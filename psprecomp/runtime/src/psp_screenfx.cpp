@@ -151,6 +151,8 @@ static const std::vector<StageLight>& stage_lights(int id) {
     return b ? *b : none;
 }
 static bool (*g_player_pos_fn)(float*) = nullptr;
+static int (*g_pickup_fn)(float (*)[3], int) = nullptr;
+void psp_set_pickup_lights_provider(int (*fn)(float (*)[3], int)) { g_pickup_fn = fn; }
 void psp_set_player_pos_provider(bool (*fn)(float*)) { g_player_pos_fn = fn; }
 bool psp_stage_light_edit_get() { return g_light_edit.load(); }
 void psp_stage_light_edit_set(bool on) { g_light_edit.store(on); std::fprintf(stderr, "[LIGHT] edit mode %s\n", on ? "ON" : "off"); }
@@ -1394,7 +1396,15 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     if (sc.rt_ready && cs > 0 && psp_rt_enabled()) {   // stage lights need the ray-traced scene for their shadows
         const int sid = psp_stage_id();
         lights_service(sid, sc.view);
-        for (const StageLight& l : stage_lights(sid)) {
+        std::vector<StageLight> all;
+        if (g_pickup_fn) {   // pickups that glow (the game module's EX cores): a warm light each, first so the stage's own lights cannot crowd them out
+            static const float pc[5] = {env_float("PSPRECOMP_PICKUP_R", 1.0f), env_float("PSPRECOMP_PICKUP_G", 0.8f), env_float("PSPRECOMP_PICKUP_B", 0.35f),
+                                        env_float("PSPRECOMP_PICKUP_RADIUS", 9.f), env_float("PSPRECOMP_PICKUP_INTENSITY", 1.5f)};
+            float P[4][3]; const int n = g_pickup_fn(P, 4);
+            for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4]});
+        }
+        for (const StageLight& l : stage_lights(sid)) all.push_back(l);
+        for (const StageLight& l : all) {
             if (n_lights >= kMaxLights) break;
             for (int k = 0; k < 3; ++k) { lp4[n_lights * 4 + k] = l.p[k]; lc4[n_lights * 4 + k] = l.c[k] * l.intensity; }
             lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = 0.f;
