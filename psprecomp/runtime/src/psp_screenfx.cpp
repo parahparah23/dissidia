@@ -64,7 +64,7 @@ static float stage_dark() {
 //   stage <id>
 //   light <x> <y> <z> <r> <g> <b> <radius> <intensity>
 // In game: F6 drops a light at the camera + forward * distance (PageUp / PageDown change the distance), F7 removes the stage's last light.
-struct StageLight { float p[3], c[3], radius, intensity; };
+struct StageLight { float p[3], c[3], radius, intensity; float clear = 0.f; };   // clear: the shadow ray stops this far short of the light (a pickup must not shadow itself)
 static const int kMaxLights = 16;
 static std::map<int, std::vector<StageLight>> g_light_file;   // from the file (overrides the built-in table of a stage)
 static std::atomic<int> g_light_req{0};                       // 1 drop, 2 remove the selected light (set by the event loop)
@@ -1012,7 +1012,7 @@ const char* const k_rt_lights = R"GLSL(
             float x = 1.0 - dist / rad, att = x * x;
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
-            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, dist - 0.1);
+            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
             while (rayQueryProceedEXT(rl)) {}
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
             acc += u_lc[li].rgb * (ndl * att);
@@ -1401,13 +1401,13 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
             static const float pc[5] = {env_float("PSPRECOMP_PICKUP_R", 0.35f), env_float("PSPRECOMP_PICKUP_G", 0.75f), env_float("PSPRECOMP_PICKUP_B", 1.0f),
                                         env_float("PSPRECOMP_PICKUP_RADIUS", 22.f), env_float("PSPRECOMP_PICKUP_INTENSITY", 1.5f)};
             float P[4][3]; const int n = g_pickup_fn(P, 4);
-            for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4]});
+            for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4], env_float("PSPRECOMP_PICKUP_CLEAR", 2.5f)});
         }
         for (const StageLight& l : stage_lights(sid)) all.push_back(l);
         for (const StageLight& l : all) {
             if (n_lights >= kMaxLights) break;
             for (int k = 0; k < 3; ++k) { lp4[n_lights * 4 + k] = l.p[k]; lc4[n_lights * 4 + k] = l.c[k] * l.intensity; }
-            lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = 0.f;
+            lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = l.clear;
             for (int k = 0; k < 3; ++k) lv4[n_lights * 4 + k] = sc.view[k] * l.p[0] + sc.view[3 + k] * l.p[1] + sc.view[6 + k] * l.p[2] + sc.view[9 + k];
             lv4[n_lights * 4 + 3] = 1.f;
             ++n_lights;
