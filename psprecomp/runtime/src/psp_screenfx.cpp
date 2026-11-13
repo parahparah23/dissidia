@@ -1398,8 +1398,8 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         lights_service(sid, sc.view);
         std::vector<StageLight> all;
         if (g_pickup_fn) {   // pickups that glow (the game module's EX cores): a warm light each, first so the stage's own lights cannot crowd them out
-            static const float pc[5] = {env_float("PSPRECOMP_PICKUP_R", 1.0f), env_float("PSPRECOMP_PICKUP_G", 0.8f), env_float("PSPRECOMP_PICKUP_B", 0.35f),
-                                        env_float("PSPRECOMP_PICKUP_RADIUS", 9.f), env_float("PSPRECOMP_PICKUP_INTENSITY", 1.5f)};
+            static const float pc[5] = {env_float("PSPRECOMP_PICKUP_R", 0.35f), env_float("PSPRECOMP_PICKUP_G", 0.75f), env_float("PSPRECOMP_PICKUP_B", 1.0f),
+                                        env_float("PSPRECOMP_PICKUP_RADIUS", 22.f), env_float("PSPRECOMP_PICKUP_INTENSITY", 1.5f)};
             float P[4][3]; const int n = g_pickup_fn(P, 4);
             for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4]});
         }
