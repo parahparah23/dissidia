@@ -111,6 +111,7 @@ static void lights_save_file() {
         "#   In edit mode (hold Shift for 4x speed):\n"
         "#     J / L  left / right     I / K  forward / back     U / O  down / up      (camera relative, kept level)\n"
         "#     , / .  radius - / +     - / =  intensity - / +     [ / ]  select previous / next light     P  select the light closest to the player\n"
+        "#     T  copy the colour of the surface the selected light is touching (the nearest scene triangle's texture colour, brightened to full)\n"
         "#   The same edit mode can be switched on in Settings > Debug > Light Editor.\n"
         "#\n", f);
     for (const auto& kv : g_light_file) {
@@ -153,7 +154,11 @@ static bool (*g_player_pos_fn)(float*) = nullptr;
 void psp_set_player_pos_provider(bool (*fn)(float*)) { g_player_pos_fn = fn; }
 bool psp_stage_light_edit_get() { return g_light_edit.load(); }
 void psp_stage_light_edit_set(bool on) { g_light_edit.store(on); std::fprintf(stderr, "[LIGHT] edit mode %s\n", on ? "ON" : "off"); }
-static std::atomic<bool> g_light_nearest{false};
+static std::atomic<bool> g_light_nearest{false}, g_light_pickcol{false};
+// "Copy colour": the light service posts the selected light's position, the scene capture (psp_ge_draw.cpp, which owns the triangles) answers.
+static bool g_pick_wait = false, g_pick_have = false; static float g_pick_p[3], g_pick_rgb[3], g_pick_dist;
+bool psp_stage_light_pick_request(float* p) { if (!g_pick_wait) return false; g_pick_wait = false; std::memcpy(p, g_pick_p, sizeof g_pick_p); return true; }
+void psp_stage_light_pick_result(const float* rgb, float dist) { std::memcpy(g_pick_rgb, rgb, sizeof g_pick_rgb); g_pick_dist = dist; g_pick_have = true; }
 bool psp_stage_light_input(int what, bool down) {
     if (what == PSP_LIGHT_TOGGLE_EDIT) { if (down) { const bool v = !g_light_edit.load(); g_light_edit.store(v); std::fprintf(stderr, "[LIGHT] edit mode %s\n", v ? "ON" : "off"); } return true; }
     if (what == PSP_LIGHT_DROP) { if (down) { g_light_req.store(1); g_light_edit.store(true); } return true; }
@@ -165,6 +170,7 @@ bool psp_stage_light_input(int what, bool down) {
     if (what == PSP_LIGHT_FAST) { if (down) g_light_keys.fetch_or(1u << 31); else g_light_keys.fetch_and(~(1u << 31)); return false; }
     if (!g_light_edit.load()) return false;                    // the other keys only act in edit mode
     if (what == PSP_LIGHT_NEAREST) { if (down) g_light_nearest.store(true); return true; }
+    if (what == PSP_LIGHT_COPY_COLOR) { if (down) g_light_pickcol.store(true); return true; }
     if (what == PSP_LIGHT_PREV || what == PSP_LIGHT_NEXT) { if (down) g_light_nav.store(what == PSP_LIGHT_NEXT ? 1 : -1); return true; }
     if (what >= PSP_LIGHT_LEFT && what <= PSP_LIGHT_INT_UP) { if (down) g_light_keys.fetch_or(1u << what); else g_light_keys.fetch_and(~(1u << what)); return true; }
     return false;
@@ -201,6 +207,23 @@ static void lights_service(int id, const float* v) {
             g_light_sel = best;
             std::fprintf(stderr, "[LIGHT] selected light %d of %d, the closest to the player (%.1f away)\n", best + 1, (int)L.size(), std::sqrt(bd));
         } else std::fprintf(stderr, "[LIGHT] no player position available\n");
+    }
+    if (g_light_pickcol.exchange(false) && !L.empty()) {
+        g_light_sel = std::min(g_light_sel, (int)L.size() - 1);
+        std::memcpy(g_pick_p, L[g_light_sel].p, sizeof g_pick_p); g_pick_wait = true; g_pick_have = false;
+    }
+    if (g_pick_have) {
+        g_pick_have = false;
+        if (g_light_sel < (int)L.size()) {
+            StageLight& l = L[g_light_sel];
+            float mx = std::max(g_pick_rgb[0], std::max(g_pick_rgb[1], g_pick_rgb[2]));
+            if (mx < 0.02f) { std::fprintf(stderr, "[LIGHT] light %d: the surface %.1f away is black, colour kept\n", g_light_sel + 1, g_pick_dist); }
+            else {
+                for (int c = 0; c < 3; ++c) l.c[c] = g_pick_rgb[c] / mx;   // hue only: brightness is the intensity's job
+                g_light_dirty = true; g_light_last_change = now;
+                std::fprintf(stderr, "[LIGHT] light %d: colour %.2f %.2f %.2f copied from the surface %.1f away\n", g_light_sel + 1, l.c[0], l.c[1], l.c[2], g_pick_dist);
+            }
+        }
     }
     if (const int nav = g_light_nav.exchange(0); nav && !L.empty()) { g_light_sel = (g_light_sel + nav + (int)L.size()) % (int)L.size(); std::fprintf(stderr, "[LIGHT] selected light %d of %d\n", g_light_sel + 1, (int)L.size()); }
     if (g_light_edit.load() && !L.empty() && dt > 0.f) {

@@ -3012,6 +3012,37 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         if (psp_rt_scene_wanted() && (!g_rt_tris[i].empty() || !g_rt_persist[i].empty())) rt_persist_merge(i, s.proj, s.view);
         if (psp_rt_scene_wanted()) rt_static_refresh(i);
         std::memcpy(g_rt_main_view[i], s.view, sizeof g_rt_main_view[i]); g_rt_main_view_ok[i] = true;
+        { float lp[3]; if (psp_stage_light_pick_request(lp)) {   // light editor: colour of the surface the light touches
+            auto closest = [&](const float* a, const float* b, const float* c, float* q) {   // closest point on a triangle to lp (Ericson)
+                const float ab[3] = {b[0]-a[0], b[1]-a[1], b[2]-a[2]}, ac[3] = {c[0]-a[0], c[1]-a[1], c[2]-a[2]}, ap[3] = {lp[0]-a[0], lp[1]-a[1], lp[2]-a[2]};
+                auto dot = [](const float* u, const float* v) { return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]; };
+                const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+                auto set = [&](float s, float t) { for (int k = 0; k < 3; ++k) q[k] = a[k] + ab[k]*s + ac[k]*t; };
+                if (d1 <= 0 && d2 <= 0) { set(0, 0); return; }
+                const float bp[3] = {lp[0]-b[0], lp[1]-b[1], lp[2]-b[2]}; const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+                if (d3 >= 0 && d4 <= d3) { set(1, 0); return; }
+                const float vc = d1*d4 - d3*d2;
+                if (vc <= 0 && d1 >= 0 && d3 <= 0) { set(d1 / (d1 - d3), 0); return; }
+                const float cp[3] = {lp[0]-c[0], lp[1]-c[1], lp[2]-c[2]}; const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+                if (d6 >= 0 && d5 <= d6) { set(0, 1); return; }
+                const float vb = d5*d2 - d1*d6;
+                if (vb <= 0 && d2 >= 0 && d6 <= 0) { set(0, d2 / (d2 - d6)); return; }
+                const float va = d3*d6 - d5*d4;
+                if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); set(1 - w, w); return; }
+                const float den = 1.f / (va + vb + vc); set(vb * den, vc * den);
+            };
+            float best = 1e30f; uint32_t bc = 0; bool found = false;
+            auto scan = [&](const std::vector<float>& T, const std::vector<uint32_t>& C) {   // this frame's draws and the settled static part
+                for (size_t k = 0; k + 9 <= T.size() && k / 9 < C.size(); k += 9) {
+                    float q[3]; closest(&T[k], &T[k+3], &T[k+6], q);
+                    const float dx = q[0]-lp[0], dy = q[1]-lp[1], dz = q[2]-lp[2], d = dx*dx + dy*dy + dz*dz;
+                    if (d < best) { best = d; bc = C[k / 9]; found = true; }
+                }
+            };
+            scan(g_rt_tris[i], g_rt_cols[i]);
+            if (g_rt_static) scan(g_rt_st_tris[i], g_rt_st_cols[i]);
+            if (found) { const float rgb[3] = {float(bc & 255) / 255.f, float((bc >> 8) & 255) / 255.f, float((bc >> 16) & 255) / 255.f}; psp_stage_light_pick_result(rgb, std::sqrt(best)); }
+        } }
         if (g_rtdump.load() == 2) { g_rtdump.store(0); rtdump_printf("[RTDUMP] end: %zu scene triangles, %zu effects triangles\n", g_rt_tris[i].size() / 9, g_rt_fx_tris[i].size() / 9);
             rtdump_printf("[RTDUMP] proj"); for (int k = 0; k < 16; ++k) rtdump_printf(" %g", s.proj[k]); rtdump_printf("\n");
             rtdump_printf("[RTDUMP] view"); for (int k = 0; k < 12; ++k) rtdump_printf(" %g", s.view[k]); rtdump_printf("\n"); }
