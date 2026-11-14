@@ -329,3 +329,7 @@ Not working / not verified:
   others (`_KOFIX` 1 = no stock restore, 2 = no stock zero on T, 4 = no down mark, 8 = down but no AI gate; `_TAGIN_SLOTS` bitmask of slots).
   Results are timing dependent (the same flags gave intact and broken HUD in different runs) so the HUD state depends on what the slot
   fighter is doing at the swap. Open: what the retail HUD keeps per fighter that the content exchange does not carry.
+
+## 2v1 mode
+Settings > Debug > Tag Team 2v1 (or `PSPRECOMP_TAGTEAM_2V1=1`, same as `PSPRECOMP_TAGTEAM_EXTRAS=2`): with Tag Team on, only the human's partner is added (you + partner against the one enemy).
+Headless run: 3 fighters acting, camera 1 bad frame in 500, no lock cycle (no second enemy).

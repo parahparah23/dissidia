@@ -72,6 +72,8 @@ std::vector<std::pair<uint32_t, uint32_t>> g_last_undo;
 int g_nextra = 0;
 uint32_t g_bs = 0;
 int g_mask = 3;
+bool g_two_v_one = false;   // Settings > Debug > Tag Team 2v1: only the partner is added (you and a partner against one enemy)
+int eff_mask() { return g_two_v_one ? (g_mask & 2) : g_mask; }
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
@@ -340,13 +342,13 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     // Slot 0 is side 0 and slot 1 side 1 in the setup, whoever the human is; the CPU brain settings are the CPU slot's.
     const uint32_t cpu_side = human == 0 ? 1 : 0, hum_side = human;
-    if ((g_mask & 1) && g_late) { g_late_q.push_back({cpu_side, hum, cpu_side, g_enemy2_char ? static_cast<uint32_t>(100 + g_enemy2_char) : cpu_side, cpu}); g_bs = bs; }
-    else if (g_mask & 1) {   // the enemy team's second fighter: a copy of the CPU fighter, foe = the human
+    if ((eff_mask() & 1) && g_late) { g_late_q.push_back({cpu_side, hum, cpu_side, g_enemy2_char ? static_cast<uint32_t>(100 + g_enemy2_char) : cpu_side, cpu}); g_bs = bs; }
+    else if (eff_mask() & 1) {   // the enemy team's second fighter: a copy of the CPU fighter, foe = the human
         Extra& e = g_extra[g_nextra];
         e.actor = spawn_fighter(bs, cpu_side, hum, cpu_side, cpu_side, cpu); e.side = cpu_side; e.foe = hum; e.slot_actor = cpu; e.started = false;
         if (e.actor) { e.undo = g_last_undo; g_nextra++; }
     }
-    if (g_mask & 2) {   // the human's partner: a copy of the human fighter on the CPU brain, foe = the CPU fighter
+    if (eff_mask() & 2) {   // the human's partner: a copy of the human fighter on the CPU brain, foe = the CPU fighter
         const uint32_t P = rd(0x089D6A10u);
         Snap sb, sp, sg;
         if (g_log) { sb = take(bs, 0x2800); if (ok(P, 0x400)) sp = take(P, 0x400); sg = take(0x089D6000u, 0x1000); }
@@ -944,6 +946,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_enabled = e && e[0] && e[0] != '0';
     g_log = std::getenv("PSPRECOMP_TAGTEAM_LOG") != nullptr;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_EXTRAS")) g_mask = std::atoi(m);
+    g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
     g_tagin = std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '1';
     g_hud_on = !(std::getenv("PSPRECOMP_TAGTEAM_HUD") && std::getenv("PSPRECOMP_TAGTEAM_HUD")[0] == '0');
@@ -965,5 +968,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (g_orig_rel1 && g_orig_rel2) { psp_dispatch_register(0x0886CAA0u, rel1_hook); psp_dispatch_register(0x0886A140u, rel2_hook); }
     psp_settings_add_debug_toggle({"Tag Team (2v2)", "Tag team battle (experimental)\nOn: the next battle adds a partner for you and a second fighter to the CPU's team (2 v 2), L cycles the lock between the two enemies.\nAffects the next battle that starts.",
                                    +[]() { return g_enabled; }, +[](bool on) { g_enabled = on; }});
+    psp_settings_add_debug_toggle({"Tag Team 2v1", "Tag team 2 v 1 (experimental)\nWith Tag Team on: only your partner is added, so you and the partner fight one enemy. Off: 2 v 2.\nAffects the next battle that starts.",
+                                   +[]() { return g_two_v_one; }, +[](bool on) { g_two_v_one = on; }});
     std::fprintf(stderr, "[TAGTEAM] installed (%s)\n", g_enabled ? "on" : "off, Settings > Debug > Tag Team (2v2)");
 }
