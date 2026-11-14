@@ -61,6 +61,8 @@ extern void dissidia_net_packs_install();
 extern void dissidia_camera_install(uint8_t* rdram);
 extern void dissidia_menu_settings_install(uint8_t* rdram);
 extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
+extern void dissidia_tagteam_install(uint8_t* rdram);
+extern void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx);   // tagteam.cpp: the swap's safe point, once per scene tick
 // direct_battle.cpp: test-only, skips the menus (PSPRECOMP_TEST_DIRECT_BATTLE=1).
 extern void dissidia_direct_battle_install(uint8_t* rdram);
 extern void dissidia_tagteam_install(uint8_t* rdram);
@@ -172,6 +174,7 @@ void dissidia_movie_time_wait(uint8_t* rdram, recomp_context* ctx) {
 // future so every timeline wait is satisfied.
 FuncPtr g_orig_scene_tick = nullptr;
 void dissidia_scene_tick(uint8_t* rdram, recomp_context* ctx) {
+    dissidia_tagteam_frame(rdram, ctx);
     uint32_t scene = static_cast<uint32_t>(ctx->r[4]);
     uint32_t movie = scene + 0x135Cu;
     if (psp_mem_read<uint32_t>(rdram, movie) == 0) {
