@@ -833,9 +833,11 @@ bool human_jecht(uint32_t a) {
 constexpr uint32_t GRID_MASK = 0x2000u | 0x8000u;
 }  // namespace
 uint32_t dissidia_walk_filter(uint32_t buttons);   // direct_battle.cpp
+uint32_t dissidia_tagteam_pad(uint32_t raw);        // tagteam.cpp: the tag swap button
 namespace {
 uint32_t jecht_grid_filter(uint32_t raw) {
     raw = dissidia_walk_filter(raw);   // direct_battle.cpp: test-only pad record / replay of the menu walk (a no-op unless asked for)
+    raw = dissidia_tagteam_pad(raw);   // tagteam.cpp: takes the swap button out of the input in a tag battle
     if (l30_active()) {   // 30 Hz logic: the pad changes only on gameplay frames (the PSP reads it once per 30 Hz frame);
         static uint32_t shown = 0, latched = 0;            // a press that came and went between two of them is shown once (latched)
         latched |= raw & ~shown;
