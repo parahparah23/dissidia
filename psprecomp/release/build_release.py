@@ -2,7 +2,7 @@
 """Build a platform's release from source: toolchain bundle -> header stub -> runtime core + SDK -> wizard -> assembled release.
 
   build_release.py --platform linux-x86_64|windows-x86_64 --version V --work DIR
-                   [--bundle DIR] [--recompiler FILE] [--jobs N] [--no-archive]
+                   [--bundle DIR] [--recompiler FILE] [--jobs N] [--no-archive] [--check-only]
 
 Runs on a Linux host (Windows is cross-built; its recompiler comes from a Windows runner via --recompiler since cargo builds it
 natively there). This is what the GitHub workflow runs per platform (.github/workflows/release.yml) and what can be run by hand
@@ -43,6 +43,8 @@ def main():
     ap.add_argument("--recompiler")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
     ap.add_argument("--no-archive", action="store_true")
+    ap.add_argument("--check-only", action="store_true",
+                    help="build the runtime core and the setup wizard for the platform, then stop (no recompiler needed, nothing assembled): the pull request check")
     ap.add_argument("--android-sdk", help="an Android SDK dir (ndk, build-tools, platforms; see build_android_sdk.py): adds the Android part to the release")
     a = ap.parse_args()
     plat = a.platform
@@ -73,7 +75,7 @@ def main():
     # the recompiler (a Windows one has to be passed in)
     rec = a.recompiler
     if not rec:
-        if cross:
+        if cross and not a.check_only:
             sys.exit("build_release: pass --recompiler for %s (built natively on a Windows runner)" % plat)
         run(["cargo", "build", "--release", "-p", "psp-cli"], cwd=REPO)
         rec = os.path.join(REPO, "target", "release", "psprecomp")
@@ -113,6 +115,10 @@ def main():
          "-DCMAKE_TOOLCHAIN_FILE=" + tcfile, "-DCMAKE_EXE_LINKER_FLAGS=-s"], env=env)
     run(["cmake", "--build", wiz, "-j", j], env=env)
     wizard = os.path.join(wiz, "psprecomp_setup" + (".exe" if win else ""))
+
+    if a.check_only:
+        print("build_release: %s core and wizard build (check only)" % plat)
+        return
 
     # 4b. Android part (the same for every platform's archive: arm64 libraries built with the NDK, built once per work dir)
     android_part = None
