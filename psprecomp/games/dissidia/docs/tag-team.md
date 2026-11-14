@@ -291,3 +291,31 @@ with room in the pool), or reuse of an already loaded character (the fighters, a
   Open: the camera still frames the original opponent, and chase cameras. Debug: `_FOESCAN=1`, `_WATCH_CAM=<hex mgr offset>`.
 - Open from the report: L skips an off-screen second enemy and the EX core is in the cycle (retail candidates), HP/BRV damage to the second enemy
   needs a play test with the foe fix.
+## KO rules (14 Nov, branch tag-ko; partly working)
+
+How retail handles a KO (found with `PSPRECOMP_TAGTEAM_KO=<who>:<s>`, `_KO_DUMP`, `_WATCH`):
+- Every fighter has a **stock counter**, the halfword `actor+0x10CE` (1 in a Quick Battle). A KO runs the EBOOT rules chain
+  `FUN_08891894 -> FUN_08891CA4 -> FUN_088C6D0C -> FUN_088C6F44 -> ovl FUN_08B33914(actor)`, which takes one stock and sets the
+  **revive word `actor+0x10D0` = 1**. With stock left the battle does not end: the KO presentation runs (the harness' "battle ended" is
+  only the fighters not being stepped for a second), then the round restarts (battle time starts over, same actors). At 0 the battle ends the
+  retail way. The rules engine keeps per-slot records around `bs+0x7A4` (`FUN_08A07DFC(obj, slot, ...)`, 40 bytes per slot, `FUN_088912D0` /
+  `FUN_08891684` / `FUN_088916A4`); `bs+72` is a per-frame flow phase, not the result, and the end handlers `FUN_0888A434..0888ACA0`
+  (`PSPRECOMP_TAGTEAM_ENDLOG=1`) are not what ends a Quick Battle round.
+- Live HP is `*(actor+0x52C)+0xC`; `actor+0x10B0` is the maximum (`alive()` read the maximum before this branch). Live HP 0 set by hand
+  only plays the KO motion (script 1210), no stock loss; the rules chain runs after a real KO, which the test recipe (live HP 1, bravery
+  halfword `status+0x14` = 0) triggers within 2 frames for the human slot fighter.
+- `ko_watch()` (tagteam.cpp, once per frame from `dissidia_tagteam_frame`): each slot fighter gets **one more stock per living team mate**
+  (`start_extra`), so the first KO restarts the round instead of ending the battle. When a slot fighter's stock drops and a team mate
+  lives, the team mate is exchanged into the slot with `content_swap` when the round restarts (battle time goes back; fallback 8 s); the slot
+  keeps its stock and revive word, the KO'd character stays down at the team mate's address (live HP 0, its brain no longer ticks, its HUD
+  panel shows KO). The camera stays sane (1 bad frame in 1000). `PSPRECOMP_TAGTEAM_TAGIN=0` turns it off, `_KO_NOSWAP=1` keeps the stock
+  rule without the swap.
+
+Not working / not verified:
+- After the tag-in the **retail HUD stays in its KO / Break display** (left bars and portrait missing, "BREAK" text, right portrait wrong)
+  although the swap itself is clean; without the swap the HUD recovers after the revive. Swapping at the KO event or at the round restart
+  gives the same picture, so the HUD widgets keep a KO state that only the retail revive path clears (find what the revive resets; the revive
+  word `+0x10D0` and the status object are the first suspects).
+- The test recipe makes the human KO twice (live HP stays 1 after the revive), so "both KO'd -> the round ends" is untested; the CPU slot
+  fighter was not KO'd by the recipe (nothing hit it), so the enemy side is untested (the code is symmetric over both slots).
+- The KO of a non-slot extra is not handled beyond "a dead extra stays down".
