@@ -57,7 +57,7 @@ constexpr uint32_t ACT_VT = 0x544u, ACT_FLAGS = 0x5B0u, ACT_LOCKBLK = 0x5ACu;
 
 FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
 bool g_in_ctor = false;   // inside the extra's constructor: the resource releases are skipped (see rel_hook)
-bool g_tagin = true;      // KO rules: a KO'd slot fighter with a living team mate is replaced by him (PSPRECOMP_TAGTEAM_TAGIN=0 turns it off)
+bool g_tagin = false;     // KO rules: a KO'd slot fighter with a living team mate is replaced by him (PSPRECOMP_TAGTEAM_TAGIN=1 turns it on; off by default: the retail HUD breaks after the swap)
 uint32_t side_of(uint32_t a);
 bool g_enabled = false;  // PSPRECOMP_TAGTEAM=1 or Settings > Debug > Tag Team (2v2): the next battle is a tag battle
 bool g_log = false;
@@ -412,6 +412,8 @@ void flow_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 // ---- HUD (tagteam_hud.cpp) ----
+std::vector<uint32_t> g_down;   // KO'd characters that stay down (tag-in): their live HP is left alone, writing 0 to it makes the retail rules treat the team as lost
+bool is_down(uint32_t a) { for (uint32_t d : g_down) if (d == a) return true; return false; }
 std::vector<TagHudReserve> g_reserve;   // waiting fighters per side (placeholder list until the roster call-ins exist)
 bool g_hud_on = true;
 
@@ -461,7 +463,7 @@ void hud_update() {
         Extra& e = g_extra[i];
         TagHudFighter f;
         f.name = char_label(actor_char(e.actor), true); f.side = static_cast<int>(e.side == g_extra[0].side ? e.side : e.side);
-        { const uint32_t st = rd(e.actor + 0x52Cu); f.hp = ok(st, 0x40) ? static_cast<int>(static_cast<int32_t>(rd(st + 0xCu))) : 0; }   // live HP (the status object word the retail HUD reads); +0x10B0 is the maximum
+        { const uint32_t st = rd(e.actor + 0x52Cu); f.hp = (ok(st, 0x40) && !is_down(e.actor)) ? static_cast<int>(static_cast<int32_t>(rd(st + 0xCu))) : 0; }   // live HP (the status object word the retail HUD reads); +0x10B0 is the maximum
         f.hp_max = std::max(static_cast<int>(rd(e.actor + 0x10B0u)), std::max(f.hp, 1));
         fs.push_back(f);
     }
@@ -481,7 +483,7 @@ int all_fighters(uint32_t out[6]) {
 }
 uint32_t side_of(uint32_t a) { return rdh(a + 0x10CCu); }
 // Alive = live HP above 0: the word the retail HUD reads, *(actor+0x52C)+0xC (actor+0x10B0 is the maximum).
-bool alive(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return ok(st, 0x40) && static_cast<int32_t>(rd(st + 0xCu)) > 0; }
+bool alive(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return !is_down(a) && ok(st, 0x40) && static_cast<int32_t>(rd(st + 0xCu)) > 0; }
 
 // The enemy fighter to cycle to from `foe` for `owner`: another living fighter of the other team, 0 if none.
 uint32_t other_enemy(uint32_t owner, uint32_t foe) {
@@ -801,7 +803,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (Extra* e = extra_of(owner); e && e->started) {
         if (g_tagin && !alive(owner)) return;   // a KO'd extra stays down: its brain does not think
         if (rd(owner + 0x2FCu) == 0 && g_orig_refresh) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(owner); g_orig_refresh(g_ram, g_ctx); *g_ctx = sv; }
-        wr(owner + 0x380u, rd(owner + 0x380u) & ~2u);   // bit 2 of +0x380 makes the CPU brain skip the actor; the retail two lose it after the intro
+        { static const int kf = std::getenv("PSPRECOMP_TAGTEAM_KOFIX") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_KOFIX")) : 0; wr(owner + 0x380u, (is_down(owner) && !(kf & 8)) ? (rd(owner + 0x380u) | 2u) : (rd(owner + 0x380u) & ~2u)); }   // bit 2 of +0x380 makes the CPU brain skip the actor; the retail two lose it after the intro
     }
     static uint32_t seen[8] = {}; static int cnt[8] = {}; static int n = 0;
     int i = 0; while (i < n && seen[i] != brain) i++;
@@ -856,22 +858,28 @@ void ko_watch() {
             if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs KO of slot %u fighter %08X: stock %u -> %u, team mate %08X%s\n", dissidia_battle_age() / 60.0f, k, S, prev[k], stock, te ? te->actor : 0u, te ? "" : " (none alive: the retail rules decide)");
             // Not at once: the retail KO sequence (finish cut, HUD KO state, revive) wants the slot fighter itself to go through it. The team
             // mate is swapped in when the round restarts (battle time starts over), see below.
-            if (te && stock >= 1 && !std::getenv("PSPRECOMP_TAGTEAM_KO_NOSWAP")) { pend_T[k] = te->actor; pend_since[k] = dissidia_battle_age(); }
+            static const int slots = std::getenv("PSPRECOMP_TAGTEAM_TAGIN_SLOTS") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_TAGIN_SLOTS")) : 3;
+            if (te && stock >= 1 && (slots & (1 << k)) && !std::getenv("PSPRECOMP_TAGTEAM_KO_NOSWAP")) { pend_T[k] = te->actor; pend_since[k] = dissidia_battle_age(); }
         }
         prev[k] = g_ram[(S + 0x10CEu) & 0x07FFFFFFu];
         if (pend_T[k]) {
             const float age = dissidia_battle_age();
             const bool restarted = age + 30.0f < last_age;                 // battle time went back: the round restarted
             const bool timeout = age - pend_since[k] > 60.0f * 8.0f;       // fallback: 8 s after the KO
-            if (restarted || timeout) {
+            static bool rs[2] = {false, false}; static int idle[2] = {0, 0};
+            if (restarted) rs[k] = true;
+            const int cur = static_cast<int16_t>(rd(S + 0x180u) & 0xFFFFu);
+            idle[k] = (rs[k] && (cur == 1 || cur == 2)) ? idle[k] + 1 : 0;   // after the restart: wait until the revived fighter is controllable (its HUD is back)
+            if (idle[k] >= 45 || timeout) { rs[k] = false; idle[k] = 0;
                 const uint32_t T = pend_T[k]; pend_T[k] = 0;
                 if (alive(T) && ok(T, 0x12D0)) {
                     const uint32_t flag = rd(S + 0x10D0u), keep = g_ram[(S + 0x10CEu) & 0x07FFFFFFu];
+                    static const int kofix = std::getenv("PSPRECOMP_TAGTEAM_KOFIX") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_KOFIX")) : 0;
                     if (content_swap(S, T)) {
-                        wr(S + 0x10D0u, flag); g_ram[(S + 0x10CEu) & 0x07FFFFFFu] = static_cast<uint8_t>(keep);   // the slot keeps its stock and revive word
-                        wr(T + 0x10D0u, 0); g_ram[(T + 0x10CEu) & 0x07FFFFFFu] = 0;                                // the KO'd character stays down
-                        { const uint32_t st = rd(T + 0x52Cu); if (ok(st, 0x40)) wr(st + 0xCu, 0); }                // (live HP 0: the AI and the lock cycle skip it)
-                        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs tag in (%s): %08X now holds the team mate, the KO'd character is at %08X (hp %d / %d)\n", age / 60.0f, restarted ? "round restarted" : "timeout", S, T, static_cast<int32_t>(rd(rd(S + 0x52Cu) + 0xCu)), static_cast<int32_t>(rd(rd(T + 0x52Cu) + 0xCu)));
+                        if (!(kofix & 1)) { wr(S + 0x10D0u, flag); g_ram[(S + 0x10CEu) & 0x07FFFFFFu] = static_cast<uint8_t>(keep); }   // the slot keeps its stock and revive word
+                        if (!(kofix & 2)) { wr(T + 0x10D0u, 0); g_ram[(T + 0x10CEu) & 0x07FFFFFFu] = 0;  }                               // the KO'd character stays down
+                        if (!(kofix & 4)) g_down.push_back(T);                // (live HP 0: the AI and the lock cycle skip it)
+                        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs tag in (%s): %08X now holds the team mate, the KO'd character is at %08X (hp %d / %d)\n", age / 60.0f, timeout ? "timeout" : "revived and idle", S, T, static_cast<int32_t>(rd(rd(S + 0x52Cu) + 0xCu)), static_cast<int32_t>(rd(rd(T + 0x52Cu) + 0xCu)));
                     }
                 }
             }
@@ -935,7 +943,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_log = std::getenv("PSPRECOMP_TAGTEAM_LOG") != nullptr;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_EXTRAS")) g_mask = std::atoi(m);
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
-    g_tagin = !(std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '0');
+    g_tagin = std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '1';
     g_hud_on = !(std::getenv("PSPRECOMP_TAGTEAM_HUD") && std::getenv("PSPRECOMP_TAGTEAM_HUD")[0] == '0');
     if (const char* b = std::getenv("PSPRECOMP_TAGTEAM_SWAP_BUTTON")) g_swap_mask = static_cast<uint32_t>(std::strtoul(b, nullptr, 16));
     if (const char* c = std::getenv("PSPRECOMP_TAGTEAM_PARTNER_CHAR")) g_partner_char = std::atoi(c);

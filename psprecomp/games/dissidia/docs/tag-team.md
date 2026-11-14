@@ -319,3 +319,13 @@ Not working / not verified:
 - The test recipe makes the human KO twice (live HP stays 1 after the revive), so "both KO'd -> the round ends" is untested; the CPU slot
   fighter was not KO'd by the recipe (nothing hit it), so the enemy side is untested (the code is symmetric over both slots).
 - The KO of a non-slot extra is not handled beyond "a dead extra stays down".
+
+## KO tag-in, round 2 (HUD bisect; tag-in is OFF by default, `PSPRECOMP_TAGTEAM_TAGIN=1`)
+- Merged the tag-ko work onto tag-team. The swap now waits until the revived slot fighter is controllable (script 1/2 for 45 frames after the
+  restart) instead of swapping in the restart frame. The retail stock decrement is seen twice (KO, then again at the round restart).
+- Writing live HP 0 into the KO'd character's status (`T+0x52C`+0xC) after the swap breaks the retail HUD (left bars/portrait gone, right portrait
+  wrong) - the retail rules/HUD read the team's status. Not writing it (`PSPRECOMP_TAGTEAM_KOFIX=4`) keeps the HUD on some runs, but the KO'd
+  character then fights on as the AI partner; marking it down with `g_down` + the AI gate bit (+0x380 bit 2) breaks the HUD / froze the fight in
+  others (`_KOFIX` 1 = no stock restore, 2 = no stock zero on T, 4 = no down mark, 8 = down but no AI gate; `_TAGIN_SLOTS` bitmask of slots).
+  Results are timing dependent (the same flags gave intact and broken HUD in different runs) so the HUD state depends on what the slot
+  fighter is doing at the swap. Open: what the retail HUD keeps per fighter that the content exchange does not carry.
