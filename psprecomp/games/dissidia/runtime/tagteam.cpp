@@ -23,6 +23,7 @@
 
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 float dissidia_battle_age();   // framerate.cpp: ticks (1/60 s) since the battle started running
+bool dissidia_cpu_ai_off();    // framerate.cpp: the debug menu's Enemy AI option / the test harness switched the CPU brains off
 uint32_t dissidia_camera_manager();   // camera.cpp
 void psp_mem_watch_set(uint32_t addr);   // runtime/src/psp_dispatch.cpp
 
@@ -833,6 +834,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_bs && extra_of(owner)) {   // a slot fighter is down: the battle is over (victory scene), the extras stop fighting
         for (int k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0) && !alive(a)) return; }
     }
+    if (dissidia_cpu_ai_off() && ok(brain, 0x60) && static_cast<int32_t>(rd(brain + 0x54u)) == 0) return;   // Enemy AI off (debug menu): CPU brains do not think; this hook replaces framerate.cpp's
     g_orig_tick(rdram, ctx);
 }
 

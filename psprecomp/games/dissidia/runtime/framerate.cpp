@@ -2532,6 +2532,9 @@ void cpu_tick_noai_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_cpu_tick(rdram, ctx);
 }
 
+// True while the debug menu / test harness has the CPU brains switched off (tagteam.cpp hooks the same brain tick and has to honour it).
+bool dissidia_cpu_ai_off() { return (g_env_no_ai && g_gt_started) || (g_dbg_no_ai && g_ai_armed); }
+
 void dissidia_framerate_install(uint8_t* rdram) {
     g_ram = rdram;
     {   // tall windows in battle: the HUD's top strip (buffs, EX / assist icons, multipliers, move names: PSP rows 0-39) is pinned to the top
