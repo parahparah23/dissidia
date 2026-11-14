@@ -15,6 +15,12 @@
 
 namespace dissidia {
 
+#ifndef DT_DIR   // MinGW's dirent has no d_type
+#define DT_UNKNOWN 0
+#define DT_DIR 4
+#define DT_REG 8
+#endif
+
 namespace {
 
 const uint32_t* crc_table() {
@@ -44,7 +50,11 @@ void walk(const std::string& root, const std::string& rel, std::vector<std::stri
     while (dirent* e = ::readdir(d)) {
         std::string n = e->d_name;
         if (n == "." || n == ".." || n[0] == '.') continue;
+#ifdef _WIN32
+        names.push_back({n, DT_UNKNOWN});   // no d_type on Windows: stat below
+#else
         names.push_back({n, e->d_type});
+#endif
     }
     ::closedir(d);
     std::sort(names.begin(), names.end());

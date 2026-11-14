@@ -545,7 +545,14 @@ void pp_init() {
                 const std::string n = de->d_name;
                 if (n == "." || n == "..") continue;
                 const std::string r = rel.empty() ? n : rel + "/" + n;
-                if (de->d_type == DT_DIR) todo.push_back(r);
+                bool is_dir;
+#ifdef _WIN32
+                struct stat st;   // no d_type on Windows
+                is_dir = ::stat((g.dir + "/" + r).c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#else
+                is_dir = de->d_type == DT_DIR;
+#endif
+                if (is_dir) todo.push_back(r);
                 else present.insert(r);
             }
             closedir(d);
