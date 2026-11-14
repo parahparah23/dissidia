@@ -430,8 +430,8 @@ const CharName kNames[34] = {
     {"CLOUD OF DARKNESS", "COD"}, {"CECIL", "CECI"}, {"GOLBEZ", "GOLB"}, {"BARTZ", "BART"}, {"EXDEATH", "EXDE"}, {"TERRA", "TERR"},
     {"KEFKA", "KEFK"}, {"CLOUD", "CLOU"}, {"SEPHIROTH", "SEPH"}, {"SQUALL", "SQUA"}, {"ULTIMECIA", "ULTI"}, {"ZIDANE", "ZIDA"},
     {"KUJA", "KUJA"}, {"TIDUS", "TIDU"}, {"JECHT", "JECH"}, {"SHANTOTTO", "SHAN"}, {"GABRANTH", "GABR"}, {"CHAOS", "CHAO"},
-    {"KAIN", "KAIN"}, {"GILGAMESH", "GILG"}, {"TIFA", "TIFA"}, {"LAGUNA", "LAGU"}, {"YUNA", "YUNA"}, {"VAAN", "VAAN"},
-    {"PRISHE", "PRIS"}, {"LIGHTNING", "LIGH"}, {"FERAL CHAOS", "FCHA"}, {"YUFFIE", "YUFF"},
+    {"KAIN", "KAIN"}, {"GILGAMESH", "GILG"}, {"TIFA", "TIFA"}, {"LAGUNA", "LAGU"}, {"YUNA", "YUNA"}, {"PRISHE", "PRIS"},
+    {"VAAN", "VAAN"}, {"LIGHTNING", "LIGH"}, {"FERAL CHAOS", "FCHA"}, {"YUFFIE", "YUFF"},
 };
 std::string char_label(int id, bool full) {
     if (id >= 1 && id <= 33) return full ? kNames[id].full : kNames[id].brief;
@@ -444,6 +444,56 @@ std::string char_label(int id, bool full) {
 int actor_char(uint32_t actor) {
     const uint32_t info = rd(actor + 0x2F8u);
     return ok(info, 8) ? static_cast<int8_t>(g_ram[(info + 6u) & 0x07FFFFFFu]) : -1;
+}
+
+// ---- the party lists of a group (Quick Battle Party) battle ----
+// The battle overlay keeps each side's party in a team record (stride 0x38) at bs+0x13C21 - 6: a count byte, then the charIds in order
+// (1st, 2nd, ...), 0xFF filled. A 1 v 1 battle rewrites it with a count of 1, so a reserve only shows in a real party battle. Retail plays
+// the party one member after the other, so the members behind the one on the stage are the reserve; the ones before him are out.
+constexpr uint32_t PARTY_IDS_FROM_BS = 0x13C21u, PARTY_STRIDE = 0x38u;
+struct PartyList { int n = 0; uint8_t ids[8] = {}; };
+PartyList read_party(int side) {
+    PartyList p;
+    if (!g_bs) return p;
+    const uint32_t ids = g_bs + PARTY_IDS_FROM_BS + PARTY_STRIDE * static_cast<uint32_t>(side);
+    if (!ok(ids - 6u, 0x10)) return p;
+    const int n = g_ram[(ids - 6u) & 0x07FFFFFFu];
+    if (n < 1 || n > 8) return p;
+    for (int i = 0; i < n; i++) { const uint8_t c = g_ram[(ids + static_cast<uint32_t>(i)) & 0x07FFFFFFu]; if (c == 0 || c > 34) return PartyList{}; p.ids[i] = c; }
+    p.n = n;
+    return p;
+}
+int g_party_last[2] = {0, 0};   // index of the member on the stage per team (only moves forward while the party list stays the same)
+void update_party_reserve() {
+    if (std::getenv("PSPRECOMP_TAGTEAM_RESERVE") || !g_bs) return;   // an env list overrides
+    const uint32_t hs = rd(g_bs + 84u);
+    const uint32_t slot[2] = {rd(g_bs + 56u + 4u * (hs & 1u)), rd(g_bs + 56u + 4u * (1u - (hs & 1u)))};   // [0] = the human's fighter, [1] = the other team's
+    const PartyList lists[2] = {read_party(0), read_party(1)};
+    g_reserve.resize(2); g_reserve[0].side = 0; g_reserve[1].side = 1;
+    g_reserve[0].names.clear(); g_reserve[1].names.clear();
+    auto has = [](const PartyList& l, int c) { for (int i = 0; i < l.n; i++) if (l.ids[i] == c) return true; return false; };
+    const int hc = ok(slot[0], 0x12D0) ? actor_char(slot[0]) : -1;
+    const int ho = has(lists[0], hc) || !has(lists[1], hc) ? 0 : 1;   // which list is the human's team (the first one unless only the second holds him)
+    const int idx_list[2] = {ho, 1 - ho};
+    static PartyList prev[2];
+    for (int t = 0; t < 2; t++) {
+        const PartyList& l = lists[idx_list[t]];
+        if (l.n <= 1) continue;
+        if (prev[t].n != l.n || std::memcmp(prev[t].ids, l.ids, 8) != 0) { prev[t] = l; g_party_last[t] = 0; }
+        const int cur = ok(slot[t], 0x12D0) ? actor_char(slot[t]) : -1;
+        int at = -1;
+        for (int i = g_party_last[t]; i < l.n && at < 0; i++) if (l.ids[i] == cur) at = i;
+        for (int i = 0; i < g_party_last[t] && at < 0; i++) if (l.ids[i] == cur) at = i;   // a new battle of the same party starts over at the first member
+        if (at < 0) continue;
+        g_party_last[t] = at;
+        for (int i = at + 1; i < l.n; i++) g_reserve[t].names.push_back(char_label(l.ids[i], false));
+    }
+    if (g_log) {
+        static std::string last;
+        std::string now;
+        for (int t = 0; t < 2; t++) { now += t ? " | " : ""; now += "team" + std::to_string(t) + ":"; for (const std::string& n : g_reserve[t].names) now += " " + n; }
+        if (now != last) { last = now; std::fprintf(stderr, "[TAGTEAM] party reserve (human char %d, lists %d/%d members): %s\n", hc, lists[0].n, lists[1].n, now.c_str()); }
+    }
 }
 
 void init_reserve() {
@@ -462,6 +512,7 @@ void hud_update() {
     if (!g_hud_on) return;
     static bool inited = false;
     if (!inited) { inited = true; init_reserve(); if (g_log) { std::fprintf(stderr, "[TAGTEAM] labels:"); for (int i = 0; i <= 36; i++) { const uint32_t p = rd(0x089D6CA8u + 4u * static_cast<uint32_t>(i)); char b[9] = {}; if (ok(p, 8)) for (int k = 0; k < 8; k++) b[k] = static_cast<char>(g_ram[(p + k) & 0x07FFFFFFu]); std::fprintf(stderr, " %d=%s", i, b); } std::fprintf(stderr, "\n"); } }
+    update_party_reserve();
     std::vector<TagHudFighter> fs;
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
