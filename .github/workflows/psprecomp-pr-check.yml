@@ -5,6 +5,10 @@ name: Build check (pull requests)
 # platforms on every pull request into main, with the same toolchain bundle and the same script, and stops before anything is assembled or signed.
 
 on:
+  push:
+    branches: [main]   # keeps the toolchain bundle cache warm on main, where pull requests and release tags can read it
+    paths:
+      - 'psprecomp/toolchain/**'
   pull_request:
     branches: [main]
     paths:
@@ -53,5 +57,18 @@ jobs:
             sleep 20
           done
           [ -n "$ok" ]
+      # The same cache key and folders as the release workflow: whichever run builds the bundle first saves it for the others.
+      - name: Toolchain bundle cache
+        id: bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            psprecomp/work/bundle-${{ matrix.platform }}
+            psprecomp/work/bundle-${{ matrix.platform }}.host
+            psprecomp/work/cache
+          key: bundle-${{ matrix.platform }}-${{ hashFiles('psprecomp/toolchain/**') }}
       - name: Core and wizard for ${{ matrix.platform }}
-        run: python3 release/build_release.py --platform ${{ matrix.platform }} --version 0.0.0-pr --work work --check-only
+        run: |
+          BUNDLE=""
+          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-${{ matrix.platform }}"; fi
+          python3 release/build_release.py --platform ${{ matrix.platform }} --version 0.0.0-pr --work work --check-only $BUNDLE
