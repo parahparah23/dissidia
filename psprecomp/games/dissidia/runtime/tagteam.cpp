@@ -73,7 +73,8 @@ int g_nextra = 0;
 uint32_t g_bs = 0;
 int g_mask = 3;
 bool g_two_v_one = false;   // Settings > Debug > Tag Team 2v1: only the partner is added (you and a partner against one enemy)
-int eff_mask() { return g_two_v_one ? (g_mask & 2) : g_mask; }
+bool g_one_v_two = false;   // Settings > Debug > Tag Team 1v2: only the enemy's second fighter is added (you alone against two); both 2v1 and 1v2 on = 2v2
+int eff_mask() { return (g_two_v_one == g_one_v_two) ? g_mask : (g_two_v_one ? (g_mask & 2) : (g_mask & 1)); }
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
@@ -967,6 +968,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_enabled = e && e[0] && e[0] != '0';
     g_log = std::getenv("PSPRECOMP_TAGTEAM_LOG") != nullptr;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_EXTRAS")) g_mask = std::atoi(m);
+    g_one_v_two = std::getenv("PSPRECOMP_TAGTEAM_1V2") && std::getenv("PSPRECOMP_TAGTEAM_1V2")[0] == '1';
     g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
     g_tagin = std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '1';
@@ -991,5 +993,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
                                    +[]() { return g_enabled; }, +[](bool on) { g_enabled = on; }});
     psp_settings_add_debug_toggle({"Tag Team 2v1", "Tag team 2 v 1 (experimental)\nWith Tag Team on: only your partner is added, so you and the partner fight one enemy. Off: 2 v 2.\nAffects the next battle that starts.",
                                    +[]() { return g_two_v_one; }, +[](bool on) { g_two_v_one = on; }});
+    psp_settings_add_debug_toggle({"Tag Team 1v2", "Tag team 1 v 2 (experimental)\nWith Tag Team on: you alone fight the CPU's two fighters (no partner for you). Off: 2 v 2.\nAffects the next battle that starts.",
+                                   +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }});
     std::fprintf(stderr, "[TAGTEAM] installed (%s)\n", g_enabled ? "on" : "off, Settings > Debug > Tag Team (2v2)");
 }

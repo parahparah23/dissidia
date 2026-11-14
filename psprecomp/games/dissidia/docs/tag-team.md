@@ -333,3 +333,7 @@ Not working / not verified:
 ## 2v1 mode
 Settings > Debug > Tag Team 2v1 (or `PSPRECOMP_TAGTEAM_2V1=1`, same as `PSPRECOMP_TAGTEAM_EXTRAS=2`): with Tag Team on, only the human's partner is added (you + partner against the one enemy).
 Headless run: 3 fighters acting, camera 1 bad frame in 500, no lock cycle (no second enemy).
+
+## 1v2 mode
+Settings > Debug > Tag Team 1v2 (or `PSPRECOMP_TAGTEAM_1V2=1`, = `EXTRAS=1`): only the enemy's second fighter is added; you have no partner. 2v1 and 1v2 both on = 2v2.
+Headless run: 3 fighters acting, camera 0 bad frames in 500, lock cycle goes foe -> second enemy.
