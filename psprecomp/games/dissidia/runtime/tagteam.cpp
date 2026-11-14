@@ -496,6 +496,8 @@ uint32_t other_enemy(uint32_t owner, uint32_t foe) {
     return 0;
 }
 
+uint32_t g_ld_a[2] = {}, g_ld_snap[2][0x12D0 / 4]; int g_ld_n = 0; float g_ld_due = 0;   // LOCKDIFF debug
+
 // FUN_08B40994: the cycle's second candidate (retail: the foe's assist). In a tag battle it is the foe's team mate, so the retail cycle
 // (FUN_08B3FE3C advances through the candidates, asking this function whether each exists) walks foe -> other enemy -> ...
 void lock_other_hook(uint8_t* rdram, recomp_context* ctx) {
@@ -542,6 +544,11 @@ void lock_mode_hook(uint8_t* rdram, recomp_context* ctx) {
             const bool core = call(0x08B40A50u, h1, L) != 0;   // retail's third candidate: the EX core, when one is out
             if (cyc == 0 && other) {
                 cyc = 1; wr(h1 + 28u, 1);           // cycle to the other enemy instead of releasing the lock
+            if (std::getenv("PSPRECOMP_TAGTEAM_LOCKDIFF")) {   // debug: remember both enemies' words, the tick logs which small values / pointers changed afterwards
+                g_ld_n = 0; uint32_t f[6]; const int n = all_fighters(f);
+                for (int i = 0; i < n && g_ld_n < 2; i++) if (side_of(f[i]) != side_of(owner)) { g_ld_a[g_ld_n] = f[i]; for (uint32_t o = 0; o < 0x12D0; o += 4) g_ld_snap[g_ld_n][o / 4] = rd(f[i] + o); g_ld_n++; }
+                g_ld_due = dissidia_battle_age() + 40.f;
+            }
                 if (g_log) std::fprintf(stderr, "[TAGTEAM] lock cycle: %08X -> the other enemy %08X\n", rd(owner + 0x300u), other);
                 ctx->r[2] = 1; return;
             }
@@ -771,7 +778,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         static bool d1 = false, d2 = false;
         const uint32_t hum = rd(g_bs + 56u + 4u * rd(g_bs + 84u));
         const float tt = dissidia_battle_age() / 60.0f;
-        if (owner == hum && ((!d1 && tt > 8.0f) || (!d2 && tt > 17.0f))) {
+        if (owner == hum && ((!d1 && tt > 8.0f) || (!d2 && tt > 11.0f))) {
             const bool first = !d1; (first ? d1 : d2) = true;
             uint32_t es[2] = {0, 0}; int k = 0;
             uint32_t f[6]; const int n = all_fighters(f);
@@ -779,6 +786,14 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             std::fprintf(stderr, "[FOESCAN] t=%.1f pass %d human %08X foe %08X enemies %08X %08X\n", tt, first ? 1 : 2, hum, rd(hum + 0x300u), es[0], es[1]);
             for (int j = 0; j < 2; j++) if (es[j]) scan_val(es[j], j == 0 ? "enemyA" : "enemyB", hum, es[j]);
         }
+    }
+    if (g_ld_n && dissidia_battle_age() > g_ld_due && owner == rd(g_bs + 56u + 4u * rd(g_bs + 84u))) {
+        for (int k = 0; k < g_ld_n; k++) for (uint32_t o = 0; o < 0x12D0; o += 4) {
+            const uint32_t b = g_ld_snap[k][o / 4], a = rd(g_ld_a[k] + o);
+            const bool flagish = (b < 0x100 && a < 0x100) || ((b >> 24) == 0x09 || (a >> 24) == 0x09);
+            if (a != b && flagish) std::fprintf(stderr, "[LOCKDIFF] enemy%d %08X +%04X: %08X -> %08X\n", k, g_ld_a[k], o, b, a);
+        }
+        g_ld_n = 0;
     }
     static bool intro_seen = false;
     if (!g_late_q.empty() && g_bs && rd(g_bs + 72) != 0 && !g_late_ready) {   // the intro scripts (ids >= 1000) have run and the human is idle again
@@ -922,6 +937,12 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             bool is_enemy = false; for (int i = 0; i < n; i++) if (f[i] == cur && side_of(f[i]) != side_of(hum)) is_enemy = true;
             if (is_enemy && foe && foe != cur && alive(foe)) { if (g_log) std::fprintf(stderr, "[TAGTEAM] camera foe %08X -> %08X\n", cur, foe); wr(mgr + 0x8B4u, foe); }
         }
+    }
+    if (g_nextra && g_bs && std::getenv("PSPRECOMP_TAGTEAM_RETICLE")) {   // experiment: the overlay globals that hold the human's foe (reticle?)
+        g_ram = rdram; g_ctx = ctx;
+        const uint32_t hum = rd(g_bs + 56u + 4u * rd(g_bs + 84u)), foe = ok(hum, 0x12D0) ? rd(hum + 0x300u) : 0;
+        static const uint32_t g[2] = {0x08B876A4u, 0x08C00998u};
+        for (uint32_t a : g) { const uint32_t cur = rd(a); uint32_t f[6]; const int n = all_fighters(f); bool en = false; for (int i = 0; i < n; i++) if (f[i] == cur && side_of(f[i]) != side_of(hum)) en = true; if (en && foe && foe != cur) wr(a, foe); }
     }
     g_ram = rdram; g_ctx = ctx;
     ko_watch();
