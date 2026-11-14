@@ -3138,7 +3138,11 @@ void pointer_press(float ux, float uy, bool touch) {
     }
     if (G.back.has(ux, uy)) { go_back(); return; }
     for (size_t i = 0; i < G.cats.size(); ++i)
-        if (G.cats[i].has(ux, uy) && G.side.has(ux, uy)) { goto_category(int(i)); g_focus_tabs = false; g_dirty = true; return; }
+        if (G.cats[i].has(ux, uy) && G.side.has(ux, uy)) {
+            if (touch) { g_ptr.mode = 5; g_ptr.row = int(i); g_dirty = true; return; }   // touch: open it on release, a drag scrolls the category list
+            goto_category(int(i)); g_focus_tabs = false; g_dirty = true; return;
+        }
+    if (touch && G.side.has(ux, uy)) { g_ptr.mode = 6; return; }   // empty space in the category list: drag it
     if (G.scroll_thumb.w > 0 && G.scroll_thumb.has(ux, uy)) { g_ptr.mode = 4; g_ptr.scroll0 = g_view.scroll_pos(); return; }
     if (G.scroll_track.w > 0 && G.scroll_track.has(ux, uy)) {   // jump to that part of the list, then drag
         const float f = std::clamp((uy - G.scroll_track.y) / std::max(1.f, G.scroll_track.h), 0.f, 1.f);
@@ -3177,6 +3181,11 @@ void pointer_move(float ux, float uy) {
     const int64_t t = now_ms();
     const float dy = uy - g_ptr.y0, dx = ux - g_ptr.x0;
     if (g_ptr.mode == 2) { slider_drag_to(g_ptr.row, ux); return; }
+    if (g_ptr.mode == 5 || g_ptr.mode == 6) {   // the category list under a finger: a drag scrolls it (a tap on a category opens it on release)
+        if (g_ptr.mode == 5 && std::fabs(dy) > 5.f) { g_ptr.mode = 6; g_ptr.moved = true; }
+        if (g_ptr.mode == 6) { g_view.scroll_cats(-(uy - g_ptr.last_y)); if (std::fabs(dy) > 5.f) g_ptr.moved = true; g_ptr.last_y = uy; g_dirty = true; }
+        return;
+    }
     if (g_ptr.mode == 1) {   // a held row turns into a list drag once the pointer travels
         if (std::fabs(dy) > 4.f || std::fabs(dx) > 8.f) {
             if (std::fabs(dy) >= std::fabs(dx)) { g_ptr.mode = 3; g_ptr.scroll0 = g_view.scroll_pos(); g_press_row = -1; g_ptr.moved = true; }
@@ -3200,7 +3209,8 @@ void pointer_move(float ux, float uy) {
 }
 void pointer_release(float ux, float uy) {
     (void)ux; (void)uy;
-    if (g_ptr.mode == 1 && !g_ptr.moved) row_tap(g_ptr.row);
+    if (g_ptr.mode == 5 && !g_ptr.moved) { goto_category(g_ptr.row); g_focus_tabs = false; }   // a tap on a category
+    else if (g_ptr.mode == 1 && !g_ptr.moved) row_tap(g_ptr.row);
     else if (g_ptr.mode == 3 && g_ptr.touch && g_ptr.moved && std::fabs(g_ptr.vy) > 30.f && now_ms() - g_ptr.last_t < 120) g_view.fling(std::clamp(g_ptr.vy, -700.f, 700.f));
     g_ptr = Pointer{};
     g_press_row = -1;

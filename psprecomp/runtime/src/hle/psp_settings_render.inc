@@ -532,11 +532,18 @@ struct SettingsDraw {
         if (!S.in_sub) {
             FT_Face nf = bodyb;
             const float tw = P.text_width(nf, 9.f * fs, S.brand);
-            const float pw = std::max(R_BACK.w, tw + 30.f);
+            const bool tap_close = S.device != 0;   // mouse / touch: the plate is a visible Close button (it always closed the menu; nothing said so)
+            const float cw = P.text_width(nf, 9.f * fs, "Close");
+            const float pw = tap_close ? std::max(R_BACK.w, cw + 34.f) : std::max(R_BACK.w, tw + 30.f);
             const SetRect nb = shifted(SetRect{470.f - pw, R_BACK.y, pw, R_BACK.h}, 0, dy);
             back = nb;
-            navy_plate(P, nb.x, nb.y, nb.w, nb.h, nb.h * 0.5f, 0.f);
-            themed_hint(P, nf, 9.f * fs, nb.x + (nb.w - tw) / 2.f, nb.y + nb.h / 2 + 3.3f, S.brand.c_str(), C_WHITE);
+            navy_plate(P, nb.x, nb.y, nb.w, nb.h, nb.h * 0.5f, (tap_close && S.hover_back) ? 0.28f : 0.f);
+            if (tap_close) {
+                draw_cross(P, nb.x + 14.f, nb.y + nb.h / 2, 2.4f, 1.2f, C_WHITE);
+                themed_hint(P, nf, 9.f * fs, nb.x + 22.f, nb.y + nb.h / 2 + 3.3f, "Close", C_WHITE);
+            } else {
+                themed_hint(P, nf, 9.f * fs, nb.x + (nb.w - tw) / 2.f, nb.y + nb.h / 2 + 3.3f, S.brand.c_str(), C_WHITE);
+            }
             P.ga = 1.f;
             return;
         }
