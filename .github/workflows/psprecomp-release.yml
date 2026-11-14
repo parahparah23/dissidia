@@ -176,4 +176,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 release/make_notes.py --tag "$VERSION" -o notes.md
-          gh release create "$VERSION" dist/* --repo "${{ github.repository }}" --title "$VERSION" --notes-file notes.md
+          # The .sha256 / .fp files are build-time leftovers (manifest.json carries the signed hashes and fingerprints): not published, so the
+          # asset list stays short.
+          find dist -type f ! -name '*.sha256' ! -name '*.fp' -print0 | xargs -0 gh release create "$VERSION" --repo "${{ github.repository }}" --title "$VERSION" --notes-file notes.md

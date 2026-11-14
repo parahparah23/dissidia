@@ -8,11 +8,16 @@ import re
 import subprocess
 import sys
 
-INSTALL = """## Install
-- **Windows:** download `DissidiaRecomp-Setup-{v}-windows-x86_64.exe` and run it. It unpacks itself on the first start.
-- **Linux:** download `DissidiaRecomp-Setup-{v}-linux-x86_64`, `chmod +x` it and run it.
-- The `.tar.xz` / `.zip` archives hold the same files if you prefer to unpack them yourself.
-- You need your own copy of the game (ISO or CSO). The wizard writes `setup.log` into the install folder; attach it to bug reports.
+INSTALL = """## Download ONE file
+| Your device | Download this |
+|---|---|
+| Windows PC | `DissidiaRecomp-Setup-{v}-windows-x86_64.exe` |
+| Linux PC | `DissidiaRecomp-Setup-{v}-linux-x86_64` (`chmod +x` it, then run it) |
+| Android phone / handheld | `DissidiaRecomp-Setup-{v}-android.apk` |
+
+Run it and follow the wizard. You need your own copy of the game (ISO or CSO); the wizard writes `setup.log` into the install folder, so attach that to bug reports.
+
+The other files (`.tar.xz`, `.zip`, `manifest.json`, `manifest.json.sig`) are what the in-app updater downloads. You do not need them, unless you would rather unpack the Windows / Linux release by hand.
 """
 
 
