@@ -281,3 +281,13 @@ therefore needs its model / motion / effect / sound files streamed in at the loa
 with room in the pool), or reuse of an already loaded character (the fighters, and the assists' characters). Characters that are already loaded
 (Squall, Lightning here) work, and the swap needs a clone (it exchanges the block lists of two fighters of one character).
 `PSPRECOMP_TAGTEAM_INFODUMP=1` prints the records.
+
+## Play-test round 1 (user, RP6)
+- Fixed: reserve strips are empty by default (they showed a placeholder roster outside a group battle; `PSPRECOMP_TAGTEAM_RESERVE` sets one);
+  the locked enemy now also becomes the foe (`actor+0x300`) so damage / follow-up attacks use it (`PSPRECOMP_TAGTEAM_KEEPFOE=1` restores the old
+  behaviour); extras stop fighting once a slot fighter is down (victory scene); `alive()` uses live HP (status+0xC).
+- Camera: the camera manager keeps a foe word at `mgr+0x8B4`; it is written every frame by the lock blocks' mode handlers (`FUN_08B3B280`)
+  and flips between the human's target and the partner's, so a single write before the update is not enough (`[TAGTEAM] camera foe` lines).
+  Open: the camera still frames the original opponent, and chase cameras. Debug: `_FOESCAN=1`, `_WATCH_CAM=<hex mgr offset>`.
+- Open from the report: L skips an off-screen second enemy and the EX core is in the cycle (retail candidates), HP/BRV damage to the second enemy
+  needs a play test with the foe fix.

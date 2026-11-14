@@ -439,7 +439,7 @@ void init_reserve() {
     g_reserve.resize(2);
     g_reserve[0].side = 0; g_reserve[1].side = 1;
     const char* e = std::getenv("PSPRECOMP_TAGTEAM_RESERVE");   // "id,id;id,id": charIds waiting on the human's side ; the enemy's side
-    std::string spec = e ? e : "5,9;20,24";                      // placeholder roster for the HUD until the party call-ins exist
+    std::string spec = e ? e : ";";                      // placeholder roster for the HUD until the party call-ins exist
     int side = 0; int v = -1;
     auto flush = [&]() { if (v >= 0) g_reserve[side].names.push_back(char_label(v, false)); v = -1; };
     for (char c : spec) { if (c >= '0' && c <= '9') v = (v < 0 ? 0 : v * 10) + (c - '0'); else if (c == ',') flush(); else if (c == ';') { flush(); side = 1; } }
@@ -474,7 +474,7 @@ int all_fighters(uint32_t out[6]) {
     return n;
 }
 uint32_t side_of(uint32_t a) { return rdh(a + 0x10CCu); }
-bool alive(uint32_t a) { return static_cast<int32_t>(rd(a + 0x10B0u)) > 0; }
+bool alive(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return ok(st, 0x40) && static_cast<int32_t>(rd(st + 0xCu)) > 0; }   // live HP (status+0xC); +0x10B0 is the maximum
 
 // The enemy fighter to cycle to from `foe` for `owner`: another living fighter of the other team, 0 if none.
 uint32_t other_enemy(uint32_t owner, uint32_t foe) {
@@ -512,6 +512,7 @@ void refresh_hook(uint8_t* rdram, recomp_context* ctx) {
     if (t && t != actor && ok(t, 0x12D0) && g_ram[(t + 0x542u) & 0x07FFFFFFu] == 0 && side_of(t) != side_of(actor) && alive(t)) {
         if (g_log && rd(actor + 0x2FCu) != t) std::fprintf(stderr, "[TAGTEAM] %08X targets %08X (foe %08X)\n", actor, t, rd(actor + 0x300u));
         wr(actor + 0x2FCu, t);
+        if (!std::getenv("PSPRECOMP_TAGTEAM_KEEPFOE")) wr(actor + 0x300u, t);   // the foe too: homing follow-ups, damage and the camera read it
     }
 }
 
@@ -726,6 +727,19 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         }
         if (target && owner == target) { const uint32_t st2 = rd(target + 0x52Cu); const int hp = ok(st2, 0x40) ? static_cast<int32_t>(rd(st2 + 0xCu)) : -1; if (hp != lasthp) { std::fprintf(stderr, "[TAGTEAM] t=%.1fs KO target %08X live hp %d (max %u) script %d flags %08X\n", dissidia_battle_age() / 60.0f, target, hp, rd(target + 0x10B0u), static_cast<int16_t>(rd(target + 0x180u) & 0xFFFF), rd(target + 0x380u)); lasthp = hp; } }
     }
+    if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_FOESCAN")) {   // debug: who holds the two enemy fighters' addresses, before and after the lock cycle
+        static bool d1 = false, d2 = false;
+        const uint32_t hum = rd(g_bs + 56u + 4u * rd(g_bs + 84u));
+        const float tt = dissidia_battle_age() / 60.0f;
+        if (owner == hum && ((!d1 && tt > 8.0f) || (!d2 && tt > 17.0f))) {
+            const bool first = !d1; (first ? d1 : d2) = true;
+            uint32_t es[2] = {0, 0}; int k = 0;
+            uint32_t f[6]; const int n = all_fighters(f);
+            for (int i = 0; i < n; i++) if (side_of(f[i]) != side_of(hum) && k < 2) es[k++] = f[i];
+            std::fprintf(stderr, "[FOESCAN] t=%.1f pass %d human %08X foe %08X enemies %08X %08X\n", tt, first ? 1 : 2, hum, rd(hum + 0x300u), es[0], es[1]);
+            for (int j = 0; j < 2; j++) if (es[j]) scan_val(es[j], j == 0 ? "enemyA" : "enemyB", hum, es[j]);
+        }
+    }
     static bool intro_seen = false;
     if (!g_late_q.empty() && g_bs && rd(g_bs + 72) != 0 && !g_late_ready) {   // the intro scripts (ids >= 1000) have run and the human is idle again
         const int cur = static_cast<int16_t>(rd(g_late_q[0].slot_actor + 0x180u) & 0xFFFFu);
@@ -778,13 +792,29 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             }
         }
     }
+    if (g_bs && extra_of(owner)) {   // a slot fighter is down: the battle is over (victory scene), the extras stop fighting
+        for (int k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0) && !alive(a)) return; }
+    }
     g_orig_tick(rdram, ctx);
 }
 
 }  // namespace
 
 // Called by the scene tick (hooks_main.cpp) before every frame's update: between frames no fighter is mid-update, the safe point for the swap.
+uint32_t dissidia_camera_manager();
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
+    if (g_nextra && g_bs && !std::getenv("PSPRECOMP_TAGTEAM_NOCAMFOE")) {   // the camera manager keeps the human's foe at mgr+0x8B4: follow the locked enemy
+        g_ram = rdram; g_ctx = ctx;
+        const uint32_t mgr = dissidia_camera_manager(), hum = rd(g_bs + 56u + 4u * rd(g_bs + 84u));
+        static bool armed = false;
+        if (mgr && !armed) if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_WATCH_CAM")) { armed = true; psp_mem_watch_set(mgr + static_cast<uint32_t>(std::strtoul(w, nullptr, 16))); std::fprintf(stderr, "[TAGTEAM] watching camera mgr %08X + %s\n", mgr, w); }
+        if (mgr && ok(hum, 0x12D0)) {
+            const uint32_t foe = rd(hum + 0x300u), cur = rd(mgr + 0x8B4u);
+            uint32_t f[6]; const int n = all_fighters(f);
+            bool is_enemy = false; for (int i = 0; i < n; i++) if (f[i] == cur && side_of(f[i]) != side_of(hum)) is_enemy = true;
+            if (is_enemy && foe && foe != cur && alive(foe)) { if (g_log) std::fprintf(stderr, "[TAGTEAM] camera foe %08X -> %08X\n", cur, foe); wr(mgr + 0x8B4u, foe); }
+        }
+    }
     if (!g_swap_req) return;
     g_swap_req = false; g_ram = rdram; g_ctx = ctx;
     swap_roles();
