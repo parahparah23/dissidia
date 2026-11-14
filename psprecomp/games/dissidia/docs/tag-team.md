@@ -337,3 +337,22 @@ Headless run: 3 fighters acting, camera 1 bad frame in 500, no lock cycle (no se
 ## 1v2 mode
 Settings > Debug > Tag Team 1v2 (or `PSPRECOMP_TAGTEAM_1V2=1`, = `EXTRAS=1`): only the enemy's second fighter is added; you have no partner. 2v1 and 1v2 both on = 2v2.
 Headless run: 3 fighters acting, camera 0 bad frames in 500, lock cycle goes foe -> second enemy.
+## KO tag-in, round 3 (HUD fixed; tag-in ON again, `PSPRECOMP_TAGTEAM_TAGIN=0` turns it off)
+**Root cause of the broken HUD:** the retail HUD asks `FUN_089E968C(side)` = "is the slot actor the player?" = `slot == FUN_08842164()`, and that
+function returns the actor at `*(0x089D4958)+20` only if its class check `FUN_08B2EF74` passes: **`actor+0x5B0` bit 2** ("this actor is the
+controlled one"). `content_swap` exchanged that byte between the two fighters, so after the swap the slot fighter was no longer "the player": the HUD
+treated side 0 as CPU-controlled (`FUN_089E95E0`/`9628` = 1), hid the left bars/portrait and mis-bound the right one. (The plain SELECT swap
+showed the same getters change in a probe but nobody looked at the player flag.) The flag belongs to the address, like the brain and the lock
+block: `content_swap` now keeps bit 2 of `+0x5B0` with the address. Found with `PSPRECOMP_TAGTEAM_HUDWATCH=<every N frames>` (prints the retail HUD
+getters for both sides, the slot fighters' HP / BRV / stock / revive word / script and `bs+72` whenever one changes).
+- Not the timing, not the status HP write: the earlier "timing dependent" results were that flag plus the status HP-0 write (which also hurts, so a
+  KO'd team mate is marked down with `g_down` + the AI gate bit instead of writing HP).
+- KO detection: the rules chain takes **one** stock per KO (`FUN_08B33914`); the round restart then drains more (the KO'd slot 1 -> 0, the other
+  slot 2 -> 0 as well). `ko_watch` treats a drop of exactly one stock as the KO, and after the swap restores the other slot's stock to what it was
+  before (`snap`). The KO'd slot ends with stock 0, so the next KO of the slot fighter ends the battle: the round ends when both team mates are down.
+- Test recipe caveat: `PSPRECOMP_TAGTEAM_KO=<who>:<s>` (HP 1, BRV 0) makes retail drain the stock within 2 frames and the fighter stays at HP 1; it is
+  not a real KO. Debug: `_KO_IDLE=<frames>` (idle frames after the restart before the swap, default 45), `_KO_HPVAL`, `_STOCK=<n>`, `_KOFIX` bits.
+- Verified (headless, screenshots after the swap): human KO and enemy KO (`cpu`) both keep the retail HUD (portraits, bars, BRV numbers) and the
+  fight goes on; the KO'd character shows `KO` in its panel; a later KO of the slot fighter ends the battle (DEFEATED). `tagteam_test.py --baseline`
+  PASS. Not verified: a real lethal hit (the recipe never produces one), the KO fall animation of the replaced character (it stands), swapping
+  mid-projectile.
