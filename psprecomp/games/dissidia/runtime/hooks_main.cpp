@@ -63,6 +63,7 @@ extern void dissidia_menu_settings_install(uint8_t* rdram);
 extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
 // direct_battle.cpp: test-only, skips the menus (PSPRECOMP_TEST_DIRECT_BATTLE=1).
 extern void dissidia_direct_battle_install(uint8_t* rdram);
+extern void dissidia_tagteam_install(uint8_t* rdram);
 // input.cpp: continuous analogue stick direction (the game's own processing is 8-way).
 extern void dissidia_input_install(uint8_t* rdram);
 extern void dissidia_button_prompts_install();
@@ -373,6 +374,7 @@ void dissidia_register_hooks(uint8_t* rdram) {
     psp_dispatch_set_overlay_resolver(dissidia_overlay_resolver);
     dissidia_roster_grid_install();   // wraps overlay functions: needs the overlay dispatch tables
     dissidia_direct_battle_install(rdram);  // direct_battle.cpp
+    dissidia_tagteam_install(rdram);  // tagteam.cpp (2 v 2 battles, experimental)
     dissidia_camera_install(rdram);   // camera.cpp (wraps a battle-overlay function too)
     dissidia_menu_settings_install(rdram);   // menu_settings.cpp: Settings entries in the title / start menu / pause menu
     dissidia_discord_install(rdram);         // discord_presence.cpp: Discord Rich Presence
