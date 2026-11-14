@@ -525,14 +525,21 @@ void lock_mode_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t owner = rd(L + 248u), h1 = rd(L + 304u);
         if (g_log && (owner == rd(g_bs + 56u + 4u * rd(g_bs + 84u)))) { static int n = 0; if (n++ < 40) std::fprintf(stderr, "[TAGTEAM] t=%.1fs lock mode call: block %08X mode %u -> %u flag %u (sel %d)\n", dissidia_battle_age() / 60.0f, L, rd(L + 264u), mode, static_cast<uint32_t>(ctx->r[6]), ok(h1, 0x40) ? static_cast<int>(rd(h1 + 28u)) : -99); }
         if (mode == 0 && rd(L + 264u) == 1 && ok(h1, 0x40) && ok(owner, 0x12D0) && g_ram[(owner + 0x542u) & 0x07FFFFFFu] == 0 && owner == rd(g_bs + 56u + 4u * rd(g_bs + 84u))) {
-            static int cyc = 0;   // 0: locked on the foe, 1: on the other enemy (the retail selector is reset by the press itself, so the state is kept here)
+            static int cyc = 0;   // 0: locked on the foe, 1: on the other enemy, 2: on the EX core (the retail selector is reset by the press itself, so the state is kept here)
             const uint32_t other = other_enemy(owner, rd(owner + 0x300u));
+            const bool core = call(0x08B40A50u, h1, L) != 0;   // retail's third candidate: the EX core, when one is out
             if (cyc == 0 && other) {
                 cyc = 1; wr(h1 + 28u, 1);           // cycle to the other enemy instead of releasing the lock
                 if (g_log) std::fprintf(stderr, "[TAGTEAM] lock cycle: %08X -> the other enemy %08X\n", rd(owner + 0x300u), other);
                 ctx->r[2] = 1; return;
             }
+            if (cyc < 2 && core) {
+                cyc = 2; wr(h1 + 28u, 2);           // ... then the EX core
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] lock cycle: -> the EX core\n");
+                ctx->r[2] = 1; return;
+            }
             cyc = 0; wr(h1 + 28u, 0);               // released: the next lock starts on the foe again
+            for (int k = 0; k < 2; k++) { const uint32_t sa = rd(g_bs + 56u + 4u * k); if (sa != owner && ok(sa, 0x12D0)) wr(owner + 0x300u, sa); }   // the foe is the slot opponent again
         }
     }
     g_orig_lock_mode(rdram, ctx);
