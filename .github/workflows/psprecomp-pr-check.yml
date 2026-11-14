@@ -1,0 +1,57 @@
+name: Build check (pull requests)
+
+# The release workflow (psprecomp-release.yml) is the only other place the Windows build runs, and it only runs on a version tag, so a Windows-only
+# compile error (v0.1.12, v0.1.15) used to show up as a failed release. This builds the runtime core and the setup wizard for both release
+# platforms on every pull request into main, with the same toolchain bundle and the same script, and stops before anything is assembled or signed.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'psprecomp/runtime/**'
+      - 'psprecomp/games/**'
+      - 'psprecomp/setup/**'
+      - 'psprecomp/release/**'
+      - 'psprecomp/toolchain/**'
+      - 'psprecomp/crates/**'
+      - 'psprecomp/Cargo.*'
+      - '.github/workflows/psprecomp-pr-check.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: psprecomp
+
+jobs:
+  core-and-wizard:
+    name: ${{ matrix.platform }} core + wizard
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-x86_64, linux-x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build dependencies of the bundle (same as the release job)
+        run: |
+          sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
+          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          ok=
+          for i in 1 2 3; do $APT update && ok=1 && break; sleep 15; done
+          [ -n "$ok" ]
+          ok=
+          for i in 1 2 3; do
+            $APT install -y --no-install-recommends perl make python3 \
+              libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxkbcommon-dev \
+              libwayland-dev wayland-protocols libdecor-0-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
+              libdrm-dev libgbm-dev libudev-dev libdbus-1-dev libgl-dev libegl-dev && ok=1 && break
+            sleep 20
+          done
+          [ -n "$ok" ]
+      - name: Core and wizard for ${{ matrix.platform }}
+        run: python3 release/build_release.py --platform ${{ matrix.platform }} --version 0.0.0-pr --work work --check-only
