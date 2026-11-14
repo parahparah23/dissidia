@@ -226,8 +226,19 @@ def main():
                     p = os.path.join(dp, fn)
                     z.write(p, os.path.join(base, os.path.relpath(p, out)))
     else:
-        with tarfile.open(arch, "w:xz", preset=6) as t:
-            t.add(out, arcname=base)
+        # Python's lzma is single threaded (about 3.5 min for this archive on a CI runner): write the tar, then compress it with the
+        # xz tool on all cores (-T0). Same format, any xz reads it. Falls back to the library when the tool is not installed.
+        xz = shutil.which("xz")
+        if xz:
+            tar_path = out + ".tar"
+            with tarfile.open(tar_path, "w") as t:
+                t.add(out, arcname=base)
+            if os.path.exists(arch):
+                os.remove(arch)
+            subprocess.run([xz, "-T0", "-6", "-f", tar_path], check=True)   # replaces <out>.tar by <out>.tar.xz
+        else:
+            with tarfile.open(arch, "w:xz", preset=6) as t:
+                t.add(out, arcname=base)
     open(arch + ".sha256", "w").write("%s  %s\n" % (sha256(arch), os.path.basename(arch)))
     print("archive %s (%.0f MB)" % (arch, os.path.getsize(arch) / 1e6))
 

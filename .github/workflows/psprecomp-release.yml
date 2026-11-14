@@ -35,7 +35,61 @@ jobs:
           name: recompiler-windows
           path: psprecomp/target/release/psprecomp.exe
 
-  build:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build dependencies of the bundle (SDL2 loads these libraries at run time; only their headers are needed here)
+        run: |
+          # The runner image points apt at azure.archive.ubuntu.com. On 2026-11-11 that name did not resolve for hours (v0.1.8 failed twice
+          # here), so use the main archive and retry with short timeouts instead of hanging for 20 minutes.
+          sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
+          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          ok=
+          for i in 1 2 3; do $APT update && ok=1 && break; sleep 15; done
+          [ -n "$ok" ]
+          ok=
+          for i in 1 2 3; do
+            $APT install -y --no-install-recommends perl make python3 \
+              libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxkbcommon-dev \
+              libwayland-dev wayland-protocols libdecor-0-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
+              libdrm-dev libgbm-dev libudev-dev libdbus-1-dev libgl-dev libegl-dev && ok=1 && break
+            sleep 20
+          done
+          [ -n "$ok" ]
+      # The toolchain bundle (zig plus the libraries compiled from source with it) is the same for every release until toolchain/ changes:
+      # build it once, keep it in the cache, and hand it to build_release.py with --bundle on every later run.
+      - name: Toolchain bundle cache
+        id: bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            psprecomp/work/bundle-linux-x86_64
+            psprecomp/work/cache
+          key: bundle-linux-x86_64-${{ hashFiles('psprecomp/toolchain/**') }}
+      - name: linux-x86_64 release
+        run: |
+          BUNDLE=""
+          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-linux-x86_64"; fi
+          python3 release/build_release.py --platform linux-x86_64 --version "${VERSION#v}" --work work $BUNDLE
+      - name: Collect
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          mkdir dist
+          cp work/DissidiaRecomp-*.tar.xz* dist/
+          cp work/DissidiaRecomp-Setup-*-linux-x86_64 dist/
+          # the Linux single file must unpack itself and hold a working release
+          work/DissidiaRecomp-Setup-*-linux-x86_64 --unpack "$RUNNER_TEMP/unpacked"
+          test -x "$RUNNER_TEMP/unpacked/DissidiaRecomp" && test -f "$RUNNER_TEMP/unpacked/toolchain/toolchain.cmake"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files-linux
+          path: psprecomp/dist/*
+
+  build-windows:
     runs-on: ubuntu-22.04
     needs: recompiler-windows
     steps:
@@ -63,26 +117,33 @@ jobs:
         with:
           name: recompiler-windows
           path: psprecomp/recompiler-windows
-      - name: Linux release
-        run: python3 release/build_release.py --platform linux-x86_64 --version "${VERSION#v}" --work work
-      - name: Windows release (cross-built with the same zig)
-        run: >
-          python3 release/build_release.py --platform windows-x86_64 --version "${VERSION#v}" --work work
-          --recompiler recompiler-windows/psprecomp.exe
+      # The toolchain bundle (zig plus the libraries compiled from source with it) is the same for every release until toolchain/ changes:
+      # build it once, keep it in the cache, and hand it to build_release.py with --bundle on every later run.
+      - name: Toolchain bundle cache
+        id: bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            psprecomp/work/bundle-windows-x86_64
+            psprecomp/work/bundle-windows-x86_64.host
+            psprecomp/work/cache
+          key: bundle-windows-x86_64-${{ hashFiles('psprecomp/toolchain/**') }}
+      - name: windows-x86_64 release
+        run: |
+          BUNDLE=""
+          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-windows-x86_64"; fi
+          python3 release/build_release.py --platform windows-x86_64 --version "${VERSION#v}" --work work --recompiler recompiler-windows/psprecomp.exe $BUNDLE
       - name: Collect
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           mkdir dist
-          cp work/DissidiaRecomp-*.tar.xz* work/DissidiaRecomp-*.zip* dist/
-          cp work/DissidiaRecomp-Setup-*-linux-x86_64 work/DissidiaRecomp-Setup-*-windows-x86_64.exe dist/
-          # the Linux single file must unpack itself and hold a working release
-          work/DissidiaRecomp-Setup-*-linux-x86_64 --unpack "$RUNNER_TEMP/unpacked"
-          test -x "$RUNNER_TEMP/unpacked/DissidiaRecomp" && test -f "$RUNNER_TEMP/unpacked/toolchain/toolchain.cmake" 
+          cp work/DissidiaRecomp-*.zip* dist/
+          cp work/DissidiaRecomp-Setup-*-windows-x86_64.exe dist/
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
-          name: release-files
+          name: release-files-windows
           path: psprecomp/dist/*
 
   android-app:
@@ -118,13 +179,17 @@ jobs:
 
   manifest:
     # manifest.json (what the updaters download first) lists every platform's asset, so it is made once all of them exist, then signed.
-    needs: [build, android-app]
+    needs: [build-linux, build-windows, android-app]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: release-files
+          name: release-files-linux
+          path: psprecomp/dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files-windows
           path: psprecomp/dist
       - uses: actions/download-artifact@v4
         with:
@@ -151,7 +216,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [build, android-app, manifest]
+    needs: [build-linux, build-windows, android-app, manifest]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -161,7 +226,11 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: release-files
+          name: release-files-linux
+          path: psprecomp/dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files-windows
           path: psprecomp/dist
       - uses: actions/download-artifact@v4
         with:
