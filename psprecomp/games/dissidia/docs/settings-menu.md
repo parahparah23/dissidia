@@ -47,13 +47,24 @@ Verified in a real run (Xvfb, NVIDIA GL, 2026-11-13): opens with Esc, category s
 returns to the game. Not verified: pad, touch / Android, HDR and Ray Tracing sub-menus (the host GPU reports both Unavailable),
 the ~60 fps animation / scale auto-drop (no frame timing taken), held-button leak after close.
 
-The in-game entry points (title screen, main menu Options, battle pause) are not wired. The runtime side is ready
-(`psp_settings_request_open()`). What was found: the title's NEW GAME / LOAD GAME / EXTRAS cursor is the word at 0x096AE20C
-(0, 1, 2; heap object, address may move), written by EBOOT code under 0x088DA0A8 (the generic data-driven list engine, shared with
-other menus), and the labels are game art, so a fourth row needs a new sprite and layout plus the engine's item table, not just a
-hook.
-More detail (run with `PSPRECOMP_TRACE_CALLS=088DA0A8`): the title's three rows are static sprite objects in the overlay data area
-(object list at 0x08B8C1C8..0x08B8C360, a0 = 0x08B8C31C for the menu), queried once per row and frame as `FUN_088DA0A8(menu, index,
-...)` with index 0, 1, 2. Next step for a Settings row: add a fourth object (clone of the EXTRAS sprite plus a "SETTINGS" label drawn
-by the runtime), raise the row count and intercept the confirm for index 3 to call `psp_settings_request_open()`. The title idles into
-the attract movie after about 60 s, so probe in one scripted pass.
+## In-game entries (games/dissidia/runtime/menu_settings.cpp)
+
+"Settings" is a row of the title screen, the start menu and the battle pause menu; choosing it opens this screen
+(`psp_settings_request_open()`). `PSPRECOMP_MENU_SETTINGS=0` removes the rows.
+
+- **Battle pause menu**: a fourth (or later) item of the game's own list widget, added just before the list opens (battle overlay
+  FUN_08B1EBE8 builds the list, EBOOT FUN_088D72E8 adds, FUN_088D743C opens; up to 7 items). Its label and help text are served
+  for marker ids by a hook of the text accessor FUN_0887AD78, so bars, font, cursor, help line and sounds are the game's. A
+  confirm on it is taken back in the selection core's update (FUN_088D80AC). Not added during a wireless match.
+- **Start menu**: the seven retail rows are pulled 21 px apart (an in-flight edit of entry 0 of
+  `menu/menu_pk_upper_start_menu_seq_0.bin`, both keyframes of each row node), the cursor range of the top level is raised to 7, and
+  the eighth row is drawn on the game layer (`ge_draw_set_game_layer`, `menu_layer.cpp`): the game's bold text face, the
+  measured line / band / help-line colours and the pointing hand of the common UI sheet, following the Options row's live
+  position. A confirm on index 7 is handled before ovl_menu FUN_089E45E8 reads its 7-entry mode table.
+- **Title screen**: NEW GAME / LOAD GAME / EXTRAS and the bar nodes move up 16 (entry 0 of `menu/en/menu_lpk_title_seq_0.bin`),
+  Settings is drawn where EXTRAS was in Crimson Text SemiBold small capitals. The game keeps three rows; "Settings selected" keeps
+  its cursor on EXTRAS with the bar instance hidden (flag bit 0x0008 at +0x20); Up / Down in and out of it are handed to the
+  game's own moves so its sounds and animations play.
+
+A loose-file mod that replaces one of the two layout files keeps its own layout (the built-in edit is skipped), and the start
+menu / title rows then overlap the retail rows; the pause menu row does not depend on files.

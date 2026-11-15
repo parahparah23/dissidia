@@ -1,6 +1,7 @@
-// games/dissidia/runtime/menu_settings.cpp — a "Settings" entry in the game's own menus that opens the runtime's settings
-// screen (psp_settings_request_open). The entries are made by the game's own menu code, so they look and behave like the
-// retail ones (same bars, font, cursor, help line, sounds).
+// games/dissidia/runtime/menu_settings.cpp — a "Settings" entry in the game's own menus (battle pause menu, start menu, title
+// screen) that opens the runtime's settings screen (psp_settings_request_open). PSPRECOMP_MENU_SETTINGS=0 turns them off.
+// The pause menu's row is made by the game's own list widget; the start menu and title rows are drawn on the game layer
+// (menu_layer.h) in the measured retail style, with the game's own layout moved to make room.
 //
 // Battle pause menu
 //   ovl_battle FUN_08B1EBE8 builds the pause list for the battle's mode with the generic EBOOT list widget:
@@ -284,11 +285,147 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t inst = r32(st + 0x408 + 4 * 0xE);
         float ox = kRowX[6], oy = kRowY0 + kRowPitch * 6;
         if (inst >= 0x08800000u && inst < 0x0A000000u) { std::memcpy(&ox, rdram + ((inst + 0x10) & 0x07FFFFFFu), 4); std::memcpy(&oy, rdram + ((inst + 0x14) & 0x07FFFFFFu), 4); }
-        static int dbg = 0;
-        if (std::getenv("PSPRECOMP_MENUSET_DEBUG") && dbg++ % 120 == 0) std::fprintf(stderr, "[MENUSET] inst %08X origin %.1f %.1f cursor %u\n", inst, ox, oy, r32(st + 0xA28 + 4));
         if (std::isfinite(ox) && std::isfinite(oy) && ox > 100.f && ox < 400.f && oy > 0.f && oy < 260.f)
             draw_settings_row(ox + float(kRowX[7] - kRowX[6]), oy + float(kRowPitch), r32(st + 0xA28 + 4) == 7, 1.f);
     }
+}
+
+
+// ---- Title screen ----------------------------------------------------------------------------------------------------
+// NEW GAME / LOAD GAME / EXTRAS are artwork rows (ovl_menu FUN_089DF14C, state T = [title + 476]: cursor T + 76, row count
+// T + 0x3FAA8, row instances T + 56 + 4 * row, the selection bar and hand = instance T + 52). Their layout is entry 0 of
+// menu/en/menu_lpk_title_seq_0.bin: row nodes (455, 224), (439, 240), (423, 256) (with their keyframes and the intro
+// keyframes one row lower) and the bar's per-row nodes (240, 220 / 237 / 254). Everything moves up 16 so a fourth row fits
+// where EXTRAS was; the fourth row, Settings, is drawn on the game layer in the same lettering.
+// The game keeps three rows. "Settings selected" is a state of this module with the game's cursor on EXTRAS and its bar hidden
+// (bit 0x0008 of the instance's flags halfword at +0x20 is "visible"): Down on EXTRAS or Up on NEW GAME enters it (the frame's update is
+// skipped so the game does not wrap), Up
+// leaves it by putting the cursor on NEW GAME and letting the game's own Up move to EXTRAS (its sound and bar animation),
+// Down by letting the game's Down wrap from EXTRAS to NEW GAME, and Confirm / START open the settings screen.
+constexpr uint32_t TITLE_TICK = 0x089DF14Cu;    // ovl_menu: title menu update
+constexpr uint32_t PAD_OBJ2 = 0x08872088u;      // EBOOT: second pad object (the title's START test)
+constexpr uint32_t TITLE_MASKS = 0x089E07B8u;   // ovl_menu: START, Confirm, Up, Down masks (two words each)
+constexpr const char* kTitleSeq = "menu/en/menu_lpk_title_seq_0.bin";
+FuncPtr g_orig_title_tick = nullptr, g_pad_obj2 = nullptr;
+bool g_title_settings = false;
+uint32_t g_title_bar = 0;   // the bar instance hidden while Settings is selected
+
+void title_bar_visible(uint8_t* rdram, uint32_t inst, bool on) {
+    if (inst < 0x08800000u || inst >= 0x0A000000u) return;
+    uint16_t f; std::memcpy(&f, rdram + ((inst + 0x20) & 0x07FFFFFFu), 2);
+    f = on ? uint16_t(f | 0x0008u) : uint16_t(f & ~0x0008u);
+    std::memcpy(rdram + ((inst + 0x20) & 0x07FFFFFFu), &f, 2);
+}
+float g_title_sel = 0.f;
+std::chrono::steady_clock::time_point g_title_last;
+
+bool edit_title_seq(std::vector<uint8_t>& pak) {
+    const uint8_t* p = nullptr; size_t len = 0;
+    if (!dissidia::menu_pak_entry(pak.data(), pak.size(), 0, &p, &len)) return false;
+    uint8_t* e = pak.data() + (p - pak.data());
+    struct Node { int off; int16_t x, y; };
+    static const Node nodes[] = {
+        {4490, 455, 224}, {4550, 455, 224}, {4590, 455, 224}, {5498, 455, 224}, {5538, 455, 224}, {4654, 455, 240},
+        {4694, 439, 240}, {4754, 439, 240}, {4794, 439, 240}, {5602, 439, 240}, {5642, 439, 240}, {4858, 439, 256},
+        {4898, 423, 256}, {5706, 423, 256}, {5746, 423, 256},
+        {16942, 240, 220}, {16982, 240, 220}, {17270, 240, 220}, {17310, 240, 220},
+        {17046, 240, 237}, {17086, 240, 237}, {17374, 240, 237}, {17414, 240, 237},
+        {17150, 240, 254}, {17190, 240, 254}, {17478, 240, 254}, {17518, 240, 254}};
+    for (const Node& n : nodes) {   // a retail layout only
+        if (size_t(n.off) + 4 > len) return false;
+        int16_t xy[2]; std::memcpy(xy, e + n.off, 4);
+        if (xy[0] != n.x || xy[1] != n.y) return false;
+    }
+    for (const Node& n : nodes) { const int16_t y = int16_t(n.y - 16); std::memcpy(e + n.off + 2, &y, 2); }
+    return true;
+}
+
+// The pad tests FUN_089DF14C makes: `which` 0 START, 1 Confirm (pressed), 2 Up, 3 Down (with key repeat).
+bool title_pad(uint8_t* rdram, recomp_context* ctx, int which) {
+    const int32_t pad = call(which == 0 ? g_pad_obj2 : g_pad_obj, rdram, ctx, {0});
+    const uint32_t vt = r32(static_cast<uint32_t>(pad) + 52) + (which >= 2 ? 32 : 16);
+    const int16_t adj = static_cast<int16_t>(r32(vt) & 0xFFFF);
+    const uint32_t fn = r32(vt + 4), m = TITLE_MASKS + 8u * uint32_t(which);
+    recomp_context save = *ctx;
+    ctx->r[4] = pad + adj; ctx->r[5] = static_cast<int32_t>(fn);
+    ctx->r[6] = static_cast<int32_t>(r32(m)); ctx->r[7] = static_cast<int32_t>(r32(m + 4));
+    RECOMP_LOOKUP(fn)(rdram, ctx);
+    const bool on = ctx->r[2] != 0;
+    *ctx = save;
+    return on;
+}
+
+void draw_title_row(float nx, float ny, bool selected) {
+    using dissidia::LayerColor;
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::min(0.1f, std::chrono::duration<float>(now - g_title_last).count());
+    g_title_last = now;
+    static float appear = 0.f;
+    appear = dt >= 0.1f ? 0.f : std::min(1.f, appear + dt / 0.25f);
+    g_title_sel = selected ? std::min(1.f, g_title_sel + dt / 0.12f) : std::max(0.f, g_title_sel - dt / 0.12f);
+    load_ui_sheet();
+    g_layer.begin(std::max(2, psp_sddialog::output_scale()));
+    const float sa = g_title_sel * appear, a = appear;
+    if (sa > 0.f) {   // the pale bar behind the row, white edges above and below
+        g_layer.band(nx - 125.f, ny - 4.5f, 480.f, ny + 5.f, [&](float x, float y) {
+            const float ramp = std::min(1.f, std::max(0.f, (x - (nx - 125.f)) / 55.f));
+            if (y < ny - 3.f || y > ny + 3.5f) return LayerColor{255, 255, 255, 0.8f * sa * ramp};
+            if (y < ny - 2.f) return LayerColor{212, 221, 230, sa * ramp};
+            if (y > ny + 2.5f) return LayerColor{181, 196, 213, sa * ramp};
+            return LayerColor{192, 205, 220, sa * ramp};
+        });
+    }
+    g_layer.band(nx - 58.f, ny + 6.f, 480.f, ny + 7.f, [&](float, float) { return LayerColor{148, 145, 183, a}; });   // underline
+    g_layer.serif_caps(kLabel, 11.5f, 0.8f, 0.45f, nx - 44.f, ny + 3.f, LayerColor{66, 66, 118, a});
+    if (sa > 0.f && g_ui_sheet_state == 1)
+        g_layer.image(g_ui_sheet.rgba.data(), g_ui_sheet.w, g_ui_sheet.h, 2, 50, 38, 24, nx - 83.f, ny - 5.f, 26.f, 14.5f, sa);
+    g_layer.publish();
+}
+
+void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(TITLE_TICK)) f(rdram, ctx); return; }
+    const uint32_t title = static_cast<uint32_t>(ctx->r[4]);
+    const uint32_t st = r32(title + 476);
+    const bool menu_up = st && r32(st + 12) == 0 && r32(st + 0x3FAA8) == 3 && r32(st + 64) != 0;
+    auto leave = [&]() { if (g_title_settings) title_bar_visible(rdram, g_title_bar, true); g_title_settings = false; };
+    if (!menu_up) { leave(); g_orig_title_tick(rdram, ctx); return; }
+    const uint32_t cur = st + 76;
+    if (g_title_settings && r32(cur) != 2) leave();
+    if (!g_title_settings) {
+        const bool down_from_last = r32(cur) == 2 && title_pad(rdram, ctx, 3);
+        const bool up_from_first = !down_from_last && r32(cur) == 0 && title_pad(rdram, ctx, 2);
+        if (!psp_settings_menu_open() && (down_from_last || up_from_first)) {   // Down on EXTRAS / Up on NEW GAME
+            if (up_from_first) { const uint32_t two = 2; std::memcpy(rdram + (cur & 0x07FFFFFFu), &two, 4); }
+            g_title_settings = true;
+            call(g_play_se, rdram, ctx, {0});
+            g_title_bar = r32(st + 52);
+            title_bar_visible(rdram, g_title_bar, false);
+        } else {
+            g_orig_title_tick(rdram, ctx);
+        }
+    } else if (psp_settings_menu_open()) {
+        g_orig_title_tick(rdram, ctx);
+    } else if (title_pad(rdram, ctx, 1) || title_pad(rdram, ctx, 0)) {          // Confirm / START: the settings screen
+        call(g_play_se, rdram, ctx, {2});
+        std::fprintf(stderr, "[MENUSET] Settings chosen on the title screen\n");
+        psp_settings_request_open();
+    } else if (title_pad(rdram, ctx, 2)) {                                        // Up: the game moves from NEW GAME to EXTRAS
+        leave();
+        const uint32_t zero = 0;
+        std::memcpy(rdram + (cur & 0x07FFFFFFu), &zero, 4);
+        g_orig_title_tick(rdram, ctx);
+    } else if (title_pad(rdram, ctx, 3)) {                                        // Down: the game wraps from EXTRAS to NEW GAME
+        leave();
+        g_orig_title_tick(rdram, ctx);
+    } else {
+        g_orig_title_tick(rdram, ctx);
+    }
+    // The fourth row follows the EXTRAS row (instance T + 64, float origin at +0x10 / +0x14), one step further.
+    const uint32_t row2 = r32(st + 64);
+    float ox = 423.f, oy = 240.f;
+    if (row2 >= 0x08800000u && row2 < 0x0A000000u) { std::memcpy(&ox, rdram + ((row2 + 0x10) & 0x07FFFFFFu), 4); std::memcpy(&oy, rdram + ((row2 + 0x14) & 0x07FFFFFFu), 4); }
+    if (std::isfinite(ox) && std::isfinite(oy) && ox > 200.f && ox < 480.f && oy > 100.f && oy < 260.f)
+        draw_title_row(ox - 16.f, oy + 16.f, g_title_settings);
 }
 
 }  // namespace
@@ -317,6 +454,16 @@ void dissidia_menu_settings_install(uint8_t* rdram) {
     g_orig_main_tick = ovl_menu_lookup(MAIN_TICK);
     g_pad_obj = psp_dispatch_probe_lookup(PAD_OBJ);
     g_play_se = psp_dispatch_probe_lookup(PLAY_SE);
+    g_orig_title_tick = ovl_menu_lookup(TITLE_TICK);
+    g_pad_obj2 = psp_dispatch_probe_lookup(PAD_OBJ2);
+    g_pad_obj = psp_dispatch_probe_lookup(PAD_OBJ);
+    g_play_se = psp_dispatch_probe_lookup(PLAY_SE);
+    if (g_orig_title_tick && g_pad_obj && g_pad_obj2 && g_play_se) {
+        dissidia_add_asset_patch(kTitleSeq, edit_title_seq);
+        psp_dispatch_register(TITLE_TICK, title_tick_hook);
+    } else {
+        std::fprintf(stderr, "[MENUSET] title hooks not installed (a function is missing)\n");
+    }
     if (g_orig_main_tick && g_pad_obj && g_play_se) {
         dissidia_add_asset_patch(kStartSeq, edit_start_seq);
         psp_dispatch_register(MAIN_TICK, main_tick_hook);

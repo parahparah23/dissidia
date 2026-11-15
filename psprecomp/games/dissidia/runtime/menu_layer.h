@@ -24,6 +24,9 @@ public:
     void image(const uint32_t* px, int iw, int ih, int sx, int sy, int sw, int sh, float x, float y, float w, float h, float alpha);
     // Text in the game's font (bold or regular), em size in design units, left x and baseline y; returns the advance width.
     float text(const std::string& s, bool bold, float em, float x, float baseline, LayerColor c, bool measure_only = false);
+    // Serif small capitals (Crimson Text SemiBold, shipped with the runtime): capitals at `em`, lower case as capitals at
+    // `small` x em, `track` extra units between letters; the title screen's lettering.
+    float serif_caps(const std::string& s, float em, float small, float track, float x, float baseline, LayerColor c, bool measure_only = false);
     void publish();   // hand the image to the runtime (ge_draw_set_game_layer)
     void clear();     // remove it
 

@@ -11,13 +11,16 @@
 #include <map>
 #include <mutex>
 
+extern const unsigned char psp_ui_font_bodyb[];   // runtime/assets/embed_fonts.cmake (Crimson Text SemiBold)
+extern const unsigned long psp_ui_font_bodyb_len;
+
 namespace dissidia {
 
 namespace {
 
 struct Faces {
     FT_Library lib = nullptr;
-    FT_Face reg = nullptr, bold = nullptr;
+    FT_Face reg = nullptr, bold = nullptr, serif = nullptr;
     std::vector<uint8_t> reg_bytes, bold_bytes;
 };
 bool read_file(const std::string& p, std::vector<uint8_t>* out) {
@@ -37,6 +40,7 @@ Faces& faces() {
     static std::once_flag once;
     std::call_once(once, [] {
         if (FT_Init_FreeType(&f.lib)) { f.lib = nullptr; return; }
+        FT_New_Memory_Face(f.lib, psp_ui_font_bodyb, FT_Long(psp_ui_font_bodyb_len), 0, &f.serif);
         std::string reg, bold;
         if (!psp_font_host_files(&reg, &bold)) return;
         if (read_file(reg, &f.reg_bytes)) FT_New_Memory_Face(f.lib, f.reg_bytes.data(), FT_Long(f.reg_bytes.size()), 0, &f.reg);
@@ -129,6 +133,33 @@ float MenuLayer::text(const std::string& str, bool bold, float em, float x, floa
         prev = gi;
     }
     return pen / s_ - x;
+}
+
+float MenuLayer::serif_caps(const std::string& str, float em, float small, float track, float x, float baseline, LayerColor c, bool measure_only) {
+    FT_Face face = faces().serif;
+    if (!face) return 0.f;
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    float pen = x * s_;
+    const int by = int(std::lround(baseline * s_));
+    for (unsigned char ch : str) {
+        const bool lower = ch >= 'a' && ch <= 'z';
+        FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * (lower ? small : 1.f) * s_)));
+        const FT_UInt gi = FT_Get_Char_Index(face, lower ? ch - 32 : ch);
+        if (FT_Load_Glyph(face, gi, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT) == 0) {
+            const FT_GlyphSlot g = face->glyph;
+            if (!measure_only) {
+                const int gx = int(std::lround(pen)) + g->bitmap_left, gy = by - g->bitmap_top;
+                for (unsigned r = 0; r < g->bitmap.rows; r++)
+                    for (unsigned q = 0; q < g->bitmap.width; q++) {
+                        const uint8_t cov = g->bitmap.buffer[r * g->bitmap.pitch + q];
+                        if (cov) blend(gx + int(q), gy + int(r), c.r, c.g, c.b, c.a * cov / 255.f);
+                    }
+            }
+            pen += g->advance.x / 64.f + track * s_;
+        }
+    }
+    return pen / s_ - x - track;
 }
 
 void MenuLayer::publish() {
