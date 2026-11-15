@@ -5662,7 +5662,8 @@ int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, in
         std::fprintf(stderr, "[TEST] plya actor %08X: %u records\n", actor, n);
         for (uint32_t i = 0; i < n && i < 4096u && guest_ok(t, 8u + (i + 1) * PLYA_STRIDE); i++) {
             const uint32_t r = t + 8u + i * PLYA_STRIDE;
-            std::fprintf(stderr, "[TEST] plya action %u script %d\n", guest_rd<uint16_t>(rdram, r), (int)guest_rd<int16_t>(rdram, r + 0x1C));
+            std::fprintf(stderr, "[TEST] plya action %u script %d later %u side %u button %u\n", guest_rd<uint16_t>(rdram, r), (int)guest_rd<int16_t>(rdram, r + 0x1C),
+                         guest_rd<uint8_t>(rdram, r + 3), guest_rd<uint8_t>(rdram, r + 5), guest_rd<uint8_t>(rdram, r + 0x0F));   // +3 1 = a later press, +5 2 ground / 1 air, +0x0F 1 brave / 2 HP
         }
         return 1;
     }

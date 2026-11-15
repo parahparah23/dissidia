@@ -352,6 +352,10 @@ static std::atomic<bool> g_draw_ready{false};
 // PSPRECOMP_NO_RASTER=1: GL_RASTERIZER_DISCARD (draws submitted, nothing
 // rasterised); =2: skip glDrawArrays entirely. Measures CPU-side cost only.
 static int g_no_raster = 0;
+static std::atomic<int> g_no_raster_request{-1};
+// Test harnesses (games/dissidia frame-rate parity runs): stop drawing once the fight's HUD has been seen. 0 draw, 1 rasterizer discard,
+// 2 no draw calls (the GE lists are still processed). Taken over by the render thread at the next present.
+void ge_draw_request_no_raster(int mode) { g_no_raster_request.store(mode); }
 static int g_no_raster_mode = 0;       // requested mode (PSPRECOMP_NO_RASTER)
 static double g_no_raster_after = 0.0; // PSPRECOMP_NO_RASTER_AFTER=<s>: enable only after s seconds
 static std::chrono::steady_clock::time_point g_t_start = std::chrono::steady_clock::now();
@@ -5124,6 +5128,12 @@ void ge_present_frame(
         }
     }
     psp_prof::Scope prof_present(psp_prof::S_PRESENT);
+    if (const int req = g_no_raster_request.exchange(-1); req >= 0 && req != g_no_raster) {   // ge_draw_request_no_raster (render thread applies it)
+        if (g_no_raster == 1) glDisable(GL_RASTERIZER_DISCARD);
+        g_no_raster = req;
+        if (g_no_raster == 1) glEnable(GL_RASTERIZER_DISCARD);
+        std::fprintf(stderr, "[DRAW] raster mode %d (requested)\n", g_no_raster);
+    }
     if (g_no_raster_mode && g_no_raster == 0 && g_no_raster_after > 0.0
         && std::chrono::duration<double>(std::chrono::steady_clock::now() - g_t_start).count()
                >= g_no_raster_after) {

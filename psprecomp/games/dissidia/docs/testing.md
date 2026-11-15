@@ -10,6 +10,27 @@ Needs: Xvfb, python3 + Pillow, a save in `<work>/ms0` (Quick Battle unlocked) an
     battle_test.py actions --work W --actions 2423,2424 --rates 30,120 [--hold SQUARE --stick 128,255 --hold-ms 1500]
     battle_test.py actions --work W --all                               # every action the fighter has
 
+## Rendering on the GPU without an X server (`BT_GPU=1`)
+
+Xvfb has no GPU driver: every run on its virtual display renders with Mesa's llvmpipe (software GL, `[RT] GL renderer: llvmpipe` in
+the log), whatever GPU the machine has. The NVIDIA driver can render without any display through EGL, and SDL2's `offscreen` video
+driver makes its GL context through EGL:
+
+    SDL_VIDEODRIVER=offscreen __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json  <run.sh ...>
+
+No Xvfb and no `DISPLAY` are needed; the log shows `[RT] GL renderer: NVIDIA GeForce GTX 1660 SUPER/PCIe/SSE2` (the GPU of the
+test host) and one harmless `xcb_connection_has_error() returned true` line. The debug socket's screenshots (`S`) still read the
+picture, so the HUD checks of the menu walks work as before.
+
+- `battle_test.py` (and every tool built on its `Game` / `start_xvfb`: `combo_timing.py`, `fps_parity.py`, ...): `BT_GPU=1` skips Xvfb
+  and sets those two variables; `BT_GPU=auto` does so when the NVIDIA EGL vendor file exists; `BT_EGL_VENDOR=<json>` picks another
+  vendor. `fps_parity.py --gpu auto|on|off` (default auto).
+- Check that it took: `grep "GL renderer" run_*.log`. `eglinfo -B` lists what EGL offers (the GBM, surfaceless and device platforms
+  all reach the NVIDIA GPU on the test host); `vulkaninfo --summary` shows the GPU for Vulkan too (not tried with the game headless).
+- Speed: with the GPU, drawing is no longer what limits a fast-forwarded run (a 120 fps parity run took 78 s drawing and 79 s with
+  drawing off; with llvmpipe, turning drawing off made 120 fps runs 2.6x faster). Several games share the GPU fine.
+- Older notes in this file that say a run used the GPU on Xvfb were wrong: those runs were llvmpipe.
+
 ## Pieces
 
 - **Script player** (`runtime/framerate.cpp`, `PSPRECOMP_TEST_SCRIPT=<file>`): lines `<game ms> set|tap|analog|mark|action|quit`.

@@ -12,8 +12,20 @@
 //   PSPRECOMP_TEST_PAD_RECORD=1       log the pad of a normal (harness) walk: "[PADREC] <poll> <mask hex>", and a
 //                                     "[PADREC] loaded <poll>" line when the save finishes loading
 //   PSPRECOMP_TEST_DIRECT_BATTLE=<f>  replay the recording <f> (tools/battle_test.py --direct, tests/replays/quick_battle_walk.txt)
-// Both are off by default; with neither set the filter returns the pad state unchanged.
+//   PSPRECOMP_TEST_CHAR_SWAP=<from>=<to>[,<from>=<to>]  fight with other characters than the recording picked (tools/fps_parity.py),
+//                                     so the Squall vs Lightning walk loads any match-up. The menu fills the battle block at 0x09AFB8A0
+//                                     (FUN_088FB1A4 copies it for the battle): per side a 0x1060-byte fighter record that starts with a copy of
+//                                     the character's 0x778-byte save record (byte 0 = charId, then level, abilities ...; the CPU side gets a
+//                                     generated one), and behind them a team struct per side (+0x272F, stride 0x38: a count byte, five bytes,
+//                                     the charIds, 0xFF filled). On every poll a side whose record holds <from> gets <to>'s own save record
+//                                     (save records: *(0x089D712C) + 0xF58 + 0x778 x the charId's index in the 31-entry id list at 0x089CBC98)
+//                                     and its team charId; the CPU side's generated record only gets the charId. What the loading
+//                                     screen (FUN_0888C4C8) loads is the record's +0xF3A halfword: the object table id of the fighter's
+//                                     model entry (P_<code>_1P: byte 6 charId, byte 7 costume 1, byte 8 type 0; table *(0x089D4968));
+//                                     it is set to <to>'s entry on every poll. The assist (+0xF3E) stays as the menu picked it.
+// All are off by default; with none set the filter returns the pad state unchanged.
 #include "psp_game_module.h"
+#include "hle/psp_hle.h"
 #include "psp_platform.h"
 #include "psp_runtime.h"
 #include "recomp.h"
@@ -21,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 extern std::atomic<uint32_t> g_savedata_list_opened, g_savedata_completed;   // runtime/src/hle/psp_hle_utility.cpp
@@ -42,8 +55,73 @@ uint32_t g_cur = 0;
 
 }  // namespace
 
+namespace {
+uint8_t* g_rdram = nullptr;
+std::vector<std::pair<int, int>> g_swap;   // PSPRECOMP_TEST_CHAR_SWAP
+uint8_t* g_at(uint32_t a) { return g_rdram + (a & 0x07FFFFFFu); }
+uint32_t g_w32(uint32_t a) { uint32_t v; std::memcpy(&v, g_at(a), 4); return v; }
+uint32_t save_record(int charId) {   // the save record of a charId (0 = none)
+    for (uint32_t i = 0; i < 31; i++) {
+        if (*g_at(0x089CBC98u + i) != charId) continue;
+        const uint32_t base = g_w32(0x089D712Cu);
+        return base >= 0x08800000u && base < 0x0A000000u ? base + 0xF58u + 0x778u * i : 0u;
+    }
+    return 0;
+}
+int model_id(int charId) {   // object table id of a character's first-costume player model entry (P_<code>_1P), -1 = none
+    const uint32_t t = g_w32(0x089D4968u);
+    if (t < 0x08800000u || t >= 0x0A000000u) return -1;
+    const uint32_t h = g_w32(t);
+    if (h < 0x08800000u || h >= 0x0A000000u) return -1;
+    const uint32_t n = g_w32(h + 4u);
+    for (uint32_t i = 0; i < n && i < 4000u; i++) {
+        const uint8_t* r = g_at(h + 8u + 0x44u * i);
+        if (r[6] != charId || r[7] != 1 || r[8] != 0) continue;
+        const char* name = reinterpret_cast<const char*>(r + 36);
+        const size_t len = strnlen(name, 16);
+        if (len < 4 || std::strncmp(name, "P_", 2) != 0 || std::strncmp(name + len - 3, "_1P", 3) != 0) continue;
+        uint16_t id; std::memcpy(&id, r, 2);
+        return id;
+    }
+    return -1;
+}
+void team_swap() {
+    constexpr uint32_t kBlock = 0x09AFB8A0u, kSide = 0x1060u, kTeam = 0x2735u, kTeamStride = 0x38u;
+    static int done[2] = {-1, -1};                 // the pair applied to each side (one per side: "15=31,31=15" must not flip a side back)
+    static int want[2] = {-2, -2}, from_id[2] = {-2, -2};
+    for (uint32_t side = 0; side < 2; side++) {
+        uint8_t* rec = g_at(kBlock + kSide * side);
+        uint8_t* ids = g_at(kBlock + kTeam + kTeamStride * side);
+        if (done[side] >= 0 && rec[0] != g_swap[done[side]].second) done[side] = -1;   // the menu wrote the record again
+        if (done[side] < 0) {
+            for (size_t k = 0; k < g_swap.size(); k++) {
+                const auto& s = g_swap[k];
+                if (rec[0] != s.first || rec[1] < 1 || rec[1] > 100) continue;   // a fighter record (charId, level 1..100)
+                const uint32_t src = side == 0 ? save_record(s.second) : 0u;
+                if (src) std::memcpy(rec, g_at(src), 0x778);
+                rec[0] = static_cast<uint8_t>(s.second);
+                done[side] = static_cast<int>(k);
+                want[side] = model_id(s.second); from_id[side] = model_id(s.first);
+                std::fprintf(stderr, "[DIRECT] side %u fighter record: charId %d -> %d (%s)\n", side, s.first, s.second, src ? "its own save record" : "charId only");
+                break;
+            }
+        }
+        if (done[side] < 0) continue;
+        const auto& s = g_swap[done[side]];
+        if (ids[-6] == 1 && ids[0] == s.first && ids[1] == 0xFF) ids[0] = static_cast<uint8_t>(s.second);   // a 1-on-1 team struct
+        uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);   // the model the loading screen loads: <to>'s (the menu sets it from its own pick)
+        if (want[side] >= 0 && m != want[side] && (m == from_id[side] || from_id[side] < 0)) {
+            const uint16_t w = static_cast<uint16_t>(want[side]);
+            std::memcpy(rec + 0xF3A, &w, 2);
+            std::fprintf(stderr, "[DIRECT] side %u model id %u -> %u (charId %d)\n", side, m, w, s.second);
+        }
+    }
+}
+}  // namespace
+
 // Called by the pad filter of framerate.cpp for every poll; returns the buttons to hand the game.
 uint32_t dissidia_walk_filter(uint32_t buttons) {
+    if (!g_swap.empty()) team_swap();
     if (!g_replay && !g_record) return buttons;
     const uint64_t n = ++g_poll;
     if (g_record) {
@@ -81,8 +159,28 @@ uint32_t dissidia_walk_filter(uint32_t buttons) {
     }
 }
 
+// FUN_08846E18(table, charId, costume): the object table entry (byte 6 charId, byte 7 costume) of a character's model files.
+FuncPtr g_orig_objfind = nullptr;
+void objfind_hook(uint8_t* rdram, recomp_context* ctx) {
+    const int id = static_cast<int>(ctx->r[5]);
+    static int logged = 0;
+    if (logged++ < 40) std::fprintf(stderr, "[DIRECT] objfind charId %d costume %d ra=%08X\n", id, static_cast<int>(ctx->r[6]), static_cast<uint32_t>(ctx->r[31]));
+    g_orig_objfind(rdram, ctx);
+}
+
 void dissidia_direct_battle_install(uint8_t* rdram) {
-    (void)rdram;
+    g_rdram = rdram;
+    if (std::getenv("PSPRECOMP_TEST_OBJFIND_LOG") && (g_orig_objfind = psp_dispatch_probe_lookup(0x08846E18u))) psp_dispatch_register(0x08846E18u, objfind_hook);
+    if (const char* sw = std::getenv("PSPRECOMP_TEST_CHAR_SWAP"); sw && sw[0]) {
+        for (const char* q = sw; *q;) {
+            int a = 0, b = 0, used = 0;
+            if (std::sscanf(q, "%d=%d%n", &a, &b, &used) != 2) break;
+            if (a > 0 && a < 255 && b > 0 && b < 255) g_swap.push_back({a, b});
+            q += used;
+            if (*q == ',') q++;
+        }
+        std::fprintf(stderr, "[DIRECT] character swap: %zu pair(s) from %s\n", g_swap.size(), sw);
+    }
     if (const char* r = std::getenv("PSPRECOMP_TEST_PAD_RECORD"); r && r[0] && r[0] != '0') {
         g_record = true;
         std::fprintf(stderr, "[DIRECT] recording the pad (PADREC lines)\n");

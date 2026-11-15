@@ -70,6 +70,8 @@ class Game:
         env = dict(os.environ, DISPLAY=self.display, PSPRECOMP_SETTINGS=ini, PSPRECOMP_MS0=ms0, PSPRECOMP_FIGHTER_LOG='1',
                    PSPRECOMP_DEBUG_PORT=str(self.port), PSPRECOMP_SAVEDATA_AUTO='0', PSPRECOMP_TEST_FREEZE_CPU='1')
         env.pop('PSPRECOMP_FPS', None)
+        if gpu_headless():
+            env.update(gpu_env())
         env.setdefault('PSPRECOMP_TEST_NO_AI', '1')   # the CPU brain never ticks: the dummy does not attack (BT_NO_FREEZE=1 lets it act)
         if os.environ.get('BT_NO_FREEZE'):
             env['PSPRECOMP_TEST_NO_AI'] = '0'      # let the CPU fighter act (the dummy is the default)
@@ -173,7 +175,23 @@ class _NoProc:
         pass
 
 
+NVIDIA_EGL = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
+
+
+def gpu_headless():
+    """BT_GPU=1: render on the NVIDIA GPU with no X server (SDL's offscreen video driver makes an EGL context; Xvfb only has
+    llvmpipe). BT_GPU=auto: when the NVIDIA EGL vendor file is there."""
+    v = os.environ.get('BT_GPU', '0')
+    return v == '1' or (v == 'auto' and os.path.exists(NVIDIA_EGL))
+
+
+def gpu_env():
+    return {'SDL_VIDEODRIVER': 'offscreen', '__EGL_VENDOR_LIBRARY_FILENAMES': os.environ.get('BT_EGL_VENDOR', NVIDIA_EGL)}
+
+
 def start_xvfb():
+    if gpu_headless():                         # no display at all: the game renders offscreen on the GPU
+        return _NoProc(), ':gpu-offscreen'
     if os.environ.get('BT_DISPLAY'):           # no Xvfb on this machine: use an existing X display (the 480x272 test windows show on it)
         return _NoProc(), os.environ['BT_DISPLAY']
     n = free_display()

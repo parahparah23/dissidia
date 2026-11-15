@@ -217,6 +217,20 @@ bool g_scan_seeded = false;   // `scan`: the candidate lists exist (second scan 
 bool g_test_ai_off = false;      // PSPRECOMP_TEST_AI_OFF=1: the CPU fighter's pad never gets a button (no AI input) but runs at the normal time step, so it takes hits and reacts
 bool g_test_freeze_cpu = false;   // PSPRECOMP_TEST_FREEZE_CPU=1: every fighter but the first one seen gets time step 0 while a test runs (a standing dummy)
 int g_player_char = -1;   // PSPRECOMP_TEST_PLAYER_CHAR=<charId>: the fighter under test (default: the first one seen)
+// PSPRECOMP_TEST_PARITY=1 (tools/fps_parity.py): frame-rate parity runs.
+//  - `[PAR]` sample lines on the 30 Hz lattice (game time k x 33.3 ms; every rate the game offers is a multiple of 30 Hz, so each one
+//    has an update exactly there): the player's and the dummy's script / motion / motion time / position / facing, and the hit count;
+//  - `[PARHIT]` for every hit a fighter takes (FUN_0883A150, the take-hit routine): attack (atkp) id, reaction, flags, HP damage;
+//  - `sync` / `waitidle` end on the lattice (the next lattice update), so `+<ms>` events land on the same game moment at every rate;
+//  - event times are compared with a small tolerance (the sum of 8.33 ms steps can be 99.99999 at 100 ms, a whole update late).
+bool g_parity = false;
+uint64_t g_par_updates = 0;   // logic updates since the test clock started
+uint32_t g_par_hits[2] = {};  // hits taken by the player [0] / the dummy [1] since the clock started
+uint32_t g_par_scratch = 0;   // 16 guest bytes for the facing vector handed to FUN_08835BA4
+// PSPRECOMP_TEST_INPUT_DELAY=<ms> (parity runs above 30 fps, experiments only): scripted pad changes reach the game this much game time later.
+// Not a latency fix: a press starts the motion on the same update at every rate (motion time 0 on the first update); what differs is
+// how far the fighter moves on that first update (see docs/testing.md "Frame-rate parity tests").
+double g_par_input_delay = 0;
 uint32_t g_human_vt = 0;   // vtable of the human's controller object (found at the first battle: the one a scripted press reaches)
 FILE* g_record = nullptr;
 char g_record_path[512] = {};
@@ -266,9 +280,11 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
-        } else if (cmd == "place") {   // place <metres>: the player stands that far from the dummy (on the line they were on), at once
-            double d = 4; ss >> d;
-            ev.push_back({t, 12, static_cast<uint32_t>(d * 100.0 + 0.5), 0, "", rel});
+        } else if (cmd == "place" || cmd == "home") {   // place <metres>: the player stands that far from the dummy (on the line they were on), at once
+            double d = 4; ss >> d;                       // home <metres> [x z]: the same, the dummy at stage point x,z (default: where it stood at the
+            std::string xz;                              // first place / home), both fighters turned to face each other (a trial's fixed start)
+            if (cmd == "home") { double x, z; if (ss >> x >> z) xz = std::to_string(x) + " " + std::to_string(z); }
+            ev.push_back({t, 12, static_cast<uint32_t>(d * 100.0 + 0.5), cmd == "home" ? 1u : 0u, xz, rel});
         } else if (cmd == "set" || cmd == "tap") {
             std::string b; ss >> b;
             const uint32_t m = parse_buttons(b);
@@ -424,6 +440,11 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
     }
     if (!g_gt_started) {
         g_gt_started = true; g_gt_ms = 0; g_test_next = 0; g_test_buttons = 0; g_test_analog = 0x8080; g_wait_kind = 0; g_ref_gt = 0;
+        g_par_updates = 0; g_par_hits[0] = g_par_hits[1] = 0;
+        if (g_parity) {   // PSPRECOMP_TEST_NO_DRAW=<mode>: nothing needs a picture once the clock runs (the harness has seen the HUD); runs go several times faster
+            static const char* nd = std::getenv("PSPRECOMP_TEST_NO_DRAW");
+            if (nd && nd[0] && nd[0] != '0') ge_draw_request_no_raster(std::atoi(nd));
+        }
         std::fprintf(stderr, "[TEST] battle started (tick %llu)\n", (unsigned long long)g_tick);
         if (g_record_path[0]) {   // one file per fight: <file>, <file>.2, <file>.3 ...
             static int fights = 0;
@@ -438,7 +459,9 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         }
     } else {
         g_gt_ms += g_ticks * (1000.0 / 60.0);
+        g_par_updates++;
     }
+    const bool lattice = !g_parity || g_par_updates % static_cast<uint64_t>(std::max(1, g_rate / 30)) == 0;   // a 30 Hz frame boundary (every update below 60 fps)
     if (g_record) {
         uint32_t b, a; psp_ctrl_last_sample(&b, &a);
         if (b != g_rec_buttons || a != g_rec_analog) {
@@ -499,13 +522,15 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         const bool done = g_wait_kind == 10 ? (g_wait_target >= 0 ? static_cast<int>(cur_scr) == g_wait_target : cur_scr != g_wait_scr) : (cur_scr == 0xFFFFu && dummy_neutral);
             const bool late = g_gt_ms - g_wait_since > g_wait_timeout;
             if (!done && !late) break;
+            if (!lattice) break;   // parity runs: the wait ends on the next 30 Hz frame boundary, the same game moment at every rate
             std::fprintf(stderr, "[TEST] gt=%.0f %s %s (scr %d)\n", g_gt_ms, g_wait_kind == 10 ? "sync" : "waitidle", done ? "done" : "TIMEOUT", cur_scr == 0xFFFFu ? -1 : static_cast<int>(cur_scr));
-            g_ref_gt = g_gt_ms;
+            g_ref_gt = g_parity ? std::round(g_gt_ms * 0.03) / 0.03 : g_gt_ms;   // (on the lattice: k x 33.3 ms without the rounding error of the sum)
             g_wait_kind = 0;
         }
         if (g_test_next >= g_test_events.size()) break;
         const TestEvent& e = g_test_events[g_test_next];
-        if (g_gt_ms < (e.rel ? g_ref_gt + e.t : e.t)) break;
+        const double delay = (e.kind == 0 || e.kind == 1) && g_rate > 30 ? g_par_input_delay : 0.0;   // pad input only
+        if (g_gt_ms + (g_parity ? 0.01 : 0.0) < (e.rel ? g_ref_gt + e.t : e.t) + delay) break;
         g_test_next++;
         if (e.kind == 13) {   // batch: wait for the file, then splice its events in here
             if (FILE* f = std::fopen(e.text.c_str(), "r")) {
@@ -562,6 +587,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             static float hx = 0, hz = 0;
             const uint32_t me = test_player(), dm = test_fighter(1);
             if (me && dm) {
+                if (!e.text.empty()) { std::sscanf(e.text.c_str(), "%f %f", &hx, &hz); have_home = true; }
                 if (!have_home) { hx = rdf(dm + 0x110u); hz = rdf(dm + 0x118u); have_home = true; }
                 auto put = [](uint32_t a, float x, float z) {
                     for (uint32_t o : {0x30u, 0x80u, 0x100u, 0x110u}) { uint32_t u; std::memcpy(&u, &x, 4); w32(a + o, u); }
@@ -570,7 +596,22 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
                 const float d = e.a / 100.0f;
                 put(dm, hx, hz);
                 put(me, hx - d, hz);
-                std::fprintf(stderr, "[TEST] gt=%.0f place: dummy at %.2f,%.2f, player %.2f m away\n", g_gt_ms, hx, hz, d);
+                if (e.b == 1) {   // home: face each other (FUN_08835BA4(actor, &dir): yaw from the direction's x / z)
+                    static FuncPtr turn = psp_dispatch_probe_lookup(0x08835BA4u);
+                    if (!g_par_scratch) g_par_scratch = psp_kmem_bump_alloc_named(16, "TEST_FACE_VEC");
+                    if (turn && g_par_scratch) {
+                        const recomp_context keep = *ctx;
+                        for (int w = 0; w < 2; w++) {
+                            wrf(g_par_scratch, w ? -1.0f : 1.0f); wrf(g_par_scratch + 4u, 0.0f); wrf(g_par_scratch + 8u, 0.0f);   // the player looks along +x (at the dummy), the dummy along -x
+                            recomp_context c = *ctx;
+                            c.r[4] = static_cast<int32_t>(w ? dm : me); c.r[5] = static_cast<int32_t>(g_par_scratch);
+                            turn(rdram, &c);
+                        }
+                        *ctx = keep;
+                    }
+                    for (uint32_t a : {me, dm}) for (uint32_t o : {0xE0u, 0xE4u, 0xE8u}) wrf(a + o, 0.0f);   // no velocity left over from the last trial
+                }
+                std::fprintf(stderr, "[TEST] gt=%.0f %s: dummy at %.2f,%.2f, player %.2f m away\n", g_gt_ms, e.b == 1 ? "home" : "place", hx, hz, d);
             }
         }
         else if (e.kind == 0) { g_test_buttons = e.a; if (e.text == "set") g_test_analog = e.b; }
@@ -620,6 +661,35 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         else if (e.kind == 3) { std::fprintf(stderr, "[TEST] quit at gt=%.0f ms\n", g_gt_ms); g_should_exit.store(true); }
     }
     psp_ctrl_set_script(true, g_test_buttons, g_test_analog);
+    if (g_parity && lattice) {   // one sample per 30 Hz frame: what both fighters look like at this game moment
+        const uint32_t pa = test_player(), da = test_fighter(1);
+        char buf[512]; int n = std::snprintf(buf, sizeof buf, "[PAR] %.0f", g_gt_ms);
+        for (uint32_t a : {pa, da}) {
+            if (!a || !ok(a)) { n += std::snprintf(buf + n, sizeof buf - n, " | -"); continue; }
+            n += std::snprintf(buf + n, sizeof buf - n, " | %d %d %.2f %.3f %.3f %.3f %.3f %.3f", static_cast<int>(static_cast<int16_t>(r32(a + 0x540u) & 0xFFFFu)),
+                               static_cast<int>(static_cast<int16_t>(r32(a + 0x180u) & 0xFFFFu)), rdf(a + 0x1A8u), rdf(a + 0x110u), rdf(a + 0x114u), rdf(a + 0x118u), rdf(a + 0x90u), rdf(a + 0x98u));
+        }
+        std::fprintf(stderr, "%s | %u %u\n", buf, g_par_hits[0], g_par_hits[1]);
+    }
+}
+
+// Parity runs: every hit a fighter takes. FUN_0883A150(a0 = defender, a1 = the 64-byte hit record: +0x20 attacker, +0x28 flags, +0x30 atkp record
+// (+0 id), +0x34 reaction, +0x38 HP damage); see docs/archive/hit-reaction.
+FuncPtr g_orig_take_hit = nullptr;
+void take_hit_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t def = static_cast<uint32_t>(ctx->r[4]), rec = static_cast<uint32_t>(ctx->r[5]);
+    if (g_parity && g_gt_started && ok(def) && ok(rec)) {
+        const uint32_t pa = test_player();
+        const int who = def == pa ? 0 : 1;
+        if (def == pa || def == test_fighter(1)) {
+            g_par_hits[who]++;
+            const uint32_t atkp = r32(rec + 0x30u), att = r32(rec + 0x20u);
+            std::fprintf(stderr, "[PARHIT] %.0f %s atkp=%d react=%u flags=%X dmg=%d by=%s\n", g_gt_ms, who ? "dummy" : "player",
+                         ok(atkp) ? static_cast<int>(static_cast<int16_t>(r32(atkp) & 0xFFFFu)) : -1, static_cast<unsigned>(g_ram[(rec + 0x34u) & 0x07FFFFFFu]),
+                         r32(rec + 0x28u), static_cast<int>(r32(rec + 0x38u)), att == pa ? "player" : (ok(att) && g_ram[(att + 0x542u) & 0x07FFFFFFu] != 0 ? "object" : "other"));
+        }
+    }
+    g_orig_take_hit(rdram, ctx);
 }
 
 // ---- Debug menu: Jecht combo timing helper ------------------------------------------------------------------------------------------
@@ -873,6 +943,8 @@ void testdrive_install() {
     if (const char* ao = std::getenv("PSPRECOMP_TEST_AI_OFF"); ao && ao[0] && ao[0] != '0') g_test_ai_off = true;
     if (const char* fz = std::getenv("PSPRECOMP_TEST_FREEZE_CPU"); fz && fz[0] && fz[0] != '0') g_test_freeze_cpu = true;
     if (const char* pc = std::getenv("PSPRECOMP_TEST_PLAYER_CHAR"); pc && pc[0]) g_player_char = std::atoi(pc);
+    if (const char* pp = std::getenv("PSPRECOMP_TEST_PARITY"); pp && pp[0] && pp[0] != '0') g_parity = true;
+    if (const char* id = std::getenv("PSPRECOMP_TEST_INPUT_DELAY"); id && id[0]) g_par_input_delay = std::atof(id);
     g_test_go = std::getenv("PSPRECOMP_TEST_GO");
     if (g_test_go && !g_test_go[0]) g_test_go = nullptr;
     const char* e = std::getenv("PSPRECOMP_TEST_SCRIPT");
@@ -1985,7 +2057,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* d = std::getenv("PSPRECOMP_DBG_COMBO"); d && d[0] && d[0] != '0') g_dbg_combo = true;   // start with the debug options on (tests)
     if (const char* d = std::getenv("PSPRECOMP_DBG_NOAI"); d && d[0] && d[0] != '0') g_dbg_no_ai = true;
     if (const char* na = std::getenv("PSPRECOMP_TEST_NO_AI"); na && na[0] && na[0] != '0') g_env_no_ai = true;
-    if ((g_orig_cpu_tick = ovl_battle_lookup(CPU_TICK))) psp_dispatch_register(CPU_TICK, cpu_tick_noai_hook);   // always: the debug menu switches it live
+    if ((g_orig_cpu_tick = ovl_battle_lookup(CPU_TICK))) psp_dispatch_register(CPU_TICK, cpu_tick_noai_hook);
+    if (std::getenv("PSPRECOMP_TEST_PARITY") && (g_orig_take_hit = psp_dispatch_probe_lookup(0x0883A150u))) psp_dispatch_register(0x0883A150u, take_hit_hook);   // test only   // always: the debug menu switches it live
     else std::fprintf(stderr, "[FPS] CPU brain tick not found: no Enemy AI option\n");
     if (g_orig_cpu_tick) {
         psp_settings_add_debug_toggle({"Enemy AI", "Enemy AI (debug)\nOff: the CPU fighter never chooses an action; it stands and takes hits. Starts to apply about 7 s into a fight. This session only.",

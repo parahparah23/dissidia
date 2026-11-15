@@ -43,6 +43,8 @@ void ge_draw_set_hud_zones(int top_rows, int bottom_rows, int bottom_visible);
 int ge_draw_hud_bottom_rows();   // the room kept for the HUD under the touch controls, PSP rows (0 = none)
 // Textures (tex_addr & 0xFFFFFF) whose 2D draws are never pinned: markers that follow a fighter (the lock-on ring) stay on the picture.
 void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n);
+// Test harnesses: 0 draw as usual, 1 rasterizer discard, 2 skip the draw calls (lists are still processed). Applied at the next present.
+void ge_draw_request_no_raster(int mode);
 // Height (PSP rows) of the displayed buffers: 272, or more on a tall window. The settings screen draws a canvas that tall; an overlay
 // canvas taller than 480:272 is drawn over the whole picture instead of the PSP's band.
 int ge_draw_tall_rows();
