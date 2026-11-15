@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "psp_ge_draw.h"
 
 namespace dissidia {
 
@@ -27,6 +28,8 @@ public:
     // Serif small capitals (Crimson Text SemiBold, shipped with the runtime): capitals at `em`, lower case as capitals at
     // `small` x em, `track` extra units between letters; the title screen's lettering.
     float serif_caps(const std::string& s, float em, float small, float track, float x, float baseline, LayerColor c, bool measure_only = false);
+    // Part of the game's own picture drawn again under the layer (ge_draw_set_game_layer_copies), PSP units.
+    void copy(float sx0, float sy0, float sx1, float sy1, float dx0, float dy0, float dx1, float dy1) { copies_.push_back({sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1}); }
     void publish();   // hand the image to the runtime (ge_draw_set_game_layer)
     void clear();     // remove it
 
@@ -34,6 +37,7 @@ public:
 private:
     int s_ = 2, w_ = 0, h_ = 0;
     std::vector<float> px_;   // r, g, b (0..255, not premultiplied), a (0..1)
+    std::vector<GeLayerCopy> copies_;
 };
 
 template <class F> void MenuLayer::band(float x0, float y0, float x1, float y1, F color_at) {

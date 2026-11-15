@@ -20,6 +20,8 @@
 #include "menu_layer.h"
 #include "../../../runtime/src/hle/psp_savedata_dialog.h"
 #include "package_mods.h"
+#include "psp_tex_pack.h"
+#include <array>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -27,6 +29,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <initializer_list>
@@ -197,10 +200,32 @@ bool confirm_pressed(uint8_t* rdram, recomp_context* ctx) {
 // origin + 28, baseline + 9.2, colour (40, 42, 65); idle: a 0.75-unit line (119, 114, 149) at + 11.3 from + 10.5 to + 206 (fading
 // out over the last 40) with a soft white dot at its start; selected: a royal-blue band (63, 53, 174) from - 2 to + 12 that fades in over the
 // first 30 units and lightens towards (134, 136, 207) at the right edge, white text with a dark edge, the pointing hand
-// (common UI sheet) at - 10, and the row's help text in the help bar (bold 7.9, centred at 232, baseline 239.3).
+// (common UI sheet, native size) at - 10, and the row's help text in the help bar (bold 7.9, centred at 232, baseline 239.3).
 dissidia::MenuLayer g_layer;
 dissidia::GimImage g_ui_sheet;        // menu/en/menu_lpk_label_gim_0.bin entry 0 (128x128): the pointing hand at (2, 50, 38, 24)
 int g_ui_sheet_state = 0;
+// The same sheet's texture-pack id (psp_texpack_make_id of its texels; tools/texpack_extract.py prints it for the GIM). With an
+// HD pack (our id-named files or a PPSSPP-style pack such as LiinkPK's) the game draws its hand from the replacement, so the
+// rows added here take the image the game got (psp_texpack_watch) and fall back to the original sheet.
+constexpr uint64_t kUiSheetTexId = 0xC6F05E9985EEBE31ull;
+std::vector<uint8_t> g_ui_hd;
+int g_ui_hd_w = 0, g_ui_hd_h = 0;
+bool g_ui_hd_ok = false;
+
+// The pointing hand at native size (36 x 24 design units; wider would take in the next sprite of an HD sheet, the game draws it 1:1), from the HD image when the game has one.
+void draw_hand(float x, float y, float alpha) {
+    if (!g_ui_hd_ok && psp_texpack_watched(kUiSheetTexId, g_ui_hd, g_ui_hd_w, g_ui_hd_h) && g_ui_hd_w >= 128 && g_ui_hd_h >= 128) {
+        g_ui_hd_ok = true;
+        std::fprintf(stderr, "[MENUSET] pointing hand from the HD texture (%dx%d)\n", g_ui_hd_w, g_ui_hd_h);
+    }
+    if (g_ui_hd_ok) {
+        const float fx = g_ui_hd_w / 128.f, fy = g_ui_hd_h / 128.f;
+        g_layer.image(reinterpret_cast<const uint32_t*>(g_ui_hd.data()), g_ui_hd_w, g_ui_hd_h, int(2 * fx), int(50 * fy), int(36 * fx), int(24 * fy),
+                      x, y, 36.f, 24.f, alpha);
+    } else if (g_ui_sheet_state == 1) {
+        g_layer.image(g_ui_sheet.rgba.data(), g_ui_sheet.w, g_ui_sheet.h, 2, 50, 36, 24, x, y, 36.f, 24.f, alpha);
+    }
+}
 float g_sel_anim = 0.f;               // 0..1, the selected look fading in
 std::chrono::steady_clock::time_point g_last_draw;
 const char* const kMainHelp = "Display, graphics, controls and other settings of this port.";
@@ -252,8 +277,7 @@ void draw_settings_row(float ox, float oy, bool selected, float alpha) {
         for (const auto& o : {std::pair<float, float>{0.6f, 0.6f}, {0.6f, 0.f}, {0.f, 0.6f}, {-0.4f, 0.f}, {0.f, -0.4f}})
             g_layer.text(kLabel, true, em, tx + o.first, base + o.second, LayerColor{30, 24, 80, 0.75f * sa});
         g_layer.text(kLabel, true, em, tx, base, LayerColor{255, 255, 255, sa});
-        if (g_ui_sheet_state == 1)
-            g_layer.image(g_ui_sheet.rgba.data(), g_ui_sheet.w, g_ui_sheet.h, 2, 50, 38, 24, ox - 10.f, oy - 1.f, 26.f, 16.4f, sa);
+        draw_hand(ox - 10.f, oy - 2.3f, sa);
         const float hw = g_layer.text(kMainHelp, true, 7.9f, 0, 0, LayerColor{0, 0, 0, 0}, true);
         g_layer.text(kMainHelp, true, 7.9f, 232.f - hw / 2.f, 239.3f, LayerColor{108, 102, 128, sa});
     }
@@ -296,9 +320,11 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
 // T + 0x3FAA8, row instances T + 56 + 4 * row, the selection bar and hand = instance T + 52). Their layout is entry 0 of
 // menu/en/menu_lpk_title_seq_0.bin: row nodes (455, 224), (439, 240), (423, 256) (with their keyframes and the intro
 // keyframes one row lower) and the bar's per-row nodes (240, 220 / 237 / 254). Everything moves up 16 so a fourth row fits
-// where EXTRAS was; the fourth row, Settings, is drawn on the game layer in the same lettering.
-// The game keeps three rows. "Settings selected" is a state of this module with the game's cursor on EXTRAS and its bar hidden
-// (bit 0x0008 of the instance's flags halfword at +0x20 is "visible"): Down on EXTRAS or Up on NEW GAME enters it (the frame's update is
+// where EXTRAS was; the fourth row's label is drawn on the game layer in matching lettering (colour taken from the title
+// sheet the game uses), its underline copied from another row of the game's picture.
+// The game keeps three rows. "Settings selected" is a state of this module with the game's cursor on EXTRAS and the game's bar
+// and hand (instance T + 52, origin = the selected row's node) moved onto the fourth row, so they are the game's own, in any
+// texture pack: Down on EXTRAS or Up on NEW GAME enters it (the frame's update is
 // skipped so the game does not wrap), Up
 // leaves it by putting the cursor on NEW GAME and letting the game's own Up move to EXTRAS (its sound and bar animation),
 // Down by letting the game's Down wrap from EXTRAS to NEW GAME, and Confirm / START open the settings screen.
@@ -310,13 +336,6 @@ FuncPtr g_orig_title_tick = nullptr, g_pad_obj2 = nullptr;
 bool g_title_settings = false;
 uint32_t g_title_bar = 0;   // the bar instance hidden while Settings is selected
 
-void title_bar_visible(uint8_t* rdram, uint32_t inst, bool on) {
-    if (inst < 0x08800000u || inst >= 0x0A000000u) return;
-    uint16_t f; std::memcpy(&f, rdram + ((inst + 0x20) & 0x07FFFFFFu), 2);
-    f = on ? uint16_t(f | 0x0008u) : uint16_t(f & ~0x0008u);
-    std::memcpy(rdram + ((inst + 0x20) & 0x07FFFFFFu), &f, 2);
-}
-float g_title_sel = 0.f;
 std::chrono::steady_clock::time_point g_title_last;
 
 bool edit_title_seq(std::vector<uint8_t>& pak) {
@@ -355,30 +374,62 @@ bool title_pad(uint8_t* rdram, recomp_context* ctx, int which) {
     return on;
 }
 
-void draw_title_row(float nx, float ny, bool selected) {
+// The title sheet (menu/en/menu_lpk_title_gim_0.bin entry 0, 512x512) as the game draws it: its labels give the lettering colour
+// of the added row (navy on retail and on our upscale, white on LiinkPK's black title).
+constexpr uint64_t kTitleSheetTexId = 0x585CA08F8A5250D3ull;
+float g_title_ink[3] = {66, 66, 118};
+float g_title_scale = 1.f, g_title_dy = 0.f;   // lettering size and baseline shift of the sheet in use (1, 0 on retail)
+bool g_title_ink_done = false;
+
+void title_ink_update() {
+    if (g_title_ink_done) return;
+    std::vector<uint8_t> px; int w = 0, h = 0;
+    if (!psp_texpack_watched(kTitleSheetTexId, px, w, h) || w < 512 || h < 512) return;   // retail colours until an HD image shows up
+    g_title_ink_done = true;
+    const float f = w / 512.f;
+    std::vector<std::array<float, 4>> ink;   // r, g, b, luminance of the opaque label pixels (NEW GAME / LOAD GAME / EXTRAS)
+    for (int y = int(443 * f); y < int(495 * f); y++)
+        for (int x = int(439 * f); x < int(505 * f); x++) {
+            const uint8_t* p = &px[(size_t(y) * size_t(w) + size_t(x)) * 4];
+            if (p[3] > 240) ink.push_back({float(p[0]), float(p[1]), float(p[2]), 0.3f * p[0] + 0.59f * p[1] + 0.11f * p[2]});
+        }
+    if (ink.size() < 50) return;
+    {   // the labels' size: total width of the three (retail 42 + 58 + 63 sheet units) and the bottom of NEW GAME (retail row 473)
+        float wsum = 0, bottom = -1;
+        static const int cells[3][2] = {{440, 458}, {458, 478}, {478, 500}};
+        for (int c = 0; c < 3; c++) {
+            int x0 = 1 << 30, x1 = -1, y1 = -1;
+            for (int y = int(cells[c][0] * f); y < int(cells[c][1] * f); y++)
+                for (int x = int(435 * f); x < int(512 * f) && x < w; x++)
+                    if (px[(size_t(y) * size_t(w) + size_t(x)) * 4 + 3] > 128) { x0 = std::min(x0, x); x1 = std::max(x1, x); y1 = std::max(y1, y); }
+            if (x1 >= x0) wsum += (x1 - x0 + 1) / f;
+            if (c == 1 && y1 >= 0) bottom = (y1 + 1) / f;
+        }
+        if (wsum > 40.f) g_title_scale = std::min(1.5f, std::max(0.4f, wsum / 163.f));
+        if (bottom > 0.f) g_title_dy = bottom - 474.f;
+    }
+    std::sort(ink.begin(), ink.end(), [](const auto& a, const auto& b) { return a[3] < b[3]; });
+    float mean = 0; for (const auto& k : ink) mean += k[3]; mean /= float(ink.size());
+    const auto& pick = ink[size_t(float(ink.size() - 1) * (mean < 128.f ? 0.15f : 0.85f))];   // the body of dark or of light lettering
+    for (int i = 0; i < 3; i++) g_title_ink[i] = pick[i];
+    std::fprintf(stderr, "[MENUSET] title lettering from the HD sheet: colour %.0f %.0f %.0f, size x%.2f, baseline %+.1f\n", g_title_ink[0], g_title_ink[1], g_title_ink[2], g_title_scale, g_title_dy);
+}
+
+// The fourth row: its label, and the underline copied from a row of the game's own picture (src node: a retail row that is
+// not selected), so the line looks like the others whatever texture pack draws them. The bar and hand are the game's own
+// (title_tick_hook moves them here).
+void draw_title_row(float nx, float ny, float srcx, float srcy) {
     using dissidia::LayerColor;
     const auto now = std::chrono::steady_clock::now();
     const float dt = std::min(0.1f, std::chrono::duration<float>(now - g_title_last).count());
     g_title_last = now;
     static float appear = 0.f;
     appear = dt >= 0.1f ? 0.f : std::min(1.f, appear + dt / 0.25f);
-    g_title_sel = selected ? std::min(1.f, g_title_sel + dt / 0.12f) : std::max(0.f, g_title_sel - dt / 0.12f);
-    load_ui_sheet();
+    title_ink_update();
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
-    const float sa = g_title_sel * appear, a = appear;
-    if (sa > 0.f) {   // the pale bar behind the row, white edges above and below
-        g_layer.band(nx - 125.f, ny - 4.5f, 480.f, ny + 5.f, [&](float x, float y) {
-            const float ramp = std::min(1.f, std::max(0.f, (x - (nx - 125.f)) / 55.f));
-            if (y < ny - 3.f || y > ny + 3.5f) return LayerColor{255, 255, 255, 0.8f * sa * ramp};
-            if (y < ny - 2.f) return LayerColor{212, 221, 230, sa * ramp};
-            if (y > ny + 2.5f) return LayerColor{181, 196, 213, sa * ramp};
-            return LayerColor{192, 205, 220, sa * ramp};
-        });
-    }
-    g_layer.band(nx - 58.f, ny + 6.f, 480.f, ny + 7.f, [&](float, float) { return LayerColor{148, 145, 183, a}; });   // underline
-    g_layer.serif_caps(kLabel, 11.5f, 0.8f, 0.45f, nx - 44.f, ny + 3.f, LayerColor{66, 66, 118, a});
-    if (sa > 0.f && g_ui_sheet_state == 1)
-        g_layer.image(g_ui_sheet.rgba.data(), g_ui_sheet.w, g_ui_sheet.h, 2, 50, 38, 24, nx - 83.f, ny - 5.f, 26.f, 14.5f, sa);
+    if (appear >= 1.f) g_layer.copy(srcx - 57.f, srcy + 5.5f, 479.f, srcy + 8.f, nx - 57.f, ny + 5.5f, 479.f, ny + 8.f);
+    else g_layer.band(nx - 58.f, ny + 6.f, 480.f, ny + 7.f, [&](float, float) { return LayerColor{148, 145, 183, appear}; });
+    g_layer.serif_caps(kLabel, 11.5f * g_title_scale, 0.8f, 0.45f * g_title_scale, nx - 44.f, ny + 3.f + g_title_dy, LayerColor{g_title_ink[0], g_title_ink[1], g_title_ink[2], appear});
     g_layer.publish();
 }
 
@@ -387,7 +438,7 @@ void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t title = static_cast<uint32_t>(ctx->r[4]);
     const uint32_t st = r32(title + 476);
     const bool menu_up = st && r32(st + 12) == 0 && r32(st + 0x3FAA8) == 3 && r32(st + 64) != 0;
-    auto leave = [&]() { if (g_title_settings) title_bar_visible(rdram, g_title_bar, true); g_title_settings = false; };
+    auto leave = [&]() { g_title_settings = false; };
     if (!menu_up) { leave(); g_orig_title_tick(rdram, ctx); return; }
     const uint32_t cur = st + 76;
     if (g_title_settings && r32(cur) != 2) leave();
@@ -399,7 +450,6 @@ void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
             g_title_settings = true;
             call(g_play_se, rdram, ctx, {0});
             g_title_bar = r32(st + 52);
-            title_bar_visible(rdram, g_title_bar, false);
         } else {
             g_orig_title_tick(rdram, ctx);
         }
@@ -420,12 +470,26 @@ void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     } else {
         g_orig_title_tick(rdram, ctx);
     }
-    // The fourth row follows the EXTRAS row (instance T + 64, float origin at +0x10 / +0x14), one step further.
-    const uint32_t row2 = r32(st + 64);
-    float ox = 423.f, oy = 240.f;
-    if (row2 >= 0x08800000u && row2 < 0x0A000000u) { std::memcpy(&ox, rdram + ((row2 + 0x10) & 0x07FFFFFFu), 4); std::memcpy(&oy, rdram + ((row2 + 0x14) & 0x07FFFFFFu), 4); }
-    if (std::isfinite(ox) && std::isfinite(oy) && ox > 200.f && ox < 480.f && oy > 100.f && oy < 260.f)
-        draw_title_row(ox - 16.f, oy + 16.f, g_title_settings);
+    // The fourth row follows the EXTRAS row (instance T + 64, float origin at +0x10 / +0x14), one step further. While it is
+    // selected the game's bar (instance T + 52, origin = the selected row's node) is moved onto it.
+    const uint32_t row1 = r32(st + 60), row2 = r32(st + 64);
+    auto origin = [&](uint32_t inst, float dx, float dy, float* x, float* y) {
+        *x = dx; *y = dy;
+        if (inst < 0x08800000u || inst >= 0x0A000000u) return false;
+        std::memcpy(x, rdram + ((inst + 0x10) & 0x07FFFFFFu), 4); std::memcpy(y, rdram + ((inst + 0x14) & 0x07FFFFFFu), 4);
+        return std::isfinite(*x) && std::isfinite(*y) && *x > 200.f && *x < 480.f && *y > 100.f && *y < 260.f;
+    };
+    float x2, y2, x1, y1;
+    if (!origin(row2, 423.f, 240.f, &x2, &y2)) return;
+    const float nx = x2 - 16.f, ny = y2 + 16.f;
+    if (g_title_settings && g_title_bar >= 0x08800000u && g_title_bar < 0x0A000000u) {
+        std::memcpy(rdram + ((g_title_bar + 0x10) & 0x07FFFFFFu), &nx, 4);
+        std::memcpy(rdram + ((g_title_bar + 0x14) & 0x07FFFFFFu), &ny, 4);
+    }
+    // underline source: EXTRAS, or LOAD GAME while EXTRAS carries the bar
+    const bool extras_lit = !g_title_settings && r32(cur) == 2;
+    if (extras_lit && origin(row1, 439.f, 224.f, &x1, &y1)) draw_title_row(nx, ny, x1, y1);
+    else draw_title_row(nx, ny, x2, y2);
 }
 
 }  // namespace
@@ -434,6 +498,8 @@ void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::
 
 void dissidia_menu_settings_install(uint8_t* rdram) {
     g_ram = rdram;
+    psp_texpack_watch(kUiSheetTexId);
+    psp_texpack_watch(kTitleSheetTexId);
     if (const char* e = std::getenv("PSPRECOMP_MENU_SETTINGS")) if (e[0] == '0') return;
     g_orig_build = ovl_battle_lookup(PAUSE_BUILD);
     g_orig_open = psp_dispatch_probe_lookup(LIST_OPEN);

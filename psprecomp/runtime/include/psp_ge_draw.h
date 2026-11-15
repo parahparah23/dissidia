@@ -105,6 +105,11 @@ void ge_draw_set_view_blocker(bool active, const float target[3], const float ey
 /// (so a screen that stops calling it loses the layer by itself). Any thread.
 void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h);
 void ge_draw_clear_game_layer();
+/// Parts of the game's own picture redrawn elsewhere under the game layer, this frame's pixels (e.g. a neighbouring row's underline
+/// for an added menu row, whatever texture pack draws it): source and destination rectangles in PSP units (480x272, y down), a
+/// destination of another size stretches. Opaque. Kept with the layer image; set them before ge_draw_set_game_layer.
+struct GeLayerCopy { float sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1; };
+void ge_draw_set_game_layer_copies(const GeLayerCopy* c, int n);
 
 /// Present the last frame with the dialog/menu overlay now (game paused).
 /// Main (GL) thread.

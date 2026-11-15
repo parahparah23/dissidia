@@ -13,6 +13,8 @@
 
 extern const unsigned char psp_ui_font_bodyb[];   // runtime/assets/embed_fonts.cmake (Crimson Text SemiBold)
 extern const unsigned long psp_ui_font_bodyb_len;
+extern const unsigned char psp_sans_regular[], psp_sans_bold[];   // Noto Sans: the game text's face where the host has none
+extern const unsigned long psp_sans_regular_len, psp_sans_bold_len;
 
 namespace dissidia {
 
@@ -42,9 +44,11 @@ Faces& faces() {
         if (FT_Init_FreeType(&f.lib)) { f.lib = nullptr; return; }
         FT_New_Memory_Face(f.lib, psp_ui_font_bodyb, FT_Long(psp_ui_font_bodyb_len), 0, &f.serif);
         std::string reg, bold;
-        if (!psp_font_host_files(&reg, &bold)) return;
-        if (read_file(reg, &f.reg_bytes)) FT_New_Memory_Face(f.lib, f.reg_bytes.data(), FT_Long(f.reg_bytes.size()), 0, &f.reg);
+        psp_font_host_files(&reg, &bold);
+        if (!reg.empty() && read_file(reg, &f.reg_bytes)) FT_New_Memory_Face(f.lib, f.reg_bytes.data(), FT_Long(f.reg_bytes.size()), 0, &f.reg);
         if (!bold.empty() && read_file(bold, &f.bold_bytes)) FT_New_Memory_Face(f.lib, f.bold_bytes.data(), FT_Long(f.bold_bytes.size()), 0, &f.bold);
+        if (!f.reg) FT_New_Memory_Face(f.lib, psp_sans_regular, FT_Long(psp_sans_regular_len), 0, &f.reg);
+        if (!f.bold) FT_New_Memory_Face(f.lib, psp_sans_bold, FT_Long(psp_sans_bold_len), 0, &f.bold);
         if (!f.bold) f.bold = f.reg;
     });
     return f;
@@ -56,6 +60,7 @@ void MenuLayer::begin(int scale) {
     s_ = std::max(1, std::min(4, scale));
     w_ = 480 * s_; h_ = 272 * s_;
     px_.assign(size_t(w_) * size_t(h_) * 4, 0.f);
+    copies_.clear();
 }
 
 void MenuLayer::blend(int x, int y, float r, float g, float b, float a) {
@@ -169,6 +174,7 @@ void MenuLayer::publish() {
         auto ch = [](float v) { return uint32_t(std::min(255.f, std::max(0.f, v + 0.5f))); };
         out[i] = ch(p[0]) | ch(p[1]) << 8 | ch(p[2]) << 16 | uint32_t(std::min(255.f, p[3] * 255.f + 0.5f)) << 24;
     }
+    ge_draw_set_game_layer_copies(copies_.data(), int(copies_.size()));
     ge_draw_set_game_layer(out.data(), w_, h_);
 }
 

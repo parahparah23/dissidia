@@ -14,6 +14,8 @@
 #include <cstring>
 #include <list>
 #include <map>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -243,6 +245,36 @@ uint64_t psp_texpack_make_id(const uint8_t* raw, size_t raw_len, int fmt, int w,
     uint8_t b[sizeof rec];
     std::memcpy(b, rec, sizeof rec);
     return xxh64(b, sizeof b, 0x70737074u);
+}
+
+// ---------------------------------------------------------------- watches ----
+namespace {
+struct Watched { bool seen = false; int w = 0, h = 0; std::vector<uint8_t> rgba; };
+std::mutex g_watch_mu;
+std::map<uint64_t, Watched> g_watch;
+std::atomic<bool> g_watch_any{false};
+}  // namespace
+
+void psp_texpack_watch(uint64_t id) {
+    std::lock_guard<std::mutex> lk(g_watch_mu);
+    g_watch[id];
+    g_watch_any = true;
+}
+bool psp_texpack_watching() { return g_watch_any.load(std::memory_order_relaxed); }
+bool psp_texpack_watched(uint64_t id, std::vector<uint8_t>& rgba, int& w, int& h) {
+    std::lock_guard<std::mutex> lk(g_watch_mu);
+    auto it = g_watch.find(id);
+    if (it == g_watch.end() || !it->second.seen || it->second.rgba.empty()) return false;
+    rgba = it->second.rgba; w = it->second.w; h = it->second.h;
+    return true;
+}
+void psp_texpack_watch_store(uint64_t id, const uint8_t* rgba, int w, int h) {
+    std::lock_guard<std::mutex> lk(g_watch_mu);
+    auto it = g_watch.find(id);
+    if (it == g_watch.end()) return;
+    it->second.seen = true;
+    it->second.w = rgba ? w : 0; it->second.h = rgba ? h : 0;
+    if (rgba) it->second.rgba.assign(rgba, rgba + size_t(w) * size_t(h) * 4); else it->second.rgba.clear();
 }
 
 // ---------------------------------------------------------------- PNG ----

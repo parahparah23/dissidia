@@ -61,10 +61,18 @@ the ~60 fps animation / scale auto-drop (no frame timing taken), held-button lea
   the eighth row is drawn on the game layer (`ge_draw_set_game_layer`, `menu_layer.cpp`): the game's bold text face, the
   measured line / band / help-line colours and the pointing hand of the common UI sheet, following the Options row's live
   position. A confirm on index 7 is handled before ovl_menu FUN_089E45E8 reads its 7-entry mode table.
-- **Title screen**: NEW GAME / LOAD GAME / EXTRAS and the bar nodes move up 16 (entry 0 of `menu/en/menu_lpk_title_seq_0.bin`),
-  Settings is drawn where EXTRAS was in Crimson Text SemiBold small capitals. The game keeps three rows; "Settings selected" keeps
-  its cursor on EXTRAS with the bar instance hidden (flag bit 0x0008 at +0x20); Up / Down in and out of it are handed to the
-  game's own moves so its sounds and animations play.
+- **Title screen**: NEW GAME / LOAD GAME / EXTRAS and the bar nodes move up 16 (entry 0 of `menu/en/menu_lpk_title_seq_0.bin`)
+  and Settings takes EXTRAS' place. The game keeps three rows; "Settings selected" keeps its cursor on EXTRAS and moves the game's
+  own bar and hand (the selection instance, whose origin is the selected row's node) onto the fourth row, and Up / Down in and
+  out of it are handed to the game's own moves so its sounds and animations play. The label is drawn in Crimson Text SemiBold
+  small capitals; its underline is a copy of another row's underline from the game's own picture (`ge_draw_set_game_layer_copies`).
+
+**HD texture packs.** The added rows take their look from what the game really draws, so they follow both packs (our id-named
+upscales and PPSSPP-style packs such as LiinkPK's): the runtime keeps the image a watched texture was replaced with
+(`psp_texpack_watch`), and the rows use the HD pointing hand of the common UI sheet (id `c6f05e9985eebe31`) and, on the title, the
+lettering colour and size of the labels on the HD title sheet (id `585ca08f8a5250d3`; white and about 0.6x on LiinkPK's black
+title). The title bar, hand and underline are the game's own pixels. The pause menu row is the game's own and needs nothing. Ids
+of retail textures: `tools/texpack_extract.py`.
 
 A loose-file mod that replaces one of the two layout files keeps its own layout (the built-in edit is skipped), and the start
 menu / title rows then overlap the retail rows; the pause menu row does not depend on files.
