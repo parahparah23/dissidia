@@ -223,6 +223,23 @@ def sweep(sess, prefix, probe, ds, dist=3.0, chunk=24):
     return out
 
 
+def sweep_adaptive(sess, prefix, probe, lo, hi, coarse=1000.0 / 30.0, fine=GRID, dist=3.0):
+    """the same rows as sweep() over a fine grid, with fewer trials: a coarse grid first (one 30 Hz frame), then the fine grid only
+    between neighbouring coarse probes whose outcome differs (the window edges keep the fine resolution)."""
+    ds = grid(lo, hi, coarse)
+    if ds[-1] < hi - 0.01:
+        ds.append(float(hi))                               # the end of the range too (the outer edge of a window that runs to it)
+    rows = sweep(sess, prefix, probe, ds, dist)
+    key = lambda r: (r[1][0] if r[1] else None) if r[2] and r[1] is not None else 'bad'
+    extra = []
+    for a, b in zip(rows, rows[1:]):
+        if key(a) != key(b):
+            extra += [d for d in grid(a[0], b[0], fine)[1:] if d < b[0] - 0.01]
+    if extra:
+        rows += sweep(sess, prefix, probe, sorted(set(extra)), dist)
+    return sorted(rows, key=lambda r: r[0])
+
+
 def windows(rows):
     """{first outcome script id: (min D, max D, count, contiguous)} from sweep rows"""
     by = {}
@@ -301,18 +318,18 @@ def combos_run(sess):
     out = {}
     rush = parse_step('CIRCLE@800=10001')
     P = parse_step
-    out['Rush > Neutral 2 (Circle)'] = sweep(sess, [rush], P('CIRCLE:n'), grid(150, 500))
-    out['Rush > Up 2 (Circle+Up)'] = sweep(sess, [rush], P('CIRCLE:u'), grid(150, 500))
+    out['Rush > Neutral 2 (Circle)'] = sweep_adaptive(sess, [rush], P('CIRCLE:n'), 150, 500)
+    out['Rush > Up 2 (Circle+Up)'] = sweep_adaptive(sess, [rush], P('CIRCLE:u'), 150, 500)
     pk = pick_success(out['Rush > Neutral 2 (Circle)'])
     if not pk:
         return out
     n2 = P('CIRCLE:n@%.1f=%d' % (pk[2], pk[0]))
-    out['Neutral 2 > Neutral 3 (Circle)'] = sweep(sess, [rush, n2], P('CIRCLE:n'), grid(300, 900))
-    out['Neutral 2 > Up 3 (Circle+Up)'] = sweep(sess, [rush, n2], P('CIRCLE:u'), grid(300, 900))
+    out['Neutral 2 > Neutral 3 (Circle)'] = sweep_adaptive(sess, [rush, n2], P('CIRCLE:n'), 300, 900)
+    out['Neutral 2 > Up 3 (Circle+Up)'] = sweep_adaptive(sess, [rush, n2], P('CIRCLE:u'), 300, 900)
     pk3 = pick_success(out['Neutral 2 > Neutral 3 (Circle)'], exclude=(pk[0],))
     if pk3:
         n3 = P('CIRCLE:n@%.1f=%d' % (pk3[2], pk3[0]))
-        out['Neutral 3 > HP (Square)'] = sweep(sess, [rush, n2, n3], P('SQUARE'), grid(300, 900))
+        out['Neutral 3 > HP (Square)'] = sweep_adaptive(sess, [rush, n2, n3], P('SQUARE'), 300, 900)
     return out
 
 
