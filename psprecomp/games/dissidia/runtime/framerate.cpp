@@ -334,11 +334,14 @@ void testdrive_load(const char* path) {
 }
 
 uint32_t assist_gauge_addr(int side);
+// Updates without a fighter update after which a fighter counts as gone (the fight is over). Parity runs allow 20 s: an HP attack can
+// stop both fighters for ~2 s (a hit freeze with no fighter update), which ended the test clock and restarted the script mid-run.
+uint64_t stale_ticks() { return g_parity ? static_cast<uint64_t>(20 * std::max(30, g_rate)) : 60u; }
 bool battle_running() {
     if (overlay_id() != 1) return false;
     for (int i = 0; i < 4; i++) {
         const uint32_t a = g_fighters[i];
-        if (a && ok(a) && g_tick - g_fighter_seen[i] < 60) return true;
+        if (a && ok(a) && g_tick - g_fighter_seen[i] < stale_ticks()) return true;
     }
     return false;
 }
@@ -365,7 +368,7 @@ uint32_t test_player() {   // the fighter under test
     uint32_t first = 0;
     for (int i = 0; i < 4; i++) {
         const uint32_t a = g_fighters[i];
-        if (!a || !ok(a) || g_tick - g_fighter_seen[i] > 60) continue;
+        if (!a || !ok(a) || g_tick - g_fighter_seen[i] > stale_ticks()) continue;
         if (!first) first = a;
         if (g_player_char >= 0 && fighter_char(a) == g_player_char) return a;
     }
@@ -375,7 +378,7 @@ uint32_t test_fighter(uint32_t who) {
     uint32_t list[4]; int n = 0;
     for (int i = 0; i < 4; i++) {
         const uint32_t a = g_fighters[i];
-        if (a && ok(a) && g_tick - g_fighter_seen[i] < 60) list[n++] = a;
+        if (a && ok(a) && g_tick - g_fighter_seen[i] < stale_ticks()) list[n++] = a;
     }
     if (who >= 2) return static_cast<int>(who - 2) < n ? list[who - 2] : 0u;
     const uint32_t pl = test_player();
@@ -385,7 +388,7 @@ uint32_t test_fighter(uint32_t who) {
 void test_describe_fighters() {
     for (int i = 0; i < 4; i++) {
         const uint32_t a = g_fighters[i];
-        if (!a || !ok(a) || g_tick - g_fighter_seen[i] > 60) continue;
+        if (!a || !ok(a) || g_tick - g_fighter_seen[i] > stale_ticks()) continue;
         const uint32_t ctrl = r32(a + 0x5C4u), info = r32(a + 0x1108u - 0x1108u + 0x0u);
         (void)info;
         std::fprintf(stderr, "[TEST] fighter %08X char=%d ctrl=%08X vt=%08X scr=%u pos=%.2f,%.2f\n", a, fighter_char(a), ctrl, ok(ctrl) ? r32(ctrl) : 0u, r32(a + 0x540u) & 0xFFFFu, rdf(a + 0x80u), rdf(a + 0x88u));
@@ -477,9 +480,13 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         static uint32_t keep_actor = 0, keep_hp = 0;
         for (int i = 0; i < 4; i++) {
             const uint32_t a = g_fighters[i];
-            if (!a || !ok(a) || g_tick - g_fighter_seen[i] > 60 || a == test_player()) continue;
+            if (!a || !ok(a) || g_tick - g_fighter_seen[i] > stale_ticks() || a == test_player()) continue;
             if (a != keep_actor || !g_gt_started || g_gt_ms < 34) { keep_actor = a; keep_hp = r32(a + 0x10B0u); }
             else if (keep_hp) w32(a + 0x10B0u, g_test_ai_off ? 100000000u : keep_hp);   // AI-off dummies get a huge pool: once broken, hits do HP damage and the KO check runs inside the update, before this write
+            if (g_parity) {   // +0x10B0 is only the maximum: the live HP is the status block's (actor+0x52C: +0x8 HP damage taken, +0xC HP; docs/tag-team.md). No damage piles up
+                const uint32_t st = r32(a + 0x52Cu);
+                if (ok(st)) w32(st + 0x8u, 0u);
+            }
         }
     }
     // the player's action (script id): every change is logged, and sync / waitidle watch it
@@ -596,7 +603,17 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
                 const float d = e.a / 100.0f;
                 put(dm, hx, hz);
                 put(me, hx - d, hz);
-                if (e.b == 1) {   // home: face each other (FUN_08835BA4(actor, &dir): yaw from the direction's x / z)
+                if (e.b == 1) {   // home: HP and bravery as at the first home (status block actor+0x52C: +0x8 HP damage, +0xC HP, +0x14 bravery halfword), so a trial
+                    static uint32_t first_hp[2] = {}, first_brv[2] = {};   // does not inherit a break, a big bravery or a KO from the one before
+                    static bool have_stats = false;
+                    for (int w = 0; w < 2; w++) {
+                        const uint32_t st = r32((w ? dm : me) + 0x52Cu);
+                        if (!ok(st)) continue;
+                        if (!have_stats) { first_hp[w] = r32(st + 0xCu); first_brv[w] = r32(st + 0x14u) & 0xFFFFu; }
+                        else { w32(st + 0x8u, 0u); w32(st + 0xCu, first_hp[w]); w32(st + 0x14u, (r32(st + 0x14u) & 0xFFFF0000u) | first_brv[w]); }
+                    }
+                    have_stats = true;
+                    // face each other (FUN_08835BA4(actor, &dir): yaw from the direction's x / z)
                     static FuncPtr turn = psp_dispatch_probe_lookup(0x08835BA4u);
                     if (!g_par_scratch) g_par_scratch = psp_kmem_bump_alloc_named(16, "TEST_FACE_VEC");
                     if (turn && g_par_scratch) {

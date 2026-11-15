@@ -179,7 +179,7 @@ def run_one(a, cid, rate, out, tag=None):
         bt.walk_direct(g, ff_menus=4)
         g.cmd('FF 120000')
         last_ff = time.time()
-        acts, wrote, want = [], False, None
+        acts, wrote, want, last_check = [], False, None, 0.0
         deadline = time.time() + a.timeout
         while g.alive():
             if time.time() > deadline:
@@ -200,6 +200,13 @@ def run_one(a, cid, rate, out, tag=None):
                         f.write('\n'.join(trial_lines(acts, a.variants.split(','), only, moves=not a.no_moves)) + '\n')
                     os.replace(batch + '.tmp', batch)
                     wrote = True
+            if wrote and time.time() - last_check > 5:      # a battle that ends after the trials began restarts the script: give up, the worker retries
+                last_check = time.time()
+                with open(log, errors='replace') as f:
+                    txt = f.read()
+                first = txt.find('mark T ')
+                if first >= 0 and '[TEST] battle ended' in txt[first:]:
+                    raise RuntimeError('the battle ended during the trials')
             try:
                 size = os.path.getsize(log)
             except OSError:
