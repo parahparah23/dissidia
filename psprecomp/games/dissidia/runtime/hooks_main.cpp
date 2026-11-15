@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+void dissidia_register_reflectivity();   // refl_materials.cpp
 
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
@@ -295,6 +296,7 @@ static int dissidia_stage_id() {
 void dissidia_register_hooks(uint8_t* rdram) {
     g_stage_ram = rdram;
     psp_set_stage_id_provider(dissidia_stage_id);
+    dissidia_register_reflectivity();
     psp_set_player_pos_provider(dissidia_player_pos);
     psp_settings_add_debug_toggle({"Light Editor", "Stage light editor (debug)\nShows a marker at every light of the stage and turns on the keys: F6 drop a light, F7 remove the selected one, J/L I/K U/O move it, , . radius, - = intensity, [ ] or P select (P = the one closest to you), Shift = faster. Needs Ray-Traced Shadows on. The lights are saved in stage_lights.txt in the game folder (the file has the full key list). This session only.",
                                    +[]() { return psp_stage_light_edit_get(); }, +[](bool on) { psp_stage_light_edit_set(on); }});

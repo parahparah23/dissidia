@@ -9,6 +9,7 @@
 #include "psp_ge_constants.h"
 #include "psp_tex_pack.h"
 #include "psp_fx_shader.h"
+#include "psp_refl_table.h"
 #include "psp_memory.h"
 #include "recomp.h"
 
@@ -533,6 +534,14 @@ static uint64_t g_bound_pack_id = 0;
 uint64_t ge_texture_bound_pack_id() { return g_bound_pack_id; }
 static uint32_t g_bound_avg = 0xFFFFFFFFu;
 uint32_t ge_texture_bound_avg_color() { return g_bound_avg; }
+static float g_bound_refl = 0.f;
+float ge_texture_bound_refl() { return g_bound_refl; }
+// The entry's reflectivity, looked up again when the table changed (reflectivity.txt edited while the game runs).
+static float entry_refl(TexCacheEntry& e) {
+    const uint32_t gen = psp_refl_generation();
+    if (e.refl_gen != gen) { e.refl_gen = gen; e.refl = e.pack_id ? float(psp_refl_encode(psp_refl_lookup(e.pack_id))) / 255.f : 0.f; }
+    return e.refl;
+}
 // Average colour over up to ~1024 evenly spaced texels (alpha-weighted so cut-out edges do not darken it).
 static uint32_t average_rgba(const uint8_t* px, long n) {
     if (n <= 0) return 0xFF808080u;
@@ -552,6 +561,7 @@ extern bool ge_draw_prefilter(GLuint tex, float* bias);   // psp_ge_draw.cpp
 GLuint ge_texture_bind_external(GLuint gl_tex, const GeState& state) {
     g_bound_pack_id = 0;
     g_bound_avg = 0xFF808080u;
+    g_bound_refl = 0.f;
     bind_tex2d(gl_tex);
     // Render targets are always clamped (REPEAT would bleed the 480x272
     // image edge into the unused part of the declared 512x512 texture).
@@ -622,6 +632,7 @@ GLuint ge_texture_bind(
 
     g_bound_pack_id = 0;
     g_bound_avg = 0xFFFFFFFFu;
+    g_bound_refl = 0.f;
     if (g_aniso_seen_epoch != g_aniso_epoch.load()) {   // anisotropic setting changed: reload every texture
         g_aniso_seen_epoch = g_aniso_epoch.load();
         ge_texture_invalidate_all();
@@ -753,6 +764,7 @@ GLuint ge_texture_bind(
         entry.last_frame = frame_num;
         g_bound_pack_id = entry.pack_id;
         g_bound_avg = entry.avg_rgba;
+        g_bound_refl = entry_refl(entry);
         bind_tex2d(entry.gl_tex);
         if (movie && entry.movie_serial != mv_serial) {
             upload_movie_rows(entry, rdram, masked_addr, width, height, bufw, mv_rows, mv_serial);
@@ -781,6 +793,8 @@ GLuint ge_texture_bind(
         entry.pack_id = 0;
         entry.avg_rgba = 0xFF808080u;
         g_bound_avg = entry.avg_rgba;
+        entry.refl = 0.f; entry.refl_gen = psp_refl_generation();
+        g_bound_refl = 0.f;
         entry.format = fmt;
         entry.last_frame = frame_num;
         entry.valid = true;
@@ -836,7 +850,8 @@ GLuint ge_texture_bind(
     if (is_pal) read_clut_palette(rdram, state, clut_rgba);
     const bool pack_on = fmt <= GE_TFMT_CLUT8 && psp_texpack_active();
     // The FX shader overrides match draws by the same id (psp_fx_shader.h).
-    const bool id_on = pack_on || (fmt <= GE_TFMT_CLUT8 && psp_fx_want_ids());
+    // The reflectivity table (psp_refl_table.h) is keyed by the same id.
+    const bool id_on = pack_on || (fmt <= GE_TFMT_CLUT8 && (psp_fx_want_ids() || psp_refl_table_active()));
     uint64_t tid = 0;
     std::vector<uint8_t> pack_px;      // replacement / upscaled pixels
     int pack_w = 0, pack_h = 0;
@@ -1026,6 +1041,8 @@ GLuint ge_texture_bind(
     g_bound_pack_id = tid;
     entry.avg_rgba = rgba.empty() ? 0xFF808080u : average_rgba(rgba.data(), (long)width * height);
     g_bound_avg = entry.avg_rgba;
+    entry.refl_gen = 0;
+    g_bound_refl = entry_refl(entry);
 
     // Store entry
     entry.psp_addr = psp_addr;

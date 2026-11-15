@@ -10,6 +10,8 @@
 #include "psp_ge_texture.h"
 #include "psp_ge_shader.h"
 #include "psp_fx_shader.h"
+#include "psp_refl_table.h"
+#include <unordered_set>
 #include "psp_fep_log.h"
 #include "psp_event_loop.h"
 #include "psp_prof.h"
@@ -1551,6 +1553,7 @@ struct Batch {
     std::vector<GLsizei> counts;
     bool fx_timed = false;   // FX shader override batch, GPU-timed (PSPRECOMP_FX_SHADER_LOG=2)
     bool fxl = false;        // an effects draw: also drawn into the screen-space effects layer (fxl_*)
+    float refl = 0.f;        // > 0: a reflective surface (material byte / 255): its triangles go to the reflectivity mask (g_rml_tris)
 };
 static Batch g_batch;
 static GLuint g_copy_buf_bound = 0;
@@ -1646,6 +1649,15 @@ static FxLayer g_fxl[GE_MAX_TARGETS];
 static float g_fx_clearz[GE_MAX_TARGETS];
 static int g_fxl_draws = 0;
 static bool g_fxl_flag = false;   // the draws being queued are effects draws (set by fx_track)
+// ---- Reflectivity mask (issue #2, psp_refl_table.h) ----
+// Which pixels are reflective: the triangles of every depth-writing 3D draw whose texture has a reflectivity are captured in clip
+// space with the material byte (psp_refl_encode) and drawn into a mask by the screen-space pass in one go (psp_screenfx.cpp), which
+// keeps a mask texel only where its depth matches the scene's: whatever was drawn over a reflective floor later hides it. One pass
+// per frame however many draws reflect: re-issuing each draw into a mask framebuffer cost two render-pass breaks per draw, which
+// a tiled mobile GPU pays for in full (RP6, a tower top built of many reflective pieces).
+static std::vector<float> g_rml_tris[GE_MAX_TARGETS];   // per vertex: clip x y z w, material byte
+static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int count, float refl);
+static bool g_rml_flag = false;   // the draws being queued may be reflective (set by fx_track; the value comes from the bound texture)
 static void fxl_free(FxLayer& L) {
     if (L.fbo) glDeleteFramebuffers(1, &L.fbo);
     if (L.color) glDeleteTextures(1, &L.color);
@@ -1710,6 +1722,7 @@ static void flush_batch() {
     g_batch.fx_timed = false;
     const bool fxl_draw = g_batch.fxl;
     g_batch.fxl = false;
+    g_batch.refl = 0.f;
     const size_t n = s.stage_n;
     if (n == 0) { g_batch.firsts.clear(); g_batch.counts.clear(); return; }
 
@@ -1990,6 +2003,7 @@ static void fx_batch(const GeState& state, GLuint fbo_tex, const GeXform3D* g) {
     else if (out.depth == Depth::Write) gl_depth_mask(true);
     else if (out.depth == Depth::Off) gl_depth_enable(false);
     g_batch.fx_timed = out.timed;
+    g_batch.refl = 0.f;   // an override shader has no alpha override to write the mask with
 }
 
 // Make `k` the active batch (flushing a different one) with room for `need`
@@ -2008,6 +2022,15 @@ static void ensure_batch(const KeyBuf& k, Stream& s, GLuint vao, GLenum mode, si
     g_batch.fxl = g_fxl_flag;
     psp_prof::batches++;
     apply_gl_pipeline(rdram, state, prim_type, fbo_tex, xf != nullptr);
+    g_batch.refl = g_rml_flag && state.texture_enable && !fbo_tex ? ge_texture_bound_refl() : 0.f;
+    if (g_rml_flag && state.texture_enable && !fbo_tex) {   // PSPRECOMP_REFL_LOG=1: each surface texture once, to fill reflectivity.txt
+        static const bool lg = std::getenv("PSPRECOMP_REFL_LOG") != nullptr;
+        static std::unordered_set<uint64_t> seen;
+        const uint64_t id = ge_texture_bound_pack_id();
+        if (lg && id && seen.insert(id).second)
+            { const PspReflMaterial m = psp_refl_decode(uint8_t(g_batch.refl * 255.f + 0.5f));
+              std::fprintf(stderr, "[REFL] stage %d texture %016llx reflectivity %.2f roughness %.2f metal %d\n", psp_stage_id(), (unsigned long long)id, m.refl, m.rough, (int)m.metal); }
+    }
     GeXform3D g{};
     if (xf) {
         psp_prof::Scope ps(psp_prof::S_UNIFORM);
@@ -2138,6 +2161,7 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         // texture is bound now, so its pack id is this draw's.
         static const bool fep_log = psp_fep_log_on();
         if (fep_log) psp_fep_log_draw(rdram, state, prim_type, n, ge_texture_bound_pack_id());
+        if (g_batch.refl > 0.f && !vb_on && path == 1) rml_capture(state, rdram, prim_type, n, g_batch.refl);   // reflectivity mask
         uint8_t* dst = stage_reserve(g_s3d, (size_t)n);
         bool ok;
         {
@@ -2865,12 +2889,54 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     out.resize(size_t(op - out.data()));   // triangles left out above
 }
 
+// The triangles of a reflective draw, in clip space (what the GPU computes: proj x view x world, widescreen x scale), with its
+// material byte, for the reflectivity mask (g_rml_tris). Skinned draws are not stage surfaces and are left out.
+static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int count, float refl) {
+    if (g_current_target < 0 || count < 3 || prim_type < GE_PRIM_TRIANGLES || prim_type > GE_PRIM_TRIANGLE_FAN) return;
+    std::vector<float>& out = g_rml_tris[g_current_target];
+    if (out.size() > 5u * 3u * 200000u) return;
+    static thread_local std::vector<DecodedVertex> dv;
+    ge_decode_vertices(rdram, st, prim_type, count, dv);
+    const size_t n = dv.size();
+    if (n < 3) return;
+    const float* m = st.world_matrix;
+    const float* v = st.view_matrix;
+    const float* p = st.proj_matrix;
+    const float wx = draw_wide_x(st);
+    const float mat = std::floor(refl * 255.f + 0.5f);
+    auto push = [&](const DecodedVertex& d) {
+        const float x = m[0] * d.pos[0] + m[3] * d.pos[1] + m[6] * d.pos[2] + m[9];
+        const float y = m[1] * d.pos[0] + m[4] * d.pos[1] + m[7] * d.pos[2] + m[10];
+        const float z = m[2] * d.pos[0] + m[5] * d.pos[1] + m[8] * d.pos[2] + m[11];
+        const float vx = v[0] * x + v[3] * y + v[6] * z + v[9], vy = v[1] * x + v[4] * y + v[7] * z + v[10], vz = v[2] * x + v[5] * y + v[8] * z + v[11];
+        float c[4];
+        for (int r = 0; r < 4; ++r) c[r] = p[r] * vx + p[4 + r] * vy + p[8 + r] * vz + p[12 + r];
+        out.push_back(c[0] * wx); out.push_back(c[1]); out.push_back(c[2]); out.push_back(c[3]); out.push_back(mat);
+    };
+    auto tri = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) { push(a); push(b); push(c); };
+    if (prim_type == GE_PRIM_TRIANGLES) {
+        for (size_t i = 0; i + 2 < n; i += 3) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else if (prim_type == GE_PRIM_TRIANGLE_STRIP) {
+        for (size_t i = 0; i + 2 < n; i++) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else {
+        for (size_t i = 1; i + 1 < n; i++) tri(dv[0], dv[i], dv[i + 1]);
+    }
+}
+
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
     {   // effects draws (blended, depth tested, not depth writing) are also drawn into the SSR effects layer (fxl_*)
-        const bool want = g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && psp_fx_ssr() > 0 && !psp_rt_refl_active()
+        // PSPRECOMP_SSR_FX_OFF=1: no effects layer at all (each effects draw is drawn twice, into another framebuffer: on a tiled mobile
+        // GPU that is two render-pass breaks per draw, 67 draws on stage 13); before, it only stopped the pass from reading the layer.
+        static const bool fxl_off = std::getenv("PSPRECOMP_SSR_FX_OFF") != nullptr;
+        const bool want = !fxl_off && g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && psp_fx_ssr() > 0 && !psp_rt_refl_active()
                           && !ge_vtype_through(st.vertex_type) && st.depth_test_enable && st.depth_write_disable && st.alpha_blend_enable
                           && is_main_key(g_targets[g_current_target].key);
         if (want != g_fxl_flag) { flush_batch(); g_fxl_flag = want; }
+        // depth-writing 3D draws may be reflective surfaces (reflectivity mask, rml_*; the value comes from the texture)
+        const bool want_m = g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && (psp_fx_ssr() > 0 || psp_rt_refl_active())
+                            && psp_refl_table_active() && !ge_vtype_through(st.vertex_type) && st.texture_enable && st.depth_test_enable
+                            && !st.depth_write_disable && is_main_key(g_targets[g_current_target].key);
+        if (want_m != g_rml_flag) { flush_batch(); g_rml_flag = want_m; }
     }
     if (g_current_target < 0 || g_ab_shadow) return;
     const int cur = g_current_target;
@@ -2878,7 +2944,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         // The effects lists are not cleared here: the game draws most of its spell / beam effects after the 3D run (after the reflection pass
         // used the lists), so they are kept and traced by the next frame's pass, which clears them after use. Clearing them here left the
         // ray-traced reflection without Watera, Thundaga, ... (PSPRECOMP_RT_REFL_DEBUG=1 never showed an effect hit).
-        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); }
+        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); g_rml_tris[cur].clear(); }
         { static const int every = std::getenv("PSPRECOMP_RT_DUMP_EVERY") ? std::atoi(std::getenv("PSPRECOMP_RT_DUMP_EVERY")) : 0; static int fr = 0;
           if (every > 0 && g_rtdump.load() == 0 && (st.clear_flags == 0 || (st.clear_flags & 4)) && ++fr % every == 0) g_rtdump.store(1); }   // automated runs: one dump every N frames
         if (g_rtdump.load() == 1) { g_rtdump.store(2); rtdump_printf("[RTDUMP] begin target %d\n", cur); }
@@ -2963,6 +3029,9 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         { static int n = 0; if (std::getenv("PSPRECOMP_SSR_FX_LOG") && n++ % 120 == 0) std::fprintf(stderr, "[SSR] effects layer used=%d fbo=%u draws=%d\n", (int)g_fxl[i].used, g_fxl[i].fbo, g_fxl_draws); }
         if (g_fxl[i].used && g_fxl[i].fbo) { s.fx_color = g_fxl[i].color; s.fx_depth = g_fxl[i].depth; }
         g_fxl[i].dirty = true; g_fxl[i].used = false; g_fxl_draws = 0;
+        s.refl_table = psp_refl_table_active();
+        s.refl_tris = g_rml_tris[i].empty() ? nullptr : g_rml_tris[i].data();
+        s.refl_nverts = (int)(g_rml_tris[i].size() / 5);
         if (s.rt_ready) {
             static int logged = 0;
             if (logged++ % 600 == 0) std::fprintf(stderr, "[RT] scene %zu triangles (frame %d)\n", g_rt_tris[i].size() / 9, logged);
@@ -2971,6 +3040,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         g_rt_tris[i].clear(); g_rt_cols[i].clear(); g_rt_fx_tris[i].clear(); g_rt_fx_cols[i].clear();
         g_fx_vote[i].n = 0;
         psp_screenfx_run(t.fbo, t.color_tex, t.w480 * t.rs, t.h272 * t.rs, s);
+        g_rml_tris[i].clear();
         glBindFramebuffer(GL_FRAMEBUFFER, g_targets[g_current_target].fbo);
         glc::invalidate();
         ge_texture_invalidate_bind_cache();
@@ -3226,7 +3296,7 @@ static void ge_draw_prim_one(
             fvp.x, fvp.y, fvp.w, fvp.h, draw_wide_x(state));
     }
     if (psp_screenfx_active()) fx_track(state, rdram, prim_type, count);
-    else if (g_fxl_flag) { flush_batch(); g_fxl_flag = false; }
+    else if (g_fxl_flag || g_rml_flag) { flush_batch(); g_fxl_flag = g_rml_flag = false; }
     static const bool draw_trace_mat_env = std::getenv("PSPRECOMP_DRAW_TRACE_MAT") != nullptr;
     if (!state.clear_mode && prim_type == 3 && count > 30 && draw_trace_mat_env) {
         static int mat_n = 0;

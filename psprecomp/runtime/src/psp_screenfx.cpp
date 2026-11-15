@@ -14,6 +14,7 @@
 #include "psp_post.h"
 #include "psp_screenfx.h"
 #include "psp_rt.h"
+#include "psp_refl_table.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -366,6 +367,38 @@ uniform int u_fx_dbg;       // PSPRECOMP_SSR_FX_DEBUG=1: a reflection that hit a
 uniform float u_fx_gain;    // base reflectivity of an effect (opaque reflections use Fresnel alone)
 uniform float u_fx_thick;   // how far behind an effect's front surface a ray still counts as inside it, view units
 uniform float u_lscale;     // 1 / stage darkening: the reflection layer is darkened with the stage, lights and markers must not be
+uniform int u_mask_on;      // 1: which surfaces reflect, and how much, is the alpha of u_color (reflectivity mask, k_fs_mask); 0: every upward surface
+uniform int u_mask_dbg;     // PSPRECOMP_REFL_MASK_DEBUG=1: tint the reflective surfaces green by their reflectivity (red: roughness, blue: metal)
+uniform float u_wave;       // water: reflection-normal tilt per unit of ripple-pattern gradient (PSPRECOMP_REFL_WAVE)
+uniform float u_wave_max;   // the largest tilt (PSPRECOMP_REFL_WAVE_MAX)
+// The surface's material from the mask byte (psp_refl_table.h psp_refl_encode): x reflectivity, y roughness, z metal, w water.
+vec4 mask_material(float a) {
+    float b = floor(a * 255.0 + 0.5);
+    return vec4(floor(b / 32.0) / 7.0, mod(floor(b / 4.0), 8.0) / 7.0, mod(floor(b / 2.0), 2.0), mod(b, 2.0));
+}
+// Water: the game animates its water by scrolling a ripple pattern, the geometry stays flat, so a reflection from the depth normal sat
+// on it as a still mirror. The ripples' brightness gradient (the scene copy, before the reflection is added) tilts the normal along the
+// surface, so the reflection bends and flows with the pattern. Limited, so an edge next to the water (a fighter's feet) cannot fold it.
+vec3 wave_normal(vec2 uv, vec3 P, vec3 n) {
+    vec2 s = u_step * 4.0;      // a wide span: the swell of the ripples, not their half-resolution texels (those gave a harsh speckle)
+    const vec3 lw = vec3(0.299, 0.587, 0.114);
+    float lx = dot(texture(u_color, uv + vec2(s.x, 0.0)).rgb - texture(u_color, uv - vec2(s.x, 0.0)).rgb, lw);
+    float ly = dot(texture(u_color, uv + vec2(0.0, s.y)).rgb - texture(u_color, uv - vec2(0.0, s.y)).rgb, lw);
+    vec3 dx = vpos(uv + vec2(s.x, 0.0)) - P, dy = vpos(uv + vec2(0.0, s.y)) - P;
+    vec3 tx = dx - n * dot(dx, n), ty = dy - n * dot(dy, n);
+    tx /= max(length(tx), 1e-5);
+    ty /= max(length(ty), 1e-5);
+    vec3 t = (tx * lx + ty * ly) * u_wave;
+    float tl = length(t);
+    if (tl > u_wave_max) t *= u_wave_max / tl;
+    return normalize(n - t);
+}
+// Schlick's Fresnel with the roughness damping of the grazing-angle boost: a rough surface does not turn into a mirror at a low
+// angle the way water or glass does. Metals reflect strongly head-on as well (base 0.5 instead of 0.04).
+float fresnel_r(float cosv, float rough, float metal) {
+    float f0 = mix(0.04, 0.5, metal);
+    return f0 + (max(1.0 - rough, f0) - f0) * pow(1.0 - clamp(cosv, 0.0, 1.0), 5.0);
+}
 //@RT_DECL
 // The effect at uv floats in front of the scene there: its depth is clearly nearer than the scene's. A blended sheet lying on a
 // surface (the water layer of the floor, decals, shadows) is at the scene's own depth and is not an effect to reflect.
@@ -441,7 +474,13 @@ void main() {
         if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, v_uv).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
     }
 
-    if (u_n_ssr > 0 && dot(n, u_up) > 0.7) {
+    // How reflective this surface is (issue #2): the material's reflectivity from the mask, in any orientation (walls too). Without a
+    // reflectivity table (another game) the old rule: every upward-facing surface is a mirror floor.
+    vec4 mat = u_mask_on != 0 ? mask_material(texture(u_color, v_uv).a) : vec4(smoothstep(0.7, 0.95, dot(n, u_up)), 0.0, 0.0, 0.0);
+    float surf_k = mat.x, m_rough = mat.y, m_metal = mat.z;
+    vec3 n_geo = n;                                   // the reflection alone sees the water's ripples; the stage lights keep the flat normal
+    if (mat.w > 0.5 && u_wave > 0.0 && surf_k > 0.004 && u_n_ssr > 0) n = wave_normal(v_uv, P, n);
+    if (u_n_ssr > 0 && surf_k > 0.004) {
 //@RT_REFL
         {
         float upness = dot(n, u_up);
@@ -517,8 +556,8 @@ void main() {
             if (hit.x >= 0.0) { col = texture(u_color, hit).rgb; euv = hit; }
             vec2 e = min(euv, 1.0 - euv);
             float edge = smoothstep(0.0, 0.12, min(e.x, e.y));
-            float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -V), 0.0, 1.0), 5.0);
-            float refl_k = smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
+            float fres = fresnel_r(dot(n, -V), m_rough, m_metal);
+            float refl_k = surf_k * fd * u_ssr_amt;
             float k = hit.x >= 0.0 ? clamp(fres * 1.6 + 0.08, 0.0, 1.0) * edge * (1.0 - ht / maxd * 0.6) * refl_k : 0.0;
             o_refl = vec4(col * k, k);
             if (fx_hit) {
@@ -534,7 +573,90 @@ void main() {
         }
         }
     }
+    n = n_geo;
+    if (m_metal > 0.5 && o_refl.a > 0.0) {   // metal: the reflection takes the surface's colour (gold reflects gold)
+        vec3 alb = texture(u_color, v_uv).rgb;
+        float l = max(dot(alb, vec3(0.299, 0.587, 0.114)), 0.05);
+        o_refl.rgb *= clamp(alb / l, 0.0, 2.0) * 0.85;
+    }
+    if (u_mask_dbg != 0 && u_n_ssr > 0) o_refl = vec4(0.7 * m_rough * surf_k, 0.7 * surf_k, 0.7 * m_metal * surf_k, 0.7 * surf_k);
 //@RT_LIGHTS
+}
+)GLSL";
+
+// Reflectivity mask (issue #2; psp_ge_draw.cpp g_rml_tris): the reflective draws' triangles, captured in clip space with their
+// material byte, drawn in one pass into a full-resolution mask (RGBA8, alpha = the byte) with its own depth.
+const char* const k_vs_rmask = R"GLSL(
+in vec4 a_clip;
+in float a_mat;
+out float v_mat;
+void main() {
+    v_mat = a_mat;
+    gl_Position = a_clip;
+}
+)GLSL";
+const char* const k_fs_rmask = R"GLSL(
+in float v_mat;
+uniform float u_byte;       // 1/255 (a uniform also keeps the Vulkan layer's uniform block from being empty)
+layout(location = 0) out vec4 o_color;
+void main() {
+    o_color = vec4(0.0, 0.0, 0.0, v_mat * u_byte);
+}
+)GLSL";
+// Mask resolve, half resolution, into the alpha of the colour copy (which pass 1 reads as u_color anyway, so it costs no sampler
+// there). A mask texel counts only where its depth is still the scene's: nothing that does not reflect was drawn over it later, and
+// a see-through texel of a cut-out card (the scene shows what lies behind it) does not count either.
+const char* const k_fs_mask = R"GLSL(
+layout(location = 0) out vec4 o_color;
+uniform sampler2D u_mask;   // alpha = reflectivity (0 where no reflective draw)
+uniform sampler2D u_mdepth; // the mask's own depth
+uniform int u_have;         // 0: no reflective draw this frame
+void main() {
+    float r = 0.0;
+    float wd = wd_at(v_uv);
+    if (u_have != 0 && !is_far(wd)) {
+        float m = texture(u_mask, v_uv).a;
+        if (m > 0.0) {
+            float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, v_uv).r));
+            if (abs(a - b) < 0.002 * a + 0.01) r = m;
+        }
+    }
+    o_color = vec4(0.0, 0.0, 0.0, r);
+}
+)GLSL";
+
+// Glossy reflections (issue #2): a separable blur of the reflection layer whose radius is the surface's roughness (from the mask byte in
+// the colour copy's alpha), so polished stone gets a soft sheen and water stays a mirror. Depth-aware and limited to reflective
+// neighbours, so nothing bleeds across a silhouette or onto a surface that does not reflect.
+const char* const k_fs_rblur = R"GLSL(
+out vec4 o_color;
+uniform sampler2D u_src;    // the reflection layer (premultiplied)
+uniform sampler2D u_color;  // alpha = the mask byte
+uniform vec2 u_dir;         // one texel along the blur axis
+uniform float u_rad;        // radius in texels at roughness 1
+float rough_at(vec2 uv) { float b = floor(texture(u_color, uv).a * 255.0 + 0.5); return b < 32.0 ? -1.0 : mod(floor(b / 4.0), 8.0) / 7.0; }
+void main() {
+    vec4 c0 = texture(u_src, v_uv);
+    float rough = rough_at(v_uv);
+    float wd = wd_at(v_uv);
+    if (rough <= 0.0 || is_far(wd)) { o_color = c0; return; }
+    float z0 = vz(wd);
+    float r = rough * u_rad;
+    vec4 sum = c0;
+    float ws = 1.0;
+    for (int i = 1; i <= 6; ++i) {
+        float t = float(i) / 6.0;
+        for (int sd = -1; sd <= 1; sd += 2) {
+            vec2 uv = v_uv + u_dir * (float(sd) * t * r);
+            float w2 = wd_at(uv);
+            if (is_far(w2) || rough_at(uv) < 0.0) continue;
+            float dl = abs(vz(w2) - z0) / abs(z0);
+            float w = exp(-t * t * 2.5) * exp(-dl * 40.0);
+            sum += texture(u_src, uv) * w;
+            ws += w;
+        }
+    }
+    o_color = sum / ws;
 }
 )GLSL";
 
@@ -639,7 +761,7 @@ struct Prog {
     GLuint id = 0;
     bool failed = false;
 };
-Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_p;
+Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_p, g_mask_p, g_rblur_p, g_rmask_p;
 
 // Ray-queried contact shadow (PSPRECOMP_VK_RT, Vulkan only; docs/VULKAN_PORT.md): the pass-1 shader with the screen-space march
 // replaced by a ray query from the surface toward the light against the frame's world-space triangles (psp_rt.h). The GL
@@ -656,6 +778,7 @@ uniform int u_use_rt_refl;
 uniform int u_rt_dbg;       // debug (PSPRECOMP_RT_REFL_DEBUG=1): colour by what the ray found (red tri colour, green visible on screen, blue miss, yellow sky)
 uniform int u_rt_refl_rays; // reflection rays per pixel (quality: 1, 1, 3), jittered by u_rt_rough for a glossy blur
 uniform float u_rt_rough;
+uniform float u_rough_jit;  // extra jitter at material roughness 1
 uniform int u_rt_fx;        // the scene has an effects layer
 uniform float u_fx_minh;    // effect hits lower than this above the reflecting surface are skipped (world units, PSPRECOMP_RT_FX_MINH)
 uniform float u_rt_hidden;   // brightness / strength of a hit on a surface that is not visible on screen
@@ -706,11 +829,11 @@ const char* const k_rt_refl = R"GLSL(
             vec4 racc = vec4(0.0);
             for (int ri = 0; ri < u_rt_refl_rays; ++ri) {
             vec3 R = R0;
-            if (u_rt_refl_rays > 1) {
+            if (u_rt_refl_rays > 1 || m_rough > 0.0) {
                 // Glossy jitter. The part along the normal is limited to half the ray's own elevation: at a grazing angle a fixed
                 // angular jitter bent rays up by many times their elevation and smeared the horizon over the whole floor (High looked blurry).
                 float ja = ign(gl_FragCoord.xy + 31.0 * float(ri + 1)) * 6.2831853, jb = ign(gl_FragCoord.yx + 57.0 * float(ri + 1)) * 2.0 - 1.0, jr = sqrt(1.0 - jb * jb);
-                vec3 J = vec3(cos(ja) * jr, jb, sin(ja) * jr) * u_rt_rough;
+                vec3 J = vec3(cos(ja) * jr, jb, sin(ja) * jr) * (u_rt_rough + m_rough * u_rough_jit);   // the material's roughness widens the lobe (the blur pass smooths the noise)
                 float jn = dot(J, n);
                 J += n * (clamp(jn, -0.5 * el0, 0.5 * el0) - jn);
                 R = normalize(R0 + J);
@@ -805,14 +928,14 @@ const char* const k_rt_refl = R"GLSL(
                     if (++nfx >= 4) rayQueryTerminateEXT(rf);
                 }
             }
-            float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -V), 0.0, 1.0), 5.0);
-            float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
+            float fres = fresnel_r(dot(n, -V), m_rough, m_metal);
+            float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * surf_k * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
             o_refl = vec4(col * k, k);
             if (fxa > 0.0) {
                 // Effects are glows (beams, bolts, the water orb's highlights): their reflection adds light over the floor and its reflection
                 // instead of covering them, with a stronger base than the Fresnel-only opaque reflection (same as the screen-space effects
                 // layer, PSPRECOMP_SSR_FX_GAIN): at the floor's steep angles a glow at plain Fresnel strength was invisible.
-                float kf = clamp(fres * 1.6 + u_fx_gain, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
+                float kf = clamp(fres * 1.6 + u_fx_gain, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * surf_k * fd * u_ssr_amt;
                 o_refl.rgb += min(fxc, vec3(1.5)) * kf;   // fxc is already colour x coverage, summed
                 if (u_rt_dbg != 0) dbg = vec3(1.0, 0.0, 1.0);
             }
@@ -909,6 +1032,9 @@ GLuint g_depth_tex = 0, g_depth_fbo = 0;
 GLuint g_color_tex = 0, g_color_fbo = 0;                     // half-res copy of the scene
 GLuint g_fx_tex[2] = {0, 0}, g_refl_tex = 0;
 GLuint g_main_fbo = 0, g_fx_fbo[2] = {0, 0};                 // main: fx[0] + refl; fx_fbo[i]: fx[i] alone
+GLuint g_refl_fbo = 0;                                        // refl alone (the glossy blur's second pass)
+GLuint g_rm_fbo = 0, g_rm_tex = 0, g_rm_depth = 0;            // reflectivity mask, full resolution (k_vs_rmask)
+GLuint g_rm_vao = 0, g_rm_vbo = 0;
 GLuint g_env_tex = 0, g_env_fbo = 0;                          // the sky map (k_fs_env), not tied to the screen size
 bool g_env_fp16 = false;
 int g_env_stage = -2;
@@ -961,6 +1087,34 @@ bool build(Prog& p, const char* fs_body) {
     return true;
 }
 
+// A program from its own vertex and fragment shader (no k_common): the reflectivity mask.
+bool build_vf(Prog& p, const char* vs_body, const char* fs_body) {
+    if (p.id) return true;
+    if (p.failed) return false;
+    GLuint vs = compile(GL_VERTEX_SHADER, &vs_body, 1), fs = vs ? compile(GL_FRAGMENT_SHADER, &fs_body, 1) : 0;
+    if (!vs || !fs) { p.failed = true; if (vs) glDeleteShader(vs); return false; }
+    GLuint id = glCreateProgram();
+    glAttachShader(id, vs);
+    glAttachShader(id, fs);
+    glBindAttribLocation(id, 0, "a_clip");   // the Vulkan layer numbers inputs in declaration order: the same
+    glBindAttribLocation(id, 1, "a_mat");
+    glLinkProgram(id);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = 0;
+    glGetProgramiv(id, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        glGetProgramInfoLog(id, sizeof log, nullptr, log);
+        std::fprintf(stderr, "[SCREENFX] link failed:\n%s\n", log);
+        glDeleteProgram(id);
+        p.failed = true;
+        return false;
+    }
+    p.id = id;
+    return true;
+}
+
 GLuint make_tex(GLenum ifmt, GLenum fmt, GLenum type, int w, int h, GLint filter) {
     GLuint t = 0;
     glGenTextures(1, &t);
@@ -974,13 +1128,14 @@ GLuint make_tex(GLenum ifmt, GLenum fmt, GLenum type, int w, int h, GLint filter
 }
 
 void free_targets() {
-    GLuint f[5] = {g_depth_fbo, g_color_fbo, g_main_fbo, g_fx_fbo[0], g_fx_fbo[1]};
-    GLuint t[5] = {g_depth_tex, g_color_tex, g_fx_tex[0], g_fx_tex[1], g_refl_tex};
-    for (int i = 0; i < 5; ++i) {
+    GLuint f[7] = {g_depth_fbo, g_color_fbo, g_main_fbo, g_fx_fbo[0], g_fx_fbo[1], g_refl_fbo, g_rm_fbo};
+    GLuint t[7] = {g_depth_tex, g_color_tex, g_fx_tex[0], g_fx_tex[1], g_refl_tex, g_rm_tex, g_rm_depth};
+    for (int i = 0; i < 7; ++i) {
         if (f[i]) glDeleteFramebuffers(1, &f[i]);
         if (t[i]) glDeleteTextures(1, &t[i]);
     }
-    g_depth_fbo = g_color_fbo = g_main_fbo = g_fx_fbo[0] = g_fx_fbo[1] = 0;
+    g_depth_fbo = g_color_fbo = g_main_fbo = g_fx_fbo[0] = g_fx_fbo[1] = g_refl_fbo = g_rm_fbo = 0;
+    g_rm_tex = g_rm_depth = 0;
     g_depth_tex = g_color_tex = g_fx_tex[0] = g_fx_tex[1] = g_refl_tex = 0;
 }
 
@@ -1018,6 +1173,17 @@ bool ensure_targets(int w, int h) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, g_refl_tex, 0);
     const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
+    ok = ok && complete();
+    glGenFramebuffers(1, &g_refl_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_refl_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_refl_tex, 0);
+    ok = ok && complete();
+    g_rm_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h, GL_NEAREST);
+    g_rm_depth = make_tex(GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, w, h, GL_NEAREST);
+    glGenFramebuffers(1, &g_rm_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_rm_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_rm_tex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g_rm_depth, 0);
     ok = ok && complete();
     if (!ok) std::fprintf(stderr, "[SCREENFX] framebuffer incomplete (%dx%d)\n", w, h);
     return ok;
@@ -1270,6 +1436,53 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
 
     float vm[16] = {sc.view[0], sc.view[1], sc.view[2], 0.f, sc.view[3], sc.view[4], sc.view[5], 0.f,
                     sc.view[6], sc.view[7], sc.view[8], 0.f, sc.view[9], sc.view[10], sc.view[11], 1.f};
+    // 0a: the reflectivity mask into the alpha of the half-resolution colour copy (k_fs_mask)
+    const bool mask_on = sr && sc.refl_table && build(g_mask_p, k_fs_mask);
+    const bool have_mask = mask_on && sc.refl_tris && sc.refl_nverts >= 3 && build_vf(g_rmask_p, k_vs_rmask, k_fs_rmask);
+    if (have_mask) {   // the reflective triangles into the mask, one draw (depth range and test as the scene's draws had them)
+        if (!g_rm_vao) { glGenVertexArrays(1, &g_rm_vao); glGenBuffers(1, &g_rm_vbo); }
+        glBindFramebuffer(GL_FRAMEBUFFER, g_rm_fbo);
+        glViewport(0, 0, w, h);
+        glDepthMask(GL_TRUE);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClearDepth(sc.clear_z);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(sc.near_z > sc.far_z ? GL_GEQUAL : GL_LEQUAL);
+        glDepthRange(sc.near_z, sc.far_z);
+        glUseProgram(g_rmask_p.id);
+        glUniform1f(glGetUniformLocation(g_rmask_p.id, "u_byte"), 1.f / 255.f);
+        glBindVertexArray(g_rm_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, g_rm_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sc.refl_nverts * 5 * sizeof(float), sc.refl_tris, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void*)(4 * sizeof(float)));
+        glDrawArrays(GL_TRIANGLES, 0, sc.refl_nverts);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDisable(GL_DEPTH_TEST);
+        glDepthRange(0.0, 1.0);
+        glBindVertexArray(g_vao);
+    }
+    if (mask_on) {
+        psp_refl_poll();   // reflectivity.txt edited while the game runs
+        glBindFramebuffer(GL_FRAMEBUFFER, g_color_fbo);
+        glViewport(0, 0, g_hw, g_hh);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        set_common(g_mask_p.id, g_hw, g_hh);
+        const bool have = have_mask;
+        if (have) {
+            bind_tex(1, g_rm_tex, g_smp_nn);
+            bind_tex(2, g_rm_depth, g_smp_nn);
+            glUniform1i(loc(g_mask_p.id, "u_mask"), 1);
+            glUniform1i(loc(g_mask_p.id, "u_mdepth"), 2);
+        }
+        glUniform1i(loc(g_mask_p.id, "u_have"), have ? 1 : 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+
     // 0: the sky map (ray-traced reflections only), from this frame's sky pixels
     bool have_env = false;
     if (use_rt && use_rt_refl && build(g_env_p, k_fs_env)) {
@@ -1323,6 +1536,10 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glUniform1f(loc(mp.id, "u_cs_thick"), cs_thick);
     glUniform1f(loc(mp.id, "u_ssr_len"), ssr_len);
     glUniform1f(loc(mp.id, "u_ssr_amt"), k_sr_amt[sr]);
+    glUniform1i(loc(mp.id, "u_mask_on"), mask_on ? 1 : 0);
+    glUniform1f(loc(mp.id, "u_wave"), env_float("PSPRECOMP_REFL_WAVE", 0.8f));
+    glUniform1f(loc(mp.id, "u_wave_max"), env_float("PSPRECOMP_REFL_WAVE_MAX", 0.08f));
+    glUniform1i(loc(mp.id, "u_mask_dbg"), std::getenv("PSPRECOMP_REFL_MASK_DEBUG") ? 1 : 0);
     static const bool fxl_off = std::getenv("PSPRECOMP_SSR_FX_OFF") != nullptr;
     const bool have_fx = sr && sc.fx_color && sc.fx_depth && !use_rt_refl && !fxl_off;
     glUniform1i(loc(mp.id, "u_have_fx"), have_fx ? 1 : 0);
@@ -1341,6 +1558,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1i(loc(mp.id, "u_rt_dbg"), env_int_dbg());
         { const int q = psp_rt_refl_quality(); glUniform1i(loc(mp.id, "u_rt_refl_rays"), q >= 3 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_rough"), env_float("PSPRECOMP_RT_ROUGH", 0.005f));
+        glUniform1f(loc(mp.id, "u_rough_jit"), env_float("PSPRECOMP_REFL_ROUGH_JITTER", 0.12f));
         glUniform1i(loc(mp.id, "u_rt_fx"), !sc.rt_fx || psp_rt_refl_quality() < 2 || !psp_rt_refl_fx_enabled() || std::getenv("PSPRECOMP_RT_FX_OFF") ? 0 : std::getenv("PSPRECOMP_RT_FX_SPLIT") ? 2 : 1);
         glUniform1f(loc(mp.id, "u_rt_hidden"), env_float("PSPRECOMP_RT_HIDDEN", 0.45f));
         glUniform1f(loc(mp.id, "u_fx_minh"), env_float("PSPRECOMP_RT_FX_MINH", 0.6f));
@@ -1377,6 +1595,23 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
             bind_tex(1, g_fx_tex[pass], g_smp_lin);
             glUniform1i(loc(g_blur_p.id, "u_fx"), 1);
             glUniform2f(loc(g_blur_p.id, "u_dir"), pass ? 0.f : 1.f / g_hw, pass ? 1.f / g_hh : 0.f);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+    }
+
+    // 2b: glossy reflections: blur the reflection layer by the surface's roughness, there (into fx[1], free after the AO blur) and back
+    static const bool rblur_off = std::getenv("PSPRECOMP_REFL_BLUR_OFF") != nullptr;
+    if (mask_on && !rblur_off && build(g_rblur_p, k_fs_rblur)) {
+        const float rad = env_float("PSPRECOMP_REFL_BLUR", 10.f) * float(g_hh) / 408.f;   // texels at roughness 1, scaled with the resolution
+        for (int pass = 0; pass < 2; ++pass) {
+            glBindFramebuffer(GL_FRAMEBUFFER, pass ? g_refl_fbo : g_fx_fbo[1]);
+            set_common(g_rblur_p.id, g_hw, g_hh);
+            bind_tex(1, pass ? g_fx_tex[1] : g_refl_tex, g_smp_lin);
+            bind_tex(2, g_color_tex, g_smp_nn);
+            glUniform1i(loc(g_rblur_p.id, "u_src"), 1);
+            glUniform1i(loc(g_rblur_p.id, "u_color"), 2);
+            glUniform2f(loc(g_rblur_p.id, "u_dir"), pass ? 0.f : 1.f / g_hw, pass ? 1.f / g_hh : 0.f);
+            glUniform1f(loc(g_rblur_p.id, "u_rad"), rad);
             glDrawArrays(GL_TRIANGLES, 0, 3);
         }
     }
