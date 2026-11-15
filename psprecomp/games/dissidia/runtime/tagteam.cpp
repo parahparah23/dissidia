@@ -12,6 +12,12 @@
 #include "tagteam_hud.h"
 #include "hle/psp_hle.h"
 #include <cstdint>
+#include <execinfo.h>
+#include <pthread.h>
+#include <signal.h>
+#include <thread>
+#include <atomic>
+#include <unistd.h>
 #include <cstdio>
 #include <csignal>
 #include <unistd.h>
@@ -42,6 +48,7 @@ constexpr uint32_t BATTLE_SETUP = 0x0888BA0Cu;   // EBOOT: FUN_0888BA0C(bs), bui
 constexpr uint32_t ALLOC = 0x08831320u;          // EBOOT: guest allocator (a0 = size)
 constexpr uint32_t SIDE_REC = 0x088729A0u;       // EBOOT: per-side record (a0 = side)
 constexpr uint32_t CHAR_INFO = 0x088470B8u;      // EBOOT: character info from a setup record (a0 = bs+0x7D8 / +0x7DC)
+constexpr uint32_t FIGHTER_DTOR = 0x08B2EDC4u;   // battle overlay: fighter destructor (this, flags: bit 0 = free the memory)
 constexpr uint32_t FIGHTER_CTOR = 0x08B39E5Cu;   // battle overlay: fighter constructor (mem, siderec, info, side, 0)
 constexpr uint32_t SET_FOE = 0x08836DA4u;        // EBOOT: a->+0x300 = b
 constexpr uint32_t CPU_MODE = 0x08B2F2E4u;       // battle overlay: FUN_08B2F2E4(actor, 0), the setup's CPU-control call
@@ -885,6 +892,174 @@ void swap_probe(uint32_t H, uint32_t P) {
     std::fprintf(stderr, "[PROBE] %d numeric differences; H owns %zu blocks, P %zu\n", nnum, ih->second.size(), ip->second.size());
 }
 
+
+// ---- rebuilding a fighter in its own memory (the swap for two DIFFERENT characters) ----
+// content_swap needs two clones (equally shaped heap block lists). For a real second party member the slot fighter is rebuilt as the
+// partner's character in place: the actor keeps its address (the HUD, the camera, the pad and the lock block are bound to it) and keeps
+// its brain, lock block, controller object, player flag, assist and stock; the fighter destructor and the constructor (the setup's
+// per-fighter init as spawn_fighter does it) run on it, then everything the constructor registered elsewhere (camera slot, pair table,
+// the "last fighter" global) is put back. The new character stands up when its files are ready (FIGHTER_READY).
+
+// debug (PSPRECOMP_TAGTEAM_HANGDUMP=1): if the game thread stops reaching the frame hook for 6 s after a rebuild, send it SIGUSR1: the handler prints its host backtrace
+std::atomic<uint64_t> g_frame_ticks{0}; std::atomic<bool> g_hang_watch{false}; pthread_t g_game_thread;
+recomp_context* g_hang_ctx = nullptr;
+void hang_handler(int) {
+    void* bt[40]; const int n = backtrace(bt, 40); backtrace_symbols_fd(bt, n, 2);
+    if (g_hang_ctx) { char b[400]; const int l = std::snprintf(b, sizeof b, "[HANGDUMP] regs r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X r10=%08X r11=%08X r16=%08X r17=%08X r18=%08X r19=%08X\n", (unsigned)g_hang_ctx->r[4], (unsigned)g_hang_ctx->r[5], (unsigned)g_hang_ctx->r[6], (unsigned)g_hang_ctx->r[7], (unsigned)g_hang_ctx->r[8], (unsigned)g_hang_ctx->r[9], (unsigned)g_hang_ctx->r[10], (unsigned)g_hang_ctx->r[11], (unsigned)g_hang_ctx->r[16], (unsigned)g_hang_ctx->r[17], (unsigned)g_hang_ctx->r[18], (unsigned)g_hang_ctx->r[19]); if (l > 0) (void)!write(2, b, static_cast<size_t>(l)); }
+}
+void hang_watch_start() {
+    static bool started = false; if (started) return; started = true;
+    g_game_thread = pthread_self(); g_hang_ctx = g_ctx; signal(SIGUSR1, hang_handler);
+    std::thread([] { uint64_t last = g_frame_ticks.load(); int still = 0; for (;;) { sleep(2); const uint64_t now = g_frame_ticks.load(); if (g_hang_watch.load() && now == last) { if (++still == 3) { std::fprintf(stderr, "[HANGDUMP] game thread stuck: backtrace\n"); { const uint32_t w = rd(0x089D4958u); std::fprintf(stderr, "[HANGDUMP] world %08X head %08X tail %08X queue %08X/%08X:\n", w, rd(w + 12u), rd(w + 16u), rd(w + 68u), rd(w + 72u)); uint32_t pp = rd(w + 12u); for (int n = 0; pp && n < 40; pp = rd(pp + 0x4A0u), n++) std::fprintf(stderr, "[HANGDUMP]   %2d %08X flags %08X %08X next %08X kind %02X\n", n, pp, rd(pp + 904u), rd(pp + 908u), rd(pp + 0x4A0u), g_ram[(pp + 0x542u) & 0x07FFFFFFu]); } pthread_kill(g_game_thread, SIGUSR1); } } else still = 0; last = now; } }).detach();
+}
+
+struct RebuildJob {
+    uint32_t A = 0, L = 0, B = 0, ctrl = 0, assist = 0, foe = 0, rev = 0; uint8_t flags = 0; uint32_t stock = 0;
+    int hp = 0, brv = 0, charId = 0; float x = 0, y = 0, z = 0; uint32_t lockmode = 0; float since = 0; int waited = 0;
+};
+std::vector<RebuildJob> g_rebuild;
+bool is_rebuilding(uint32_t a) { for (const RebuildJob& j : g_rebuild) if (j.A == a) return true; return false; }
+
+// The world's actor list (head world+12, tail world+16, next link actor+0x4A0): the retail deletion path (FUN_088417f8) unlinks a dead actor itself, the
+// destructor does not. A fighter that is rebuilt in place must leave the list before its constructor appends it again (else the list gets a cycle and the
+// flush loops forever).
+void world_unlink(uint32_t A) {
+    const uint32_t w = rd(0x089D4958u);
+    if (!ok(w, 0x60)) return;
+    const uint32_t head = rd(w + 12u), tail = rd(w + 16u), next = rd(A + 0x4A0u);
+    uint32_t prev = 0; bool found = false;
+    if (head == A) found = true;
+    else for (uint32_t p = head, n = 0; p && ok(p, 0x12D0) && n < 64; p = rd(p + 0x4A0u), n++) if (rd(p + 0x4A0u) == A) { prev = p; found = true; break; }
+    if (!found) { if (g_log) std::fprintf(stderr, "[TAGTEAM] world list: %08X is not in it (head %08X tail %08X)\n", A, head, tail); return; }
+    if (prev) wr(prev + 0x4A0u, next); else wr(w + 12u, next);
+    if (tail == A) wr(w + 16u, prev);
+    wr(A + 0x4A0u, 0);
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] world list: %08X unlinked (prev %08X next %08X)\n", A, prev, next);
+}
+
+void world_dump(const char* tag) {
+    const uint32_t w = rd(0x089D4958u); if (!ok(w, 0x60)) return;
+    std::fprintf(stderr, "[TAGTEAM] world list %s: head %08X tail %08X:", tag, rd(w + 12u), rd(w + 16u));
+    uint32_t p = rd(w + 12u); for (int n = 0; p && ok(p, 0x12D0) && n < 24; p = rd(p + 0x4A0u), n++) std::fprintf(stderr, " %08X", p);
+    std::fprintf(stderr, "\n");
+}
+void world_state(const char* tag, uint32_t A) {
+    const uint32_t w = rd(0x089D4958u); if (!ok(w, 0x60)) return;
+    std::fprintf(stderr, "[TAGTEAM] world %s: A %08X flags %08X %08X (mask %08X %08X) queue head %08X tail %08X:", tag, A, rd(A + 904u), rd(A + 908u), rd(0x089D0000u - 31088u), rd(0x089D0000u - 31084u), rd(w + 68u), rd(w + 72u));
+    uint32_t p = rd(w + 68u); for (int n = 0; p && ok(p, 0x12D0) && n < 12; p = rd(p + 0x4A0u), n++) std::fprintf(stderr, " %08X", p);
+    std::fprintf(stderr, "\n");
+}
+bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
+    if (!ok(A, 0x12D0) || is_rebuilding(A)) return false;
+    load_character(charId);
+    const uint32_t info = info_for_char(charId);
+    if (!info) { std::fprintf(stderr, "[TAGTEAM] rebuild: no info record for charId %d\n", charId); return false; }
+    RebuildJob j; j.A = A; j.charId = charId; j.hp = hp; j.brv = brv;
+    j.L = rd(A + ACT_LOCKBLK); j.B = rd(A + ACT_BRAIN); j.ctrl = rd(A + 0x5A0u); j.assist = rd(A + 0x1108u); j.foe = rd(A + 0x300u);
+    j.flags = g_ram[(A + 0x5B0u) & 0x07FFFFFFu]; j.stock = rd(A + 0x10CCu); j.rev = rd(A + 0x10D0u);
+    const uint32_t stock_w = rdh(A + 0x10CEu);
+    j.x = rdf(A + 0x80u); j.y = rdf(A + 0x84u); j.z = rdf(A + 0x88u);
+    j.lockmode = ok(j.L, 0x200) ? rd(j.L + 264u) : 0u;
+    const uint32_t side = side_of(A);
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
+    g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x200u);
+    const uint32_t buf = sp0 - 0x1C0u;
+    const uint32_t rec = call(SIDE_REC, side);
+    constexpr uint32_t SB = 0x08800000u, SN = (0x0A000000u - SB) / 4;
+    std::vector<uint32_t> snap(SN);
+    std::memcpy(snap.data(), g_ram + (SB & 0x07FFFFFFu), SN * 4);
+    const uint32_t t0 = rd(REG_PAIR0), t1 = rd(REG_PAIR1), lastfo = rd(LAST_FIGHTER_OBJ);
+    const uint32_t mgr = dissidia_camera_manager();
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: char %d -> %d (brain %08X lock %08X ctrl %08X assist %08X foe %08X stock %u pos %.1f,%.1f,%.1f)\n", A, actor_char(A), charId, j.B, j.L, j.ctrl, j.assist, j.foe, stock_w, j.x, j.y, j.z);
+    // The destructor frees the brain and the lock block (and unregisters the latter from the camera): hide both from it.
+    wr(A + ACT_BRAIN, 0); wr(A + ACT_LOCKBLK, 0);
+    g_in_ctor = true;                                   // resource releases are skipped (the old character's data may be needed again)
+    call(FIGHTER_DTOR, A, 0);
+    if (g_log) { world_dump("before"); world_state("before", A); }
+    world_unlink(A);
+    if (g_log) world_dump("unlinked");
+    if (!std::getenv("PSPRECOMP_TAGTEAM_REBUILD_KEEPMEM")) std::memset(g_ram + (A & 0x07FFFFFFu), 0, 0x12D0);   // like a fresh allocation: the old character's flags (e.g. the KO / delete marks the world flush reads at +0x388) must not survive
+    g_owned[A].clear(); g_owned[A].push_back({A, 0x12D0u}); g_own_ctx = A;
+    call(FIGHTER_CTOR, A, rec, info, side, 0);
+    g_in_ctor = false;
+    if (g_log) { world_dump("after the constructor"); world_state("after the constructor", A); }
+    const uint32_t new_lb = rd(A + ACT_LOCKBLK);
+    wr(A + ACT_LOCKBLK, j.L); wr(A + ACT_BRAIN, j.B);
+    int undone = 0;
+    for (uint32_t i = 0; i < SN; i++) {                 // the camera slot (and any other word) that now holds the new lock block goes back
+        const uint32_t a = SB + 4 * i;
+        if (a >= A && a < A + 0x12D0u) continue;
+        if (snap[i] != new_lb && rd(a) == new_lb && new_lb) { wr(a, snap[i]); undone++; }
+    }
+    if (ok(mgr, 0xD00)) for (uint32_t o = 0; o < 0xD00u; o += 4) { const uint32_t a = mgr + o, ov = snap[(a - SB) / 4]; if (rd(a) != ov) { wr(a, ov); undone++; } }
+    if (ok(j.L, 0x440)) for (uint32_t o = 0; o < 0x440u; o += 4) { const uint32_t a = j.L - 0x40u + o; if (a < SB) continue; const uint32_t ov = snap[(a - SB) / 4]; if (a >= A && a < A + 0x12D0u) continue; if (rd(a) != ov) { wr(a, ov); undone++; } }
+    wr(REG_PAIR0, t0); wr(REG_PAIR1, t1); wr(LAST_FIGHTER_OBJ, lastfo);
+    call(SET_FOE, A, j.foe);
+    // the setup's per-fighter init (actor's own init through its vtable, two flag bits), as spawn_fighter does
+    const uint32_t G = REC_BASE + 4192u * side;
+    call(REC_INIT, buf, side);
+    const uint32_t vt = rd(A + 1348) + 256u;
+    const uint32_t voff = static_cast<uint32_t>(static_cast<int16_t>(rd(vt) & 0xFFFFu)), vfn = rd(vt + 4);
+    if (FuncPtr f = fn(vfn)) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(A + voff); g_ctx->r[5] = static_cast<int32_t>(G); g_ctx->r[6] = static_cast<int32_t>(buf); f(g_ram, g_ctx); *g_ctx = sv; }
+    if (rd(REC_BASE + 10208u + 4u * side) & 1u) g_ram[(A + 1456u + 7u) & 0x07FFFFFFu] |= 0x10;
+    if (rdh(REC_BASE + 10216u + 2u * side) & 1u) g_ram[(A + 1456u + 8u) & 0x07FFFFFFu] |= 0x20;
+    // what belongs to the slot, not to the character
+    wr(A + 0x5A0u, j.ctrl); wr(A + 0x1108u, j.assist);
+    g_ram[(A + 0x5B0u) & 0x07FFFFFFu] = static_cast<uint8_t>((g_ram[(A + 0x5B0u) & 0x07FFFFFFu] & ~4u) | (j.flags & 4u));
+    g_ram[(A + 0x10CEu) & 0x07FFFFFFu] = static_cast<uint8_t>(stock_w & 0xFF); g_ram[(A + 0x10CFu) & 0x07FFFFFFu] = static_cast<uint8_t>((stock_w >> 8) & 0xFF); wr(A + 0x10D0u, j.rev);
+    g_own_ctx = 0;
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+    j.since = dissidia_battle_age();
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: built as char %d (new lock block %08X, %d registration words put back), waiting for its files\n", A, actor_char(A), new_lb, undone);
+    g_rebuild.push_back(j);
+    if (std::getenv("PSPRECOMP_TAGTEAM_HANGDUMP")) { hang_watch_start(); g_hang_watch = true; }
+    return true;
+}
+
+// per frame (frame hook): a rebuilt fighter that is ready stands where the old one was, gets the carried HP / bravery and starts
+void rebuild_frame() {
+    g_frame_ticks++;
+    if (g_log && !g_rebuild.empty()) { static int n = 0; if (n++ < 6) world_state("frame", g_rebuild[0].A); }
+    for (size_t i = 0; i < g_rebuild.size();) {
+        RebuildJob& j = g_rebuild[i];
+        const bool timeout = dissidia_battle_age() - j.since > 60.0f * 4.0f;
+        if (!call(FIGHTER_READY, j.A) && !timeout) { i++; continue; }
+        const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
+        g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+        const uint32_t vec = sp0 - 0xC0u;
+        wrf(vec, j.x); wrf(vec + 4, j.y); wrf(vec + 8, j.z); wrf(vec + 12, 1.0f);
+        call(PLACE, j.A, vec, 1);
+        g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+        call(START_ACTION, j.A + 304u, 1, 0);
+        if (ok(j.L, 0x200)) { call(LOCK_SET, j.L, j.foe); if (j.lockmode == 1 && rd(j.L + 264u) != 1) call(LOCK_MODE, j.L, 1, 0); }
+        const uint32_t st = rd(j.A + 0x52Cu);
+        if (ok(st, 0x40)) { wr(st + 0xCu, static_cast<uint32_t>(j.hp)); wr(st + 0x14u, static_cast<uint32_t>(j.brv)); }
+        g_ctx->r[29] = static_cast<int32_t>(sp0);
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs rebuild %08X: char %d stands (script %d, hp %d brv %08X)%s\n", dissidia_battle_age() / 60.0f, j.A, actor_char(j.A), static_cast<int16_t>(rd(j.A + 0x180u) & 0xFFFFu), j.hp, static_cast<uint32_t>(j.brv), timeout ? " [timeout]" : "");
+        g_rebuild.erase(g_rebuild.begin() + static_cast<long>(i));
+    }
+}
+
+// The one entry point of the KO flow / the pad swap: slot fighter S takes the place of fighter T of its own team. Clones (same character) exchange their
+// content (the KO'd body stays at T); two different characters: S is rebuilt as T's character with T's HP / bravery and T becomes inert
+// (`ko`: the KO'd one is gone, down) or, for the pad swap (`!ko`), T is rebuilt as S's character with S's HP / bravery.
+// The rebuilt fighters stand up a few frames later (rebuild_frame).
+int hp_of(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return ok(st, 0x40) ? static_cast<int32_t>(rd(st + 0xCu)) : 0; }
+int brv_of(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return ok(st, 0x40) ? static_cast<int32_t>(rd(st + 0x14u)) : 0; }
+bool swap_slot_with(uint32_t S, uint32_t T, bool ko) {
+    if (!ok(S, 0x12D0) || !ok(T, 0x12D0)) return false;
+    const int cS = actor_char(S), cT = actor_char(T);
+    if (cS == cT && !std::getenv("PSPRECOMP_TAGTEAM_FORCEREBUILD")) return content_swap(S, T);
+    const int hpS = hp_of(S), hpT = hp_of(T), bS = brv_of(S), bT = brv_of(T);
+    if (!rebuild_begin(S, cT, hpT, bT)) return false;
+    if (ko) {   // T: the fighter that took over is gone from its old place, its body is parked out of the way and it never thinks again
+        g_down.push_back(T);
+        wr(T + 0x380u, rd(T + 0x380u) | 2u);
+        wrf(T + 0x80u, 5000.0f); wrf(T + 0x88u, 5000.0f);
+    } else if (!rebuild_begin(T, cS, hpS, bS)) return false;
+    return true;
+}
+
 void swap_content() {
     if (!g_bs) return;
     const uint32_t hs = rd(g_bs + 84u), H = rd(g_bs + 56u + 4u * hs);
@@ -892,7 +1067,7 @@ void swap_content() {
     for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].side == side_of(H) && alive(g_extra[i].actor)) pe = &g_extra[i];
     if (!pe || !ok(H, 0x12D0) || !alive(H)) { if (g_log) std::fprintf(stderr, "[TAGTEAM] swap: no living partner\n"); return; }
     const uint32_t P = pe->actor;
-    if (content_swap(H, P)) {
+    if (swap_slot_with(H, P, false)) {
         if (rd(rd(H + ACT_LOCKBLK) + 264u) != 1) call(LOCK_MODE, rd(H + ACT_LOCKBLK), 1, 0);
         if (g_log) std::fprintf(stderr, "[TAGTEAM] swap: pad character is now the one that stood at %08X (H %08X, P %08X)\n", P, H, P);
     }
@@ -1221,6 +1396,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_bs && extra_of(owner)) {   // a slot fighter is down: the battle is over (victory scene), the extras stop fighting
         for (int k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0) && !alive(a)) return; }
     }
+    if (is_rebuilding(owner)) return;   // a fighter being rebuilt as another character: its brain waits until it stands
     if (dissidia_cpu_ai_off() && ok(brain, 0x60) && static_cast<int32_t>(rd(brain + 0x54u)) == 0) return;   // Enemy AI off (debug menu): CPU brains do not think; this hook replaces framerate.cpp's
     g_orig_tick(rdram, ctx);
 }
@@ -1432,7 +1608,7 @@ void ko_oneround() {
         if (!te) continue;                                    // nobody to take over: the retail rules end the round
         const uint32_t T = te->actor;
         const uint32_t keepRev = 0; const uint8_t keepStock = lastStock[k];   // the stock / revive words belong to the slot, like the player flag: back to what they were before the retail KO chain took a stock and asked for a revive
-        if (!content_swap(S, T)) continue;
+        if (!swap_slot_with(S, T, true)) continue;
         wr(S + 0x10D0u, keepRev); g_ram[(S + 0x10CEu) & 0x07FFFFFFu] = keepStock; wr(T + 0x10D0u, 0); g_ram[(T + 0x10CEu) & 0x07FFFFFFu] = 0;
         g_down.push_back(T);                                   // the KO'd content now at T: it plays out its fall and stays down
         g_downrec.push_back({T, age, side_of(T)});
@@ -1725,6 +1901,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
     }
     g_ram = rdram; g_ctx = ctx;
     if (g_nextra && g_bs && dissidia_battle_age() / 60.0f > 3.0f) fix_assist();   // (not at once: the retail setup of the assist actors has to run first)
+    rebuild_frame();
     ko_watch();
     ko_oneround();
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HUDWATCH")) hud_watch();
