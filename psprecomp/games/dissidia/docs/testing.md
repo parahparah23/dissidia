@@ -163,11 +163,21 @@ everything goes through adb (debug socket forwarded, log read from the game fold
 - Screen-space reflections: blended draws are re-issued into a per-target layer (`fxl_*` in psp_ge_draw.cpp); the layer is cleared after the pass
   used it, so effects drawn after the 3D run are used one frame late. `PSPRECOMP_SSR_FX_DEBUG=1|2|3`, `PSPRECOMP_SSR_FX_GAIN`, `PSPRECOMP_SSR_FX_THICK`,
   `PSPRECOMP_SSR_FX_OFF`, `PSPRECOMP_SSR_FX_LOG`. Works on GL and the Vulkan layer; not used while ray-traced reflections are on.
-- **Not done: effects in the ray-traced reflections.** Findings from trying (2026-11-12): the Watera orb and bubbles are camera-facing sprites
-  (RECTANGLES, vt=000199 prim=6) that the RT capture ignores; the stage's sky / cloud domes are blended, not depth writing, with 50-110 unit
-  triangles and cover the floor if captured; the beams are long ribbons plus chains of tiny fan draws; Thundaga's ground ripples / sparks are
-  low flat quads. An attempt to rebuild sprites as world quads and to read the screen-space layer for colour gave reflections that looked wrong,
-  lagged heavily, and disappeared after a few seconds (cause not found). The local branch `ssr-effects-pass` has that experiment.
+- **Effects in the ray-traced reflections (2026-11-15, Medium / High).** Why the first try looked bad and what fixed it (psp_ge_draw.cpp `rt_capture`
+  fx path, psp_screenfx.cpp `k_rt_refl`): (1) the effects lists were cleared at the frame's clear, but the game draws its spell / beam effects
+  after the 3D run, so Watera / Thundaga were never traced (`PSPRECOMP_RT_REFL_DEBUG=1` showed no magenta): the lists are now kept and traced by
+  the next frame. (2) Big blended triangles are background sheets (cloud / sky domes, flash planes) that covered half the floor: dropped by area
+  (`PSPRECOMP_RT_FX_MAX_AREA`, 30). (3) Flat sheets on or just above the floor (splash rings, ground ripples) were hit by every floor ray: hits lower
+  than `PSPRECOMP_RT_FX_MINH` (0.6) above the surface are skipped. (4) The hit colour came from the scene copy, which does not hold effects drawn
+  after the 3D run (it showed the floor behind them as a haze): the effect triangle's own colour is used, and lit effects use their vertex colour
+  (the material is plain white: the green rails came out white). (5) Effects drawn with their own (sometimes identity) view matrix were placed
+  wrong (straight white bars over the floor): re-expressed with the main view like the opaque debris (`rt_fix_view`; the last completed scene's view
+  for effects after the 3D run). (6) Effects are additive layers (a rail = white core + green ribbon): up to 4 effect triangles along the ray are
+  summed in one non-opaque traversal (candidates, never committed). Contribution is additive over the floor with the screen-space layer's base
+  (`PSPRECOMP_SSR_FX_GAIN`). `PSPRECOMP_RT_FX_LOG=1` prints the colour state of each kind of effect draw (`[RTFX]`).
+  Test: `rtt_run.sh` / `android_battle.py --direct --char lightning` with `place 3`, `action 2303 player` (Watera) and `action 2293 player` (Thundaga).
+  RP6 (Medium, the player's settings): normal fight ~84.6 fps (same as reflections Off); casting every 3 s ~67-72 fps (Off ~83, effect tracing off ~76).
+  Not done: camera-facing sprite effects (RECTANGLES: the orb's bubbles, glow cards) are still not captured.
 
 ### Testing with the player's own settings (android_battle.py --use-settings)
 - `--use-settings` copies the device's `settings.ini` (render scale, SSAO, RT rows, driver ...) into the private test settings; `--fps-override --fps 30`

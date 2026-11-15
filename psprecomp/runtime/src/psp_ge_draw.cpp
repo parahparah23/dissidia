@@ -2524,6 +2524,8 @@ static std::unordered_map<uint64_t, RtPersist> g_rt_persist[GE_MAX_TARGETS];
 static uint32_t g_rt_frame[GE_MAX_TARGETS];
 // Some draws (the broken-block debris) use their own view matrix. Their world matrix then is not a world position: the game's position is
 // view_draw * world. Re-express such triangles in the world of the frame's main view: p' = inv(view_main) * view_draw * p.
+static float g_rt_main_view[GE_MAX_TARGETS][12];   // the last completed scene's main view (for effects drawn after it)
+static bool g_rt_main_view_ok[GE_MAX_TARGETS];
 static void rt_fix_view(std::vector<float>& tr, size_t t0, const float* vd, const float* vm) {
     if (!std::memcmp(vd, vm, 12 * sizeof(float))) return;
     for (size_t i = t0; i + 2 < tr.size(); i += 3) {
@@ -2680,6 +2682,14 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     if (!fx && st.texture_enable && (tex >> 24) < 200 && (st.tex_func_rgba || st.alpha_test_enable)) { g_rt_why = "transparent-texture"; return; }
     static thread_local std::vector<DecodedVertex> dv;
     ge_decode_vertices(rdram, st, prim_type, count, dv, true);   // positions and colours only
+    if (fx && std::getenv("PSPRECOMP_RT_FX_LOG") && !dv.empty()) {   // debug: the colour state of each kind of effect draw (once per kind)
+        static std::unordered_map<uint64_t, int> seen_k;
+        const uint64_t k = ((uint64_t)tex << 32) ^ ((uint64_t)st.tex_func << 24) ^ ((uint64_t)st.blend_mode << 8) ^ (uint64_t)(st.tex_env_color & 0xFFFFFF) * 31u ^ (uint64_t)(st.blend_fix_a & 0xFFFFFF) * 131u;
+        if (seen_k[k]++ == 0 && seen_k.size() < 400)
+            std::fprintf(stderr, "[RTFX] n=%d prim=%d tex=%08X tfunc=%u rgba=%d env=%06X bm=%03X fa=%06X fb=%06X lit=%d vcol=%d v0=%02X%02X%02X%02X mat=%06X amb=%06X vt=%06X\n", count, prim_type, (unsigned)tex,
+                         (unsigned)st.tex_func, (int)st.tex_func_rgba, (unsigned)(st.tex_env_color & 0xFFFFFF), (unsigned)st.blend_mode, (unsigned)(st.blend_fix_a & 0xFFFFFF), (unsigned)(st.blend_fix_b & 0xFFFFFF),
+                         (int)st.lighting_enable, (int)dv[0].has_color, dv[0].color[0], dv[0].color[1], dv[0].color[2], dv[0].color[3], (unsigned)(st.material_diffuse & 0xFFFFFF), (unsigned)(st.material_ambient & 0xFFFFFF), (unsigned)st.vertex_type);
+    }
     const size_t n = dv.size();
     if (n < 3) return;
     const float* m = st.world_matrix;
@@ -2703,7 +2713,7 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
         float col[3] = {1.f, 1.f, 1.f};
         if (!replace) {
             const DecodedVertex* vs[3] = {&a, &b, &c};
-            if (lit) {
+            if (lit && !(fx && a.has_color)) {   // effects: the vertex colour is what tints them (lit or not; the material is plain white)
                 for (int k = 0; k < 3; k++) {
                     float d = rgb(st.material_diffuse, k);
                     if ((st.material_update & 2u) && a.has_color) { d = 0; for (const DecodedVertex* v : vs) d += float(v->color[k]) / 255.f; d /= 3.f; }
@@ -2719,15 +2729,28 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
         uint32_t alpha = (st.texture_enable && (st.tex_func_rgba || st.alpha_test_enable)) ? (tex >> 24) : 255u;
         if (fx) {   // coverage: the texture's mean alpha x the vertex alpha (the material alpha when lit)
             float al = st.texture_enable ? float(tex >> 24) / 255.f : 1.f;
-            if (lit) al *= float(st.material_alpha & 0xFFu) / 255.f;
-            else if (a.has_color) al *= (float(a.color[3]) + float(b.color[3]) + float(c.color[3])) / (3.f * 255.f);
+            if (a.has_color) al *= (float(a.color[3]) + float(b.color[3]) + float(c.color[3])) / (3.f * 255.f);
+            else if (lit) al *= float(st.material_alpha & 0xFFu) / 255.f;
             alpha = uint32_t(std::min(255.f, std::max(24.f, al * 255.f)));
         }
         uint32_t o = alpha << 24;
         for (int k = 0; k < 3; k++) o |= uint32_t(std::min(255.f, std::max(0.f, col[k] * t3[k] * 255.f + 0.5f))) << (8 * k);
         cols.push_back(o);
     };
-    auto tri = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) { push(a); push(b); push(c); tri_color(a, b, c); };
+    // Effects: big blended triangles are background sheets (cloud / sky domes, flash planes, the intro's planes), not effects; reflected
+    // they covered half the floor. Spell and beam triangles are small or long and thin, so the test is the area (world units squared,
+    // PSPRECOMP_RT_FX_MAX_AREA, default 30; a 100-unit beam ribbon 0.5 wide is 25).
+    static const float fx_max_area = [] { const char* e = std::getenv("PSPRECOMP_RT_FX_MAX_AREA"); return e ? (float)std::atof(e) : 30.f; }();
+    auto tri = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) {
+        float* t0 = op;
+        push(a); push(b); push(c);
+        if (fx) {
+            const float ux = t0[3] - t0[0], uy = t0[4] - t0[1], uz = t0[5] - t0[2], vx = t0[6] - t0[0], vy = t0[7] - t0[1], vz = t0[8] - t0[2];
+            const float cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+            if (0.25f * (cx * cx + cy * cy + cz * cz) > fx_max_area * fx_max_area) { op = t0; return; }   // (area = |u x v| / 2)
+        }
+        tri_color(a, b, c);
+    };
     if (prim_type == GE_PRIM_TRIANGLES) {
         for (size_t i = 0; i + 2 < n; i += 3) tri(dv[i], dv[i + 1], dv[i + 2]);
     } else if (prim_type == GE_PRIM_TRIANGLE_STRIP) {
@@ -2735,6 +2758,7 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     } else {
         for (size_t i = 1; i + 1 < n; i++) tri(dv[0], dv[i], dv[i + 1]);
     }
+    out.resize(size_t(op - out.data()));   // triangles left out above
 }
 
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
@@ -2747,7 +2771,10 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
     if (g_current_target < 0 || g_ab_shadow) return;
     const int cur = g_current_target;
     if (st.clear_mode) {
-        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); g_rt_fx_tris[cur].clear(); g_rt_fx_cols[cur].clear(); }
+        // The effects lists are not cleared here: the game draws most of its spell / beam effects after the 3D run (after the reflection pass
+        // used the lists), so they are kept and traced by the next frame's pass, which clears them after use. Clearing them here left the
+        // ray-traced reflection without Watera, Thundaga, ... (PSPRECOMP_RT_REFL_DEBUG=1 never showed an effect hit).
+        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); }
         { static const int every = std::getenv("PSPRECOMP_RT_DUMP_EVERY") ? std::atoi(std::getenv("PSPRECOMP_RT_DUMP_EVERY")) : 0; static int fr = 0;
           if (every > 0 && g_rtdump.load() == 0 && (st.clear_flags == 0 || (st.clear_flags & 4)) && ++fr % every == 0) g_rtdump.store(1); }   // automated runs: one dump every N frames
         if (g_rtdump.load() == 1) { g_rtdump.store(2); rtdump_printf("[RTDUMP] begin target %d\n", cur); }
@@ -2788,7 +2815,15 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2) rt_capture(st, rdram, prim_type, count, cur, true);   // the effects layer is only traced from Medium up
+        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2) {
+            // Effects drawn with their own view matrix (some with an identity view: the world matrix then holds view-space positions) are
+            // re-expressed in the main view's world, as the opaque draws are. Most effects come after the 3D run, when this scene's vote is
+            // already reset: the last completed scene's main view is used then.
+            const size_t t0 = g_rt_fx_tris[cur].size();
+            rt_capture(st, rdram, prim_type, count, cur, true);
+            const float* mv = g_fx_vote[cur].n > 0 ? g_fx_vote[cur].view : g_rt_main_view_ok[cur] ? g_rt_main_view[cur] : nullptr;
+            if (mv && !g_rt_nofix && g_rt_fx_tris[cur].size() > t0) rt_fix_view(g_rt_fx_tris[cur], t0, st.view_matrix, mv);
+        }   // the effects layer is only traced from Medium up
         return;
     }
     for (int i = 0; i < GE_MAX_TARGETS; ++i) {
@@ -2805,6 +2840,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         { static int dbg = 0; if (psp_rt_available() && dbg++ % 600 == 0) std::fprintf(stderr, "[RT] scene complete: %zu captured triangles, rt %d\n", g_rt_tris[i].size() / 9, (int)psp_rt_available()); }
         if (psp_rt_scene_wanted() && (!g_rt_tris[i].empty() || !g_rt_persist[i].empty())) rt_persist_merge(i, s.proj, s.view);
         if (psp_rt_scene_wanted()) rt_static_refresh(i);
+        std::memcpy(g_rt_main_view[i], s.view, sizeof g_rt_main_view[i]); g_rt_main_view_ok[i] = true;
         if (g_rtdump.load() == 2) { g_rtdump.store(0); rtdump_printf("[RTDUMP] end: %zu scene triangles, %zu effects triangles\n", g_rt_tris[i].size() / 9, g_rt_fx_tris[i].size() / 9);
             rtdump_printf("[RTDUMP] proj"); for (int k = 0; k < 16; ++k) rtdump_printf(" %g", s.proj[k]); rtdump_printf("\n");
             rtdump_printf("[RTDUMP] view"); for (int k = 0; k < 12; ++k) rtdump_printf(" %g", s.view[k]); rtdump_printf("\n"); }

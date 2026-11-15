@@ -650,6 +650,7 @@ uniform int u_rt_dbg;       // debug (PSPRECOMP_RT_REFL_DEBUG=1): colour by what
 uniform int u_rt_refl_rays; // reflection rays per pixel (quality: 1, 1, 3), jittered by u_rt_rough for a glossy blur
 uniform float u_rt_rough;
 uniform int u_rt_fx;        // the scene has an effects layer
+uniform float u_fx_minh;    // effect hits lower than this above the reflecting surface are skipped (world units, PSPRECOMP_RT_FX_MINH)
 uniform float u_rt_hidden;   // brightness / strength of a hit on a surface that is not visible on screen
 uniform float u_rt_sky_amt;  // strength of a reflection of the sky relative to one of geometry
 uniform float u_rt_sky_dist; // view units past which a hit counts as the sky dome
@@ -771,31 +772,41 @@ const char* const k_rt_refl = R"GLSL(
             col = cut + trans * col;
             // The effects layer (orbs, auras, glass: blended draws that write no depth): the closest one in front of the opaque hit,
             // shown with its real on-screen colour when it is visible there, else its triangle colour, blended over the opaque reflection.
-            vec3 fxc = vec3(0.0);
+            vec3 fxc = vec3(0.0);   // summed effect colour x coverage
             float fxa = 0.0, fx_t = 0.0;
+            int nfx = 0;
             if (u_rt_fx != 0 && !(u_rt_fx == 2 && v_uv.x < 0.5)) {   // 2 = debug split: no effects layer in the left half
+                // The closest effect hit that is clearly above the reflecting surface: flat sheets lying on or just above the floor (Watera's
+                // splash ring, Thundaga's ground ripples, decals) are hit at once by every ray leaving the floor and washed the whole area out.
+                // Shaded with the effect triangle's own colour (texture average x vertex colour, coverage in alpha): most effects are drawn after
+                // the 3D run, so the scene copy this pass reads does not hold them, and sampling it showed the floor behind the effect instead.
+                // Effects are additive glows drawn in layers (a rail beam: a white core inside a green ribbon), so every effect triangle along
+                // the ray adds its colour x coverage (up to 4), in ONE traversal: the effect instance is traced as non-opaque, each triangle the
+                // traversal meets is a candidate that is summed and never committed. (Separate closest-hit queries per layer cost the RP6 8-10
+                // fps during spells.)
                 rayQueryEXT rf;
-                rayQueryInitializeEXT(rf, u_tlas, gl_RayFlagsOpaqueEXT, 0x2, Ow, 0.0, Rw, hit ? hit_t : u_rt_refl_len);
-                while (rayQueryProceedEXT(rf)) {}
-                if (rayQueryGetIntersectionTypeEXT(rf, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-                    fx_t = rayQueryGetIntersectionTEXT(rf, true);
-                    uint fc = rt_fx_col[rayQueryGetIntersectionPrimitiveIndexEXT(rf, true)];
-                    fxc = vec3(float(fc & 255u), float((fc >> 8) & 255u), float((fc >> 16) & 255u)) / 255.0;
-                    fxa = float(fc >> 24) / 255.0;
-                    vec4 cf = u_proj * vec4(O + R * fx_t, 1.0);
-                    if (cf.w > 1e-5) {
-                        vec2 uvf = cf.xy / cf.w * 0.5 + 0.5;
-                        if (uvf.x > 0.0 && uvf.x < 1.0 && uvf.y > 0.0 && uvf.y < 1.0) fxc = texture(u_color, uvf).rgb;
-                    }
+                rayQueryInitializeEXT(rf, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x2, Ow, 0.0, Rw, hit ? hit_t : u_rt_refl_len);
+                while (rayQueryProceedEXT(rf)) {
+                    if (rayQueryGetIntersectionTypeEXT(rf, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+                    float t = rayQueryGetIntersectionTEXT(rf, false);
+                    if (dot(R * t, n) < u_fx_minh) continue;   // height of the hit above the surface point
+                    uint fc = rt_fx_col[rayQueryGetIntersectionPrimitiveIndexEXT(rf, false)];
+                    float a = float(fc >> 24) / 255.0;
+                    fxc += vec3(float(fc & 255u), float((fc >> 8) & 255u), float((fc >> 16) & 255u)) / 255.0 * a;
+                    fx_t = fxa == 0.0 ? t : min(fx_t, t);   // the nearest one sets the distance fade
+                    fxa = 1.0;
+                    if (++nfx >= 4) rayQueryTerminateEXT(rf);
                 }
             }
             float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -V), 0.0, 1.0), 5.0);
             float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
             o_refl = vec4(col * k, k);
             if (fxa > 0.0) {
-                float kf = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
-                float af = fxa * kf;
-                o_refl = vec4(fxc * af + o_refl.rgb * (1.0 - af), af + o_refl.a * (1.0 - af));
+                // Effects are glows (beams, bolts, the water orb's highlights): their reflection adds light over the floor and its reflection
+                // instead of covering them, with a stronger base than the Fresnel-only opaque reflection (same as the screen-space effects
+                // layer, PSPRECOMP_SSR_FX_GAIN): at the floor's steep angles a glow at plain Fresnel strength was invisible.
+                float kf = clamp(fres * 1.6 + u_fx_gain, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
+                o_refl.rgb += min(fxc, vec3(1.5)) * kf;   // fxc is already colour x coverage, summed
                 if (u_rt_dbg != 0) dbg = vec3(1.0, 0.0, 1.0);
             }
             if (u_rt_dbg == 1 || (u_rt_dbg == 2 && v_uv.x > 0.5)) o_refl = vec4(dbg * 0.6, 0.6);
@@ -1325,6 +1336,8 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1f(loc(mp.id, "u_rt_rough"), env_float("PSPRECOMP_RT_ROUGH", 0.005f));
         glUniform1i(loc(mp.id, "u_rt_fx"), !sc.rt_fx || psp_rt_refl_quality() < 2 || std::getenv("PSPRECOMP_RT_FX_OFF") ? 0 : std::getenv("PSPRECOMP_RT_FX_SPLIT") ? 2 : 1);
         glUniform1f(loc(mp.id, "u_rt_hidden"), env_float("PSPRECOMP_RT_HIDDEN", 0.45f));
+        glUniform1f(loc(mp.id, "u_fx_minh"), env_float("PSPRECOMP_RT_FX_MINH", 0.6f));
+        glUniform1f(loc(mp.id, "u_fx_gain"), env_float("PSPRECOMP_SSR_FX_GAIN", 0.4f));
         glUniform1f(loc(mp.id, "u_rt_sky_amt"), env_float("PSPRECOMP_RT_SKY_AMT", 0.4f));
         glUniform1f(loc(mp.id, "u_rt_sky_dist"), env_float("PSPRECOMP_FX_SKY_DIST", 150.f));
         glUniform1i(loc(mp.id, "u_refl_split"), std::getenv("PSPRECOMP_RT_REFL_SPLIT") ? 1 : 0);
