@@ -23,12 +23,15 @@ int ge_vertex_stride(uint32_t vtype);
 /// Decode `count` vertices from rdram at state.vertex_addr using
 /// the vertex format described by state.vertex_type. If index bits
 /// are set in VTYPE, reads the index buffer from state.index_addr.
+/// pos_color_only: texture coordinates and normals are left out (has_uv / has_normal false), for callers that only need
+/// positions and colours (the ray-traced scene capture, psp_ge_draw.cpp rt_capture).
 void ge_decode_vertices(
     uint8_t* rdram,
     const GeState& state,
     int prim_type,
     int count,
-    std::vector<DecodedVertex>& out
+    std::vector<DecodedVertex>& out,
+    bool pos_color_only = false
 );
 
 /// Apply world*view*proj matrix to positions and tex scale/offset

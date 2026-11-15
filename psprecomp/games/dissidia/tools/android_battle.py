@@ -41,8 +41,9 @@ class AndroidGame(bt.Game):
     def start(self):
         a = self.args
         env_old = os.path.join(self.out, 'env.txt.orig')
-        if not os.path.exists(env_old):
-            self.adb('pull', DEV + '/env.txt', env_old)
+        if not os.path.exists(env_old) and not os.path.exists(env_old + '.none'):
+            if self.adb('pull', DEV + '/env.txt', env_old, check=False).returncode != 0:
+                open(env_old + '.none', 'w').close()     # the device had no env.txt: delete ours at the end
         ini = os.path.join(self.out, 'bt_settings.ini')
         if a.use_settings:          # the player's own settings.ini (render scale, SSAO, RT rows ...): what they see is what is tested
             self.adb('pull', DEV + '/settings.ini', ini)
@@ -62,6 +63,10 @@ class AndroidGame(bt.Game):
                 f.write('1000 mark start\n600000 quit\n')
         self.adb('push', self.script, DEV + '/bt_script.txt')
         env['PSPRECOMP_TEST_SCRIPT'] = DEV + '/bt_script.txt'
+        if a.direct:              # skip the menu walk: the runtime replays a recorded pad sequence (games/dissidia/runtime/direct_battle.cpp)
+            self.adb('push', a.direct, DEV + '/bt_walk.txt')
+            self.adb('shell', 'chmod 666 ' + DEV + '/bt_walk.txt')
+            env['PSPRECOMP_TEST_DIRECT_BATTLE'] = DEV + '/bt_walk.txt'
         env.update(self.extra_env)
         envf = os.path.join(self.out, 'env.txt.bt')
         with open(envf, 'w') as f:
@@ -82,6 +87,8 @@ class AndroidGame(bt.Game):
         if os.path.exists(orig):
             self.adb('push', orig, DEV + '/env.txt', check=False)
             self.adb('shell', 'chmod 666 ' + DEV + '/env.txt', check=False)   # a push leaves it shell-owned and read-only for the app
+        elif os.path.exists(orig + '.none'):
+            self.adb('shell', 'rm -f ' + DEV + '/env.txt', check=False)
         self.adb('forward', '--remove', 'tcp:%d' % self.port, check=False)
 
     def alive(self):
@@ -142,6 +149,9 @@ def main():
     ap.add_argument('--stage', type=int, default=12)
     ap.add_argument('--shots', default='3,8', help='seconds after the fight starts')
     ap.add_argument('--script')
+    ap.add_argument('--direct', nargs='?', const=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tests', 'replays', 'quick_battle_walk.txt'),
+                    help='skip the menu walk: replay a recorded pad sequence in the game (Squall vs Lightning, stage 12; needs a build with direct_battle.cpp)')
+    ap.add_argument('--ff-menus', dest='ff_menus', type=int, default=4, help='with --direct: menu trip at N x real time (default 4; 0 = real time)')
     ap.add_argument('--ai', action='store_true', help='let the CPU fighter act (default: PSPRECOMP_TEST_NO_AI=1, it stands still)')
     ap.add_argument('--env', action='append', default=[], metavar='KEY=VALUE', help='extra PSPRECOMP_* variable for the run')
     ap.add_argument('--wait-script', action='store_true', help='wait for the script to quit the game before finishing')
@@ -161,11 +171,20 @@ def main():
     if a.hdr_scene is not None:
         extra.update({'PSPRECOMP_HDR': '1', 'PSPRECOMP_HDR_SCENE': a.hdr_scene, 'PSPRECOMP_HDR_STATS': '1'})
     extra.update(kv.split('=', 1) for kv in a.env)
+    global DEV
+    for d in ('/sdcard/Android/media/%s/game' % PKG, DEV):   # newer builds keep the game folder under Android/media
+        if subprocess.run(['adb', '-s', a.serial, 'shell', 'ls ' + d + '/last_run.log'], capture_output=True).returncode == 0:
+            DEV = d
+            break
+    print('[android_battle] game folder ' + DEV, file=sys.stderr)
     g = AndroidGame(a.serial, a.out, a, extra)
     try:
         g.start()
         t0 = time.time()
-        bt.walk_menus(g, a.char, stage=a.stage)
+        if a.direct:
+            bt.walk_direct(g, ff_menus=a.ff_menus)
+        else:
+            bt.walk_menus(g, a.char, stage=a.stage)
         print('[android_battle] in battle after %.0f s' % (time.time() - t0), file=sys.stderr)
         t_start = time.time()
         for sec in [float(x) for x in a.shots.split(',') if x.strip()]:

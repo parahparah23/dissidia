@@ -172,10 +172,13 @@ static void pp_mark(VkCommandBuffer cb, const std::string& label) {
     vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, f.pp, (uint32_t)f.pp_labels.size());
     f.pp_labels.push_back(label);
 }
+// CPU timers for the [VKGL] line. Off unless asked for (PSPRECOMP_VK_CPU_TIMES=1, the pass profiler or the performance overlay):
+// one per draw was two clock reads x ~3,400 draws a frame, 20% of the RP6 render thread (simpleperf: __kernel_clock_gettime).
+static const bool g_cpu_times_env = std::getenv("PSPRECOMP_VK_CPU_TIMES") != nullptr;
 struct Tmr {
     double* acc; std::chrono::steady_clock::time_point t0;
-    explicit Tmr(double* a) : acc(a), t0(std::chrono::steady_clock::now()) {}
-    ~Tmr() { *acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+    explicit Tmr(double* a) : acc(g_cpu_times_env || g().passprof ? a : nullptr) { if (acc) t0 = std::chrono::steady_clock::now(); }
+    ~Tmr() { if (acc) *acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
 };
 
 static void defer(std::function<void()> f) { fr().deferred.push_back(std::move(f)); }
@@ -1579,11 +1582,12 @@ bool core_init(SDL_Window* w, bool vsync, std::string* err) {
     return true;
 }
 
-bool rt_set_scene(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols) {
+bool rt_set_scene(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols,
+                 const float* st_xyz, uint32_t st_count, const uint32_t* st_cols, uint64_t st_version) {
     Globals& gl = g();
     const int i = gl.cur;
     gl.rt_ready[i] = false;
-    if (!gl.rt_on || !tri_count) return false;
+    if (!gl.rt_on || (!tri_count && !st_count)) return false;
     static const bool dbg = std::getenv("PSPRECOMP_RT_DEBUG") != nullptr;
     if (dbg) std::fprintf(stderr, "[RT] set_scene %u tris\n", tri_count);
     end_pass();
@@ -1594,7 +1598,9 @@ bool rt_set_scene(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, nullptr, 0, nullptr);
     std::string err;
     if (dbg) std::fprintf(stderr, "[RT] record_build\n");
-    if (!gl.rt[i].record_build(cb, xyz, tri_count, tri_cols, fx_xyz, fx_tri_count, fx_cols, &err)) { std::fprintf(stderr, "[VKGL] RT scene build failed: %s\n", err.c_str()); return false; }
+    if (gl.passprof) pp_mark(cb, "rt acceleration structure build");   // PSPRECOMP_VK_PASSPROF: its own line, not "other"
+    if (!gl.rt[i].record_build(cb, xyz, tri_count, tri_cols, fx_xyz, fx_tri_count, fx_cols, st_xyz, st_count, st_cols, st_version, &err)) { std::fprintf(stderr, "[VKGL] RT scene build failed: %s\n", err.c_str()); return false; }
+    if (gl.passprof) pp_mark(cb, "other");
     const bool realloc = gl.rt_set_gen[i] != gl.rt[i].generation();
     gl.rt_set_gen[i] = gl.rt[i].generation();
     if (realloc || gl.rt_set_tlas[i] != gl.rt[i].tlas()) {   // only after a (re)allocation: the structure is rebuilt in place otherwise

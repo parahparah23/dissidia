@@ -57,6 +57,8 @@ extern void dissidia_roster_grid_install();
 extern void dissidia_wpnp_install();
 // camera.cpp: analogue right-stick battle camera.
 extern void dissidia_camera_install(uint8_t* rdram);
+// direct_battle.cpp: test-only, skips the menus (PSPRECOMP_TEST_DIRECT_BATTLE=1).
+extern void dissidia_direct_battle_install(uint8_t* rdram);
 // input.cpp: continuous analogue stick direction (the game's own processing is 8-way).
 extern void dissidia_input_install(uint8_t* rdram);
 // framerate.cpp: native 60 Hz battle logic (PSPRECOMP_FPS / settings menu).
@@ -346,6 +348,7 @@ void dissidia_register_hooks(uint8_t* rdram) {
     ovl_extra_init_dispatch_table();
     psp_dispatch_set_overlay_resolver(dissidia_overlay_resolver);
     dissidia_roster_grid_install();   // wraps overlay functions: needs the overlay dispatch tables
+    dissidia_direct_battle_install(rdram);  // direct_battle.cpp
     dissidia_camera_install(rdram);   // camera.cpp (wraps a battle-overlay function too)
     dissidia_input_install(rdram);    // input.cpp
     dissidia_framerate_install(rdram);   // framerate.cpp (wraps a battle-overlay function too)

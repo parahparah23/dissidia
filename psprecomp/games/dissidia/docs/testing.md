@@ -141,6 +141,18 @@ everything goes through adb (debug socket forwarded, log read from the game fold
   (`/tmp/claude-1000`, 11 GB): write to `~/dissidia/ssrfx_out` instead (a full /tmp makes `adb pull` die at 8%).
 - Never `pkill -f android_battle` from a shell whose own command line contains the pattern (it kills that shell); use `pgrep` and `kill <pid>`.
 
+### Faster phone runs and profiling (2026-11-15)
+- `android_battle.py --direct` skips the menu walk like the desktop harness (the recorded walk is pushed as `bt_walk.txt`; needs a build with
+  `direct_battle.cpp`): in battle after ~34 s on the RP6. `--use-settings --drop rt_refl_level --env PSPRECOMP_VK_RT_REFL=2` tests the player's own
+  settings with one row changed. The fight HUD check counts the two gauge probes double (`hud_dark`): with the player's settings the portraits
+  next to the outer probes are bright and the old check never fired.
+- The game folder moved to `/sdcard/Android/media/org.psprecomp.game/game` in newer builds; the harness picks whichever has `last_run.log`.
+- Achieved frame rate: `[FPS] <n> GE frames/s` lines in `run.log` every 5 s. GPU per pass: `--env PSPRECOMP_VK_PASSPROF=1` (`[VKPASS]` lines).
+- CPU hot spots (rooted device): `simpleperf record -p <pid> -f 2000 --duration 10 -o /data/local/tmp/perf.data` as root during the fight, push the
+  unstripped `game_and/libmain.so` to `/data/local/tmp/symfs/<the app's lib path>`, then
+  `simpleperf report -i ... --symfs /data/local/tmp/symfs --tids <render thread> --sort symbol` (the render thread is the one with samples in `vulkan.ad07xx.so`).
+- Local APK build on this host: `~/dissidia/rtrefl_apk/build_perf.sh <psprecomp dir> <work dir>` (a copy of the tag-team script), ~1.5 min.
+
 ### Shader gotchas found on the phone
 - The Vulkan layer allows **4 samplers per program** (`kMaxSamplerBindings`, "too many samplers" at link) and only `DEPTH24_STENCIL8`
   depth textures (`[VKGL] unsupported texture format 0x81a6` = DEPTH_COMPONENT24). A failing screen-space shader switches shadows, AO and
@@ -151,11 +163,21 @@ everything goes through adb (debug socket forwarded, log read from the game fold
 - Screen-space reflections: blended draws are re-issued into a per-target layer (`fxl_*` in psp_ge_draw.cpp); the layer is cleared after the pass
   used it, so effects drawn after the 3D run are used one frame late. `PSPRECOMP_SSR_FX_DEBUG=1|2|3`, `PSPRECOMP_SSR_FX_GAIN`, `PSPRECOMP_SSR_FX_THICK`,
   `PSPRECOMP_SSR_FX_OFF`, `PSPRECOMP_SSR_FX_LOG`. Works on GL and the Vulkan layer; not used while ray-traced reflections are on.
-- **Not done: effects in the ray-traced reflections.** Findings from trying (2026-11-12): the Watera orb and bubbles are camera-facing sprites
-  (RECTANGLES, vt=000199 prim=6) that the RT capture ignores; the stage's sky / cloud domes are blended, not depth writing, with 50-110 unit
-  triangles and cover the floor if captured; the beams are long ribbons plus chains of tiny fan draws; Thundaga's ground ripples / sparks are
-  low flat quads. An attempt to rebuild sprites as world quads and to read the screen-space layer for colour gave reflections that looked wrong,
-  lagged heavily, and disappeared after a few seconds (cause not found). The local branch `ssr-effects-pass` has that experiment.
+- **Effects in the ray-traced reflections (2026-11-15, Medium / High).** Why the first try looked bad and what fixed it (psp_ge_draw.cpp `rt_capture`
+  fx path, psp_screenfx.cpp `k_rt_refl`): (1) the effects lists were cleared at the frame's clear, but the game draws its spell / beam effects
+  after the 3D run, so Watera / Thundaga were never traced (`PSPRECOMP_RT_REFL_DEBUG=1` showed no magenta): the lists are now kept and traced by
+  the next frame. (2) Big blended triangles are background sheets (cloud / sky domes, flash planes) that covered half the floor: dropped by area
+  (`PSPRECOMP_RT_FX_MAX_AREA`, 30). (3) Flat sheets on or just above the floor (splash rings, ground ripples) were hit by every floor ray: hits lower
+  than `PSPRECOMP_RT_FX_MINH` (0.6) above the surface are skipped. (4) The hit colour came from the scene copy, which does not hold effects drawn
+  after the 3D run (it showed the floor behind them as a haze): the effect triangle's own colour is used, and lit effects use their vertex colour
+  (the material is plain white: the green rails came out white). (5) Effects drawn with their own (sometimes identity) view matrix were placed
+  wrong (straight white bars over the floor): re-expressed with the main view like the opaque debris (`rt_fix_view`; the last completed scene's view
+  for effects after the 3D run). (6) Effects are additive layers (a rail = white core + green ribbon): up to 4 effect triangles along the ray are
+  summed in one non-opaque traversal (candidates, never committed). Contribution is additive over the floor with the screen-space layer's base
+  (`PSPRECOMP_SSR_FX_GAIN`). `PSPRECOMP_RT_FX_LOG=1` prints the colour state of each kind of effect draw (`[RTFX]`).
+  Test: `rtt_run.sh` / `android_battle.py --direct --char lightning` with `place 3`, `action 2303 player` (Watera) and `action 2293 player` (Thundaga).
+  RP6 (Medium, the player's settings): normal fight ~84.6 fps (same as reflections Off); casting every 3 s ~67-72 fps (Off ~83, effect tracing off ~76).
+  Not done: camera-facing sprite effects (RECTANGLES: the orb's bubbles, glow cards) are still not captured.
 
 ### Testing with the player's own settings (android_battle.py --use-settings)
 - `--use-settings` copies the device's `settings.ini` (render scale, SSAO, RT rows, driver ...) into the private test settings; `--fps-override --fps 30`
@@ -195,6 +217,26 @@ Measured 2026-11-11 while building the Jecht combo timing tests (`tools/combo_ti
 - Other findings: the harness CPU dummy (time step 0) still takes hits (HUD BRV changes); Jecht's Rush from the start position
   (20 m) never reaches the dummy, so `place 3` first; HP attack is Square, bravery Circle (not Triangle).
 - Background long runs with `nohup` and send a Gotify message at the end (see ~/CLAUDE.md).
+
+## Skipping the menu walk (`battle_test.py run --direct`)
+
+The picture-by-picture menu walk takes about 100 s to reach the fight. `--direct` replays a recorded pad sequence inside the game
+(`runtime/direct_battle.cpp`) and gets to `[TEST] battle started` in about 30 s (Squall vs Lightning, stage 12, no screenshots until the HUD is up):
+
+    battle_test.py run --work W --script S --out /abs/dir --direct            # tests/replays/quick_battle_walk.txt
+    battle_test.py run ... --direct my_walk.txt --ff-menus 4                  # another recording; --ff-menus defaults to 4 with --direct
+
+- **How**: the game polls the pad once per frame, and the poll number is the one clock that does not change with fast-forward. The first part is rule
+  driven (CROSS 3 polls of every 15 until the save has loaded; the runtime turns `PSPRECOMP_SAVEDATA_AUTO` on for the replay because the save list dialog
+  reads the host pad, not the filtered one), the rest is the recorded rows, each as polls since the save loaded and a pad mask. The runtime logs
+  `[DIRECT] replay finished`; the harness then waits for the HUD, starts the clock as the normal walk does, and fast-forward goes off.
+- **Speed limit**: 4x. The replay finishes at the same poll at 8x and unthrottled too (the poll count is deterministic), but loads run in host time, so the
+  recorded gaps get too short and the game falls back to the menu or never enters the fight. 6x failed in a try as well.
+- **Flags** (test only, off by default): `PSPRECOMP_TEST_DIRECT_BATTLE=<file>` replays a recording; `PSPRECOMP_TEST_PAD_RECORD=1` makes a normal harness walk
+  log its pad (`[PADREC] <poll> <mask>`, and `[PADREC] loaded <poll>`). Another character or stage: record a walk (`battle_test.py run --char X --stage N ...` with
+  `PSPRECOMP_TEST_PAD_RECORD=1`), then `tools/walk_extract.py run_30.log walk.txt` and pass `--direct walk.txt`.
+- The pad filter is the one in `framerate.cpp` (`jecht_grid_filter` calls `dissidia_walk_filter` first), and the save events are two counters in
+  `psp_hle_utility.cpp` (`g_savedata_list_opened`, `g_savedata_completed`).
 
 ## Finding a stat the HUD shows (BRV, HP...) in guest RAM, and what keeps a test fight alive
 

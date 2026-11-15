@@ -155,7 +155,8 @@ bool fmt_for_internal(GLenum ifmt, FmtInfo* out);
 // object tables (names are indices; 0 is "none")
 bool core_init(SDL_Window* w, bool vsync, std::string* err);
 void core_shutdown();
-bool rt_set_scene(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols);   // PSPRECOMP_VK_RT ray-query scene (psp_rt.h)
+bool rt_set_scene(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols,
+                 const float* st_xyz, uint32_t st_count, const uint32_t* st_cols, uint64_t st_version);   // PSPRECOMP_VK_RT ray-query scene (psp_rt.h)
 bool rt_available();
 void core_set_hdr(bool on);
 bool core_hdr_supported();
