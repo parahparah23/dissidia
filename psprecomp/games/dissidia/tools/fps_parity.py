@@ -599,7 +599,7 @@ def main(argv):
     p.add_argument('--max-actions', dest='max_actions', type=int, default=0, help='only the first N actions (quick checks)')
     p.add_argument('--jecht-combos', dest='jecht_combos', action='store_true',
                    help='also run the Jecht combo window test (tools/combo_timing.py combos) after the parity games; off by default')
-    p.add_argument('--combo-rates', dest='combo_rates', default='', help='rates for --jecht-combos (default: --rates)')
+    p.add_argument('--combo-rates', dest='combo_rates', default='', help='rates for --jecht-combos (default: --rates, i.e. every rate 30..240)')
     p.add_argument('--moves-only', dest='moves_only', action='store_true', help='only the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--no-moves', dest='no_moves', action='store_true', help='leave out the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--variants', default='plain,mash')
@@ -665,7 +665,7 @@ def main(argv):
         crates = [int(x) for x in (a.combo_rates or a.rates).split(',')]
         crates = [30] + [r for r in crates if r != 30]
         print('[fps_parity] Jecht combo windows at %s fps' % ','.join(map(str, crates)), file=sys.stderr)
-        crc = combo_timing.run_combos(os.path.abspath(a.work), crates, os.path.join(a.out, 'jecht_combos'))
+        crc = combo_timing.run_combos(os.path.abspath(a.work), crates, os.path.join(a.out, 'jecht_combos'), jobs=a.jobs)
         with open(os.path.join(a.out, 'summary.txt'), 'a') as f:
             f.write('\nJecht combo windows (jecht_combos/combos.txt): %s\n' % ('PASS' if crc == 0 else 'FAIL'))
         rc = rc or crc

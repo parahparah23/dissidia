@@ -14,7 +14,7 @@ after the last move started and log which script ids follow. A window is the set
 at 30, 60 and 120 fps (at 30 fps the edges can only fall on update boundaries, 33.3 ms apart).
 
   combo_timing.py sweep   --work W --rates 30,120 --prefix 'CIRCLE@800=10001' --probe CIRCLE --from 150 --to 700   # one transition
-  combo_timing.py combos  --work W --rates 30,60,120                                                              # every wiki combo
+  combo_timing.py combos  --work W [--rates 30,60,...,240] [--jobs 4]                                             # every wiki combo, every rate
                                                                                                     # (exit 1 when a window differs)
 Boot: by default the recorded Quick Battle walk is replayed inside the game (`--direct`, tests/replays/quick_battle_walk.txt) with the
 fighter swapped in (PSPRECOMP_TEST_CHAR_SWAP, runtime/direct_battle.cpp): ~35 s to the fight instead of the ~3 min picture walk
@@ -257,16 +257,24 @@ def windows(rows):
     return res
 
 
-def run_rates(work, rates, out, fn, char='jecht', ff_menus=0, attempts=3, direct=True):
-    """boot one session per rate (in parallel), run fn(session) in a thread each, return {rate: result}. A session whose display was killed
-    (this host: low memory, other sessions' cleanups) is started again from the menus, up to `attempts` times."""
+RATES = [30, 60, 90, 120, 150, 180, 210, 240]   # every rate the settings offer (framerate.cpp k_rates)
+
+
+def run_rates(work, rates, out, fn, char='jecht', ff_menus=0, attempts=3, direct=True, jobs=0):
+    """boot one session per rate (at most `jobs` at once, 0 = all), run fn(session) in a thread each, return {rate: result}. A session
+    whose boot failed (display killed, the battle never started) is started again, up to `attempts` times."""
     results, errs = {}, {}
+    gate = threading.Semaphore(jobs if jobs > 0 else len(rates))
 
     def go(r):
+        with gate:
+            go1(r)
+
+    def go1(r):
         for attempt in range(attempts):
             s = Session(work, r, os.path.join(out, 'r%d' % r if attempt == 0 else 'r%d_try%d' % (r, attempt + 1)), char, ff_menus, direct)
             if attempt == 0 and r != rates[0]:
-                time.sleep(3 * rates.index(r))             # two games started in the same second can pick the same X display
+                time.sleep(3 * (rates.index(r) % max(1, jobs or len(rates))))   # two games started in the same second can pick the same X display
             s.start()
             s.ready.wait()
             try:
@@ -378,11 +386,11 @@ def verdict(res, rates, tol=34.0):
     return bad
 
 
-def run_combos(work, rates, out, char='jecht', direct=True, ff_menus=0, tol=34.0):
+def run_combos(work, rates, out, char='jecht', direct=True, ff_menus=0, tol=34.0, jobs=0):
     """the `combos` test: report + verdict files in out, returns 0 (all windows the same as at 30 fps) or 1"""
     os.makedirs(out, exist_ok=True)
     t0 = time.time()
-    res = run_rates(work, rates, out, combos_run, char, ff_menus, direct=direct)
+    res = run_rates(work, rates, out, combos_run, char, ff_menus, direct=direct, jobs=jobs)
     bad = verdict(res, rates, tol)
     text = report(res, rates) + '\n\n' + ('PASS: every chain window the same as at %d fps (within %.0f ms)' % (rates[0], tol) if not bad else
                                           'FAIL:\n' + '\n'.join('  %s, %d fps: %s' % b for b in bad)) + '\ntook %.0f s\n' % (time.time() - t0)
@@ -412,7 +420,8 @@ def main(argv):
     p = sub.add_parser('combos')
     p.add_argument('--work', required=True)
     p.add_argument('--out', default='/tmp/combo_timing')
-    p.add_argument('--rates', default='30,60,120')
+    p.add_argument('--rates', default=','.join(map(str, RATES)), help='default: every rate the settings offer, 30..240')
+    p.add_argument('--jobs', type=int, default=4, help='games at once (default 4)')
     p.add_argument('--char', default='jecht')
     p.add_argument('--ff-menus', type=int, default=0)
     p.add_argument('--tol', type=float, default=34.0, help='ms a window edge may differ from 30 fps (default 34: one 30 fps update)')
@@ -426,7 +435,7 @@ def main(argv):
         rates = [int(x) for x in a.rates.split(',')]
         if 30 in rates:
             rates = [30] + [r for r in rates if r != 30]
-        return run_combos(work, rates, out, a.char, not a.menus, a.ff_menus, a.tol)
+        return run_combos(work, rates, out, a.char, not a.menus, a.ff_menus, a.tol, a.jobs)
     work, out = os.path.abspath(os.path.expanduser(a.work)), os.path.abspath(a.out)
     rates = [int(x) for x in a.rates.split(',')]
     prefix = [parse_step(x) for x in a.prefix.split(',')] if a.prefix else []
