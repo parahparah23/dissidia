@@ -38,6 +38,7 @@ How a run works
 Needs what battle_test.py needs (Xvfb, a work folder with a save that has Quick Battle unlocked) and a runtime built with this
 branch's test hooks. Runs are long: ~3-6 min per character and rate on a busy 20-core box; --jobs N runs N games at once."""
 import argparse
+import bisect
 import json
 import math
 import os
@@ -196,6 +197,8 @@ def run_one(a, cid, rate, out, tag=None):
                     only = set(int(x) for x in a.actions.split(',')) if a.actions else None
                     if a.max_actions:
                         acts = acts[:a.max_actions]
+                    if a.moves_only:
+                        acts = []
                     with open(batch + '.tmp', 'w') as f:
                         f.write('\n'.join(trial_lines(acts, a.variants.split(','), only, moves=not a.no_moves)) + '\n')
                     os.replace(batch + '.tmp', batch)
@@ -273,7 +276,8 @@ class Trial:
         self.result = None         # 'started' / 'NOT started' / ...
         self.end = None            # gt of the E mark
         self.idle = None           # gt the player was idle again (the next waitidle), or None on a timeout
-        self.samples = []          # (gt, pscr, pcur, pmt, px, py, pz, dscr, dcur, dx, dy, dz)
+        self.samples = []          # on the 30 Hz lattice: (gt, pscr, pcur, pmt, px, py, pz, dscr, dcur, dx, dy, dz)
+        self.every = []            # every update (same tuples): paths are aligned by whole updates
         self.hits = []             # (gt, atkp, react, dmg, by)
         self.scr = []              # (gt, new script) of the player, every update
 
@@ -290,7 +294,7 @@ def keyed(trials):
 
 def parse(path):
     trials, cur = [], None
-    rx_par = re.compile(r'^\[PAR\] (\d+) \| (.*?) \| (.*?) \| (\d+) (\d+)')
+    rx_par = re.compile(r'^\[PAR\] ([\d.]+)(~?) \| (.*?) \| (.*?) \| (\d+) (\d+)')
     pending_idle = None
     with open(path, errors='replace') as f:
         for l in f:
@@ -300,11 +304,14 @@ def parse(path):
                 m = rx_par.match(l)
                 if not m:
                     continue
-                p, d = m.group(2).split(), m.group(3).split()
+                p, d = m.group(3).split(), m.group(4).split()
                 if len(p) < 6 or len(d) < 6:
                     continue
-                cur.samples.append((int(m.group(1)), int(p[0]), int(p[1]), float(p[2]), float(p[3]), float(p[4]), float(p[5]),
-                                    int(d[0]), int(d[1]), float(d[3]), float(d[4]), float(d[5])))
+                smp = (float(m.group(1)), int(p[0]), int(p[1]), float(p[2]), float(p[3]), float(p[4]), float(p[5]),
+                       int(d[0]), int(d[1]), float(d[3]), float(d[4]), float(d[5]))
+                cur.every.append(smp)
+                if not m.group(2):                          # '~' marks an update between two 30 Hz frames
+                    cur.samples.append(smp)
             elif l.startswith('[PARHIT] '):
                 if cur is None:
                     continue
@@ -356,9 +363,10 @@ def segments(seq):
     return out
 
 
-def compare_trials(base, other, a):
-    """reasons why `other` does not play like `base` (both Trial), [] = the same"""
+def compare_trials(base, other, a, info=None):
+    """reasons why `other` does not play like `base` (both Trial), [] = the same. `info` (a list) gets notes that are not failures."""
     why = []
+    info = [] if info is None else info
     if base.result != other.result:
         return ['start: %s vs %s at 30 fps' % (other.result, base.result)]
     if base.result != 'started':
@@ -403,18 +411,41 @@ def compare_trials(base, other, a):
             if abs(x[3] - y[3]) > max(5, a.dmg_tol * abs(x[3])):   # HP damage = the attacker's bravery, which varies a little between runs
                 why.append('hit %d (attack %d) damage %d vs %d at 30 fps' % (i + 1, x[1], y[3], x[3]))
                 break
-    # paths
+    # paths: judged at the best alignment within +-a.shift 30 Hz frames. A move starts at the end of the first update after it was asked
+    # for: 33 ms after the press at 30 fps, 17 ms at 60, 8 ms at 120, so a high rate can lead by up to a frame (a phase, reported as info)
     for label, cols in (('player', (4, 5, 6)), ('dummy', (9, 10, 11))):
-        gap, at_k, travel = 0.0, 0, 0.0
-        for k in range(n):
-            d = math.sqrt(sum((sb[k][c] - so[k][c]) ** 2 for c in cols))
-            if d > gap:
-                gap, at_k = d, k
-            if k:
-                travel += math.sqrt(sum((sb[k][c] - sb[k - 1][c]) ** 2 for c in cols))
+        travel = sum(math.sqrt(sum((sb[k][c] - sb[k - 1][c]) ** 2 for c in cols)) for k in range(1, n))
+        ev = [x for x in other.every if x[0] >= to - FRAME_MS * a.shift - 1] or so
+        times = [x[0] for x in ev]
+        step = min((b - a_) for a_, b in zip(times, times[1:]) if b - a_ > 0.5) if len(times) > 2 else FRAME_MS
+        m_ = int(round(a.shift * FRAME_MS / step))
+        best = None
+        for j in range(-m_, m_ + 1):
+            sh_ms = j * step
+            gap, at_k = 0.0, 0
+            for k in range(n):
+                t = so[0][0] + (sb[k][0] - sb[0][0]) + sh_ms
+                i = bisect.bisect_left(times, t - step / 2)
+                if i >= len(times) or abs(times[i] - t) > step / 2:
+                    continue
+                d = math.sqrt(sum((sb[k][c] - ev[i][c]) ** 2 for c in cols))
+                if d > gap:
+                    gap, at_k = d, k
+            if best is None or gap < best[0] - 1e-6 or (abs(gap - best[0]) <= 1e-6 and abs(j) < abs(best[2])):
+                best = (gap, at_k, j)
+        gap, at_k, j = best
+        sh = -1 if j < 0 else (1 if j > 0 else 0)
+        shift_ms = j * step
         lim = max(a.pos_tol, a.pos_rel * travel)
         if gap > lim:
-            why.append('%s path %.2f m off at %.0f ms into the move (moved %.2f m at 30 fps; limit %.2f m)' % (label, gap, at_k * FRAME_MS, travel, lim))
+            why.append('%s path %.2f m off at %.0f ms into the move (moved %.2f m at 30 fps; limit %.2f m; best alignment %+.0f ms)' % (
+                label, gap, at_k * FRAME_MS, travel, lim, shift_ms))
+        elif sh and label == 'player':
+            info.append('player %.0f ms %s' % (abs(shift_ms), 'ahead' if sh < 0 else 'behind'))
+        # peak height (jumps, launches): a lower or higher arc is a difference even when the path stays within the tolerance
+        hb, ho = max(s[cols[1]] for s in sb[:n]), max(s[cols[1]] for s in so[:n])
+        if abs(hb - ho) > a.height_tol and max(hb, ho) - min(sb[0][cols[1]], so[0][cols[1]]) > 0.5:
+            why.append('%s peak height %.2f m vs %.2f m at 30 fps' % (label, ho, hb))
     # length
     if base.idle and other.idle and base.idle > 0 and other.idle > 0:
         lb, lo = base.idle - tb, other.idle - to
@@ -446,7 +477,7 @@ def compare_char(a, cid, logs):
     started = sum(1 for t in base.values() if t.result == 'started')
     lines.append('%d trials at 30 fps (%d actions started)' % (len(base), started))
     for tag in sorted((t for t in parsed if t not in ('30', '30b')), key=int):
-        fails, nd, n = [], [], 0
+        fails, nd, n, ahead = [], [], 0, 0
         seen = keyed(parsed[tag])
         for key, b in base.items():
             o = seen.get(key)
@@ -454,12 +485,14 @@ def compare_char(a, cid, logs):
                 fails.append((key, ['missing at this rate (run cut short?)']))
                 continue
             n += 1
-            why = compare_trials(b, o, a)
+            inf = []
+            why = compare_trials(b, o, a, inf)
+            ahead += any('ahead' in x for x in inf)
             if why:
                 (nd if key in nondet else fails).append((key, why))
         res[tag] = {'trials': n, 'fail': [[k[0], k[1], w] for k, w in fails], 'nondet': [[k[0], k[1], w] for k, w in nd]}
         lines.append('')
-        lines.append('== %s fps vs 30 fps: %d trials, %d FAIL, %d nondeterministic' % (tag, n, len(fails), len(nd)))
+        lines.append('== %s fps vs 30 fps: %d trials, %d FAIL, %d nondeterministic; the player ran ahead (up to a frame: phase, not judged) in %d trials' % (tag, n, len(fails), len(nd), ahead))
         for (aid, v, occ), why in fails:
             b = base[(aid, v, occ)]
             scr = next((s[1] for s in b.samples if b.start and s[0] >= b.start), '?')
@@ -561,6 +594,7 @@ def main(argv):
     p.add_argument('--jobs', type=int, default=4)
     p.add_argument('--actions', default='', help='only these action ids (default: every action the fighter has)')
     p.add_argument('--max-actions', dest='max_actions', type=int, default=0, help='only the first N actions (quick checks)')
+    p.add_argument('--moves-only', dest='moves_only', action='store_true', help='only the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--no-moves', dest='no_moves', action='store_true', help='leave out the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--variants', default='plain,mash')
     p.add_argument('--repeat-base', dest='repeat_base', action='store_true', help='a second 30 fps run: trials that differ between two 30 fps runs are NONDETERMINISTIC')
@@ -586,6 +620,8 @@ def main(argv):
         x.add_argument('--frame-tol', dest='frame_tol', type=int, default=1, help='30 Hz frames a change / hit may be off (default 1)')
         x.add_argument('--pos-tol', dest='pos_tol', type=float, default=0.25, help='metres a path may be off (default 0.25)')
         x.add_argument('--pos-rel', dest='pos_rel', type=float, default=0.05, help='or this share of the distance covered (default 0.05)')
+        x.add_argument('--shift', type=int, default=1, help='30 Hz frames a path may be shifted in time (phase) before it is compared (default 1)')
+        x.add_argument('--height-tol', dest='height_tol', type=float, default=0.10, help='metres a peak height may differ (default 0.10)')
         x.add_argument('--dmg-tol', dest='dmg_tol', type=float, default=0.03, help='share an HP hit\'s damage may differ (default 0.03; two 30 fps runs differ by up to 2%%)')
     a = ap.parse_args(argv)
     if a.what == 'chars':

@@ -678,9 +678,9 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         else if (e.kind == 3) { std::fprintf(stderr, "[TEST] quit at gt=%.0f ms\n", g_gt_ms); g_should_exit.store(true); }
     }
     psp_ctrl_set_script(true, g_test_buttons, g_test_analog);
-    if (g_parity && lattice) {   // one sample per 30 Hz frame: what both fighters look like at this game moment
+    if (g_parity) {   // a sample every update (fps_parity.py compares on the 30 Hz lattice and aligns paths by whole updates): both fighters at this game moment
         const uint32_t pa = test_player(), da = test_fighter(1);
-        char buf[512]; int n = std::snprintf(buf, sizeof buf, "[PAR] %.0f", g_gt_ms);
+        char buf[512]; int n = std::snprintf(buf, sizeof buf, "[PAR] %.2f%s", g_gt_ms, lattice ? "" : "~");
         for (uint32_t a : {pa, da}) {
             if (!a || !ok(a)) { n += std::snprintf(buf + n, sizeof buf - n, " | -"); continue; }
             n += std::snprintf(buf + n, sizeof buf - n, " | %d %d %.2f %.3f %.3f %.3f %.3f %.3f", static_cast<int>(static_cast<int16_t>(r32(a + 0x540u) & 0xFFFFu)),
