@@ -72,7 +72,7 @@ void ge_shader_set_alpha_override(float a);
 
 /// Per-draw UV remap applied after normalisation (FBO-as-texture):
 /// s' = s*sx, t' = flip ? 1 - t*sy : t. Identity is (1, 1, false).
-void ge_shader_set_tex_remap(float sx, float sy, bool flip);
+void ge_shader_set_tex_remap(float sx, float sy, bool flip, float flip_off = 0.0f);   // flip_off: subtracted after the flip (a tall render target's band)
 
 /// Get the shader program ID (for external uniform queries).
 GLuint ge_shader_get_program();

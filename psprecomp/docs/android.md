@@ -89,6 +89,22 @@ Not yet run: the GitHub workflow, and an update against a real release.
   **The right (camera) stick** is always floating: touch any empty part of the **right half** of the screen and it starts right there (drag to turn the camera; it disappears when you let go). A floating left stick only starts on the **left half**, so the two sticks never fight over a touch. A control under your finger (a face button, L / R, ...) always wins over a stick.
   **Reset** restores the default layout, **Done** saves. The layout is `touch_layout.txt` in the game folder (one line per control; positions are
   fractions of the window, so it survives a change of screen size).
+- **Tall / square screens** (a folding phone's inner screen; any window whose width is at most about 1.15 x its height): while the touch
+  controls are not Off and **Settings > Display > Tall Screen** is On (the row is shown only on such a screen; saved as `tall_screen`,
+  `PSPRECOMP_TALL_SCREEN`; Off gives the 16:9 picture in the middle and the normal touch layout), the picture **fills the whole screen**, like Ultrawide does for wide screens but vertically. In battle (from the
+  moment the fight runs until it is over: summons and the pause menu included) the game's own 480x272 picture is in the middle of the
+  screen, full width, and the 3D scene goes on above and below it; the HUD is moved to the edges: the portraits, HP / Bravery bars and
+  gauges to the bottom edge, the buff / EX / assist icons, multipliers and move names to the top (under L / R); the lock-on ring stays
+  on the opponent. The game's glow is carried into the extra rows (mirrored from the picture's edge) so they are not darker, and
+  full-screen darkening (summons, EX moves) covers the whole screen. Menus and other 2D screens are at the top of the screen (black
+  below); the Settings screen itself fills the whole screen (its lists grow taller). The controls get their own layout, like a controller: L, Select, menu, Start and R along the top edge; the d-pad and the stick
+  side by side on the left and the face buttons on the right, just above the HUD strip at the bottom. This layout is edited and saved
+  separately (`touch_layout_tall.txt`; Reset in the editor brings back the defaults): folding or unfolding the phone switches between the
+  two layouts. With Touch Controls set to Off the picture stays 16:9 in the middle; `PSPRECOMP_TALL_FILL=0` keeps the tall layout but
+  shows only the 480x272 picture; `PSPRECOMP_TALL_HUD=0` leaves the HUD on the centred picture (needed by `battle_test.py`, which finds
+  the fight by the HUD in the 480x272 capture). Soft Focus is skipped on these screens. On any screen the controls are sized from the
+  height but never from more than 0.625 x the width, so they do not grow out of proportion on 4:3 tablets (16:10 and wider screens are
+  unchanged).
 - **Frame rate / render scale**: Settings > Display (frame rate) and Settings > Graphics (render scale). 30 fps is the PSP's own rate; the 120 fps mode needs a fast device. Rooted devices can set the
   CPU governor to `performance` for steadier clocks.
 - **GPU drivers (Adreno phones)**: the Settings > Drivers tab (shown only on devices that can use it: an Adreno GPU). **GPU Driver** picks the Vulkan driver (System default, or a downloaded

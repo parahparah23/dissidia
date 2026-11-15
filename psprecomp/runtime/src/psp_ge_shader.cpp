@@ -187,9 +187,9 @@ void ge_shader_set_uniforms(const GeState& state) {
     }
 }
 
-void ge_shader_set_tex_remap(float sx, float sy, bool flip) {
+void ge_shader_set_tex_remap(float sx, float sy, bool flip, float flip_off) {
     if (!g_program) return;
-    u4f(g_uniforms.u_tex_remap, sx, sy, flip ? 1.0f : 0.0f, 0.0f);
+    u4f(g_uniforms.u_tex_remap, sx, sy, flip ? 1.0f : 0.0f, flip_off);
 }
 
 static void u1f(GLint loc, float v) { if (u_changed(loc, &v, sizeof v)) glUniform1f(loc, v); }

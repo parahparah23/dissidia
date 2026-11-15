@@ -59,6 +59,16 @@ void ge_transform_vertices(
 /// PSP's 0..480 stays on the middle of it: u' = u * u_scale + u_off (1, 0 = off).
 void ge_set_wide(float wx, bool cover, bool extend_fb);
 void ge_set_fb_u(float u_scale, float u_off, float shader_remap);
+// Tall render target (taller than 272 PSP pixels, see g_tall_px in psp_ge_draw.cpp; the buffer's viewport is its whole height):
+// a 2D draw's NDC y becomes y * through_s + through_t, which puts it in the PSP's band (one that covers the whole screen untextured, a
+// fade, is stretched over the whole height instead); a 3D draw's clip y becomes y * xf_s + xf_t * w (draw_tall_y). 1, 0, 1, 0 = normal.
+void ge_set_tall(float through_s, float through_t, float xf_s, float xf_t);
+// ... and the game's HUD zones (ge_draw_set_hud_zones): a 2D draw entirely in the top `top_rows` PSP rows uses through_t = top_t, one
+// entirely in the bottom `bottom_rows` rows uses bottom_t. 0 rows = no zone.
+void ge_set_tall_hud(int top_rows, float top_t, int bottom_rows, float bottom_t);
+// ... and whether a textured 2D draw that covers the whole screen (not a render-target read) is stretched over the whole height too
+// (in battle: the darkening a summon or a super move lays over the picture), not only an untextured one.
+void ge_set_tall_cover_textured(bool on);
 bool ge_soft_focus();            // PSPRECOMP_SOFT_FOCUS / settings 'soft_focus' (default on)
 void ge_set_soft_focus(bool on);
 

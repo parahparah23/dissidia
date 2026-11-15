@@ -176,7 +176,7 @@ void main() {
 
     if (u_texture_enable) {
         vec2 tc = v_texcoord * u_tex_remap.xy;
-        if (u_tex_remap.z > 0.5) tc.y = 1.0 - tc.y;
+        if (u_tex_remap.z > 0.5) tc.y = 1.0 - tc.y - u_tex_remap.w;
         vec4 tex = texture(u_texture, tc);
 
         // Texture function (GE tex func), PPSSPP semantics: the RGBA
