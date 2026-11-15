@@ -1144,7 +1144,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.can_dec = m.can_inc = usable;
             m.help = !psp_rt_available() ? std::string("Effect reflections: unavailable\n") + psp_rt_unavailable_reason()
                    : psp_rt_refl_quality() < 2 ? "Effect reflections: needs Ray-Traced Reflections set to Medium or High (Low reflects solid geometry only)."
-                   : "Effect reflections (PSPRECOMP_RT_REFL_FX)\nSpells, beams and other glowing effects (Watera, Thundaga, the stage's rails) also show in the ray-traced floor reflection, as light added over it. Costs some GPU time while effects are on screen. On by default. Takes effect at once. Saved.";
+                   : "Effect reflections (PSPRECOMP_RT_REFL_FX)\nSpells, beams and other glowing effects (Watera, Thundaga, the stage's rails) also show in the ray-traced floor reflection, as light added over it. Warning: the cost grows with the number of effects on screen, so it can lag when many spells or effects happen at once (an EX Burst, several projectiles, assists); turn it off if that happens. On by default. Takes effect at once. Saved.";
             break;
         }
         case ROW_ANISO: {
@@ -1314,7 +1314,7 @@ bool cost_of(Row r, std::string& out) {
     case ROW_RT: return lv(psp_rt_available() && psp_rt_quality() > 0 ? psp_rt_quality() + 1 : 0);
     case ROW_RT_REFL: return lv(psp_rt_available() && psp_rt_refl_quality() > 0 ? psp_rt_refl_quality() + 1 : 0);
     case ROW_RT_SOFT: return lv(psp_rt_available() && psp_rt_quality() >= 2 ? 1 : 0);
-    case ROW_RT_REFL_FX: return lv(psp_rt_available() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled() ? 1 : 0);
+    case ROW_RT_REFL_FX: return lv(psp_rt_available() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled() ? 3 : 0);   // spells cost the RP6 ~10 fps
     case ROW_ANISO: return lv(ge_texture_aniso() > 1 ? 1 : 0);
     default: return false;
     }
