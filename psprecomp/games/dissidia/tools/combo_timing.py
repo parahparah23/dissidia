@@ -365,6 +365,11 @@ def verdict(res, rates, tol=34.0):
     base_rate = rates[0]
     if base_rate not in res:
         return [('*', base_rate, 'no result at the reference rate')]
+    for r in rates:                                        # a sweep whose combo steps often did not start says nothing: the harness failed there
+        for name, rows in res.get(r, {}).items():
+            lost = sum(1 for x in rows if not x[2] or x[1] is None)
+            if rows and lost > 0.25 * len(rows):
+                bad.append((name, r, '%d of %d trials could not be played (a combo step before the probe did not start): harness problem' % (lost, len(rows))))
     for name, rows in res[base_rate].items():
         w0 = {k: v for k, v in windows(rows).items() if k is not None}
         if not w0:
