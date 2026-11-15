@@ -3948,7 +3948,7 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
             glCompileShader(sh);
             GLint ok = 0;
             glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
-            if (!ok) { glDeleteShader(sh); return GLuint(0); }
+            if (!ok) { char log[512] = {}; glGetShaderInfoLog(sh, sizeof log, nullptr, log); std::fprintf(stderr, "[OVERLAY] alpha shader compile failed: %s\n", log); glDeleteShader(sh); return GLuint(0); }
             return sh;
         };
         GLuint vs = compile(GL_VERTEX_SHADER, vs_body), fs = compile(GL_FRAGMENT_SHADER, fs_body);
@@ -3960,7 +3960,7 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
         glDeleteShader(vs); glDeleteShader(fs);
         GLint ok = 0;
         glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-        if (!ok) { glDeleteProgram(prog); prog = 0; failed = true; return; }
+        if (!ok) { { char log[1024] = {}; glGetProgramInfoLog(prog, sizeof log, nullptr, log); std::fprintf(stderr, "[OVERLAY] alpha program link failed: %s\n", log); } glDeleteProgram(prog); prog = 0; failed = true; return; }
         u_tex = glGetUniformLocation(prog, "u_tex");
         GLint prev_vao = 0, prev_abo = 0;
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
