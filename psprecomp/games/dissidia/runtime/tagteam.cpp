@@ -754,10 +754,19 @@ uint32_t trans(uint32_t v) {
 // them the hit messages. An extra is neither, so the victim of its attacks reacted but nobody took damage. The extra therefore takes the place of
 // its slot fighter's assist pointer (the retail assist actor is left alone otherwise; PSPRECOMP_TAGTEAM_KEEPASSIST=1 keeps the old behaviour).
 void fix_assist() {
-    if (!std::getenv("PSPRECOMP_TAGTEAM_SWAPASSIST")) return;   // old behaviour (the extra replaces the slot fighter's assist): the retail assist then stops working and the extra is treated as an invisible assist; off by default
+    // The extra takes the assist place of its slot fighter ONLY when that fighter has no real assist: a real assist must keep working (it needs the pointer
+    // for the call-in, drawing and its own validity checks; an extra standing there becomes an invisible assist). PSPRECOMP_TAGTEAM_SWAPASSIST=1 forces the
+    // old behaviour (extras deal damage, the real assist is lost); PSPRECOMP_TAGTEAM_KEEPASSIST=1 never touches it.
+    static const bool force = std::getenv("PSPRECOMP_TAGTEAM_SWAPASSIST") != nullptr;
+    if (std::getenv("PSPRECOMP_TAGTEAM_KEEPASSIST")) return;
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
         if (!e.started || !ok(e.actor, 0x12D0) || !ok(e.slot_actor, 0x12D0)) continue;
+        const uint32_t cur = rd(e.slot_actor + 0x1108u);
+        if (cur != 0 && cur != e.actor && !force) {   // a real assist stands there (or another extra): leave it
+            static bool said = false; if (g_log && !said) { said = true; std::fprintf(stderr, "[TAGTEAM] slot %08X has a real assist %08X: extras keep their hands off it (no damage dealt by extras on this side)\n", e.slot_actor, cur); }
+            continue;
+        }
         wr(e.slot_actor + 0x1108u, e.actor);
         wr(e.actor + 0x1108u, 0);
     }
@@ -1366,6 +1375,14 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     const uint32_t m = static_cast<uint32_t>(ctx->r[4]);
     g_orig_afd424(rdram, ctx);
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_AFDDUMP")) {
+        static bool once = false;
+        if (!once && ok(m, 0x100)) { once = true;
+            std::fprintf(stderr, "[AFDDUMP] kind table 08AE7BE0:"); for (uint32_t k = 0; k < 46; k++) std::fprintf(stderr, " %u:%08X", k, rd(0x08AE7BE0u + 4u * k)); std::fprintf(stderr, "\n");
+            std::fprintf(stderr, "[AFDDUMP] module %08X words:", m); for (uint32_t o = 0; o < 0x120; o += 4) std::fprintf(stderr, " %X:%08X", o, rd(m + o)); std::fprintf(stderr, "\n");
+            for (uint32_t n = rd(m + 208), c = 0; n && ok(n, 0x20) && c < 12; n = rd(n + 8), c++) std::fprintf(stderr, "[AFDDUMP] list node %08X: %08X %08X %08X %08X vt+8: %08X\n", n, rd(n), rd(n + 4), rd(n + 8), rd(n + 12), ok(rd(n + 4), 0x20) ? rd(rd(n + 4) + 8) : 0u);
+        }
+    }
     if (!g_nextra || !ok(m, 0x100)) return;
     const uint32_t slot = rd(m);
     static const int mode = std::getenv("PSPRECOMP_TAGTEAM_AFDMODE") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_AFDMODE")) : 0;   // 0 off (no effect found), 1 module clone, 2 second assist call
@@ -1374,6 +1391,21 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
         if (!e.started || e.slot_actor != slot || !alive(e.actor) || !ok(e.actor, 0x12D0)) continue;
+        if (mode >= 3) {   // modes: 3 kind 0 + pointer shown, 4 every frame, 5 kind 1 no pointer, 6 kind 1 + pointer every frame, 7 kind 1 no pointer every frame (flag-gated otherwise). The extra visits the loop as a second assist: only when its flag word says "hit" (the loop reads actor+0x380 & 0x200), with the slot's assist pointer showing it during the call only
+            const uint32_t fl = rd(e.actor + 0x380u);
+            static uint32_t lastfl[8] = {};
+            if (g_log && ((fl ^ lastfl[i]) & 0x600u)) std::fprintf(stderr, "[AFD] t=%.2fs extra %08X flags %08X -> %08X\n", dissidia_battle_age() / 60.0f, e.actor, lastfl[i], fl);
+            lastfl[i] = fl;
+            if (mode == 4 || mode == 6 || (fl & 0x200u)) {
+                const uint32_t scratch = static_cast<uint32_t>(ctx->r[29]) - 128u, real = rd(slot + 0x1108u);
+                const uint32_t kind = (mode >= 5) ? 1u : 0u;
+                wr(scratch, e.actor); if (mode != 5 && mode != 7) wr(slot + 0x1108u, e.actor);
+                if (g_log) std::fprintf(stderr, "[AFD] t=%.2fs call AFD170(m %08X, 0, &%08X) slot %08X\n", dissidia_battle_age() / 60.0f, m, e.actor, slot);
+                call(0x08AFD170u, m, kind, scratch);
+                wr(slot + 0x1108u, real);
+            }
+            continue;
+        }
         if (mode == 2) {   // the extra as the module's second assist: FUN_08AFD170(m, 0, &actor)
             const uint32_t scratch = static_cast<uint32_t>(ctx->r[29]) - 128u;
             wr(scratch, e.actor);
