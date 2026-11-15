@@ -64,9 +64,8 @@ Ctl make(const char* id, Type t, float x, float y, std::vector<Btn> b = {}, int 
     return c;
 }
 // ---- window shape ----------------------------------------------------------------------------------------------------
-// Tall windows (a folding phone's inner screen, about square): the picture fills the width at the top of the window
-// (psp_touch_tall_layout, read by the presenter) and the controls get their own layout in the space under it. The control area
-// starts under a full-width 480x272 picture (a widescreen picture is shorter, which only leaves more room).
+// Tall windows (a folding phone's inner screen, about square): the PSP's 480x272 picture fills the width at the top of the window
+// (psp_touch_tall_layout, read by the presenter; the 3D scene goes on below it) and the controls get their own layout under that band.
 bool tall_shape(int w, int h) { return w > 0 && h > 0 && (float)h - (float)w * 272.0f / 480.0f >= 0.3f * (float)w; }
 float picture_bottom(float w) { return w * 272.0f / 480.0f; }
 // The size unit of every control (and of the layout editor). Wide windows: the height, but no more than 0.625 x the width, so the

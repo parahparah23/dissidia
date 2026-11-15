@@ -63,6 +63,7 @@ struct GeTarget {
     uint64_t last_use = 0;     // LRU stamp (monotonic counter)
     int rs = 1;                // this target is (w480*rs) x (272*rs): g_rs for the buffers shown on screen, 1 for the others
     int w480 = 480;            // width in PSP pixels: 480, or wider for a displayed buffer when widescreen is on
+    int h272 = 272;            // height in PSP pixels: 272, or taller for a displayed buffer on a tall window (see g_tall_px)
     bool mip_dirty = true;     // drawn into since its mipmaps were last built (see ge_draw_find_target_texture)
 };
 
@@ -92,6 +93,13 @@ static bool wide_on() {
     return v != 0;
 }
 static int g_wide_px = 480;      // width of the displayed buffers, PSP pixels (even, 480..960)
+// Tall windows (a folding phone's inner screen, see psp_touch_tall_layout): the displayed buffers are taller than 272 so the
+// picture fills the window. The PSP's 480x272 picture keeps the TOP 272 rows of the buffer (the HUD, the menus and every 2D draw
+// stay there, above the touch controls); a 3D draw over the whole screen is given a projection that keeps that band exactly as
+// before and goes on below it (more of the scene under the band); clears cover the whole buffer; a 2D draw that covers the whole
+// screen with no texture (a fade, a flash) is stretched over the whole height. PSPRECOMP_TALL_FILL=0 turns it off (the picture
+// then stays 480x272 at the top of the window).
+static int g_tall_px = 272;      // height of the displayed buffers, PSP pixels (even, 272..960)
 static uint32_t g_main_keys[8];
 static int g_main_n = 0;
 static const bool g_scale_all = [] { const char* e = std::getenv("PSPRECOMP_RENDER_SCALE_ALL"); return e && e[0] && e[0] != '0'; }();
@@ -122,6 +130,7 @@ static inline uint32_t ge_fb_key(uint32_t addr) {
 // into -- a feedback loop, logged once).
 static int cur_rs() { return (g_current_target >= 0 && g_targets[g_current_target].fbo) ? g_targets[g_current_target].rs : g_rs; }
 static int cur_w480() { return (g_current_target >= 0 && g_targets[g_current_target].fbo) ? g_targets[g_current_target].w480 : g_wide_px; }
+static int cur_h272() { return (g_current_target >= 0 && g_targets[g_current_target].fbo) ? g_targets[g_current_target].h272 : g_tall_px; }
 static void flush_batch();
 static void delete_scratch();
 // One scratch copy per target scale (the blur chain at 1x and the main picture at g_rs alternate every frame).
@@ -174,7 +183,7 @@ static GLuint feedback_snapshot(int* w, int* h) {
     if (!g_fb_snapshot_on.load()) return 0;
     flush_batch();
     const int rs = cur_rs();
-    const int W = cur_w480() * rs, H = 272 * rs;
+    const int W = cur_w480() * rs, H = cur_h272() * rs;
     ScratchEntry* se = nullptr;
     for (auto& e : g_scratch) if (e.tex && e.w == W && e.h == H) { se = &e; break; }
     if (!se) {
@@ -227,6 +236,7 @@ static void delete_scratch() {
 }
 
 static int g_fbtex_w480 = 480;   // width (PSP pixels) of the render target ge_draw_find_target_texture last returned
+static int g_fbtex_h272 = 272;   // ... and its height
 
 unsigned int ge_draw_find_target_texture(uint32_t key, int* w, int* h) {
     for (int i = 0; i < GE_MAX_TARGETS; ++i) {
@@ -237,6 +247,7 @@ unsigned int ge_draw_find_target_texture(uint32_t key, int* w, int* h) {
             if (!no_snap)
                 if (const GLuint t = feedback_snapshot(w, h)) {
                     g_fbtex_w480 = cur_w480();
+                    g_fbtex_h272 = cur_h272();
                     psp_prof::fb_snaps++;
                     if (w && h) psp_prof::fb_snap_px += uint64_t(*w) * uint64_t(*h);
                     return t;
@@ -251,8 +262,9 @@ unsigned int ge_draw_find_target_texture(uint32_t key, int* w, int* h) {
         }
         g_targets[i].last_use = ++g_target_clock;
         g_fbtex_w480 = g_targets[i].w480;
+        g_fbtex_h272 = g_targets[i].h272;
         if (w) *w = g_targets[i].w480 * g_targets[i].rs;
-        if (h) *h = 272 * g_targets[i].rs;
+        if (h) *h = g_targets[i].h272 * g_targets[i].rs;
         if (g_targets[i].rs > cur_rs() && g_fb_prefilter.load() && g_targets[i].mip_dirty) {   // mip chain for the down-scaling read
             flush_batch();
             glBindTexture(GL_TEXTURE_2D, g_targets[i].color_tex);
@@ -529,12 +541,16 @@ static int w480_of_fbo(GLuint fbo) {
     for (int i = 0; i < GE_MAX_TARGETS; ++i) if (g_targets[i].fbo == fbo || (g_targets[i].ab_fbo && g_targets[i].ab_fbo == fbo)) return g_targets[i].w480;
     return 480;
 }
+static int h272_of_fbo(GLuint fbo) {
+    for (int i = 0; i < GE_MAX_TARGETS; ++i) if (g_targets[i].fbo == fbo || (g_targets[i].ab_fbo && g_targets[i].ab_fbo == fbo)) return g_targets[i].h272;
+    return 272;
+}
 static void read_fbo_native(GLuint fbo, std::vector<uint8_t>& out, int* ow = nullptr, int* oh = nullptr) {
     const int n = rs_of_fbo(fbo);
-    const int fw = w480_of_fbo(fbo) * n, fh = 272 * n;
+    const int fw = w480_of_fbo(fbo) * n, fh = 272 * n;   // a tall buffer: its top 480x272 band (the PSP's picture)
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     std::vector<uint8_t> pixels(size_t(fw) * fh * 4);
-    glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glReadPixels(0, (h272_of_fbo(fbo) - 272) * n, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     static const bool full = std::getenv("PSPRECOMP_SHOT_FULL") != nullptr;
     if (n == 1 || full) {
         // Flip vertically (GL origin is bottom-left)
@@ -786,18 +802,19 @@ static int g_ab_dumped = 0;
 // Create one render target (FBO + RGBA8 color texture + Depth24 renderbuffer,
 // 480x272, NEAREST) for the given normalized key. Clears it to black. The
 // pool owns the GL objects; ge_draw_shutdown deletes them.
-static GeTarget make_target(uint32_t key, int rs, int w480) {
+static GeTarget make_target(uint32_t key, int rs, int w480, int h272 = 272) {
     if (!g_scene_inited) { g_scene_inited = true; g_scene_fp16 = psp_hdr_scene_live(); std::fprintf(stderr, "[DRAW] scene targets: %s\n", g_scene_fp16 ? "RGBA16F (HDR Scene)" : "RGBA8"); }
     GeTarget t;
     t.key = key;
     t.rs = rs;
     t.w480 = w480;
+    t.h272 = h272;
     glGenFramebuffers(1, &t.fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
 
     glGenTextures(1, &t.color_tex);
     glBindTexture(GL_TEXTURE_2D, t.color_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, scene_ifmt(), w480 * rs, 272 * rs, 0,
+    glTexImage2D(GL_TEXTURE_2D, 0, scene_ifmt(), w480 * rs, h272 * rs, 0,
                  GL_RGBA, scene_type(), nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -809,7 +826,7 @@ static GeTarget make_target(uint32_t key, int rs, int w480) {
     // Depth + 8-bit stencil: the GE stencil buffer is the framebuffer's alpha
     // channel (STENCILTEST / STENCILOP), emulated with a real GL stencil
     // buffer next to the colour alpha (see apply_gl_pipeline_impl).
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w480 * rs, 272 * rs);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w480 * rs, h272 * rs);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                               GL_RENDERBUFFER, t.depth_rb);
     if (g_ab) {
@@ -817,14 +834,14 @@ static GeTarget make_target(uint32_t key, int rs, int w480) {
         glBindFramebuffer(GL_FRAMEBUFFER, t.ab_fbo);
         glGenTextures(1, &t.ab_tex);
         glBindTexture(GL_TEXTURE_2D, t.ab_tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w480 * rs, 272 * rs, 0,
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w480 * rs, h272 * rs, 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.ab_tex, 0);
         glGenRenderbuffers(1, &t.ab_depth);
         glBindRenderbuffer(GL_RENDERBUFFER, t.ab_depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w480 * rs, 272 * rs);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w480 * rs, h272 * rs);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, t.ab_depth);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
@@ -863,14 +880,16 @@ static void mark_main_key(uint32_t key) {
     }
     for (int i = 0; i < GE_MAX_TARGETS; ++i) {
         GeTarget& t = g_targets[i];
-        if (!t.fbo || t.key != key || (t.rs == g_rs && t.w480 == g_wide_px)) continue;
+        if (!t.fbo || t.key != key || (t.rs == g_rs && t.w480 == g_wide_px && t.h272 == g_tall_px)) continue;
         flush_batch();
-        GeTarget n = make_target(key, g_rs, g_wide_px);
+        GeTarget n = make_target(key, g_rs, g_wide_px, g_tall_px);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, t.fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, n.fbo);
         const GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
         if (sc) glDisable(GL_SCISSOR_TEST);
-        glBlitFramebuffer(0, 0, t.w480 * t.rs, 272 * t.rs, 0, 0, n.w480 * n.rs, 272 * n.rs, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        // the PSP's 480x272 band (the top rows of a tall buffer) of the old buffer into the band of the new one
+        glBlitFramebuffer(0, (t.h272 - 272) * t.rs, t.w480 * t.rs, t.h272 * t.rs, 0, (n.h272 - 272) * n.rs, n.w480 * n.rs, n.h272 * n.rs,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (sc) glEnable(GL_SCISSOR_TEST);
         glDeleteFramebuffers(1, &t.fbo);
         glDeleteTextures(1, &t.color_tex);
@@ -914,7 +933,7 @@ static int acquire_target(uint32_t key) {
         }
     }
     const bool mainbuf = is_main_key(key);
-    g_targets[slot] = make_target(key, mainbuf ? g_rs : 1, mainbuf ? g_wide_px : 480);
+    g_targets[slot] = make_target(key, mainbuf ? g_rs : 1, mainbuf ? g_wide_px : 480, mainbuf ? g_tall_px : 272);
     std::fprintf(stderr, "[DRAW] FBO target created key=0x%06X slot=%d (%dx, %d px wide)\n",
                  key, slot, g_targets[slot].rs, g_targets[slot].w480);
     return slot;
@@ -1011,14 +1030,19 @@ static bool apply_gl_pipeline_impl(uint8_t* rdram, const GeState& state, int pri
     bool depth_reversed = false;
     if (!ge_vtype_through(state.vertex_type)) {
         const GeViewportDepth vp = compute_state_viewport_depth(state);
-        const int crs = cur_rs(), cw = cur_w480();
-        if (cw > 480 && vp.x <= 0 && vp.x + vp.w >= 480) gl_viewport(0, vp.y * crs, cw * crs, vp.h * crs);   // widescreen: whole width (x scaled by draw_wide_x)
-        else gl_viewport((vp.x + (cw - 480) / 2) * crs, vp.y * crs, vp.w * crs, vp.h * crs);                  // a partial viewport: shifted to the middle
+        const int crs = cur_rs(), cw = cur_w480(), ch = cur_h272();
+        // tall buffer: the PSP's rows are the top 272 (GL y up: shifted up by ch - 272); a whole-screen 3D draw covers the whole height
+        // (its projection is extended downwards by draw_tall_y)
+        const bool tall_full = ch > 272 && vp.y <= 0 && vp.y + vp.h >= 272;
+        const int vy = tall_full ? 0 : vp.y + (ch - 272), vh = tall_full ? ch : vp.h;
+        if (cw > 480 && vp.x <= 0 && vp.x + vp.w >= 480) gl_viewport(0, vy * crs, cw * crs, vh * crs);   // widescreen: whole width (x scaled by draw_wide_x)
+        else gl_viewport((vp.x + (cw - 480) / 2) * crs, vy * crs, vp.w * crs, vh * crs);                  // a partial viewport: shifted to the middle
         
         gl_depth_range(vp.near_z, vp.far_z);
         depth_reversed = depth_range_reversed(vp);
     } else {
-        gl_viewport(0, 0, cur_w480() * cur_rs(), PSP_FB_HEIGHT * cur_rs());
+        // 2D: the whole buffer (on a tall buffer the vertex transform puts the draw in the top band, see ge_set_tall)
+        gl_viewport(0, 0, cur_w480() * cur_rs(), cur_h272() * cur_rs());
         gl_depth_range(0.0, 1.0);
     }
 
@@ -1039,7 +1063,7 @@ static bool apply_gl_pipeline_impl(uint8_t* rdram, const GeState& state, int pri
             int dw = 1 << (state.tex_size[0] & 0xFF);
             int dh = 1 << ((state.tex_size[0] >> 8) & 0xFF);
             ge_texture_bind_external(fbo_tex, state);
-            ge_shader_set_tex_remap(dw / 480.0f, dh / 272.0f, true);
+            ge_shader_set_tex_remap(dw / 480.0f, dh / float(g_fbtex_h272), true);   // a tall target: v 0..272 is its top band (flipped: GL y up)
         } else {
             ge_texture_bind(rdram, g_frame_counter);
             ge_shader_set_tex_remap(1.0f, 1.0f, false);
@@ -1334,6 +1358,20 @@ static float draw_wide_x(const GeState& st) {
     return (vp.x <= 0 && vp.x + vp.w >= 480) ? 480.0f / float(w) : 1.0f;
 }
 
+// Tall buffer (g_tall_px): the factor s = 272 / height for a 3D draw whose PSP viewport covers the whole screen (its GL viewport is the
+// whole buffer), else 1. Its clip y becomes y * s + (1 - s) * w: the PSP's picture lands in the top 272 rows unchanged and the view
+// goes on below it.
+static float draw_tall_y(const GeState& st) {
+    const int h = cur_h272();
+    if (h <= 272 || ge_vtype_through(st.vertex_type)) return 1.0f;
+    const GeViewportDepth vp = compute_state_viewport_depth(st);
+    return (vp.y <= 0 && vp.y + vp.h >= 272) ? 272.0f / float(h) : 1.0f;
+}
+static void tall_proj(float* p, float s) {   // column-major: row 1 (clip y) += (1 - s) * row 3 (clip w), after scaling by s
+    if (s == 1.0f) return;
+    for (int c = 0; c < 4; c++) p[c * 4 + 1] = p[c * 4 + 1] * s + (1.0f - s) * p[c * 4 + 3];
+}
+
 static void build_xf(const GeState& st, Xf3D& x) {
     const uint32_t vt = st.vertex_type;
     std::memcpy(x.world, st.world_matrix, sizeof x.world);
@@ -1342,6 +1380,7 @@ static void build_xf(const GeState& st, Xf3D& x) {
     if (const float wx = draw_wide_x(st); wx != 1.0f) {   // clip.x = row 0 of the projection
         x.proj[0] *= wx; x.proj[4] *= wx; x.proj[8] *= wx; x.proj[12] *= wx;
     }
+    tall_proj(x.proj, draw_tall_y(st));
     if (ge_vtype_tc(vt) != GE_VTYPE_TC_NONE) {
         x.uvxf[0] = st.tex_scale_u; x.uvxf[1] = st.tex_scale_v;
         x.uvxf[2] = st.tex_offset_u; x.uvxf[3] = st.tex_offset_v;
@@ -1553,7 +1592,7 @@ static void fxl_free(FxLayer& L) {
 static bool fxl_bind(int ti) {
     const GeTarget& t = g_targets[ti];
     FxLayer& L = g_fxl[ti];
-    const int w = t.w480 * t.rs, h = 272 * t.rs;
+    const int w = t.w480 * t.rs, h = t.h272 * t.rs;
     if (L.fbo && (L.w != w || L.h != h)) { const bool f = L.failed; fxl_free(L); L.failed = f; }
     if (!L.fbo) {
         if (L.failed) return false;
@@ -1805,7 +1844,7 @@ static int g_fx_screen_w = 0, g_fx_screen_h = 0;
 // distortion). The batch about to draw is still empty, so every earlier draw
 // is in it. psp_fx_shader.cpp calls this at most once per frame and target.
 static unsigned fx_screen_copy(int* w, int* h) {
-    const int W = cur_w480() * cur_rs(), H = 272 * cur_rs();
+    const int W = cur_w480() * cur_rs(), H = cur_h272() * cur_rs();
     if (!g_fx_screen_tex || g_fx_screen_w != W || g_fx_screen_h != H) {
         if (!g_fx_screen_tex) glGenTextures(1, &g_fx_screen_tex);
         glBindTexture(GL_TEXTURE_2D, g_fx_screen_tex);   // caller's unit (not unit 0)
@@ -1860,7 +1899,7 @@ static void fx_batch(const GeState& state, GLuint fbo_tex, const GeXform3D* g) {
     in.state = &state;
     in.xform = g;
     in.target_w = cur_w480() * cur_rs();
-    in.target_h = 272 * cur_rs();
+    in.target_h = cur_h272() * cur_rs();
     for (int i = 0; i < 4; i++) in.vp[i] = glc::vp[i];
     in.alpha_double = g_pipe_alpha_double;
     in.screen_copy = fx_screen_copy;
@@ -2463,7 +2502,7 @@ void ge_draw_begin_list() {
     // Full-buffer default; the precise PSP viewport (scale/offset + depth
     // range) is applied per-PRIM in ge_draw_prim from the live registers,
     // which may be set after begin_list (issue #23).
-    gl_viewport(0, 0, cur_w480() * cur_rs(), PSP_FB_HEIGHT * cur_rs());
+    gl_viewport(0, 0, cur_w480() * cur_rs(), cur_h272() * cur_rs());
     g_frame_counter++;
 }
 
@@ -2804,6 +2843,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             float proj[16];
             std::memcpy(proj, st.proj_matrix, sizeof proj);
             if (const float wx = draw_wide_x(st); wx != 1.0f) { proj[0] *= wx; proj[4] *= wx; proj[8] *= wx; proj[12] *= wx; }
+            tall_proj(proj, draw_tall_y(st));
             const bool same = v.n > 0 && !std::memcmp(v.proj, proj, sizeof v.proj) && !std::memcmp(v.view, st.view_matrix, sizeof v.view);
             if (same) v.n++;
             else if (v.n > 0) v.n--;
@@ -2865,7 +2905,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         { static int fl = 0; if (psp_rt_refl_active() && fl++ % 600 == 0) std::fprintf(stderr, "[RT] effects layer: %zu triangles\n", g_rt_fx_tris[i].size() / 9); }
         g_rt_tris[i].clear(); g_rt_cols[i].clear(); g_rt_fx_tris[i].clear(); g_rt_fx_cols[i].clear();
         g_fx_vote[i].n = 0;
-        psp_screenfx_run(t.fbo, t.color_tex, t.w480 * t.rs, 272 * t.rs, s);
+        psp_screenfx_run(t.fbo, t.color_tex, t.w480 * t.rs, t.h272 * t.rs, s);
         glBindFramebuffer(GL_FRAMEBUFFER, g_targets[g_current_target].fbo);
         glc::invalidate();
         ge_texture_invalidate_bind_cache();
@@ -3073,6 +3113,7 @@ static void ge_draw_prim_one(
     }
     // Widescreen: tell the vertex transform how this draw is placed (psp_ge_vertex.h)
     ge_set_wide(draw_wide_x(state), fbo_tex == 0, fbo_tex != 0);
+    ge_set_tall(272.0f / float(cur_h272()), draw_tall_y(state));
     if (fbo_tex && g_fbtex_w480 > 480) {   // the shader multiplies u by declared_width / 480 afterwards (ge_shader_set_tex_remap): pre-divide the offset
         const float dw = float(1 << (state.tex_size[0] & 0xFF));
         ge_set_fb_u(480.0f / float(g_fbtex_w480), 0.5f * float(g_fbtex_w480 - 480) / float(g_fbtex_w480) * (480.0f / dw), dw / 480.0f);
@@ -3642,16 +3683,17 @@ static bool env_on(const char* name) {
 }
 
 static int g_present_w480 = 480;   // width (PSP pixels) of the picture being shown: 480, or wider with widescreen
+static int g_present_h272 = 272;   // height (PSP pixels): 272, or taller on a tall window (g_tall_px)
 static PresentRect present_layout(SDL_Window* window) {
-    static int cw = -1, ch = -1, cpw = -1, ctall = -1;
-    const int pw = g_present_w480;
+    static int cw = -1, ch = -1, cpw = -1, ctall = -1, cph = -1;
+    const int pw = g_present_w480, ph = g_present_h272;
     static PresentRect cached{0, 0, 480, 272, GL_NEAREST, false};
     int dw = 0, dh = 0;
     psp_gl_drawable_size(window, &dw, &dh);
-    if (dw <= 0 || dh <= 0) { dw = pw; dh = 272; }
+    if (dw <= 0 || dh <= 0) { dw = pw; dh = ph; }
     const int tall = psp_touch_tall_layout(dw, dh) ? 1 : 0;   // touch controls on a tall window: the picture goes to the top
-    if (dw == cw && dh == ch && pw == cpw && tall == ctall) return cached;
-    cw = dw; ch = dh; cpw = pw; ctall = tall;
+    if (dw == cw && dh == ch && pw == cpw && tall == ctall && ph == cph) return cached;
+    cw = dw; ch = dh; cpw = pw; ctall = tall; cph = ph;
     const char* st = std::getenv("PSPRECOMP_STRETCH");
     const bool stretch = st && st[0] && st[0] != '0';
     const char* fl = std::getenv("PSPRECOMP_FILTER");
@@ -3660,24 +3702,24 @@ static PresentRect present_layout(SDL_Window* window) {
     PresentRect r{0, 0, dw, dh, GL_NEAREST, false};
     bool exact_int = false;
     if (filter == "integer" || filter == "integer-scale") {
-        int k = std::min(dw / pw, dh / 272);
+        int k = std::min(dw / pw, dh / ph);
         if (k >= 1) {
-            int w = pw * k, h = 272 * k;
+            int w = pw * k, h = ph * k;
             r.x0 = (dw - w) / 2; r.y0 = (dh - h) / 2; r.x1 = r.x0 + w; r.y1 = r.y0 + h;
             exact_int = true;
         } else {  // window smaller than native: fall back to a linear fit
-            double s = std::min(dw / double(pw), dh / 272.0);
-            int w = std::max(1, int(pw * s + 0.5)), h = std::max(1, int(272 * s + 0.5));
+            double s = std::min(dw / double(pw), dh / double(ph));
+            int w = std::max(1, int(pw * s + 0.5)), h = std::max(1, int(ph * s + 0.5));
             r.x0 = (dw - w) / 2; r.y0 = (dh - h) / 2; r.x1 = r.x0 + w; r.y1 = r.y0 + h;
         }
     } else if (!stretch) {
-        double s = std::min(dw / double(pw), dh / 272.0);
+        double s = std::min(dw / double(pw), dh / double(ph));
         int w = std::min(dw, std::max(1, int(pw * s + 0.5)));
-        int h = std::min(dh, std::max(1, int(272 * s + 0.5)));
+        int h = std::min(dh, std::max(1, int(ph * s + 0.5)));
         r.x0 = (dw - w) / 2; r.y0 = (dh - h) / 2; r.x1 = r.x0 + w; r.y1 = r.y0 + h;
-        exact_int = (w % pw == 0 && h % 272 == 0 && w / pw == h / 272);
+        exact_int = (w % pw == 0 && h % ph == 0 && w / pw == h / ph);
     } else {
-        exact_int = (dw % pw == 0 && dh % 272 == 0 && dw / pw == dh / 272);
+        exact_int = (dw % pw == 0 && dh % ph == 0 && dw / pw == dh / ph);
     }
     if (tall && !stretch) {   // (GL coordinates: y1 is the top edge)
         const int ph = r.y1 - r.y0;
@@ -4474,7 +4516,7 @@ static void present_toast(const PresentRect& pr) {
         glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row_len);
         tw = w; th = h; tscale = scale;
     }
-    const float sx = float(pr.x1 - pr.x0) / 480.f, sy = float(std::abs(pr.y1 - pr.y0)) / 272.f;
+    const float sx = float(pr.x1 - pr.x0) / 480.f, sy = float(std::abs(pr.y1 - pr.y0)) / float(g_present_h272);   // a tall picture: the PSP band is its top 272 rows
     const int top = std::max(pr.y0, pr.y1), left = std::min(pr.x0, pr.x1);
     const int bw = int(std::lround(float(tw) / float(tscale) * sx));
     const int x0 = left + (int(std::lround(480.f * sx)) - bw) / 2;     // centred
@@ -4592,7 +4634,7 @@ static void present_blend_hud(HudBlend& st, const std::string& text, bool& text_
     int dw = 0, dh = 0;
     psp_gl_drawable_size(psp_get_sdl_window(), &dw, &dh);
     if (dw <= 0 || dh <= 0) { glBindTexture(GL_TEXTURE_2D, GLuint(prev_tex)); glActiveTexture(GLenum(prev_active)); return; }
-    const float sx = float(pr.x1 - pr.x0) / 480.f, sy = float(std::abs(pr.y1 - pr.y0)) / 272.f;
+    const float sx = float(pr.x1 - pr.x0) / 480.f, sy = float(std::abs(pr.y1 - pr.y0)) / float(g_present_h272);   // a tall picture: the PSP band is its top 272 rows
     const float qw = float(tw) / float(tscale) * sx;
     const float right = box ? float(std::min(pr.x0, pr.x1)) + 4.f * sx + qw : float(std::max(pr.x0, pr.x1)) - 4.f * sx;
     const float top = float(std::max(pr.y0, pr.y1)) - 4.f * sy;   // GL origin is bottom-left
@@ -4721,6 +4763,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
     present_dump_frame(fbo, why);
     present_service_screenshot(fbo);
     g_present_w480 = w480_of_fbo(fbo);
+    g_present_h272 = h272_of_fbo(fbo);
     const PresentRect pr = present_layout(window);
     // Widescreen: the dialog / settings overlays are 480x272 canvases; they go in the middle of the picture
     PresentRect cpr = pr;
@@ -4728,6 +4771,10 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         const int fw = pr.x1 - pr.x0, cw = int(fw * 480.0 / g_present_w480 + 0.5);
         cpr.x0 = pr.x0 + (fw - cw) / 2;
         cpr.x1 = cpr.x0 + cw;
+    }
+    if (g_present_h272 > 272) {   // tall: the overlays go in the PSP's band, the top 272 rows of the picture (GL y up: y1 is the top)
+        const int fh = pr.y1 - pr.y0, ch = int(fh * 272.0 / g_present_h272 + 0.5);
+        cpr.y0 = pr.y1 - ch;
     }
     // Tell the savedata-dialog renderer how big the output is so the overlay
     // is rendered at (at least) output resolution rather than upscaled.
@@ -4768,7 +4815,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         static const int every = (e && e[0] == '1') ? 15 : (e && e[0] == '0') ? 0 : 120;
         static int n = 0;
         if (every && g_scene_fp16 && (++n % every) == 0) {
-            const int fw = spw * srs, fh = 272 * srs;
+            const int fw = spw * srs, fh = h272_of_fbo(fbo) * srs;
             std::vector<float> px(size_t(fw) * fh * 4);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
             glReadPixels(0, 0, fw, fh, GL_RGBA, GL_FLOAT, px.data());
@@ -4790,7 +4837,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
             else if (g_targets[i].ab_fbo && g_targets[i].ab_fbo == fbo) src_tex = g_targets[i].ab_tex;
         }
         if (src_tex) {
-            post_done = psp_post_draw(src_tex, spw * srs, 272 * srs, pr.x0, pr.y0, pr.x1, pr.y1, pf == GL_NEAREST);
+            post_done = psp_post_draw(src_tex, spw * srs, h272_of_fbo(fbo) * srs, pr.x0, pr.y0, pr.x1, pr.y1, pf == GL_NEAREST);
             if (post_done) {
                 int dw = 0, dh = 0;
                 psp_gl_drawable_size(window, &dw, &dh);
@@ -4802,7 +4849,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         }
     }
     if (!post_done)
-    glBlitFramebuffer(0, 0, spw * srs, 272 * srs, pr.x0, pr.y0, pr.x1, pr.y1,
+    glBlitFramebuffer(0, 0, spw * srs, h272_of_fbo(fbo) * srs, pr.x0, pr.y0, pr.x1, pr.y1,
                       GL_COLOR_BUFFER_BIT, pf);
     perf_note_present();
     if (!std::strcmp(why, "flip")) perf_note_flip();
@@ -4908,6 +4955,29 @@ static void wide_update() {
     for (int i = 0; i < g_main_n; i++) mark_main_key(g_main_keys[i]);   // grows / shrinks them, keeping the picture
     delete_scratch();
 }
+// Tall windows: the height the displayed buffers should have (272 unless the touch controls use the tall layout, see g_tall_px).
+static int tall_px_for_window() {
+    static const bool off = [] { const char* e = std::getenv("PSPRECOMP_TALL_FILL"); return e && e[0] == '0'; }();
+    SDL_Window* w = psp_get_sdl_window();
+    if (off || !w) return 272;
+    int dw = 0, dh = 0;
+    psp_gl_drawable_size(w, &dw, &dh);
+    if (dw <= 0 || dh <= 0 || !psp_touch_tall_layout(dw, dh)) return 272;
+    int px = int(480.0 * dh / dw + 0.5) & ~1;
+    GLint maxtex = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxtex);
+    int cap = 960;
+    while (cap > 272 && cap * g_rs > maxtex) cap -= 2;
+    return std::max(272, std::min(px, cap));
+}
+static void tall_update() {
+    const int px = tall_px_for_window();
+    if (px == g_tall_px) return;
+    g_tall_px = px;
+    std::fprintf(stderr, "[DRAW] tall window: displayed buffers 480 x %d PSP pixels%s\n", px, px == 272 ? " (off)" : " (the PSP's picture in the top 272 rows)");
+    for (int i = 0; i < g_main_n; i++) mark_main_key(g_main_keys[i]);   // grows / shrinks them, keeping the picture
+    delete_scratch();
+}
 void ge_draw_set_widescreen(bool on) { g_wide_state.store(on ? 1 : 0); wide_update(); }
 bool ge_draw_widescreen() { return wide_on(); }
 int ge_draw_widescreen_width() { return g_wide_px; }
@@ -4978,6 +5048,7 @@ void ge_present_frame(
     // present strictly per-address: a fresh flip shows a clean buffer, and any
     // geometry the GE later renders into this address lands in the same FBO.
     wide_update();   // the window may have changed shape
+    tall_update();
     uint32_t key = ge_fb_key(fb_addr);
     mark_main_key(key);   // a buffer that is displayed is rendered at the render scale
     if (g_dyn_trace_n.load() > 0)
@@ -5047,7 +5118,6 @@ bool ge_draw_set_render_scale(int n) {
     if (n == g_rs) return true;
     if (g_ab) return false;
     flush_batch();
-    const int nh = 272 * n;
     const GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
     if (sc) glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -5059,7 +5129,7 @@ bool ge_draw_set_render_scale(int n) {
     for (int i = 0; i < GE_MAX_TARGETS; ++i) {
         GeTarget& t = g_targets[i];
         if (!t.fbo || t.rs != g_rs) continue;   // the 1x buffers of the blur chain stay as they are
-        const int ow = t.w480 * t.rs, oh = 272 * t.rs, nw = t.w480 * n;
+        const int ow = t.w480 * t.rs, oh = t.h272 * t.rs, nw = t.w480 * n, nh = t.h272 * n;
         GLuint tex = 0, rb = 0;
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -5095,7 +5165,7 @@ bool ge_draw_set_render_scale(int n) {
     glBindFramebuffer(GL_FRAMEBUFFER, g_current_target >= 0 ? g_targets[g_current_target].fbo : 0);
     glc::invalidate();
     ge_texture_invalidate_bind_cache();
-    std::fprintf(stderr, "[DRAW] render scale %dx (targets %dx%d), %d target(s) resized\n", g_rs, g_wide_px * g_rs, nh, resized);
+    std::fprintf(stderr, "[DRAW] render scale %dx (targets %dx%d), %d target(s) resized\n", g_rs, g_wide_px * g_rs, g_tall_px * g_rs, resized);
     return true;
 }
 
@@ -5118,7 +5188,7 @@ bool ge_draw_sync_scene_format() {
     for (int i = 0; i < GE_MAX_TARGETS; ++i) {
         GeTarget& t = g_targets[i];
         if (!t.fbo) continue;
-        const int w = t.w480 * t.rs, h = 272 * t.rs;
+        const int w = t.w480 * t.rs, h = t.h272 * t.rs;
         GLuint tex = 0;
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);

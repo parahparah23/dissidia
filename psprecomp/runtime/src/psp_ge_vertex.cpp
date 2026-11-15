@@ -557,6 +557,8 @@ static float g_wide_x = 1.0f;
 static bool g_wide_cover = false, g_wide_extend = false;
 static float g_fb_u_scale = 1.0f, g_fb_u_off = 0.0f, g_fb_u_remap = 1.0f;   // remap: the shader's declared-width / 480 factor
 void ge_set_wide(float wx, bool cover, bool extend_fb) { g_wide_x = wx; g_wide_cover = cover; g_wide_extend = extend_fb; }
+static float g_tall_through = 1.0f, g_tall_xf = 1.0f;
+void ge_set_tall(float through_s, float xf_s) { g_tall_through = through_s; g_tall_xf = xf_s; }
 // Soft focus (the stage-wide blurred copy some stages blend over the picture): PSPRECOMP_SOFT_FOCUS=0 / settings "soft_focus=0" drops it.
 // The env var is read on first use, because settings.ini is applied to the environment after static initialisation.
 static std::atomic<int> g_soft_focus_state{-1};
@@ -689,7 +691,8 @@ void ge_transform_vertices(
         // a render-target texture, which is stretched across the whole width (menu backgrounds, fades).
         float wx = g_wide_x;
         bool drop_soft = false;   // the soft-focus pass with Soft Focus off: moved out of the picture below
-        if (g_wide_extend && state.alpha_blend_enable && state.blend_mode == 0x32 && state.texture_enable && !verts.empty() && !ge_soft_focus()) {
+        // (a tall target always drops it: the blurred copy only covers the PSP's top band and its edge shows as a dark line across the picture)
+        if (g_wide_extend && state.alpha_blend_enable && state.blend_mode == 0x32 && state.texture_enable && !verts.empty() && (!ge_soft_focus() || g_tall_through != 1.0f)) {
             float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f, u0 = 1e9f, u1 = -1e9f;
             for (const auto& v : verts) {
                 minx = std::min(minx, v.pos[0]); maxx = std::max(maxx, v.pos[0]); miny = std::min(miny, v.pos[1]); maxy = std::max(maxy, v.pos[1]);
@@ -746,9 +749,15 @@ void ge_transform_vertices(
             const float dest_w = (x1 - x0) * wx, src_w = (u1 - u0) * state.tex_scale_u;
             if (dest_w > 0.5f && src_w >= 3.5f * dest_w) { fu_scale = 1.0f; fu_off = 0.0f; }
         }
+        float ty = g_tall_through;   // tall target: the top 272 rows, unless the draw covers the whole screen untextured (stretched)
+        if (ty != 1.0f && !state.texture_enable && !verts.empty()) {
+            float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+            for (const auto& v : verts) { minx = std::min(minx, v.pos[0]); maxx = std::max(maxx, v.pos[0]); miny = std::min(miny, v.pos[1]); maxy = std::max(maxy, v.pos[1]); }
+            if (minx <= 0.5f && maxx >= 479.5f && miny <= 0.5f && maxy >= 271.5f) ty = 1.0f;
+        }
         for (auto& v : verts) {
             v.pos[0] = (v.pos[0] / 240.0f - 1.0f) * wx;
-            v.pos[1] = 1.0f - v.pos[1] / 136.0f;
+            v.pos[1] = 1.0f - v.pos[1] / 136.0f * ty;
             v.pos[2] = v.pos[2] / 65535.0f;
             v.w = 1.0f;   // already NDC: no perspective divide (see ge_decode_vertices)
 
@@ -843,6 +852,7 @@ void ge_transform_vertices(
                     v.pos[2] = wpos[2];
                 }
                 v.pos[0] *= g_wide_x;
+                v.pos[1] = v.pos[1] * g_tall_xf + (1.0f - g_tall_xf);
                 v.w = 1.0f;   // NDC-direct: no perspective divide
             } else {
                 float clip[4];
@@ -852,7 +862,7 @@ void ge_transform_vertices(
                 // Leave in clip space: the GPU does the perspective divide,
                 // near/far clipping and perspective-correct interpolation.
                 v.pos[0] = clip[0] * g_wide_x;   // widescreen: the wider target shows more to the sides
-                v.pos[1] = clip[1];
+                v.pos[1] = clip[1] * g_tall_xf + (1.0f - g_tall_xf) * clip[3];   // tall target (ge_set_tall)
                 v.pos[2] = clip[2];
                 v.w = clip[3];
             }

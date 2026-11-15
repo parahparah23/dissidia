@@ -90,12 +90,14 @@ Not yet run: the GitHub workflow, and an update against a real release.
   **Reset** restores the default layout, **Done** saves. The layout is `touch_layout.txt` in the game folder (one line per control; positions are
   fractions of the window, so it survives a change of screen size).
 - **Tall / square screens** (a folding phone's inner screen; any window whose width is at most about 1.15 x its height): while the touch
-  controls are not Off, the picture fills the width at the **top** of the screen and the controls get their own layout in the space under it
-  (L, menu and R along the top of that space, the d-pad above the stick on the left, the face buttons on the right, Select / Start at the
-  bottom), sized to fit it, so nothing covers the picture. This layout is edited and saved separately (`touch_layout_tall.txt`): folding or
-  unfolding the phone switches between the two layouts. With Touch Controls set to Off the picture stays in the middle. On any screen the
-  controls are sized from the height but never from more than 0.625 x the width, so they do not grow out of proportion on 4:3 tablets
-  (16:10 and wider screens are unchanged).
+  controls are not Off, the picture **fills the whole screen**, like Ultrawide does for wide screens but downwards: the game's own
+  480x272 picture (HUD, menus, text) stays at the top of the screen, full width, and the 3D scene goes on below it, under the touch
+  controls. The controls get their own layout in the space under the HUD (L, menu and R along its top, the d-pad above the stick on the
+  left, the face buttons on the right, Select / Start at the bottom). Menus and other 2D screens fill only the top part (black below);
+  fades and flashes cover the whole screen. This layout is edited and saved separately (`touch_layout_tall.txt`): folding or unfolding
+  the phone switches between the two layouts. With Touch Controls set to Off the picture stays 16:9 in the middle; `PSPRECOMP_TALL_FILL=0`
+  keeps the tall layout but shows only the 480x272 picture at the top. On any screen the controls are sized from the height but never
+  from more than 0.625 x the width, so they do not grow out of proportion on 4:3 tablets (16:10 and wider screens are unchanged).
 - **Frame rate / render scale**: Settings > Display (frame rate) and Settings > Graphics (render scale). 30 fps is the PSP's own rate; the 120 fps mode needs a fast device. Rooted devices can set the
   CPU governor to `performance` for steadier clocks.
 - **GPU drivers (Adreno phones)**: the Settings > Drivers tab (shown only on devices that can use it: an Adreno GPU). **GPU Driver** picks the Vulkan driver (System default, or a downloaded
