@@ -14,6 +14,7 @@
 //   PSPRECOMP_TEST_DIRECT_BATTLE=<f>  replay the recording <f> (tools/battle_test.py --direct, tests/replays/quick_battle_walk.txt)
 // Both are off by default; with neither set the filter returns the pad state unchanged.
 #include "psp_game_module.h"
+#include "psp_platform.h"
 #include "psp_runtime.h"
 #include "recomp.h"
 #include <atomic>
@@ -95,6 +96,6 @@ void dissidia_direct_battle_install(uint8_t* rdram) {
     std::fclose(fp);
     g_replay = !g_steps.empty();
     g_record = false;
-    if (g_replay) setenv("PSPRECOMP_SAVEDATA_AUTO", "1", 1);   // the save list dialog reads the host pad, not the filtered one: load the save without it
+    if (g_replay) psp_plat::setenv_("PSPRECOMP_SAVEDATA_AUTO", "1");   // the save list dialog reads the host pad, not the filtered one: load the save without it
     std::fprintf(stderr, "[DIRECT] replaying %zu pad changes from %s\n", g_steps.size(), f);
 }
