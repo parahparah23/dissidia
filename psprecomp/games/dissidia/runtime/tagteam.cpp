@@ -765,6 +765,7 @@ bool content_swap(uint32_t H, uint32_t P) {
     if (bh.size() != bp.size()) { std::fprintf(stderr, "[TAGTEAM] swap: H owns %zu blocks, P %zu: not clones\n", bh.size(), bp.size()); return false; }
     for (size_t k = 0; k < bh.size(); k++) if (bh[k].size != bp[k].size) { std::fprintf(stderr, "[TAGTEAM] swap: block %zu size %u vs %u\n", k, bh[k].size, bp[k].size); return false; }
     const uint32_t keepH[2] = {rd(H + ACT_BRAIN), rd(H + ACT_LOCKBLK)}, keepP[2] = {rd(P + ACT_BRAIN), rd(P + ACT_LOCKBLK)};
+    const uint32_t nextH = rd(H + 0x4A0u), nextP = rd(P + 0x4A0u);   // the actor list's link (FUN_088417f8 unlinks through it): belongs to the address; swapped it makes a cycle
     const uint8_t flagH = g_ram[(H + 0x5B0u) & 0x07FFFFFFu], flagP = g_ram[(P + 0x5B0u) & 0x07FFFFFFu];   // +0x5B0 bit 2: "this actor is the player" (the HUD's FUN_08842164 asks it): belongs to the address
     g_pairs.clear();
     int kept = 0;
@@ -798,6 +799,7 @@ bool content_swap(uint32_t H, uint32_t P) {
     g_ram[(P + 0x5B0u) & 0x07FFFFFFu] = static_cast<uint8_t>((g_ram[(P + 0x5B0u) & 0x07FFFFFFu] & ~4u) | (flagP & 4u));
     if (g_log) std::fprintf(stderr, "[TAGTEAM] swap: content exchanged: %zu numeric, %zu translated pointer, %zu external-pointer words left with their address, %zu writes\n", nnum, ntrans, next, writes.size());
     fix_assist();
+    wr(H + 0x4A0u, nextH); wr(P + 0x4A0u, nextP);
     return true;
 }
 
