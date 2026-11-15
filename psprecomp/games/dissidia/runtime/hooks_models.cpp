@@ -73,6 +73,8 @@ bool g_reserved = false;                      // pool + file heap reserved toget
 uint32_t g_staging = kRetailStaging;
 uint32_t g_pool_block = 0, g_pool_size = 0;
 uint32_t g_tt_pool_extra = 0;   // tag team: extra pool bytes (dissidia_model_pool_request_extra)
+uint32_t g_od_block = 0, g_od_size = 0; bool g_od_done = false;   // tag team: the OBJDATA heap (0x41000, the characters' D_ data) served from the host heap with more room
+FuncPtr g_orig_small_alloc = nullptr;
 bool g_tt_pool = false;         // g_pool_block is the tag team pool (not tied to the budget reservation)
 bool g_pool_in_use = false;
 uint32_t g_wm_block = 0, g_wm_size = 0;      // host-heap block, allocated once and reused by every scene
@@ -195,8 +197,21 @@ void alloc_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_trace && req >= 0x100000u) std::fprintf(stderr, "[MODELS]   -> 0x%08X\n", (uint32_t)ctx->r[2]);
 }
 
+// FUN_088820D8(size): block from the main heap. The OBJDATA heap (the file manager's, exactly 0x41000, allocated once at start) holds the
+// D_ data (scripts / parameters) of every character in the battle; the extra characters of a tag team battle do not fit.
+void small_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (g_tt_pool_extra && !g_od_done && static_cast<uint32_t>(ctx->r[4]) == 0x41000u) {
+        g_od_done = true;
+        const uint32_t size = 0x41000u + 0x80000u;
+        g_od_block = psp_kmem_bump_alloc_named(rd256(size), "OBJDATA_TAGTEAM");
+        if (g_od_block) { g_od_size = size; std::fprintf(stderr, "[MODELS] tag team OBJDATA heap %u B at 0x%08X (retail %u B)\n", size, g_od_block, 0x41000u); ctx->r[2] = static_cast<int32_t>(g_od_block); return; }
+    }
+    g_orig_small_alloc(rdram, ctx);
+}
+
 // FUN_0885C40C(block, size, name, align): heap init over a block; give the host block its real size.
 void heap_init_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (g_od_block != 0 && static_cast<uint32_t>(ctx->r[4]) == g_od_block && static_cast<uint32_t>(ctx->r[5]) == 0x41000u) ctx->r[5] = static_cast<int32_t>(g_od_size);
     if (g_wm_block != 0 && static_cast<uint32_t>(ctx->r[4]) == g_wm_block && static_cast<uint32_t>(ctx->r[5]) == kRetailFile)
         ctx->r[5] = static_cast<int32_t>(g_wm_size);
     else if (g_pool_block != 0 && static_cast<uint32_t>(ctx->r[4]) == g_pool_block && static_cast<uint32_t>(ctx->r[5]) == kRetailPool)
@@ -228,6 +243,7 @@ void register_hook(uint8_t* rdram, recomp_context* ctx) {
 // FUN_0888208C(block): free to the main heap.
 void free_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_trace && static_cast<uint32_t>(ctx->r[4]) >= 0x08C00000u) std::fprintf(stderr, "[MODELS] free(0x%08X)\n", (uint32_t)ctx->r[4]);
+    if (g_od_block != 0 && static_cast<uint32_t>(ctx->r[4]) == g_od_block) { ctx->r[2] = 0; return; }   // (kept for the next battle)
     if (g_wm_block != 0 && static_cast<uint32_t>(ctx->r[4]) == g_wm_block) { g_wm_in_use = false; ctx->r[2] = 0; return; }
     if (g_pool_block != 0 && static_cast<uint32_t>(ctx->r[4]) == g_pool_block) { g_pool_in_use = false; ctx->r[2] = 0; return; }
     g_orig_free(rdram, ctx);
@@ -237,9 +253,35 @@ void free_hook(uint8_t* rdram, recomp_context* ctx) {
 // comes back null (the caller then reads / builds into guest address 0: an invisible model, not a crash), with
 // the heap's end and used bytes (heap+4 / heap+8) so an exhausted pool is obvious.
 FuncPtr g_orig_heap_alloc = nullptr;
+// Tag team: the character texture heap lives in VRAM (heap object 0x04110000, 0xF0000 bytes = 960 KB, "GRAPHICS"-side memory). Retail sizes it for two
+// fighters; the extra characters' textures do not fit and come out missing. Allocations that fail there are served from a second heap in
+// the host heap (texture addresses in RAM are fine for the GE), and frees of those blocks are routed back to it.
+constexpr uint32_t kVramHeap = 0x04110000u, kVramHeapName = 0x089C93F4u, kOverflowSize = 0x300000u;
+uint32_t g_ov_heap = 0;
+FuncPtr g_orig_heap_free = nullptr;
+bool in_overflow(uint32_t p) { return g_ov_heap && p >= g_ov_heap && p < g_ov_heap + kOverflowSize; }
+
 void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t heap = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
+    const recomp_context saved = *ctx;
     g_orig_heap_alloc(rdram, ctx);
+    if (ctx->r[2] == 0 && size != 0 && g_tt_pool_extra && heap == kVramHeap) {   // the texture heap is full: overflow into RAM
+        if (!g_ov_heap) {
+            g_ov_heap = psp_kmem_bump_alloc_named(rd256(kOverflowSize), "TEXHEAP_TAGTEAM");
+            if (g_ov_heap) {
+                recomp_context c2 = saved;
+                c2.r[4] = static_cast<int32_t>(g_ov_heap); c2.r[5] = static_cast<int32_t>(kOverflowSize); c2.r[6] = static_cast<int32_t>(kVramHeapName); c2.r[7] = 0x40;
+                g_orig_heap_init(rdram, &c2);
+                std::fprintf(stderr, "[MODELS] tag team texture overflow heap %u B at 0x%08X\n", kOverflowSize, g_ov_heap);
+            }
+        }
+        if (g_ov_heap) {
+            recomp_context c3 = saved;
+            c3.r[4] = static_cast<int32_t>(g_ov_heap);
+            g_orig_heap_alloc(rdram, &c3);
+            if (c3.r[2] != 0) { *ctx = c3; return; }
+        }
+    }
     if (ctx->r[2] == 0 && size != 0) {
         static int n = 0;
         if (n++ < 100) {
@@ -251,6 +293,12 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
             std::fprintf(stderr, "[MODELS] heap 0x%08X alloc(%u) FAILED (heap end 0x%08X, used 0x%X)\n", heap, size, end, used);
         }
     }
+}
+
+// FUN_0885C538(heap, ptr, align, ...): the game's generic heap free.
+void heap_free_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (static_cast<uint32_t>(ctx->r[4]) == kVramHeap && in_overflow(static_cast<uint32_t>(ctx->r[5]))) ctx->r[4] = static_cast<int32_t>(g_ov_heap);
+    g_orig_heap_free(rdram, ctx);
 }
 
 // ---- Effect pool (EFFECT_ALLOCATOR) ----
@@ -353,6 +401,8 @@ void dissidia_models_install() {
     }
     g_orig_heap_alloc = psp_dispatch_probe_lookup(0x0885C6CCu);
     if (g_orig_heap_alloc) psp_dispatch_register(0x0885C6CCu, heap_alloc_hook);
+    if ((g_orig_heap_free = psp_dispatch_probe_lookup(0x0885C538u))) psp_dispatch_register(0x0885C538u, heap_free_hook);
+    if ((g_orig_small_alloc = psp_dispatch_probe_lookup(0x088820D8u))) psp_dispatch_register(0x088820D8u, small_alloc_hook);
     psp_dispatch_register(0x0888204Cu, alloc_hook);
     psp_dispatch_register(0x0885C40Cu, heap_init_hook);
     psp_dispatch_register(0x0884417Cu, register_hook);

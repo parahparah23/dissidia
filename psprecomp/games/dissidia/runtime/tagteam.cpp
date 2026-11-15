@@ -1334,7 +1334,7 @@ void batrec_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 // generic call logger for the loading chain (PSPRECOMP_TAGTEAM_LOADLOG=1)
-constexpr uint32_t kChain[8] = {0x08844C14u, 0x0884417Cu, 0x088444D4u, 0x0888204Cu, 0x0885C6CCu, 0x0885C538u, 0x08844B58u, 0x08842308u};
+constexpr uint32_t kChain[8] = {0x08844C14u, 0x0884417Cu, 0x088444D4u, 0x0888204Cu, 0x08844DE0u, 0x08844F50u, 0x08844B58u, 0x08842308u};
 FuncPtr g_chain_orig[8] = {};
 template <int N> void chain_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
