@@ -210,8 +210,12 @@ def walk_direct(g, ff_menus=4):
             raise RuntimeError('the game exited')
         time.sleep(0.5)
         im = g.shot()
+        if im.size != (480, 272):                      # PSPRECOMP_SHOT_FULL / widescreen: the probes are in 480x272 picture coordinates
+            im = im.resize((480, 272))
         dark = sum(1 for p in ((120, 262), (360, 262), (30, 262), (450, 262)) if sum(im.getpixel(p)) < 330)
         seen = seen + 1 if dark >= 3 else 0
+        if dark < 3 and _ % 4 == 3:
+            g.press('cross')                           # a slow load (real GPU, ray tracing) can leave the replay's last presses on the loading / VS ("Next") page
         if seen >= 2:
             g.touch_go()
             g.wait_log(r'\[TEST\] battle started', 20)
