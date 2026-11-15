@@ -62,8 +62,9 @@ constexpr uint32_t REG_PAIR0 = 0x08BAE9FCu, REG_PAIR1 = 0x08BAEA08u;   // ctor w
 constexpr uint32_t LAST_FIGHTER_OBJ = 0x089D4774u;   // EBOOT global the fighter constructor sets to its own controller-side object
 constexpr uint32_t ACT_VT = 0x544u, ACT_FLAGS = 0x5B0u, ACT_LOCKBLK = 0x5ACu;
 
-FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
+FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_stock = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
 bool g_in_ctor = false;   // inside the extra's constructor: the resource releases are skipped (see rel_hook)
+bool g_oneround = true;   // KO rules, one continuous round: a KO'd slot fighter is swapped with its living team mate at once, no stock hack / round restart (PSPRECOMP_TAGTEAM_ONEROUND=0: the old restart flow)
 bool g_tagin = true;      // KO rules: a KO'd slot fighter with a living team mate is replaced by him (PSPRECOMP_TAGTEAM_TAGIN=0 turns it off)
 uint32_t side_of(uint32_t a);
 bool g_enabled = false;  // PSPRECOMP_TAGTEAM=1 or Settings > Debug > Tag Team (2v2): the next battle is a tag battle
@@ -114,6 +115,7 @@ uint32_t call(uint32_t addr, uint32_t a0, uint32_t a1 = 0, uint32_t a2 = 0, uint
 void tick_hook(uint8_t* rdram, recomp_context* ctx);
 const char* role_of(uint32_t a);
 void fix_assist();
+void stock_hook(uint8_t* rdram, recomp_context* ctx);
 void lock_other_hook(uint8_t* rdram, recomp_context* ctx);
 void refresh_hook(uint8_t* rdram, recomp_context* ctx);
 void lock_mode_hook(uint8_t* rdram, recomp_context* ctx);
@@ -375,6 +377,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
         if (g_orig_lock_other && g_orig_refresh && g_orig_lock_mode) { psp_dispatch_register(LOCK_OTHER, lock_other_hook); psp_dispatch_register(TARGET_REFRESH, refresh_hook); psp_dispatch_register(LOCK_MODE, lock_mode_hook); }
         else std::fprintf(stderr, "[TAGTEAM] lock cycle hooks not installed\n");
     }
+    if (!g_orig_stock) { g_orig_stock = fn(0x08B33914u); if (g_orig_stock) psp_dispatch_register(0x08B33914u, stock_hook); }
     if (!g_orig_tick) { g_orig_tick = fn(BRAIN_TICK); if (g_orig_tick) psp_dispatch_register(BRAIN_TICK, tick_hook); else std::fprintf(stderr, "[TAGTEAM] brain tick not found\n"); }
     const uint32_t hum = human == 0 ? a0 : a1, cpu = human == 0 ? a1 : a0;
     if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_WATCH_BS")) {   // arm the write watch on bs + hex offset
@@ -428,7 +431,7 @@ void apply_undo(Extra& e) {
 void start_extra(Extra& e) {
     if (g_stop < 6) { e.started = true; return; }
     apply_undo(e);
-    if (g_tagin) {   // one more stock for the slot fighter of this extra's team: the retail KO then restarts the round instead of ending the battle (the KO watcher swaps the partner in)
+    if (g_tagin && !g_oneround) {   // one more stock for the slot fighter of this extra's team: the retail KO then restarts the round instead of ending the battle (the KO watcher swaps the partner in)
         for (int k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0) && side_of(a) == e.side) g_ram[(a + 0x10CEu) & 0x07FFFFFFu] = static_cast<uint8_t>(g_ram[(a + 0x10CEu) & 0x07FFFFFFu] + 1); }
     }
     const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
@@ -476,6 +479,7 @@ void flow_hook(uint8_t* rdram, recomp_context* ctx) {
 // ---- HUD (tagteam_hud.cpp) ----
 std::vector<uint32_t> g_down;   // KO'd characters that stay down (tag-in): their live HP is left alone, writing 0 to it makes the retail rules treat the team as lost
 bool is_down(uint32_t a) { for (uint32_t d : g_down) if (d == a) return true; return false; }
+int g_called[2] = {0, 0};   // call-ins made per team (0 = the human's), the reserve strip hides that many names
 std::vector<TagHudReserve> g_reserve;   // waiting fighters per side (placeholder list until the roster call-ins exist)
 bool g_hud_on = true;
 
@@ -583,6 +587,12 @@ void hud_update() {
     // sides in the HUD: the human's team on the left (side value of the human's slot), the other on the right
     const uint32_t hum_side = g_bs ? rd(g_bs + 84u) : 0u;
     for (TagHudFighter& f : fs) f.side = (static_cast<uint32_t>(f.side) == hum_side) ? 0 : 1;
+    {   // members already called in are not in reserve any more
+        std::vector<TagHudReserve> shown = g_reserve;
+        for (size_t t = 0; t < shown.size() && t < 2; t++) { const size_t n = std::min(static_cast<size_t>(g_called[t]), shown[t].names.size()); shown[t].names.erase(shown[t].names.begin(), shown[t].names.begin() + static_cast<long>(n)); }
+        tagteam_hud_draw(fs, shown);
+        return;
+    }
     tagteam_hud_draw(fs, g_reserve);
 }
 
@@ -1102,6 +1112,17 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_tick(rdram, ctx);
 }
 
+// FUN_08B33914(actor): the round-end handler's "take one stock, ask for a revive" for the loser (experiment ONEROUND=1: skipped).
+void stock_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const uint32_t a = static_cast<uint32_t>(ctx->r[4]);
+    if (g_oneround && g_tagin && g_bs && ok(a, 0x12D0) && (a == rd(g_bs + 56u) || a == rd(g_bs + 60u)) && alive(a)) {   // the retail finish effect of a KO that the tag swap took away: nothing is lost
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs retail KO finish for %08X skipped (the slot holds a living fighter)\n", dissidia_battle_age() / 60.0f, a);
+        return;
+    }
+    g_orig_stock(rdram, ctx);
+}
+
 // ---- KO rules ----
 // Retail: every fighter has a stock count (actor halfword +0x10CE, 1 in a quick battle). A KO takes one (FUN_08B33914 also sets the
 // revive word +0x10D0); at 0 the battle ends, otherwise the round restarts about 2 s later (the KO presentation runs first).
@@ -1110,7 +1131,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
 // retail revive / round restart go on with the slot. The slot keeps its own stock and revive word. A team loses when the slot
 // fighter is KO'd with no stock left, i.e. when both of its fighters are down.
 void ko_watch() {
-    if (!g_tagin || !g_bs || g_nextra == 0) return;
+    if (g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
     static uint32_t prev[2] = {99, 99}, prev_rev[2] = {0, 0}, snap[2] = {99, 99}, prev_bs = 0, pend_T[2] = {0, 0};
     static float pend_since[2] = {0, 0}, last_age = 0;
     if (prev_bs != g_bs) { prev[0] = prev[1] = 99; prev_bs = g_bs; pend_T[0] = pend_T[1] = 0; }
@@ -1162,6 +1183,82 @@ void ko_watch() {
     last_age = dissidia_battle_age();
 }
 
+
+// ---- one-round KO flow ----
+// Retail has no "a fighter is down, the fight goes on": the KO of a slot fighter ends the round (finish effect, stock, restart; skipping
+// the stock step only loops the round end). So the KO is taken away from the slot: the moment a slot fighter's live HP reaches 0
+// (its KO motion has just started, the retail round end is seconds away) the content of the slot and of a living team mate are
+// exchanged. The slot (HUD, camera, pad) now holds the living fighter; the KO'd one plays out its fall at the other address and stays down
+// (AI gate, g_down). A down fighter comes back after kCallInDelay with the next member of the side's party (the reserve strips) when one is
+// left: it is healed, placed beside its team mate and started like an extra (call_in).
+constexpr float kCallInDelaySec = 20.0f;   // seconds between a KO and the next member coming in (15-30 s; PSPRECOMP_TAGTEAM_CALLIN_DELAY overrides)
+float call_in_delay() { static const float d = (std::getenv("PSPRECOMP_TAGTEAM_CALLIN_DELAY") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_CALLIN_DELAY"))) : kCallInDelaySec) * 60.0f; return d; }
+struct DownRec { uint32_t actor; float since; uint32_t side; };
+std::vector<DownRec> g_downrec;
+
+int team_of(uint32_t side) { return g_bs && side == side_of(rd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u))) ? 0 : 1; }
+int reserve_left(int team) { const int n = static_cast<int>(g_reserve.size() > static_cast<size_t>(team) ? g_reserve[team].names.size() : 0u); return n - g_called[team]; }
+
+// Bring a down extra back as the side's next member (charId reserved for the day other characters can be loaded: today a clone of the existing fighters).
+void call_in(DownRec& d, int charId) {
+    const uint32_t A = d.actor;
+    uint32_t anchor = 0;
+    for (int k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0) && side_of(a) == d.side) anchor = a; }
+    const uint32_t st = rd(A + 0x52Cu);
+    if (ok(st, 0x40)) { wr(st + 0xCu, rd(A + 0x10B0u)); const uint32_t b = rd(A + 0x10ACu) & 0xFFFFu; wr(st + 0x14u, (b << 16) | b); }
+    for (size_t i = 0; i < g_down.size(); i++) if (g_down[i] == A) { g_down.erase(g_down.begin() + static_cast<long>(i)); break; }
+    wr(A + 0x380u, rd(A + 0x380u) & ~2u);
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
+    g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+    const uint32_t vec = sp0 - 0xC0u;
+    const uint32_t ref = ok(anchor, 0x12D0) ? anchor : A;
+    wrf(vec, rdf(ref + 0x80u) + 3.0f); wrf(vec + 4, rdf(ref + 0x84u)); wrf(vec + 8, rdf(ref + 0x88u)); wrf(vec + 12, 1.0f);
+    call(PLACE, A, vec, 1);
+    g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+    call(START_ACTION, A + 304u, 1, 0);
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+    g_called[team_of(d.side)]++;
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs CALLIN actor %08X (side %u, char %d) is back with full HP\n", dissidia_battle_age() / 60.0f, A, d.side, charId);
+}
+
+void ko_oneround() {
+    if (!g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
+    if (std::getenv("PSPRECOMP_TAGTEAM_BSDIFF")) {   // debug: the setup object's words that changed during the last frames (at the KO and after)
+        static uint32_t snap[0x1400 / 4]; static int shown = 0; static bool have = false; static float lastage = -1;
+        const float a = dissidia_battle_age();
+        const uint32_t S0 = rd(g_bs + 56u); const bool dead0 = ok(S0, 0x12D0) && !alive(S0);
+        static int since_dead = -1; if (dead0 && since_dead < 0) since_dead = 0; if (since_dead >= 0) since_dead++;
+        if (have && since_dead >= 0 && since_dead < 1500 && shown < 80) for (uint32_t o = 0; o < 0x1400; o += 4) { const uint32_t v = rd(g_bs + o); if (v != snap[o / 4] && o != 0x48 && o != 0x60 && shown < 80) { std::fprintf(stderr, "[BSDIFF] f+%d t=%.2f bs+%04X: %08X -> %08X\n", since_dead, a / 60.0f, o, snap[o / 4], v); shown++; } }
+        for (uint32_t o = 0; o < 0x1400; o += 4) snap[o / 4] = rd(g_bs + o); have = true; (void)lastage;
+    }
+    static uint32_t prev_bs = 0; static bool handled[2] = {false, false}; static uint8_t lastStock[2] = {1, 1};
+    if (prev_bs != g_bs) { prev_bs = g_bs; handled[0] = handled[1] = false; g_downrec.clear(); g_called[0] = g_called[1] = 0; g_down.clear(); }
+    const float age = dissidia_battle_age();
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_KOLOG")) { static int n = 0; if ((n++ % 120) == 0) { std::fprintf(stderr, "[KOLOG] t=%.1f down %zu rec %zu called %d/%d reserve %d/%d bs %08X:", age / 60.0f, g_down.size(), g_downrec.size(), g_called[0], g_called[1], reserve_left(0), reserve_left(1), g_bs); for (int i = 0; i < g_nextra; i++) std::fprintf(stderr, " extra%d %08X side %u started %d hp %d down %d", i, g_extra[i].actor, g_extra[i].side, g_extra[i].started, ok(rd(g_extra[i].actor + 0x52Cu), 0x40) ? static_cast<int>(rd(rd(g_extra[i].actor + 0x52Cu) + 0xCu)) : -1, is_down(g_extra[i].actor)); std::fprintf(stderr, "\n"); } }
+    for (uint32_t k = 0; k < 2; k++) {
+        const uint32_t S = rd(g_bs + 56u + 4u * k);
+        if (!ok(S, 0x12D0)) continue;
+        if (alive(S)) { handled[k] = false; lastStock[k] = g_ram[(S + 0x10CEu) & 0x07FFFFFFu]; continue; }
+        if (handled[k]) continue;
+        handled[k] = true;
+        Extra* te = nullptr;
+        for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != S && side_of(g_extra[i].actor) == side_of(S) && alive(g_extra[i].actor)) te = &g_extra[i];
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs KO of slot %u fighter %08X, team mate %08X, reserve %d\n", age / 60.0f, k, S, te ? te->actor : 0u, reserve_left(team_of(side_of(S))));
+        if (!te) continue;                                    // nobody to take over: the retail rules end the round
+        const uint32_t T = te->actor;
+        const uint32_t keepRev = 0; const uint8_t keepStock = lastStock[k];   // the stock / revive words belong to the slot, like the player flag: back to what they were before the retail KO chain took a stock and asked for a revive
+        if (!content_swap(S, T)) continue;
+        wr(S + 0x10D0u, keepRev); g_ram[(S + 0x10CEu) & 0x07FFFFFFu] = keepStock; wr(T + 0x10D0u, 0); g_ram[(T + 0x10CEu) & 0x07FFFFFFu] = 0;
+        g_down.push_back(T);                                   // the KO'd content now at T: it plays out its fall and stays down
+        g_downrec.push_back({T, age, side_of(T)});
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs slot %u now holds the team mate; the KO'd character is down at %08X\n", age / 60.0f, k, T);
+    }
+    for (size_t i = 0; i < g_downrec.size();) {
+        DownRec& d = g_downrec[i];
+        if (age - d.since >= call_in_delay() && reserve_left(team_of(d.side)) > 0) { call_in(d, 0); g_downrec.erase(g_downrec.begin() + static_cast<long>(i)); }
+        else i++;
+    }
+}
 
 // debug (PSPRECOMP_TAGTEAM_HUDWATCH=1): the retail HUD getters for the human's side every 10 frames, printed when one changes
 void hud_watch() {
@@ -1374,6 +1471,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     if (g_nextra && g_bs && dissidia_battle_age() / 60.0f > 3.0f) fix_assist();   // (not at once: the retail setup of the assist actors has to run first)
     ko_watch();
+    ko_oneround();
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HUDWATCH")) hud_watch();
     if (!g_swap_req) return;
     g_swap_req = false;
@@ -1399,6 +1497,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_one_v_two = std::getenv("PSPRECOMP_TAGTEAM_1V2") && std::getenv("PSPRECOMP_TAGTEAM_1V2")[0] == '1';
     g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
+    g_oneround = !(std::getenv("PSPRECOMP_TAGTEAM_ONEROUND") && std::getenv("PSPRECOMP_TAGTEAM_ONEROUND")[0] == '0');
     g_tagin = !(std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '0');
     if (std::getenv("PSPRECOMP_TAGTEAM_LOADLOG") && (g_orig_filerec = psp_dispatch_probe_lookup(0x088470B8u))) { psp_dispatch_register(0x088470B8u, filerec_hook); psp_mem_watch_set(0x0880FFF0u); install_chain(std::make_integer_sequence<int, 8>{}); if ((g_orig_ld1 = psp_dispatch_probe_lookup(0x08843014u))) psp_dispatch_register(0x08843014u, ld1_hook); if ((g_orig_ld2 = psp_dispatch_probe_lookup(0x08845230u))) psp_dispatch_register(0x08845230u, ld2_hook); }
     if ((g_orig_batrec = psp_dispatch_probe_lookup(0x089132A4u))) psp_dispatch_register(0x089132A4u, batrec_hook);

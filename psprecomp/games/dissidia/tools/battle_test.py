@@ -253,7 +253,7 @@ def walk_direct(g, ff_menus=4):
             g.press('cross')                           # a slow load (real GPU, ray tracing) can leave the replay's last presses on the loading / VS ("Next") page
         if seen >= 2:
             g.touch_go()
-            g.wait_log(r'\[TEST\] battle started', 20)
+            g.wait_log(r'\[TEST\] battle started', 90)
             g.cmd('FF 0')
             return
     raise RuntimeError('the battle never started (direct)')
