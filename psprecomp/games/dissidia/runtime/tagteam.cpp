@@ -75,8 +75,8 @@ uint8_t* g_ram = nullptr;
 recomp_context* g_ctx = nullptr;
 
 // The extra fighters of the battle being set up. side 1 = the CPU's team (the "third"), side 0 = the human's (the partner).
-struct Extra { uint32_t actor = 0, side = 0, foe = 0, slot_actor = 0; bool started = false; int hp_max = 0; std::vector<std::pair<uint32_t, uint32_t>> undo; };   // undo: (address, value) writes that take back what the constructor registered
-Extra g_extra[2];
+struct Extra { uint32_t actor = 0, side = 0, foe = 0, slot_actor = 0; bool started = false; bool replaced = false; bool callin = false; int charId = 0; int hp_max = 0; std::vector<std::pair<uint32_t, uint32_t>> undo; };   // undo: (address, value) writes that take back what the constructor registered
+Extra g_extra[10];   // 2 made at the start + one per call-in of a real party member (down ones stay: the fallen keep their place)
 std::vector<std::pair<uint32_t, uint32_t>> g_last_undo;
 int g_nextra = 0;
 uint32_t g_bs = 0;
@@ -87,8 +87,9 @@ int eff_mask() { return (g_two_v_one == g_one_v_two) ? g_mask : (g_two_v_one ? (
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
-struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; };
-std::vector<Late> g_late_q;   // extras still to be made (after the intro)
+struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; };
+std::vector<Late> g_late_q;
+std::vector<Late> g_late_load;   // call-in members whose character files still have to be loaded (done from the frame hook, outside any fighter's update)   // extras still to be made (after the intro)
 bool g_late_ready = false;    // the intro is over, the queue may spawn   // PSPRECOMP_TAGTEAM_EXTRAS: 1 = enemy side fighter, 2 = partner on the human's side
 
 uint32_t rd(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
@@ -368,7 +369,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     g_owned.clear(); g_own_ctx = 0;
     g_orig_setup(rdram, ctx);
     g_ram = rdram; g_ctx = ctx;
-    g_nextra = 0; g_bs = 0; g_late_q.clear(); g_late_ready = false;
+    g_nextra = 0; g_bs = 0; g_late_q.clear(); g_late_load.clear(); g_late_ready = false;
     if (!g_enabled) return;
     if (!ok(bs, 0x2800)) return;
     const uint32_t a0 = rd(bs + 56), a1 = rd(bs + 60), mode = rd(bs + 76), human = rd(bs + 84);
@@ -430,6 +431,8 @@ void apply_undo(Extra& e) {
     e.undo.clear();
 }
 
+void entrance_effect(uint32_t A, const std::string& name);   // below (call-in entrance: pose, match pause, banner)
+std::string char_label(int id, bool full);
 void start_extra(Extra& e) {
     if (g_stop < 6) { e.started = true; return; }
     apply_undo(e);
@@ -451,6 +454,7 @@ void start_extra(Extra& e) {
         if (ok(st, 0x40) && rd(st + 0x14u) == 0) wr(st + 0x14u, (b << 16) | b);
     }
     e.started = true;
+    if (e.callin) entrance_effect(e.actor, char_label(e.charId, true));   // a real party member called in: pose + pause + banner
     if (g_log) for (uint32_t a : {e.slot_actor, e.actor}) { const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[TAGTEAM] stats %08X: +10A8 %u %u %u %u %u status %08X +0x14 %08X +0x18 %08X +0x1C %08X\n", a, rd(a + 0x10A8u), rd(a + 0x10ACu), rd(a + 0x10B0u), rd(a + 0x10B4u), rd(a + 0x10B8u), st, rd(st + 0x14u), rd(st + 0x18u), rd(st + 0x1Cu)); }
     if (g_log) std::fprintf(stderr, "[TAGTEAM] extra %08X (side %u) started, target %08X foe %08X\n", e.actor, e.side, rd(e.actor + 0x2FCu), e.foe);
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_ACTORDUMP")) {   // debug: every word of the extra's actor (diff a clone against another character)
@@ -483,6 +487,8 @@ std::vector<uint32_t> g_down;   // KO'd characters that stay down (tag-in): thei
 bool is_down(uint32_t a) { for (uint32_t d : g_down) if (d == a) return true; return false; }
 uint32_t g_entrant = 0; float g_entrant_until = 0;   // the call-in's pose ends with the match pause
 float g_banner_until = 0; std::string g_banner_text;   // the call-in announcement (battle age ticks)
+std::vector<int> g_reserve_ids[2];   // the charIds behind g_reserve[t].names (same order), for the call-ins
+int team_of_side(uint32_t side);   // below
 int g_called[2] = {0, 0};   // call-ins made per team (0 = the human's), the reserve strip hides that many names
 std::vector<TagHudReserve> g_reserve;   // waiting fighters per side (placeholder list until the roster call-ins exist)
 bool g_hud_on = true;
@@ -536,7 +542,7 @@ void update_party_reserve() {
     const uint32_t slot[2] = {rd(g_bs + 56u + 4u * (hs & 1u)), rd(g_bs + 56u + 4u * (1u - (hs & 1u)))};   // [0] = the human's fighter, [1] = the other team's
     const PartyList lists[2] = {read_party(0), read_party(1)};
     g_reserve.resize(2); g_reserve[0].side = 0; g_reserve[1].side = 1;
-    g_reserve[0].names.clear(); g_reserve[1].names.clear();
+    g_reserve[0].names.clear(); g_reserve[1].names.clear(); g_reserve_ids[0].clear(); g_reserve_ids[1].clear();
     auto has = [](const PartyList& l, int c) { for (int i = 0; i < l.n; i++) if (l.ids[i] == c) return true; return false; };
     const int hc = ok(slot[0], 0x12D0) ? actor_char(slot[0]) : -1;
     const int ho = has(lists[0], hc) || !has(lists[1], hc) ? 0 : 1;   // which list is the human's team (the first one unless only the second holds him)
@@ -552,7 +558,7 @@ void update_party_reserve() {
         for (int i = 0; i < g_party_last[t] && at < 0; i++) if (l.ids[i] == cur) at = i;   // a new battle of the same party starts over at the first member
         if (at < 0) continue;
         g_party_last[t] = at;
-        for (int i = at + 1; i < l.n; i++) g_reserve[t].names.push_back(char_label(l.ids[i], false));
+        for (int i = at + 1; i < l.n; i++) { g_reserve[t].names.push_back(char_label(l.ids[i], false)); g_reserve_ids[t].push_back(l.ids[i]); }
     }
     if (g_log) {
         static std::string last;
@@ -569,7 +575,8 @@ void init_reserve() {
     const char* e = std::getenv("PSPRECOMP_TAGTEAM_RESERVE");   // "id,id;id,id": charIds waiting on the human's side ; the enemy's side
     std::string spec = e ? e : ";";                      // placeholder roster for the HUD until the party call-ins exist
     int side = 0; int v = -1;
-    auto flush = [&]() { if (v >= 0) g_reserve[side].names.push_back(char_label(v, false)); v = -1; };
+    g_reserve_ids[0].clear(); g_reserve_ids[1].clear();
+    auto flush = [&]() { if (v >= 0) { g_reserve[side].names.push_back(char_label(v, false)); g_reserve_ids[side].push_back(v); } v = -1; };
     for (char c : spec) { if (c >= '0' && c <= '9') v = (v < 0 ? 0 : v * 10) + (c - '0'); else if (c == ',') flush(); else if (c == ';') { flush(); side = 1; } }
     flush();
 }
@@ -582,6 +589,7 @@ void hud_update() {
     std::vector<TagHudFighter> fs;
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
+        if (e.replaced) continue;   // the fallen one a called-in member took the place of
         TagHudFighter f;
         f.name = char_label(actor_char(e.actor), true); f.side = static_cast<int>(e.side == g_extra[0].side ? e.side : e.side);
         { const uint32_t st = rd(e.actor + 0x52Cu); f.hp = (ok(st, 0x40) && !is_down(e.actor)) ? static_cast<int>(static_cast<int32_t>(rd(st + 0xCu))) : 0; }   // live HP (the status object word the retail HUD reads); +0x10B0 is the maximum
@@ -606,7 +614,7 @@ void hud_update() {
 int all_fighters(uint32_t out[6]) {
     int n = 0;
     if (g_bs) { for (int k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0)) out[n++] = a; } }
-    for (int i = 0; i < g_nextra && n < 6; i++) if (g_extra[i].started) out[n++] = g_extra[i].actor;
+    for (int i = 0; i < g_nextra && n < 6; i++) if (g_extra[i].started && !is_down(g_extra[i].actor)) out[n++] = g_extra[i].actor;
     return n;
 }
 uint32_t side_of(uint32_t a) { return rdh(a + 0x10CCu); }
@@ -1078,8 +1086,9 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!g_late_q.empty() && g_late_ready) {   // the intro is over: make the late extras now
         for (const Late& l : g_late_q) {
             Extra& e = g_extra[g_nextra];
-            e.actor = spawn_fighter(g_bs, l.side, l.foe, l.cpu_side, l.info_slot, l.slot_actor); e.side = l.side; e.foe = l.foe; e.slot_actor = l.slot_actor; e.started = false;
+            e.actor = spawn_fighter(g_bs, l.side, l.foe, l.cpu_side, l.info_slot, l.slot_actor); e.side = l.side; e.foe = l.foe; e.slot_actor = l.slot_actor; e.started = false; e.callin = l.callin; e.charId = l.charId; e.replaced = false;
             if (e.actor) { e.undo = g_last_undo; g_nextra++; }
+            else if (l.callin) { const int t = team_of_side(l.side); if (g_called[t] > 0) g_called[t]--; }   // spawn failed: the member stays in reserve
         }
         g_late_q.clear(); intro_seen = false;
     }
@@ -1090,6 +1099,10 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             for (int i = g_nextra - 1; i >= 0; i--) if (!g_extra[i].started) apply_undo(g_extra[i]);
             for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) start_extra(g_extra[i]);
         }
+    }
+    if (Extra* e = extra_of(owner); e && e->callin && e->started && g_log) {   // the called-in member's actions (log of his script changes)
+        static int last = -1, n = 0; const int sc = static_cast<int16_t>(rd(owner + 0x180u) & 0xFFFFu);
+        if (sc != last && n++ < 80) { std::fprintf(stderr, "[CALLINLOG] t=%.1fs %s %08X script %d -> %d hp %d tgt %08X\n", dissidia_battle_age() / 60.0f, char_label(e->charId, true).c_str(), owner, last, sc, (ok(rd(owner + 0x52Cu), 0x40) ? static_cast<int>(rd(rd(owner + 0x52Cu) + 0xCu)) : -1), rd(owner + 0x2FCu)); last = sc; }
     }
     if (Extra* e = extra_of(owner); e && e->started) {
         if (g_tagin && !alive(owner)) return;   // a KO'd extra stays down: its brain does not think
@@ -1213,7 +1226,44 @@ struct DownRec { uint32_t actor; float since; uint32_t side; };
 std::vector<DownRec> g_downrec;
 
 int team_of(uint32_t side) { return g_bs && side == side_of(rd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u))) ? 0 : 1; }
+int team_of_side(uint32_t side) { return team_of(side); }
 int reserve_left(int team) { const int n = static_cast<int>(g_reserve.size() > static_cast<size_t>(team) ? g_reserve[team].names.size() : 0u); return n - g_called[team]; }
+
+// The entrance of a member coming in: the battle-start pose, the match pauses for a moment (only the entrant moves) and a banner names him.
+void entrance_effect(uint32_t A, const std::string& name) {
+    static const int entr = std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_ACTION") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_ACTION")) : 1100;   // the battle-start pose every fighter has (script 1100); 1 = just stand up
+    static const float pause_s = std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_PAUSE") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_PAUSE"))) : 2.5f;
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
+    g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+    call(START_ACTION, A + 304u, static_cast<uint32_t>(entr), 0);
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+    g_banner_text = name + " JOINS THE BATTLE"; g_banner_until = dissidia_battle_age() + pause_s * 60.f;
+    if (pause_s > 0.f) dissidia_pause_match(A, pause_s);
+    g_entrant = A; g_entrant_until = dissidia_battle_age() + pause_s * 60.f;
+}
+
+// The next reserve member of a team as a charId: the party list's id (a group battle) with a loadable character record, else 0 (a plain 2v2: the clone comes back).
+int next_member_char(int team) {
+    if (team < 0 || team > 1) return 0;
+    const size_t i = static_cast<size_t>(g_called[team]);
+    if (i >= g_reserve_ids[team].size()) return 0;
+    const int c = g_reserve_ids[team][i];
+    return (c > 0 && info_for_char(c)) ? c : 0;
+}
+
+// A real member comes in: a new extra of his own character is made (load_character + spawn_fighter run from the brain tick through the late queue) next to
+// the side's slot fighter; start_extra then runs his entrance. The fallen one keeps lying where it fell (g_down), its HUD panel is replaced.
+void queue_member(DownRec& d, int charId) {
+    const uint32_t hs = rd(g_bs + 84u) & 1u;
+    uint32_t anchor = 0, foe = 0;
+    for (uint32_t k = 0; k < 2; k++) { const uint32_t a = rd(g_bs + 56u + 4u * k); if (!ok(a, 0x12D0)) continue; if (side_of(a) == d.side) anchor = a; else foe = a; }
+    if (!anchor || !foe) return;
+    Late l; l.side = d.side; l.foe = foe; l.cpu_side = side_of(rd(g_bs + 56u + 4u * (1u - hs))); l.info_slot = static_cast<uint32_t>(100 + charId); l.slot_actor = anchor; l.callin = true; l.charId = charId;
+    g_late_load.push_back(l);   // the files are loaded from the camera step (frame hook), then the spawn follows through the late queue
+    if (Extra* e = extra_of(d.actor)) e->replaced = true;
+    g_called[team_of(d.side)]++;
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs CALLIN queued: %s (char %d) for side %u, anchor %08X foe %08X\n", dissidia_battle_age() / 60.0f, char_label(charId, true).c_str(), charId, d.side, anchor, foe);
+}
 
 // Bring a down extra back as the side's next member (charId reserved for the day other characters can be loaded: today a clone of the existing fighters).
 void call_in(DownRec& d, int charId) {
@@ -1281,7 +1331,11 @@ void ko_oneround() {
     }
     for (size_t i = 0; i < g_downrec.size();) {
         DownRec& d = g_downrec[i];
-        if (age - d.since >= call_in_delay() && reserve_left(team_of(d.side)) > 0) { call_in(d, 0); g_downrec.erase(g_downrec.begin() + static_cast<long>(i)); }
+        if (age - d.since >= call_in_delay() && reserve_left(team_of(d.side)) > 0) {
+            const int cid = g_nextra < 10 ? next_member_char(team_of(d.side)) : 0;
+            if (cid) queue_member(d, cid); else call_in(d, 0);   // a party member of his own: loaded and spawned; a plain 2v2: the clone comes back
+            g_downrec.erase(g_downrec.begin() + static_cast<long>(i));
+        }
         else i++;
     }
 }
@@ -1499,6 +1553,11 @@ template <int... I> void install_chain(std::integer_sequence<int, I...>) {
 // Called by the scene tick (hooks_main.cpp) before every frame's update: between frames no fighter is mid-update, the safe point for the swap.
 uint32_t dissidia_camera_manager();
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
+    if (!g_late_load.empty() && g_bs) {   // a called-in member's files: loading them inside a fighter's update could stall the game
+        g_ram = rdram; g_ctx = ctx;
+        for (const Late& l : g_late_load) { load_character(l.charId); g_late_q.push_back(l); }
+        g_late_load.clear();
+    }
     if (g_nextra && g_bs && !std::getenv("PSPRECOMP_TAGTEAM_NOCAMFOE")) {   // the camera manager keeps the human's foe at mgr+0x8B4: follow the locked enemy
         g_ram = rdram; g_ctx = ctx;
         const uint32_t mgr = dissidia_camera_manager(), hum = rd(g_bs + 56u + 4u * rd(g_bs + 84u));
@@ -1554,7 +1613,9 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (const char* b = std::getenv("PSPRECOMP_TAGTEAM_SWAP_BUTTON")) g_swap_mask = static_cast<uint32_t>(std::strtoul(b, nullptr, 16));
     if (const char* c = std::getenv("PSPRECOMP_TAGTEAM_PARTNER_CHAR")) g_partner_char = std::atoi(c);
     if (const char* c = std::getenv("PSPRECOMP_TAGTEAM_ENEMY2_CHAR")) g_enemy2_char = std::atoi(c);
-    if (g_partner_char || g_enemy2_char) dissidia_model_pool_request_extra(0x600000u);   // room for up to two more characters' models
+    // Room for the models, character data and textures of up to two more characters: needed for the called-in party members (and PARTNER_CHAR / ENEMY2_CHAR). The model pool is
+    // taken at the loading screen, the OBJDATA heap once at start-up, so it is asked for at every launch (about 6.5 MB of host memory; PSPRECOMP_TAGTEAM_NOPOOL=1 keeps retail sizes).
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOPOOL")) dissidia_model_pool_request_extra(0x600000u);
     if (g_partner_char) g_preload[g_npreload++] = g_partner_char;
     if (g_enemy2_char) g_preload[g_npreload++] = g_enemy2_char;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_STOP")) g_stop = std::atoi(m);

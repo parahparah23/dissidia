@@ -460,3 +460,23 @@ What was learned (FIRSTCALL phase diffs of the matrix harness, `PSPRECOMP_FIRSTC
 - Tried without result (all env-gated off): `PSPRECOMP_TAGTEAM_AFDMODE` 1 (module clone with `m+0 = extra`), 2 (second `FUN_08AFD170` call), 3/4 (call for flagged extras with the slot's assist pointer showing the extra during the call, kind 0, flag gated / every frame), 5/6/7 (kind 1). The `[AFD]` log shows the extras' `+0x380` flags (0x1B48 -> 0x1948 one frame) when they are hit.
 - Open leads: the EBOOT collision code (`FUN_08808EE4`, `FUN_08807D4C`, `FUN_08813510`, `FUN_0883A150`) reads actor `+1346` (kind byte: 3 = assist whose owner is `+1492`, owner `+4360` must point back) and `+4360`; and `0x08B876A0` (global fighter array: slot, slot, assist, assist). Candidate fix for the hit gate: find the per-attacker list the collision step iterates for slot victims.
 - Debug aids added: `PSPRECOMP_TAGTEAM_AFDDUMP=1` (kind table, module words, handler list), `_AFDMODE`.
+
+## Real party members as call-ins (tag-roster)
+In a group (party) battle the timed call-in (20 s after a KO, `PSPRECOMP_TAGTEAM_CALLIN_DELAY`) now brings in the NEXT party member as his own character instead of the clone:
+- `update_party_reserve()` also keeps the charIds (`g_reserve_ids[team]`, same order as the strip names; `PSPRECOMP_TAGTEAM_RESERVE` ids too). `next_member_char(team)` = the id at `g_called[team]`
+  when `info_for_char()` knows it, else 0 (plain 2v2 / unknown: the old clone call-in).
+- `queue_member()` puts a `Late{callin, charId}` in `g_late_load`; the **frame hook** (`dissidia_tagteam_frame`, camera step, outside any fighter's update) runs
+  `load_character()` and moves it to `g_late_q`, the brain tick spawns it (`spawn_fighter(..., info_slot = 100 + charId, ...)`) and `start_extra()` starts it and runs
+  `entrance_effect()` (battle-start pose 1100, match pause 2.5 s, banner "<NAME> JOINS THE BATTLE"). The fallen extra is marked `replaced` (its HUD panel is dropped,
+  its body stays down); the strip drops the member (`g_called`). `all_fighters()` skips down extras; `g_extra` holds 10.
+- **Loading inside a brain tick hung the game about half of the runs** (main thread stuck after the first disc seek of the new character's model, game time stops, render
+  thread alive; with the loader's logging hooks on it did not hang): doing the load from the frame hook did not hang in 3 of 3 runs (party battle, human KO twice, CPU KO once).
+- The model pool / OBJDATA enlargements (`dissidia_model_pool_request_extra(0x600000)`) are now requested at every launch (the OBJDATA heap is allocated once at start-up, the pool at the
+  first loading screen), ~6.5 MB host memory, `PSPRECOMP_TAGTEAM_NOPOOL=1` keeps retail sizes. The 1 v 1 baseline run is unchanged.
+- Evidence (Party A: Jecht + Squall/Cloud of Darkness/Terra/Yuna vs Lightning + Vaan/Laguna, `PSPRECOMP_TAGTEAM_KO=human:10 _KO_HP0=1 _CALLIN_DELAY=8`, headless): KO at 10 s ->
+  clone partner takes the slot -> at 18 s Squall (char 15) is loaded and spawned, banner shown, the strip goes `SQUA COD TERR YUNA` -> `COD TERR YUNA`, his own model (gunblade) is on
+  the stage, script 1100 (pose) -> 101/102 (attacks) -> 1/2, locked on the enemy, camera 2 bad of 990. CPU side (`KO=cpu:10`): Vaan (char 30) comes in the same way (script 1100 -> 1 -> 470).
+  `[CALLINLOG]` (with `_LOG=1`) prints the called-in member's script changes. `tagteam_test.py --baseline` PASS.
+- Limits: the called-in member's HP / bravery / attack are the slot fighter's (the setup record of his side), his voice bank is not requested (probably silent), the assist-style summon
+  entrance is not done (pose + pause + banner only). A second KO of the slot fighter while the team mate is a REAL member cannot swap (`content_swap` needs clones: the slot holds the clone,
+  the real member lives in his own actor), so the retail round end applies there. The timed call-in after a natural (non-recipe) KO was not exercised.
