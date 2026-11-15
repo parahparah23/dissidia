@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <string>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -64,7 +65,7 @@ constexpr uint32_t REG_PAIR0 = 0x08BAE9FCu, REG_PAIR1 = 0x08BAEA08u;   // ctor w
 constexpr uint32_t LAST_FIGHTER_OBJ = 0x089D4774u;   // EBOOT global the fighter constructor sets to its own controller-side object
 constexpr uint32_t ACT_VT = 0x544u, ACT_FLAGS = 0x5B0u, ACT_LOCKBLK = 0x5ACu;
 
-FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_stock = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
+FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_stock = nullptr, g_orig_rule = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
 bool g_in_ctor = false;   // inside the extra's constructor: the resource releases are skipped (see rel_hook)
 bool g_oneround = true;   // KO rules, one continuous round: a KO'd slot fighter is swapped with its living team mate at once, no stock hack / round restart (PSPRECOMP_TAGTEAM_ONEROUND=0: the old restart flow)
 bool g_tagin = true;      // KO rules: a KO'd slot fighter with a living team mate is replaced by him (PSPRECOMP_TAGTEAM_TAGIN=0 turns it off)
@@ -122,6 +123,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx);
 const char* role_of(uint32_t a);
 void fix_assist();
 void stock_hook(uint8_t* rdram, recomp_context* ctx);
+void rule_hook(uint8_t* rdram, recomp_context* ctx);
 void lock_other_hook(uint8_t* rdram, recomp_context* ctx);
 void refresh_hook(uint8_t* rdram, recomp_context* ctx);
 void lock_mode_hook(uint8_t* rdram, recomp_context* ctx);
@@ -383,6 +385,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
         if (g_orig_lock_other && g_orig_refresh && g_orig_lock_mode) { psp_dispatch_register(LOCK_OTHER, lock_other_hook); psp_dispatch_register(TARGET_REFRESH, refresh_hook); psp_dispatch_register(LOCK_MODE, lock_mode_hook); }
         else std::fprintf(stderr, "[TAGTEAM] lock cycle hooks not installed\n");
     }
+    if (!g_orig_rule && std::getenv("PSPRECOMP_TAGTEAM_RULELOG")) { g_orig_rule = fn(0x08A040BCu); if (g_orig_rule) psp_dispatch_register(0x08A040BCu, rule_hook); }
     if (!g_orig_stock) { g_orig_stock = fn(0x08B33914u); if (g_orig_stock) psp_dispatch_register(0x08B33914u, stock_hook); }
     if (!g_orig_tick) { g_orig_tick = fn(BRAIN_TICK); if (g_orig_tick) psp_dispatch_register(BRAIN_TICK, tick_hook); else std::fprintf(stderr, "[TAGTEAM] brain tick not found\n"); }
     const uint32_t hum = human == 0 ? a0 : a1, cpu = human == 0 ? a1 : a0;
@@ -650,7 +653,14 @@ int all_fighters(uint32_t out[6]) {
 }
 uint32_t side_of(uint32_t a) { return rdh(a + 0x10CCu); }
 // Alive = live HP above 0: the word the retail HUD reads, *(actor+0x52C)+0xC (actor+0x10B0 is the maximum).
-bool alive(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return !is_down(a) && ok(st, 0x40) && static_cast<int32_t>(rd(st + 0xCu)) > 0; }
+bool ko_script(uint32_t a);
+bool alive(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return !is_down(a) && !ko_script(a) && ok(st, 0x40) && static_cast<int32_t>(rd(st + 0xCu)) > 0; }
+
+// A natural lethal hit does not necessarily write 0 into the live HP word: the retail KO is the fall script (1200..1299, 1210 = knocked out) that
+// starts in the frame of the hit, the HP bar goes down later. A fighter is KO'd when its HP is 0 or its script is a KO fall.
+bool ko_script(uint32_t a) { const int sc = static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu); return sc >= 1200 && sc < 1300; }
+bool ko_state(uint32_t a);
+bool ko_state(uint32_t a) { return !alive(a) || ko_script(a); }
 
 // The enemy fighter to cycle to from `foe` for `owner`: another living fighter of the other team, 0 if none.
 uint32_t other_enemy(uint32_t owner, uint32_t foe) {
@@ -941,6 +951,15 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             if (sel != last_sel || t != last_t || rd(L + 264u) != last_mode) { last_mode = rd(L + 264u); std::fprintf(stderr, "[TAGTEAM] t=%.1fs human lock: sel %d -> %d, mode %u, target %08X -> %08X (+0x2FC %08X foe %08X)\n", dissidia_battle_age() / 60.0f, last_sel, sel, rd(L + 264u), last_t, t, rd(hum + 0x2FCu), rd(hum + 0x300u)); last_sel = sel; last_t = t; }
         }
     }
+    if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_KOFALL")) {   // debugging: "<who>:<seconds>": the fighter starts its KO fall (script 1210) with its HP untouched, like a natural lethal hit (the retail round end follows ~2 s later)
+        static bool done = false; char who[16] = {}; float at = 0; std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_KOFALL"), "%15[a-z0-9]:%f", who, &at);
+        const uint32_t hs = rd(g_bs + 84u);
+        if (!done && dissidia_battle_age() / 60.0f >= at && g_nextra && owner == rd(g_bs + 56u + 4u * (!std::strcmp(who, "human") ? hs : 1u - hs))) {
+            done = true; const uint32_t a = owner; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u);
+            call(START_ACTION, a + 304u, 1210, 0); g_ctx->r[29] = static_cast<int32_t>(sp0);
+            std::fprintf(stderr, "[TAGTEAM] t=%.1fs KOFALL %s %08X: script 1210 started, hp %d\n", dissidia_battle_age() / 60.0f, who, a, static_cast<int>(rd(rd(a + 0x52Cu) + 0xCu)));
+        }
+    }
     if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_NATKO")) {   // debugging, natural KO: "<who>:<seconds>:<hp>": the victim gets that live HP once and its bravery is held at 0 (broken), then a REAL HP attack kills it
         static uint32_t vic = 0; static bool set = false;
         char who[16] = {}; float at = 0; int hp = 40; std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_NATKO"), "%15[a-z0-9]:%f:%d", who, &at, &hp);
@@ -950,6 +969,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             if (!std::strcmp(who, "human")) a = rd(g_bs + 56u + 4u * hs); else if (!std::strcmp(who, "cpu")) a = rd(g_bs + 56u + 4u * (1u - hs));
             if (ok(a, 0x12D0)) { const uint32_t st = rd(a + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0xCu, static_cast<uint32_t>(hp)); vic = a; set = true; std::fprintf(stderr, "[TAGTEAM] t=%.1fs NATKO victim %s %08X live HP %d, bravery held at 0\n", dissidia_battle_age() / 60.0f, who, a, hp); } }
         }
+        if (!set && std::getenv("PSPRECOMP_TAGTEAM_STATDUMP") && dissidia_battle_age() / 60.0f >= at - 1.0f) { static bool d = false; if (!d) { d = true; const uint32_t a = rd(g_bs + 56u + 4u * ((!std::strcmp(who, "human")) ? hs : 1u - hs)); const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[STATDUMP] actor %08X status %08X:", a, st); for (uint32_t o = 0; o < 0x60; o += 4) std::fprintf(stderr, " +%02X=%X", o, rd(st + o)); std::fprintf(stderr, "\n[STATDUMP] actor words +10A0..:"); for (uint32_t o = 0x10A0; o < 0x10D4; o += 4) std::fprintf(stderr, " %X=%X", o, rd(a + o)); std::fprintf(stderr, "\n"); } }
         if (vic && owner == vic) { const uint32_t st = rd(vic + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0x14u, rd(st + 0x14u) & 0xFFFF0000u); static int lasthp = -1; const int h = static_cast<int32_t>(rd(st + 0xCu)); if (h != lasthp) { std::fprintf(stderr, "[TAGTEAM] t=%.2fs NATKO victim live HP %d script %d\n", dissidia_battle_age() / 60.0f, h, static_cast<int16_t>(rd(vic + 0x180u) & 0xFFFF)); lasthp = h; } } }
     }
     if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_KO")) {   // debugging: "<who>:<seconds>" puts a fighter on 1 HP and 0 bravery so the next hit KOs it (who = human, cpu, enemy2, partner)
@@ -1209,11 +1229,40 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
 void stock_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     const uint32_t a = static_cast<uint32_t>(ctx->r[4]);
-    if (g_oneround && g_tagin && g_bs && ok(a, 0x12D0) && (a == rd(g_bs + 56u) || a == rd(g_bs + 60u)) && alive(a)) {   // the retail finish effect of a KO that the tag swap took away: nothing is lost
-        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs retail KO finish for %08X skipped (the slot holds a living fighter)\n", dissidia_battle_age() / 60.0f, a);
+    if (g_oneround && g_tagin && g_bs && ok(a, 0x12D0) && (a == rd(g_bs + 56u) || a == rd(g_bs + 60u)) && alive(a)) {
+        // The retail KO finish of a KO that the tag swap took away (or that is only a recipe): the step runs (skipping it leaves the finish state
+        // machine calling it again every frame and the battle clock restarting each time), but the stock it takes and the revive it asks for are put back.
+        const uint8_t stock = g_ram[(a + 0x10CEu) & 0x07FFFFFFu]; const uint32_t rev = rd(a + 0x10D0u);
+        g_orig_stock(rdram, ctx);
+        g_ram[(a + 0x10CEu) & 0x07FFFFFFu] = stock; wr(a + 0x10D0u, rev);
+        if (g_log) { static int n = 0; if (n++ < 20) std::fprintf(stderr, "[TAGTEAM] t=%.1fs retail KO finish for %08X undone (the slot holds a living fighter; stock %u rev %u kept)\n", dissidia_battle_age() / 60.0f, a, stock, rev); }
         return;
     }
     g_orig_stock(rdram, ctx);
+}
+
+
+// debug (PSPRECOMP_TAGTEAM_RULELOG=1): the rules engine's condition objects. FUN_08A040BC(record, slot) asks up to 20 condition objects
+// (record+8+8*i: +4 = object, virtual +144 = check(slot)); the ones that say yes are logged with their check function.
+void rule_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const uint32_t rec = static_cast<uint32_t>(ctx->r[4]), slot = static_cast<uint32_t>(ctx->r[5]);
+    static std::map<uint64_t, int> last; static std::set<uint32_t> seenfn;
+    if (ok(rec, 0x100) && g_ram[rec & 0x07FFFFFFu] && slot < 2) {
+        for (int i = 0; i < 20; i++) {
+            const uint32_t obj = rd(rec + 8u + 8u * i + 4u); if (!obj || !ok(obj, 0x10)) continue;
+            const uint32_t vt = rd(obj), e = vt + 144u, fnp = rd(e + 4u); const int16_t adj = static_cast<int16_t>(rdh(e));
+            if (!fnp) continue;
+            const uint32_t res = call(fnp, obj + static_cast<uint32_t>(static_cast<int32_t>(adj)), slot);
+            const uint64_t key = (static_cast<uint64_t>(rec) << 32) | (static_cast<uint64_t>(slot) << 8) | static_cast<uint64_t>(i);
+            auto it = last.find(key);
+            if (it == last.end() || it->second != static_cast<int>(res)) {
+                last[key] = static_cast<int>(res);
+                std::fprintf(stderr, "[RULE] t=%.1fs rec %08X slot %u cond %d obj %08X check fn %08X (vt %08X) -> %u\n", dissidia_battle_age() / 60.0f, rec, slot, i, obj, fnp, vt, res);
+            }
+        }
+    }
+    g_orig_rule(rdram, ctx);
 }
 
 // ---- KO rules ----
@@ -1374,7 +1423,7 @@ void ko_oneround() {
     for (uint32_t k = 0; k < 2; k++) {
         const uint32_t S = rd(g_bs + 56u + 4u * k);
         if (!ok(S, 0x12D0)) continue;
-        if (alive(S)) { handled[k] = false; lastStock[k] = g_ram[(S + 0x10CEu) & 0x07FFFFFFu]; continue; }
+        if (!ko_state(S)) { handled[k] = false; lastStock[k] = g_ram[(S + 0x10CEu) & 0x07FFFFFFu]; continue; }
         if (handled[k]) continue;
         handled[k] = true;
         Extra* te = nullptr;
@@ -1392,6 +1441,12 @@ void ko_oneround() {
     if (g_entrant && age >= g_entrant_until) {   // the pose is over with the pause: stand up and fight
         const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u);
         call(START_ACTION, g_entrant + 304u, 1, 0); g_ctx->r[29] = static_cast<int32_t>(sp0); g_entrant = 0;
+    }
+    for (int i = 0; i < g_nextra; i++) {   // a non-slot extra (the clone) that was knocked out: it stays down, its side's reserve calls in after the delay
+        Extra& e = g_extra[i];
+        if (!e.started || is_down(e.actor) || alive(e.actor)) continue;
+        g_down.push_back(e.actor); g_downrec.push_back({e.actor, age, side_of(e.actor)});
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs extra %08X (side %u) is down (hp %d, script %d), reserve %d\n", age / 60.0f, e.actor, e.side, ok(rd(e.actor + 0x52Cu), 0x40) ? static_cast<int>(rd(rd(e.actor + 0x52Cu) + 0xCu)) : -1, static_cast<int16_t>(rd(e.actor + 0x180u) & 0xFFFFu), reserve_left(team_of(side_of(e.actor))));
     }
     for (size_t i = 0; i < g_downrec.size();) {
         DownRec& d = g_downrec[i];

@@ -515,3 +515,18 @@ User spec: no clones in a group battle; the match starts with the two party memb
   Result: with real members the two on the stage fight, the called-in members (after a KO of an EXTRA) work, but a KO of a slot fighter ends the round; use
   `PSPRECOMP_TAGTEAM_NOREAL=1` (clones) when the swap matters more than real characters.
 - Debug: `PSPRECOMP_TAGTEAM_SWAPPROBE=1` (differences + fighter vtable), `PSPRECOMP_TAGTEAM_NOREAL=1`.
+## Natural KO (tag-call, 15 Nov)
+Play-test: a natural lethal hit on the original fighter produced no switch. Findings:
+- A natural lethal hit does **not** have to write 0 into the live HP word (`status+0xC`): in the matrix harness (`HPMATRIX` pair 4, victim HP 40, broken) the victim
+  went 700 -> 701 -> **1210** (the KO fall) with `status+0xC` still 40. The check `!alive(slot)` (HP <= 0) never fired. A fighter is now KO'd when its HP is 0
+  **or its script is a KO fall (1200..1299)** (`ko_script`, `ko_state`; `alive()` includes it, so a KO'd clone is not "alive" for the lock cycle / AI either).
+- Verified (headless): `PSPRECOMP_TAGTEAM_KOFALL=<human|cpu>:<s>` starts script 1210 with the HP untouched (what a natural hit leaves): the swap happens at the
+  next camera safe point on both sides, the retail finish never runs, the fight goes on (no DEFEATED for 30+ s). A real natural kill was not reproduced: every way
+  I found to put a fighter near death by hand (`NATKO`, `KO`, `HPM_VBRV0` = holding the victim's bravery at 0) makes the retail rules run the finish in the next frame by
+  themselves (stock 1 -> 0, revive word 1; the condition objects `FUN_08A040BC` say 0 - `PSPRECOMP_TAGTEAM_RULELOG=1` - so it is not the rule table), which is what
+  the recipe loop was: with the stock step skipped the finish state machine calls `FUN_08B33914` again every frame and the battle clock restarts each time
+  (`t=0.0s` repeating). `stock_hook` now lets the step run and puts stock / revive back (still loops with a held BRV 0: use the recipes without `KO_NOBRV`-less BRV writes).
+- **Killing a clone**: a non-slot extra that is KO'd (HP 0 or KO fall) is marked down and queued for the call-in of its side's reserve after the delay
+  (`[TAGTEAM] extra ... is down`); the forced recipe on the enemy's clone did not end the battle (50 s). A natural kill of the clone (user report: battle ended) was not reproduced:
+  the damage to a clone goes through the slot fighter's assist place (`fix_assist`), so it may be applied to the slot; check with a real fight.
+- Debug aids: `PSPRECOMP_TAGTEAM_NATKO=<who>:<s>:<hp>`, `_KOFALL=<who>:<s>`, `_STATDUMP=1`, `_RULELOG=1`, `_HPM_VHP`, `_HPM_WATCHHP`, `_HPM_WATCH_ACT=<hex>`.
