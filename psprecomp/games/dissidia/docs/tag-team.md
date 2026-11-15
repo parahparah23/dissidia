@@ -362,3 +362,29 @@ getters for both sides, the slot fighters' HP / BRV / stock / revive word / scri
 - **Implemented**: `update_party_reserve()` (tagteam.cpp) reads the two lists every HUD frame; the member on the stage is the actor's charId (first match from the last index, so a repeated charId works), the reserve strip lists the ones after him; a count of 1 (1 v 1) shows nothing. Verified in the Party A battle: `team0: SQUA COD TERR YUNA | team1: VAAN LAGU`; the 1 v 1 baseline shows nothing. `PSPRECOMP_TAGTEAM_RESERVE` still overrides. Name table fix: charId 29 is Prishe, 30 is Vaan (checked against the CPU party pick).
 - **Not decoded**: the exact "which member is next / who is KO'd" progress word of the sequential flow (only the round-result bytes above were seen to change after a round); members who already lost are inferred from the list order.
 - **What a real roster tag-in needs**: the next party member is a different character, and retail loads model, motion and sound data only for the two (plus their assists') characters at the loading screen into fixed slots (0x780000 model pool), so a call-in of Squall for Jecht needs those resources streamed in (or loaded for the whole party up front by the loading step, `FUN_0888BA0C` / the character info table), and the actor built through the same spawn path as the extras (`spawn_fighter` with that character's info record). The retail party flow itself restarts the battle with a fresh setup for the next member, which is a cheaper route to a real "next member" (let the round end the retail way and keep the other side's fighter state) than loading everyone at once.
+## Extras cannot deal damage (tag-hp fork, 14 Nov)
+Symptom (play test): HP/BRV damage works between the two original fighters only; extras hit (the victim reacts) but nothing is lost.
+Found with a deterministic harness (`PSPRECOMP_TAGTEAM_HPMATRIX=<action id>`: every 4 s one attacker/victim pair of the four fighters, the victim
+put 1.6 m in front of the attacker, the attacker starts an attack action, the other fighters are AI-gated; `[HPM]` lines give the victim's
+BRV/HP before/after, `PSPRECOMP_TAGTEAM_HPM_AI=1` lets the attacker's AI choose, `_HPM_SWEEP=<pair>` sweeps action ids, `_HPM_VBRV0=1` zeroes the
+victim's bravery) and a gdb hardware watchpoint on the victim's BRV word (the write comes from `FUN_08AE6D2C`, called via
+`FUN_08886C88` -> `FUN_08AFCDAC` -> `FUN_08AFD424` -> `FUN_08AFD170` -> `FUN_08AE1830` -> `FUN_08AE17FC` -> `FUN_08AE45B8`):
+- The **battle controller `FUN_08886C88`** (once per frame) runs the combat modules for the **two slot fighters only** (arrays of two entries: the
+  per-slot objects, actor at +0). `FUN_08AFD424` walks `[slot actor, its assist (+0x1108)]` and sends them the hit-result messages;
+  `FUN_08AE6D2C(component, ...)` applies the damage: *this* = `component+16` (the actor), the other party = `this->+0x300` (the foe, vtable +304 getter
+  `FUN_08836D9C`). An extra is neither a slot fighter nor an assist, so nobody consumes its hits.
+- Ruled out: stock `+0x10CE`, the pair table, the `+0x4A0/+0x4A4` fighter list (extras are linked in), actor fields left unfilled by the clone init, the
+  global fighter array `0x08B876A0` (slot, slot, assist, assist). The "groups" at `world+36/+120/+204` (`FUN_089DEDB0`) are HUD number accounting
+  (BRV roll), not hit logic. Which functions run only for slot attackers: `FUN_08AE3710/3B54` (HUD channels), `089DE6EC...` (HUD).
+- **Fix**: an extra takes the place of its slot fighter's assist pointer (`slot+0x1108 = extra`, `fix_assist()`, applied once the battle is 3 s old
+  because the retail assist setup must run first and again after every content exchange); then the modules process it and the extras deal BRV
+  damage. Substituting only while the controller runs does not work (the pointer is read at hit time too). Cost: a real assist character on that
+  side is not used in tag mode (`PSPRECOMP_TAGTEAM_KEEPASSIST=1` keeps it, extras then deal no damage).
+- Status: in the matrix, extras land hits in about half of the windows (slot attackers land ~65 % in the same harness); the remaining failures are
+  mostly extra -> slot victim. HP damage was not verified: no action id in 10000-10139 / 400-539 does HP damage in the harness (it needs a broken
+  victim and an HP attack, pad taps did not make the human attack in the windows), but it goes through the same module.
+- The human's foe: retail rewrites `actor+0x300` between the target refresh and the controller, so while the lock is on the other enemy the foe is
+  put back to it right before the controller runs (`ctrl_hook`, `[TAGTEAM] controller: human foe` in the log). The lock block target L+252 stays 0
+  in that state; the reticle was not investigated.
+- Debug aids: `_HPLOG=1|2` (`[HP]` lines per fighter, `_HPBOOST=1`), `_HPSCAN=1` (holders of each fighter's address, actor diffs, fighter fields,
+  vtable), `_HITLOG=1` (world hook), `_HPM_WATCH`, `_HPM_GDB` (raise SIGTRAP at a window start for gdb with the hardware watchpoint).
