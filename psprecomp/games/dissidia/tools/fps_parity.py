@@ -133,10 +133,10 @@ def trial_lines(acts, variants, only=None, moves=True):
             lines.append('+0 waitidle 8000')
             lines.append('+0 home %.2f %.2f %.2f' % (HOME_DIST, HOME_X, HOME_Z))
             lines.append('+100 mark T %d %s' % (aid, v))
-            t = 200
-            if side == 1:                                   # an air action: jump first
-                lines.append('+200 tap CROSS 67')
-                t = 600
+            t = 700                                         # 0.6 s after `home`: right after the teleport a jump was sometimes not taken and the
+            if side == 1:                                   # dummy sometimes not hittable (still getting up); an air action: jump first
+                lines.append('+700 tap CROSS 100')
+                t = 1100
             lines.append('+%d action %d player' % (t, aid))
             if v == 'mash':
                 for k in range(12):
@@ -166,7 +166,8 @@ def run_one(a, cid, rate, out, tag=None):
     env = {'PSPRECOMP_TEST_PLAYER_CHAR': str(cid), 'PSPRECOMP_TEST_PARITY': '1', 'PSPRECOMP_TEST_DIRECT_BATTLE': os.path.abspath(WALK),
            'PSPRECOMP_FIGHTER_LOG': '0', 'PSPRECOMP_TEST_NO_AI': '1', 'PSPRECOMP_TEST_AI_OFF': '1', 'PSPRECOMP_TEST_FREEZE_CPU': '0',
            'LP_NUM_THREADS': os.environ.get('LP_NUM_THREADS', '2'), 'PSPRECOMP_TEST_NO_DRAW': '0' if (a.draw or bt.gpu_headless()) and not a.no_draw else '2',
-           'PSPRECOMP_TEST_INPUT_DELAY': str(a.input_delay)}
+           'PSPRECOMP_TEST_INPUT_DELAY': str(a.input_delay),
+           'PSPRECOMP_CAM_FREE': '0'}   # the analogue camera runs on the wall clock (not repeatable under fast-forward) and turns the stick
     if swap:
         env['PSPRECOMP_TEST_CHAR_SWAP'] = swap
     with _start_lock:                                      # two games started in the same second pick the same X display

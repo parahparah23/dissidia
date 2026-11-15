@@ -604,14 +604,16 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
                 const float d = e.a / 100.0f;
                 put(dm, hx, hz);
                 put(me, hx - d, hz);
-                if (e.b == 1) {   // home: HP and bravery as at the first home (status block actor+0x52C: +0x8 HP damage, +0xC HP, +0x14 bravery halfword), so a trial
-                    static uint32_t first_hp[2] = {}, first_brv[2] = {};   // does not inherit a break, a big bravery or a KO from the one before
+                if (e.b == 1) {   // home: both fighters' status blocks (actor+0x52C, 0x80 bytes: +0x8 HP damage, +0xC HP, +0x14 bravery <initial><current>, break
+                    // state ...) as at the first home, so a trial does not inherit a break, a big bravery or HP damage from the one before (with only HP and
+                    // bravery put back, the same HP attack did 465 or 1254 damage in two 30 fps runs)
+                    static uint8_t first[2][0x80];
                     static bool have_stats = false;
                     for (int w = 0; w < 2; w++) {
                         const uint32_t st = r32((w ? dm : me) + 0x52Cu);
                         if (!ok(st)) continue;
-                        if (!have_stats) { first_hp[w] = r32(st + 0xCu); first_brv[w] = r32(st + 0x14u) & 0xFFFFu; }
-                        else { w32(st + 0x8u, 0u); w32(st + 0xCu, first_hp[w]); w32(st + 0x14u, (r32(st + 0x14u) & 0xFFFF0000u) | first_brv[w]); }
+                        uint8_t* p = g_ram + (st & 0x07FFFFFFu);
+                        if (!have_stats) std::memcpy(first[w], p, sizeof first[w]); else std::memcpy(p, first[w], sizeof first[w]);
                     }
                     have_stats = true;
                     // face each other (FUN_08835BA4(actor, &dir): yaw from the direction's x / z)
