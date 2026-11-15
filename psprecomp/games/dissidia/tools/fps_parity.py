@@ -400,7 +400,7 @@ def compare_trials(base, other, a):
             if abs(dt) > a.frame_tol * FRAME_MS + 1:
                 why.append('hit %d (attack %d) lands %+.0f ms off (%.0f vs %.0f ms into the move)' % (i + 1, x[1], dt, y[0] - to, x[0] - tb))
                 break
-            if x[3] != y[3]:
+            if abs(x[3] - y[3]) > max(5, a.dmg_tol * abs(x[3])):   # HP damage = the attacker's bravery, which varies a little between runs
                 why.append('hit %d (attack %d) damage %d vs %d at 30 fps' % (i + 1, x[1], y[3], x[3]))
                 break
     # paths
@@ -586,6 +586,7 @@ def main(argv):
         x.add_argument('--frame-tol', dest='frame_tol', type=int, default=1, help='30 Hz frames a change / hit may be off (default 1)')
         x.add_argument('--pos-tol', dest='pos_tol', type=float, default=0.25, help='metres a path may be off (default 0.25)')
         x.add_argument('--pos-rel', dest='pos_rel', type=float, default=0.05, help='or this share of the distance covered (default 0.05)')
+        x.add_argument('--dmg-tol', dest='dmg_tol', type=float, default=0.03, help='share an HP hit\'s damage may differ (default 0.03; two 30 fps runs differ by up to 2%%)')
     a = ap.parse_args(argv)
     if a.what == 'chars':
         for c, (n, code) in sorted(CHARS.items()):
