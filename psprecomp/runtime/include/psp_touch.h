@@ -19,6 +19,10 @@ bool psp_touch_editing();                     // the layout editor is open (it t
 void psp_touch_edit_begin();                  // open the layout editor (Settings > System > Edit Touch Controls)
 int psp_touch_mode();                         // 0 auto, 1 on, 2 off
 void psp_touch_set_mode(int m);               // runtime change (settings menu)
+// A tall window (width at most about 1.15 x the height, e.g. a folding phone's inner screen) with the controls enabled: the picture is drawn at
+// the top of the window instead of in the middle, and the controls use their own layout in the space under it (saved separately,
+// touch_layout_tall.txt). w, h: the drawable size.
+bool psp_touch_tall_layout(int w, int h);
 
 // Layout editor: every control (stick, d-pad, the four face buttons, L, R, Start, Select, menu) can be dragged anywhere, resized, made
 // more or less opaque and hidden; "Add combo" creates a button that presses several PSP buttons at once (for example L+R, or R+Triangle),

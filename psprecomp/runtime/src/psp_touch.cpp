@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -62,9 +63,48 @@ Ctl make(const char* id, Type t, float x, float y, std::vector<Btn> b = {}, int 
     c.id = id; c.type = t; c.x = x; c.y = y; c.btns = std::move(b); c.face = face; c.glyph = glyph;
     return c;
 }
+// ---- window shape ----------------------------------------------------------------------------------------------------
+// Tall windows (a folding phone's inner screen, about square): the picture fills the width at the top of the window
+// (psp_touch_tall_layout, read by the presenter) and the controls get their own layout in the space under it. The control area
+// starts under a full-width 480x272 picture (a widescreen picture is shorter, which only leaves more room).
+bool tall_shape(int w, int h) { return w > 0 && h > 0 && (float)h - (float)w * 272.0f / 480.0f >= 0.3f * (float)w; }
+float picture_bottom(float w) { return w * 272.0f / 480.0f; }
+// The size unit of every control (and of the layout editor). Wide windows: the height, but no more than 0.625 x the width, so the
+// controls do not grow out of proportion on a squarer screen (16:10 and wider are unchanged). Tall windows: what fits the control
+// area (its layout needs 0.95 units of height), no more than a 16:9 screen of the same width would give.
+float unit_for(int w, int h, bool tall) {
+    if (tall) return std::max(1.0f, std::min((float)w * 9.0f / 16.0f, ((float)h - picture_bottom((float)w)) / 0.95f));
+    return std::max(1.0f, std::min((float)h, (float)w * 0.625f));
+}
+std::recursive_mutex g_lock;   // the controls are read by the GL thread (drawing) and changed by the main thread (touches, editor)
+bool g_tall = false;   // the layout loaded is the tall one
+float g_u = 1.0f;      // size unit (pixels), unit_for the current window
+
+void default_controls_tall(std::vector<Ctl>& v, float w, float h) {
+    // The area under the picture: L, menu, R along its top; d-pad over the stick on the left; the face buttons on the right;
+    // Select / Start along the bottom.
+    const float u = g_u, m = 0.04f * u, top = picture_bottom(w);
+    const float ry = top + m + 0.055f * u, rb = top + m + 0.11f * u;    // L / R row centre and bottom
+    const float sx = m + 0.2f * u, sy = h - m - 0.2f * u;              // stick
+    const float dx = sx, dy = (rb + (sy - 0.17f * u)) / 2;              // d-pad between the L button and the stick
+    const float fx = w - m - 0.26f * u, fy = (rb + h - m) / 2, d = 0.115f * u;
+    v.push_back(make("stick", T_STICK, sx / w, sy / h));
+    v.push_back(make("dpad", T_DPAD, dx / w, dy / h));
+    v.push_back(make("tri", T_FACE, fx / w, (fy - d) / h, {SDL_CONTROLLER_BUTTON_Y}, 0));
+    v.push_back(make("cir", T_FACE, (fx + d) / w, fy / h, {SDL_CONTROLLER_BUTTON_B}, 1));
+    v.push_back(make("cro", T_FACE, fx / w, (fy + d) / h, {SDL_CONTROLLER_BUTTON_A}, 2));
+    v.push_back(make("sqr", T_FACE, (fx - d) / w, fy / h, {SDL_CONTROLLER_BUTTON_X}, 3));
+    v.push_back(make("l", T_RECT, (m + 0.13f * u) / w, ry / h, {SDL_CONTROLLER_BUTTON_LEFTSHOULDER}, -1, 'L'));
+    v.push_back(make("r", T_RECT, (w - m - 0.13f * u) / w, ry / h, {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER}, -1, 'R'));
+    v.push_back(make("select", T_RECT, (w * 0.5f - 0.16f * u) / w, (h - m - 0.0375f * u) / h, {SDL_CONTROLLER_BUTTON_BACK}, -1, 'E'));
+    v.push_back(make("start", T_RECT, (w * 0.5f + 0.16f * u) / w, (h - m - 0.0375f * u) / h, {SDL_CONTROLLER_BUTTON_START}, -1, 'S'));
+    v.push_back(make("menu", T_MENU, 0.5f, ry / h, {SDL_CONTROLLER_BUTTON_GUIDE}));
+}
+
 void default_controls(std::vector<Ctl>& v, float w, float h) {
     v.clear();
-    const float u = h, m = 0.05f * u;
+    if (g_tall) { default_controls_tall(v, w, h); return; }
+    const float u = g_u, m = 0.05f * u;
     const float sx = m + 0.20f * u, sy = h - m - 0.20f * u;           // stick
     const float dx = sx, dy = sy - 0.17f * u - 0.04f * u - 0.16f * u;   // d-pad above it
     const float fx = w - m - 0.26f * u, fy = h - m - 0.27f * u, d = 0.115f * u;
@@ -88,14 +128,14 @@ struct Circle { float x, y, r; };
 struct Rect { float x, y, w, h; };
 
 Circle circle_of(const Ctl& c) {
-    const float h = (float)g_win_h;
+    const float h = g_u;
     float r = 0.075f * h;
     if (c.type == T_STICK) r = 0.17f * h;
     else if (c.type == T_MENU) r = 0.04f * h;
     return {c.x * g_win_w, c.y * g_win_h, r * c.s};
 }
 Rect rect_of(const Ctl& c) {
-    const float h = (float)g_win_h;
+    const float h = g_u;
     float w = 0.26f * h, hh = 0.11f * h;
     if (c.type == T_DPAD) { w = hh = 0.32f * h; }
     else if (c.glyph == 'S' || c.glyph == 'E') { w = 0.22f * h; hh = 0.075f * h; }
@@ -112,7 +152,7 @@ bool in_rect(const Rect& r, float x, float y, float grow = 0.0f) {
 }
 bool hit(const Ctl& c, float x, float y) {
     if (is_round(c)) return in_circle(circle_of(c), x, y, c.type == T_STICK ? 1.5f : c.type == T_MENU ? 1.4f : 1.25f);
-    return in_rect(rect_of(c), x, y, 0.02f * g_win_h);
+    return in_rect(rect_of(c), x, y, 0.02f * g_u);
 }
 
 // ===================================================================================================================
@@ -120,7 +160,9 @@ bool hit(const Ctl& c, float x, float y) {
 //   ctl <id> x=.. y=.. s=.. a=.. on=0|1                              a built-in control
 //   combo <id> x=.. y=.. s=.. a=.. on=0|1 latch=0|1 btns=L,R,TRI     a combination button
 // ===================================================================================================================
-const char* k_layout_file = "touch_layout.txt";
+// Tall windows keep their own layout (touch_layout_tall.txt): a folding phone switches between the two shapes and a layout made for one
+// does not fit the other.
+const char* layout_file() { return g_tall ? "touch_layout_tall.txt" : "touch_layout.txt"; }
 
 Btn btn_from_name(const std::string& n, bool* ok) {
     for (auto& e : k_names) if (n == e.name) { *ok = true; return e.b; }
@@ -129,8 +171,8 @@ Btn btn_from_name(const std::string& n, bool* ok) {
 }
 
 void save_layout() {
-    FILE* f = std::fopen(k_layout_file, "w");
-    if (!f) { std::fprintf(stderr, "[TOUCH] cannot write %s\n", k_layout_file); return; }
+    FILE* f = std::fopen(layout_file(), "w");
+    if (!f) { std::fprintf(stderr, "[TOUCH] cannot write %s\n", layout_file()); return; }
     std::fprintf(f, "# Touch control layout (edited in Settings > System > Edit Touch Controls). Positions are fractions of the window.\n");
     std::fprintf(f, "option stick=%s\n", g_float ? "floating" : "fixed");
     for (auto& c : g_ctl) {
@@ -148,8 +190,11 @@ void save_layout() {
 void load_layout() {
     if (g_loaded || g_win_w <= 0) return;
     g_loaded = true;
+    g_tall = tall_shape(g_win_w, g_win_h);
+    g_u = unit_for(g_win_w, g_win_h, g_tall);
+    g_float = false;
     default_controls(g_ctl, (float)g_win_w, (float)g_win_h);
-    FILE* f = std::fopen(k_layout_file, "r");
+    FILE* f = std::fopen(layout_file(), "r");
     if (!f) return;
     char line[512];
     while (std::fgets(line, sizeof line, f)) {
@@ -271,7 +316,7 @@ void recompute() {
         for (auto& kv : g_fingers) {
             const Finger& f = kv.second;
             if (f.rstick) {   // the right stick: centred where the finger went down, the same size as the left one
-                const float r = 0.17f * (float)g_win_h;
+                const float r = 0.17f * g_u;
                 float dx = (f.x - f.ox) / r, dy = (f.y - f.oy) / r;
                 const float len = std::sqrt(dx * dx + dy * dy);
                 if (len > 1.0f) { dx /= len; dy /= len; }
@@ -298,9 +343,9 @@ void recompute() {
                 if (c.type == T_DPAD) {
                     const Rect r = rect_of(c);
                     const bool captured = f.dpad == (int)ci;   // a finger that went down on the d-pad keeps steering it, even outside the box
-                    if (!captured && !in_rect(r, f.x, f.y, 0.03f * g_win_h)) continue;
+                    if (!captured && !in_rect(r, f.x, f.y, 0.03f * g_u)) continue;
                     const float cx = r.x + r.w / 2, cy = r.y + r.h / 2, dx = f.x - cx, dy = f.y - cy;
-                    if (dx * dx + dy * dy <= (0.05f * g_win_h * c.s) * (0.05f * g_win_h * c.s)) { c.pressed = true; continue; }   // dead centre
+                    if (dx * dx + dy * dy <= (0.05f * g_u * c.s) * (0.05f * g_u * c.s)) { c.pressed = true; continue; }   // dead centre
                     const float ang = std::atan2(dy, dx);
                     // cardinal zones are 60 degrees wide, diagonals 30 (a thumb slightly off the axis must not add a second direction)
                     const float t = 0.5f, co = std::cos(ang), si = std::sin(ang);
@@ -384,8 +429,8 @@ std::string new_combo_id() {
 
 void build_ui() {
     g_ui.clear();
-    const float h = (float)g_win_h, w = (float)g_win_w;
-    const float bh = 0.085f * h, bw = 0.2f * h, gap = 0.015f * h;
+    const float h = (float)g_win_h, w = (float)g_win_w, u = g_u;   // positions: fractions of the window; sizes: the control unit
+    const float bh = 0.085f * u, bw = 0.2f * u, gap = 0.015f * u;
     auto row = [&](float y, std::vector<std::pair<std::string, Act>> items, const std::vector<bool>& lit = {}) {
         const float total = items.size() * bw + (items.size() - 1) * gap;
         float x = w / 2 - total / 2;
@@ -395,13 +440,13 @@ void build_ui() {
         }
     };
     if (g_pick) {
-        const float cw = 0.17f * h, ch = 0.1f * h, cg = 0.012f * h;
+        const float cw = 0.17f * u, ch = 0.1f * u, cg = 0.012f * u;
         const float x0 = w / 2 - (4 * cw + 3 * cg) / 2, y0 = h * 0.36f;
         for (int i = 0; i < 12; i++) {
             const bool lit = std::find(g_pick_set.begin(), g_pick_set.end(), k_names[i].b) != g_pick_set.end();
             g_ui.push_back({{x0 + (i % 4) * (cw + cg), y0 + (i / 4) * (ch + cg), cw, ch}, k_names[i].name, (Act)(A_PICK_BASE + i), lit, i});
         }
-        const float by = y0 + 3 * (ch + cg) + 0.02f * h;
+        const float by = y0 + 3 * (ch + cg) + 0.02f * u;
         g_ui.push_back({{w / 2 - bw - gap / 2, by, bw, bh}, "OK", A_PICK_OK, false});
         g_ui.push_back({{w / 2 + gap / 2, by, bw, bh}, "CANCEL", A_PICK_CANCEL, false});
         return;
@@ -499,13 +544,16 @@ void edit_finger(const SDL_Event& ev, float x, float y) {
 }  // namespace
 
 bool psp_touch_enabled() { return resolve_mode() != 2 || g_edit; }
+bool psp_touch_tall_layout(int w, int h) { return psp_touch_enabled() && tall_shape(w, h); }
 int psp_touch_mode() { return resolve_mode(); }
 void psp_touch_set_mode(int m) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     g_mode = std::clamp(m, 0, 2);
     if (g_mode == 2) release_all();
 }
 bool psp_touch_editing() { return g_edit; }
 void psp_touch_edit_begin() {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (resolve_mode() == 2) g_mode = 0;
     g_visible = true;
     release_all();
@@ -542,6 +590,7 @@ void psp_touch_event(const SDL_Event& ev) {
         return;
     }
     if (!psp_touch_enabled()) return;
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (g_win_w <= 0 || g_win_h <= 0) return;   // not drawn yet: the layout is unknown
     load_layout();
     const float x = ev.tfinger.x * g_win_w, y = ev.tfinger.y * g_win_h;
@@ -924,7 +973,7 @@ void draw_editor_ui(float lw) {
     const float w = (float)g_win_w, h = (float)g_win_h;
     build_ui();
     static float title[4] = {1, 1, 1, 1};
-    const float cell = 0.0055f * h;
+    const float cell = 0.0055f * g_u;
     text_center(g_pick ? "CHOOSE THE BUTTONS" : "EDIT TOUCH CONTROLS", w / 2, 0.215f * h, 0.7f * w, cell * 1.2f, title);
     if (!g_pick) {
         text_center(g_sel >= 0 ? "DRAG TO MOVE. USE THE BUTTONS BELOW." : "DRAG A CONTROL TO MOVE IT. TAP TO SELECT.", w / 2, 0.265f * h, 0.8f * w, cell * 0.75f, title);
@@ -949,7 +998,7 @@ void draw_editor_ui(float lw) {
         static float c2[4] = {1, 1, 1, 1};
         if (g_pick_set.empty()) text_center("NOTHING YET", w / 2, 0.315f * h, 0.8f * w, cell, c2);
         else {   // the chosen buttons as shapes, joined by plus signs
-            const float is = 0.03f * h, stepx = is * 2.6f;
+            const float is = 0.03f * g_u, stepx = is * 2.6f;
             const float total = (float)g_pick_set.size() * stepx - is * 0.6f;
             float px = w / 2 - total / 2 + is;
             for (size_t i = 0; i < g_pick_set.size(); i++) {
@@ -965,8 +1014,15 @@ void draw_editor_ui(float lw) {
 void psp_touch_draw(int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (resolve_mode() == 2 && !g_edit) return;
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (w != g_win_w || h != g_win_h) {
         g_win_w = w; g_win_h = h;
+        if (g_loaded && tall_shape(w, h) != g_tall) {   // the window changed shape (a folding phone opened or closed): the other layout
+            release_all();
+            g_sel = -1; g_pick = false; g_drags.clear(); g_ui_fingers.clear();   // an open editor stays open, on the other layout
+            g_loaded = false;
+        }
+        g_u = unit_for(w, h, tall_shape(w, h));
     }
     load_layout();
     {   // PSPRECOMP_TOUCH_EDIT=1: open the layout editor at start (testing)
@@ -975,7 +1031,7 @@ void psp_touch_draw(int w, int h) {
     }
     if (!shown()) return;
     g_vtx.clear();
-    const float lw = std::max(2.0f, 0.006f * h);
+    const float lw = std::max(2.0f, 0.006f * g_u);
     if (g_edit) draw_editor(lw);
     for (const Ctl& c : g_ctl) {
         if (!c.on && !g_edit) continue;
@@ -984,7 +1040,7 @@ void psp_touch_draw(int w, int h) {
     if (g_rfl_active && !g_edit) {   // the right (camera) stick, only while in use
         const float* wl = g_white; (void)wl;
         g_white[3] = 0.6f;
-        draw_stick(g_rfl_cx, g_rfl_cy, 0.17f * (float)h, g_rknob_x, g_rknob_y, 1.0f, lw);
+        draw_stick(g_rfl_cx, g_rfl_cy, 0.17f * g_u, g_rknob_x, g_rknob_y, 1.0f, lw);
     }
     if (g_edit) draw_editor_ui(lw);
 

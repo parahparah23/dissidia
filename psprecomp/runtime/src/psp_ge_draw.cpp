@@ -3643,14 +3643,15 @@ static bool env_on(const char* name) {
 
 static int g_present_w480 = 480;   // width (PSP pixels) of the picture being shown: 480, or wider with widescreen
 static PresentRect present_layout(SDL_Window* window) {
-    static int cw = -1, ch = -1, cpw = -1;
+    static int cw = -1, ch = -1, cpw = -1, ctall = -1;
     const int pw = g_present_w480;
     static PresentRect cached{0, 0, 480, 272, GL_NEAREST, false};
     int dw = 0, dh = 0;
     psp_gl_drawable_size(window, &dw, &dh);
     if (dw <= 0 || dh <= 0) { dw = pw; dh = 272; }
-    if (dw == cw && dh == ch && pw == cpw) return cached;
-    cw = dw; ch = dh; cpw = pw;
+    const int tall = psp_touch_tall_layout(dw, dh) ? 1 : 0;   // touch controls on a tall window: the picture goes to the top
+    if (dw == cw && dh == ch && pw == cpw && tall == ctall) return cached;
+    cw = dw; ch = dh; cpw = pw; ctall = tall;
     const char* st = std::getenv("PSPRECOMP_STRETCH");
     const bool stretch = st && st[0] && st[0] != '0';
     const char* fl = std::getenv("PSPRECOMP_FILTER");
@@ -3678,14 +3679,18 @@ static PresentRect present_layout(SDL_Window* window) {
     } else {
         exact_int = (dw % pw == 0 && dh % 272 == 0 && dw / pw == dh / 272);
     }
+    if (tall && !stretch) {   // (GL coordinates: y1 is the top edge)
+        const int ph = r.y1 - r.y0;
+        r.y1 = dh; r.y0 = dh - ph;
+    }
     if (filter == "nearest" || exact_int) r.filter = GL_NEAREST;
     else if (filter == "integer" && exact_int) r.filter = GL_NEAREST;
     else r.filter = GL_LINEAR;   // (integer-scale: present_blit decides from the render-scale ratio)
     r.bars = (r.x0 != 0 || r.y0 != 0 || r.x1 != dw || r.y1 != dh);
     cached = r;
-    std::fprintf(stderr, "[PRESENT] drawable %dx%d -> dst (%d,%d)-(%d,%d) %s%s\n", dw, dh,
+    std::fprintf(stderr, "[PRESENT] drawable %dx%d -> dst (%d,%d)-(%d,%d) %s%s%s\n", dw, dh,
                  r.x0, r.y0, r.x1, r.y1, r.filter == GL_LINEAR ? "linear" : "nearest",
-                 r.bars ? " +bars" : "");
+                 r.bars ? " +bars" : "", tall ? " top (tall window, touch controls under it)" : "");
     return r;
 }
 
@@ -4701,7 +4706,7 @@ static void note_overlay_rect(SDL_Window* window, const PresentRect& r) {
     psp_gl_drawable_size(window, &dw, &dh);
     if (dw <= 0 || dh <= 0) return;
     g_ovl_fx0 = float(r.x0) / float(dw); g_ovl_fx1 = float(r.x1) / float(dw);
-    g_ovl_fy0 = float(r.y0) / float(dh); g_ovl_fy1 = float(r.y1) / float(dh);
+    g_ovl_fy0 = float(dh - r.y1) / float(dh); g_ovl_fy1 = float(dh - r.y0) / float(dh);   // GL y is up, window fractions go down
 }
 void ge_draw_overlay_rect(float* fx0, float* fy0, float* fx1, float* fy1) {
     *fx0 = g_ovl_fx0; *fy0 = g_ovl_fy0; *fx1 = g_ovl_fx1; *fy1 = g_ovl_fy1;
