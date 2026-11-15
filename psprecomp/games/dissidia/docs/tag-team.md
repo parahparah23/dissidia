@@ -269,18 +269,50 @@ actor at the human's address H holds what used to be the partner P's character, 
   The human's lock mode is re-engaged after a swap (`FUN_08B3B3EC`). Not tried: swapping mid-attack with projectiles out, KO call-ins, the lock
   cycle (L) after a swap (it reads the human by address, so it should work).
 
-## Partners of a different character (14 Nov: not working, needs resource loading)
+## Partners of a different character (tag-load, 15 Nov: works)
 
-`PSPRECOMP_TAGTEAM_PARTNER_CHAR=<charId>` / `_ENEMY2_CHAR` make an extra of another character: the character info is found by id in the table
-`FUN_08846C98` searches (`*(*0x089D4968)`: header with the array at +8 and the count at +4, 0x44-byte records, charId = signed byte +6; the
-record also holds the model file stems, e.g. `P_EHT100_1P` Squall, `P_SEV100_1P` Cloud). Result with Cloud as the partner: the actor is built,
-becomes "ready", gets a panel in the HUD, but never starts (script id stays -1) and nothing is drawn: **retail only loads the data of the characters
-in the battle during the loading screen** (the model slots 0x54E, 0x134, 0x408, 0x548 of `FUN_08B45310`, the 0x780000-byte model pool of
-hooks_models.cpp holds the built models of the fighters and their assists; a model larger than the budget fails). A different character
-therefore needs its model / motion / effect / sound files streamed in at the loading stage (extend the retail loader to include the extras
-with room in the pool), or reuse of an already loaded character (the fighters, and the assists' characters). Characters that are already loaded
-(Squall, Lightning here) work, and the swap needs a clone (it exchanges the block lists of two fighters of one character).
-`PSPRECOMP_TAGTEAM_INFODUMP=1` prints the records.
+`PSPRECOMP_TAGTEAM_PARTNER_CHAR=<charId>` / `_ENEMY2_CHAR` make an extra of another character (charIds: 1 Warrior of Light .. 13 Cloud, 15 Squall,
+31 Lightning; the table is the `[TAGTEAM] labels:` line). `tagteam_test.py --partner-char 13 --enemy2-char 1` is the regression run
+(4 fighters acting, camera 1 bad frame in 800). Cloud was seen drawn with his Buster Sword in a headless screenshot; Cloud, charIds 1, 5, 9, 24 and
+28 also changed their scripts 50-90 times in a 30 s run (idle, moves, attacks).
+
+**How the retail game loads a character.** The loading screen (`FUN_0888C4C8`) loads, for each of the two fighters, the model file with
+`FUN_08844C14(fileId, heap, flag)` (heap = `FUN_088908E0()`, the 0x270800 "FILE" staging heap): it registers the file object with
+`FUN_0884417C(mgr 0x08BAE964, id, heap, 0x264000, 0)` (which stages the file in `heap`, builds it with `FUN_08845230` into the model pool and frees the
+staging block), then the files that belong to it (`W_` weapon files with the same stem, the 4 dependency ids at record +28). Then the actor
+constructor asks the manager for the model object (`FUN_088444D4(mgr, id)`) and the D_ data object (record +4). **Nothing else loads a character
+later**: the character table (`*(0x089E0000-31824)`) is freed after the loading screen and, worse, the staging heap block (0x095CD080) is given back to
+the main heap and reused, so a late load through the retail heap fails (`[MODELS] heap ... alloc(2506752) FAILED`) and the file objects stay empty. The
+file record (`info_for_char(charId)`, 0x44 bytes, name at +36) holds the file id at +0, the D_ data file id at +4, the charId at byte +6.
+
+**What `load_character(charId)` does** (tagteam.cpp, called at the top of `spawn_fighter` for an extra of another character):
+1. `FUN_088444D4(mgr, id)`: skip files that are already loaded; 2. a private staging heap (`TAGTEAM_LOAD_HEAP`, 0x290000 bytes of the host heap, initialised
+with `FUN_0885C40C(block, size, 0x089E076C, 0x40)`); 3. `FUN_08844C14(fileId, heap, 0)` for the model file (loading the D_ file with it; the D_ id is
+checked afterwards and loaded the same way if it is missing). The file object chain (model object -> D object) then looks like Squall's
+(`PSPRECOMP_TAGTEAM_FILEOBJ=1` dumps both).
+
+**Capacity** (retail sizes are for two fighters + assists; `dissidia_model_pool_request_extra(0x600000)` is called at start-up when a partner /
+enemy2 character is configured, so this only applies when it is set at launch):
+- **model pool** (`FUN_0888204C(0x780000)`, 7.5 MB): retail 1v1 plus a clone fills ~6 MB; a third character failed with `heap 0x08C15F80 alloc FAILED`.
+  hooks_models.cpp now serves the pool request from the host heap with 6 MB more (13.5 MB, `[MODELS] tag team model pool`);
+- **OBJDATA heap** (0x41000 = 266 KB, the D_ data of every character in the battle, `FUN_088820D8(0x41000)` at boot, "OBJDATA" at 0x089C88B8): the
+  retail two fill 0x3E000. It is served from the host heap with +0x80000 (`[MODELS] tag team OBJDATA heap`);
+- **texture heap in VRAM** (heap object 0x04110000, 0xF0000 = 960 KB): characters 9 / 5 overflowed it (`alloc(92172) FAILED`). Failed allocations there now go to
+  a 3 MB overflow heap in the host heap, frees are routed back (`[MODELS] tag team texture overflow heap`);
+- extra host-heap memory in total: ~6 MB pool + 0.5 MB OBJDATA + 2.6 MB staging + (when used) 3 MB textures; one pair of extra characters was tested (13 + 1,
+  5 + 9, 24 + 28).
+
+**Not done / open**
+- **Voices (SFX)**: the character's voice bank (`voice/<lang>/battle/voice_p_<code>_00.scd`, loaded by the sound manager for the battle's characters; the
+  string formats are at 0x089C8858) is not requested for the extra, so it is probably silent (not verified: no per-actor audio attribution yet). The loader
+  path to try is `FUN_0884318C` (record flag +8 & 0x10) / `FUN_08844F50`.
+- The pool / OBJDATA / texture enlargement is requested at start-up from the environment variables: toggling the settings entry later does not enlarge
+  them (a roster driven tag-in would call `dissidia_model_pool_request_extra` from the saved setting at boot).
+- The extra's stats (HP, bravery, attack) are copied from the slot fighter it stands beside (`start_extra`), not from its own character's records.
+- The extras are still spawned after the loading screen (strategy B, mid battle): `FUN_08844C14` runs from the battle's brain tick; it takes a few frames
+  (file reads); a preload at the loading screen (appending the characters to the battle record's list, `FUN_089132A4`) would hide the stall but that
+  call is not made by this battle path (the hook never fired).
+- `PSPRECOMP_TAGTEAM_LOADLOG=1` logs the loader chain (`[CHAIN]`, `[LOAD]`, `[LOAD1]`), `_ACTORDUMP=1` dumps an extra's actor, `_PLACE=dx,dz` places the extra.
 
 ## Play-test round 1 (user, RP6)
 - Fixed: reserve strips are empty by default (they showed a placeholder roster outside a group battle; `PSPRECOMP_TAGTEAM_RESERVE` sets one);

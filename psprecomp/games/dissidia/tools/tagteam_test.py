@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import battle_test as bt  # noqa: E402
 
 
-def run_battle(work, out, seconds, tag, fps=30):
+def run_battle(work, out, seconds, tag, fps=30, partner=0, enemy2=0):
     os.makedirs(out, exist_ok=True)
     script = os.path.join(out, 'script.txt')
     with open(script, 'w') as f:
@@ -30,6 +30,8 @@ def run_battle(work, out, seconds, tag, fps=30):
     env = {'PSPRECOMP_CAMX_LOG': '800', 'PSPRECOMP_FIGHTER_LOG': '1', 'PSPRECOMP_TAGTEAM_LOG': '1'}
     if tag:
         env['PSPRECOMP_TAGTEAM'] = '1'
+        if partner: env['PSPRECOMP_TAGTEAM_PARTNER_CHAR'] = str(partner)   # extras of other characters (load_character)
+        if enemy2: env['PSPRECOMP_TAGTEAM_ENEMY2_CHAR'] = str(enemy2)
     a = argparse.Namespace(work=work, script=script, fps=fps, out=out, char='Squall', timeout=400, ff=True, ff_menus=4,
                            direct=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tests', 'replays', 'quick_battle_walk.txt'),
                            env=env, stage=12, record=None, watch=None, shots=str(seconds))
@@ -61,6 +63,8 @@ def main():
     ap.add_argument('--out', default=None)
     ap.add_argument('--seconds', type=int, default=24)
     ap.add_argument('--baseline', action='store_true', help='also check that the same battle without the tag team is the plain 1v1')
+    ap.add_argument('--partner-char', type=int, default=0, help='charId of the human\'s partner (default: a copy of your fighter)')
+    ap.add_argument('--enemy2-char', type=int, default=0, help='charId of the enemy\'s second fighter')
     ap.add_argument('--max-bad-cam', type=int, default=5)
     ap.add_argument('--min-changes', type=int, default=8)
     a = ap.parse_args()
@@ -73,7 +77,7 @@ def main():
         print(('PASS  ' if cond else 'FAIL  ') + msg)
         ok = ok and cond
 
-    changes, cam, bad, spawn, started = analyse(run_battle(work, os.path.join(out, 'tag'), a.seconds, True))
+    changes, cam, bad, spawn, started = analyse(run_battle(work, os.path.join(out, 'tag'), a.seconds, True, partner=a.partner_char, enemy2=a.enemy2_char))
     print('tag team on: fighters %d, script changes %s, camera lines %d (bad %d), spawned %d, started %d' % (len(changes), sorted(changes.values()), cam, bad, spawn, started))
     check(len(changes) == 4, 'four fighters were seen')
     check(spawn == 2 and started == 2, 'both extras were spawned and started')
