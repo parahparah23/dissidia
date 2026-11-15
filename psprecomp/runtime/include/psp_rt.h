@@ -41,6 +41,10 @@ int psp_rt_refl_quality();               // 0 off, 1 low (opaque geometry only),
 void psp_rt_refl_set_quality(int q);
 inline bool psp_rt_available() { return g_psp_rt.available && g_psp_rt.available(); }
 inline bool psp_rt_active() { return psp_rt_available() && psp_rt_enabled(); }
+/// Settings row "Effect Reflections" (saved `rt_refl_fx`, env PSPRECOMP_RT_REFL_FX=0/1): spell / beam effects in the ray-traced reflection.
+/// On by default; used from Medium up (Low traces solid geometry only).
+bool psp_rt_refl_fx_enabled();
+void psp_rt_refl_fx_set_enabled(bool on);
 inline bool psp_rt_refl_active() { return psp_rt_available() && psp_rt_refl_enabled(); }
 /// Either ray-traced effect is on: the draw path captures this frame's triangles.
 void psp_rt_request_dump();   // F9: log every 3D draw of the next frame ([RTDUMP] lines on stderr)

@@ -2815,7 +2815,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2) {
+        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) {
             // Effects drawn with their own view matrix (some with an identity view: the world matrix then holds view-space positions) are
             // re-expressed in the main view's world, as the opaque draws are. Most effects come after the 3D run, when this scene's vote is
             // already reset: the last completed scene's main view is used then.

@@ -254,6 +254,13 @@ bool psp_rt_refl_enabled() {
 int psp_rt_refl_quality() { return psp_rt_refl_enabled() ? g_rt_refl_on.load() : 0; }
 void psp_rt_refl_set_quality(int q) { g_rt_refl_on.store(std::min(3, std::max(0, q))); }
 void psp_rt_refl_set_enabled(bool on) { psp_rt_refl_set_quality(on ? 2 : 0); }
+static std::atomic<int> g_rt_refl_fx{-1};
+bool psp_rt_refl_fx_enabled() {
+    int v = g_rt_refl_fx.load();
+    if (v < 0) { const char* e = std::getenv("PSPRECOMP_RT_REFL_FX"); v = e && e[0] == '0' ? 0 : 1; g_rt_refl_fx.store(v); }
+    return v != 0;
+}
+void psp_rt_refl_fx_set_enabled(bool on) { g_rt_refl_fx.store(on ? 1 : 0); }
 const char* psp_rt_unavailable_reason() {
     if (psp_rt_available()) return "";
     if (g_psp_rt.unavailable_reason) { const char* r = g_psp_rt.unavailable_reason(); if (r && r[0]) return r; }
@@ -1334,7 +1341,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1i(loc(mp.id, "u_rt_dbg"), env_int_dbg());
         { const int q = psp_rt_refl_quality(); glUniform1i(loc(mp.id, "u_rt_refl_rays"), q >= 3 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_rough"), env_float("PSPRECOMP_RT_ROUGH", 0.005f));
-        glUniform1i(loc(mp.id, "u_rt_fx"), !sc.rt_fx || psp_rt_refl_quality() < 2 || std::getenv("PSPRECOMP_RT_FX_OFF") ? 0 : std::getenv("PSPRECOMP_RT_FX_SPLIT") ? 2 : 1);
+        glUniform1i(loc(mp.id, "u_rt_fx"), !sc.rt_fx || psp_rt_refl_quality() < 2 || !psp_rt_refl_fx_enabled() || std::getenv("PSPRECOMP_RT_FX_OFF") ? 0 : std::getenv("PSPRECOMP_RT_FX_SPLIT") ? 2 : 1);
         glUniform1f(loc(mp.id, "u_rt_hidden"), env_float("PSPRECOMP_RT_HIDDEN", 0.45f));
         glUniform1f(loc(mp.id, "u_fx_minh"), env_float("PSPRECOMP_RT_FX_MINH", 0.6f));
         glUniform1f(loc(mp.id, "u_fx_gain"), env_float("PSPRECOMP_SSR_FX_GAIN", 0.4f));

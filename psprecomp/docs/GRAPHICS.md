@@ -385,6 +385,10 @@ Ray-traced shadow softness (`PSPRECOMP_RT_SOFT`, Settings > Effects > Ray Tracin
 (default), Normal, Soft, Very Soft, i.e. a light-disc half-angle of 0.012, 0.025, 0.04, 0.075, 0.12 over which Medium / High spread their
 rays. `PSPRECOMP_RT_SOFT=<float>` sets the angle directly until a level is chosen in the menu.
 
+Effect reflections (`PSPRECOMP_RT_REFL_FX=0/1`, Settings > Effects > Ray Tracing > Effect Reflections, saved as `rt_refl_fx`, On by default):
+spells, beams and other blended effects in the ray-traced reflection (docs/VULKAN_PORT.md). Used with Ray-Traced Reflections Medium or High
+(Low reflects solid geometry only; the row is greyed out there). Off skips both the effects capture and the effect rays.
+
 An exact integer-scale (nearest) present keeps its hard pixels: the upscale filter does not apply there, FXAA and sharpening still do.
 If the shader fails to build, the plain blit is used. The pass resets the cached GL state afterwards (`glc::invalidate`).
 
