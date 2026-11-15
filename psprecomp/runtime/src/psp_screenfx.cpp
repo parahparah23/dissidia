@@ -316,7 +316,16 @@ uniform float u_clearz;     // the cleared (background) depth
 uniform float u_sky;        // depth_t above which a pixel is the sky dome / background
 uniform vec2 u_fade;        // view distance where the effects start to fade out / are gone (the 16-bit depth is too coarse far away)
 
-float wd_at(vec2 uv) { return texture(u_depth, uv).r; }
+uniform int u_depth_snap;    // 0 = the old unsnapped read (PSPRECOMP_FX_DEPTH_SNAP=0, for comparison)
+// The depth at uv, from one definite full-resolution texel. The passes run at half resolution, where a pixel's centre lies exactly on
+// the border between two depth texels: nearest sampling then picks either one depending on the GPU's rounding (Adreno / Turnip did
+// not do it consistently), so the normals rebuilt from neighbouring depths jumped in bands along pixel columns and depth contours,
+// and AO and the ray-traced shadow's facing term drew evenly spaced lines on walls (RP6, render scale 2). The quarter-texel pull-back
+// makes every read land inside a texel.
+float wd_at(vec2 uv) {
+    if (u_depth_snap == 0) return texture(u_depth, uv).r;
+    return texture(u_depth, (floor(uv * u_size - 0.25) + 0.5) / u_size).r;
+}
 float depth_t(float wd) { return (wd - u_dr.x) / (u_dr.y - u_dr.x); }   // 0 at the near plane, 1 at the far plane
 bool is_far(float wd) { return abs(wd - u_clearz) < 3.0 / 65535.0 || depth_t(wd) > u_sky; }
 vec3 vpos(vec2 uv, float wd) {
@@ -1431,6 +1440,8 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1f(c.clearz, sc.clear_z);
         glUniform1f(c.sky, sky_t);
         glUniform2f(c.fade, fade0, fade1);
+        static const int depth_snap = std::getenv("PSPRECOMP_FX_DEPTH_SNAP") ? std::atoi(std::getenv("PSPRECOMP_FX_DEPTH_SNAP")) : 1;
+        glUniform1i(glGetUniformLocation(prog, "u_depth_snap"), depth_snap);
     };
     auto loc = [](GLuint p, const char* n) { return glGetUniformLocation(p, n); };
 
@@ -1623,6 +1634,11 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
     if (ao || cs || dark < 0.999f) {
         glEnable(GL_BLEND);
+        // debug PSPRECOMP_FX_SHOW=<s>: the AO x shadow factor alone, as the picture, from <s> seconds after the first 3D frame
+        static const char* fx_show_e = std::getenv("PSPRECOMP_FX_SHOW");
+        static const auto fx_t0 = std::chrono::steady_clock::now();
+        const bool fx_show = fx_show_e && std::chrono::duration<double>(std::chrono::steady_clock::now() - fx_t0).count() >= std::atof(fx_show_e);
+        if (fx_show) glBlendFunc(GL_ONE, GL_ZERO); else
         glBlendFunc(GL_ZERO, GL_SRC_COLOR);              // dst * (AO * (1 - shadow))
         set_common(g_mul_p.id, w, h);
         bind_tex(1, g_fx_tex[0], g_smp_nn);
