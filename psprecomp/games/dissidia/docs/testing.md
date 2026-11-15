@@ -295,8 +295,12 @@ finisher) must start at every rate, first and last probe delay within `--tol` 34
 walk with the fighter swapped in (`PSPRECOMP_TEST_CHAR_SWAP=15=20`, ~35 s to the fight instead of ~3 min; `--menus` for the old picture
 walk), on the GPU when there is one (`--gpu`), analogue camera off, 3 s settle before the first trial. The verdict was checked against
 the saved 11 Nov results: PASS for the windows after the action start step fix (120 fps within 25 ms of 30 fps), FAIL naming Rush >
-Neutral 2 / Up 2 (317..408 vs 267..358 ms) for the ones before it. A game run of the new boot path has not been made yet (left for after
-the next changes).
+Neutral 2 / Up 2 (317..408 vs 267..358 ms) for the ones before it. Checked in the game (15 Nov, 30 and 120 fps, box shared with 6 parity games): PASS in
+30 min (`--rates 30,120`). The 30 fps windows are the ones measured on 11 Nov (Rush > Neutral 2 267..358 ms, Neutral 2 > Neutral 3
+542..633 ms); 120 fps: Rush > Neutral 2 / Up 2 identical, Neutral 2 > Neutral 3 / Up 3 8-17 ms earlier, the HP finisher at 600 vs 633 ms
+(a single probe delay: the narrowest window). One fight ended during the run (time limit) and its batch was replayed in the next one.
+The sweep is adaptive: a 1/30 s grid, then 1/120 s only between neighbouring probes whose outcome differs (same windows as the full
+1/120 s grid on all four saved 11 Nov runs, with 40-50% of the trials).
 
 Built 2026-11-11 for Jecht (his chain inputs have 3 to 5 frame windows at 30 fps; the wiki list is
 https://dissidia.wiki/Jecht_(Dissidia_012)/Combos). One battle per frame rate runs in parallel (own display / port / memory stick); the CPU
