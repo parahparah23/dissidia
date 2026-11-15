@@ -937,6 +937,13 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     input_debug_frame();
     testdrive_frame(rdram, ctx);
     if (battle_running()) g_battle_age += g_ticks; else g_battle_age = 0.f;
+    {   // tall windows: the picture is centred from the moment the fight runs until the battle overlay goes (summons, the pause menu and
+        // the results keep it; the loading / opponent pages before the fight are at the top like the menus), see ge_draw_note_scene_view
+        static bool in_battle = false;
+        if (overlay_id() != 1) in_battle = false;
+        else if (g_battle_age > 0.f) in_battle = true;
+        if (in_battle) ge_draw_note_scene_view();
+    }
     fighter_log_frame();
     combo_frame();
     if (g_battle_age > 420.f) g_ai_armed = true; else if (overlay_id() != 1) g_ai_armed = false;
@@ -1907,6 +1914,19 @@ void cpu_tick_noai_hook(uint8_t* rdram, recomp_context* ctx) {
 
 void dissidia_framerate_install(uint8_t* rdram) {
     g_ram = rdram;
+    {   // tall windows in battle: the HUD's top strip (buffs, EX / assist icons, multipliers, move names: PSP rows 0-39) is pinned to the top
+        // of the window, the bottom strip (portraits, HP / Bravery bars, gauges: draws within rows 145-271; the portraits are sprites from row
+        // 162, the visible part from about row 175) to its bottom edge (ge_draw_set_hud_zones).
+        // PSPRECOMP_TALL_HUD=0 keeps the HUD with the centred picture.
+        const char* h = std::getenv("PSPRECOMP_TALL_HUD");
+        if (!(h && h[0] == '0')) {
+            ge_draw_set_hud_zones(40, 127, 97);
+            // the lock-on ring and the off-screen target pointer follow the opponent: they stay on the picture (texture addresses of the
+            // battle HUD archive, the same for every fighter and stage)
+            static const uint32_t follow[] = {0xC33070u, 0xC7EA30u};
+            ge_draw_set_hud_fixed_tex(follow, 2);
+        }
+    }
     const char* e = std::getenv("PSPRECOMP_FPS");
     if (e && std::atoi(e) >= 30) g_target = (std::min(std::atoi(e), 240) + 15) / 30 * 30;
     g_scope_all = (e = std::getenv("PSPRECOMP_FPS_SCOPE")) && std::strcmp(e, "all") == 0;

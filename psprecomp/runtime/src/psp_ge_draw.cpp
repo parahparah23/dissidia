@@ -108,6 +108,25 @@ static uint32_t g_present_count = 0;
 // GL row (from the bottom) of the band's lowest row in a buffer `h` PSP pixels tall (0 for a normal buffer)
 static int band_b(int h) { return h > 272 ? h - 272 - std::min(g_band_off, h - 272) : 0; }
 void ge_draw_note_scene_view() { g_scene_note.store(g_present_count + 1, std::memory_order_relaxed); }
+static int g_hud_top = 0, g_hud_bottom = 0, g_hud_visible = 0;   // ge_draw_set_hud_zones
+static bool g_hud_live = false;               // this frame: battle view on a tall buffer, HUD zones pinned
+static int g_hud_top_pin = 0;                 // PSP row (from the buffer's top) the top zone starts at: under the touch controls' top row
+void ge_draw_set_hud_zones(int top_rows, int bottom_rows, int bottom_visible) {
+    g_hud_top = std::max(0, top_rows); g_hud_bottom = std::max(0, bottom_rows); g_hud_visible = std::clamp(bottom_visible, 0, g_hud_bottom);
+}
+int ge_draw_hud_bottom_rows() { return g_hud_visible; }
+static uint32_t g_hud_fixed[8];
+static int g_hud_fixed_n = 0;
+void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n) {
+    g_hud_fixed_n = std::clamp(n, 0, 8);
+    for (int i = 0; i < g_hud_fixed_n; i++) g_hud_fixed[i] = addrs[i] & 0xFFFFFFu;
+}
+static bool hud_fixed_tex(const GeState& st) {
+    if (!st.texture_enable) return false;
+    const uint32_t a = st.tex_addr[0] & 0xFFFFFFu;
+    for (int i = 0; i < g_hud_fixed_n; i++) if (g_hud_fixed[i] == a) return true;
+    return false;
+}
 static uint32_t g_main_keys[8];
 static int g_main_n = 0;
 static const bool g_scale_all = [] { const char* e = std::getenv("PSPRECOMP_RENDER_SCALE_ALL"); return e && e[0] && e[0] != '0'; }();
@@ -1384,6 +1403,38 @@ static void tall_proj(float* p, TallY m) {   // column-major: row 1 (clip y) -> 
     for (int c = 0; c < 4; c++) p[c * 4 + 1] = p[c * 4 + 1] * m.s + m.t * p[c * 4 + 3];
 }
 
+// Tall buffer: a 2D sprite that reads a render target and spans the PSP's whole height (the glow pass adds a blurred copy of the picture
+// back in such strips) would leave the rows above and below the band without it, and they look darker. Each such sprite gets a piece
+// above and one below the band: a source that is itself a tall buffer is read on (its real rows there); any other (the 480x272 glow
+// buffer) is mirrored about the band's edge, a soft glow of the same kind. Set per draw in ge_draw_prim (through, render-target texture).
+static bool g_tall_fb_draw = false;
+static void tall_extend_strips(std::vector<DecodedVertex>& d, int prim_type) {
+    if (!g_tall_fb_draw || prim_type != 6) return;
+    const int H = cur_h272();
+    if (H <= 272) return;
+    const float below = float(band_b(H)), above = float(H - 272) - below;
+    const bool mirror = g_fbtex_h272 <= 272;
+    const size_t n = d.size() & ~size_t(1);
+    for (size_t i = 0; i < n; i += 2) {
+        const bool a_top = d[i].pos[1] <= d[i + 1].pos[1];
+        const DecodedVertex top = a_top ? d[i] : d[i + 1], bot = a_top ? d[i + 1] : d[i];
+        if (!top.has_uv || top.pos[1] > 0.5f || bot.pos[1] < 271.5f) continue;
+        const float dv = (bot.uv[1] - top.uv[1]) / (bot.pos[1] - top.pos[1]);   // texels per PSP row
+        if (above > 0.f) {
+            DecodedVertex t0 = top, t1 = bot;
+            t0.pos[1] = top.pos[1] - above; t0.uv[1] = mirror ? top.uv[1] + above * dv : top.uv[1] - above * dv;
+            t1.pos[1] = top.pos[1]; t1.uv[1] = top.uv[1];
+            d.push_back(t0); d.push_back(t1);
+        }
+        if (below > 0.f) {
+            DecodedVertex b0 = top, b1 = bot;
+            b0.pos[1] = bot.pos[1]; b0.uv[1] = bot.uv[1];
+            b1.pos[1] = bot.pos[1] + below; b1.uv[1] = mirror ? bot.uv[1] - below * dv : bot.uv[1] + below * dv;
+            d.push_back(b0); d.push_back(b1);
+        }
+    }
+}
+
 static void build_xf(const GeState& st, Xf3D& x) {
     const uint32_t vt = st.vertex_type;
     std::memcpy(x.world, st.world_matrix, sizeof x.world);
@@ -2142,6 +2193,7 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
     if (decoded.empty()) return;
     {
         psp_prof::Scope ps(psp_prof::S_XFORM);
+        tall_extend_strips(decoded, prim_type);
         ge_transform_vertices(decoded, state);
         rect_clip_to_ndc(decoded, state, prim_type);
     }
@@ -2149,7 +2201,7 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
     {
         psp_prof::Scope ps(psp_prof::S_PACK);
         if (prim_type == GE_PRIM_RECTANGLES) {
-            const int rect_count = count / 2;
+            const int rect_count = static_cast<int>(decoded.size()) / 2;   // (tall_extend_strips may have added sprites)
             packed.reserve((size_t)rect_count * 6);
             for (int r = 0; r < rect_count; r++) {
                 const int i0 = r * 2, i1 = r * 2 + 1;
@@ -3125,7 +3177,17 @@ static void ge_draw_prim_one(
     }
     // Widescreen: tell the vertex transform how this draw is placed (psp_ge_vertex.h)
     ge_set_wide(draw_wide_x(state), fbo_tex == 0, fbo_tex != 0);
-    { const TallY b = band_map(cur_h272()), x = draw_tall_y(state); ge_set_tall(b.s, b.t, x.s, x.t); }
+    {
+        const int h = cur_h272();
+        const TallY b = band_map(h), x = draw_tall_y(state);
+        ge_set_tall(b.s, b.t, x.s, x.t);
+        if (g_hud_live && h > 272 && !hud_fixed_tex(state)) {   // HUD zones: the same mapping with the band placed at the top pin / the bottom edge
+            const float s = b.s, t_top = s - 1.0f + 2.0f * float(std::max(0, h - 272 - g_hud_top_pin)) / float(h), t_bot = s - 1.0f;
+            ge_set_tall_hud(g_hud_top, t_top, g_hud_bottom, t_bot);
+        } else ge_set_tall_hud(0, 0.0f, 0, 0.0f);
+        ge_set_tall_cover_textured(h > 272 && g_band_off > 0);   // in battle (the picture centred)
+    }
+    g_tall_fb_draw = fbo_tex && ge_vtype_through(state.vertex_type) && cur_h272() > 272;
     if (fbo_tex && g_fbtex_w480 > 480) {   // the shader multiplies u by declared_width / 480 afterwards (ge_shader_set_tex_remap): pre-divide the offset
         const float dw = float(1 << (state.tex_size[0] & 0xFF));
         ge_set_fb_u(480.0f / float(g_fbtex_w480), 0.5f * float(g_fbtex_w480 - 480) / float(g_fbtex_w480) * (480.0f / dw), dw / 480.0f);
@@ -3297,6 +3359,7 @@ static void ge_draw_prim_one(
     // Transform
     {
         psp_prof::Scope ps(psp_prof::S_XFORM);
+        tall_extend_strips(decoded, prim_type);
         ge_transform_vertices(decoded, state);
         rect_clip_to_ndc(decoded, state, prim_type);
     }
@@ -3336,7 +3399,7 @@ static void ge_draw_prim_one(
     const uint64_t prof_pack_t0 = psp_prof::enabled ? psp_prof::now() : 0;
     if (prim_type == GE_PRIM_RECTANGLES) {
         // Each rectangle is 2 vertices (top-left, bottom-right)
-        int rect_count = count / 2;
+        int rect_count = static_cast<int>(decoded.size()) / 2;   // (tall_extend_strips may have added sprites)
         packed.reserve(rect_count * 6);
         for (int r = 0; r < rect_count; r++) {
             int i0 = r * 2;
@@ -4994,8 +5057,11 @@ static void tall_update() {
         if (note && g_present_count - note < 10 && g_tall_px > 272 && dh > 0) {
             const int room = g_tall_px - 272;
             const int below = int(std::ceil(double(psp_touch_tall_bottom(dw, dh)) * g_tall_px / dh));   // PSP pixels under the band kept clear
-            off = std::max(0, std::min(room / 2, room - below));
+            // with the game's HUD pinned to the edges (ge_draw_set_hud_zones) nothing in the band needs to clear the controls: centred
+            off = (g_hud_top || g_hud_bottom) ? room / 2 : std::max(0, std::min(room / 2, room - below));
         }
+        g_hud_live = off > 0 && (g_hud_top || g_hud_bottom);
+        g_hud_top_pin = (g_hud_live && dh > 0) ? int(std::ceil(double(psp_touch_tall_top(dw, dh)) * g_tall_px / dh)) : 0;
         if (off != g_band_off) {
             std::fprintf(stderr, "[DRAW] tall window: the picture %s (band at %d of %d PSP rows)\n", off ? "centred (battle view)" : "at the top", off, g_tall_px);
             g_band_off = off;

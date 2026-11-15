@@ -35,6 +35,14 @@ int ge_draw_widescreen_width();
 // Called by a game module once per frame while a full-screen 3D view is up (a battle): on a tall window the PSP's picture is then
 // centred in the taller buffer instead of at its top (menus), with the 3D scene filling above and below. Any thread.
 void ge_draw_note_scene_view();
+// The game's 2D HUD on a tall window in battle (set once by a game module): a 2D draw entirely in the top `top_rows` rows of the PSP's
+// screen is pinned to the top of the window (under the touch controls' top row), one entirely in the bottom `bottom_rows` rows to its
+// bottom edge; the rest (lock-on markers) stays with the centred picture. The touch controls' bottom row sits above the bottom
+// `bottom_visible` rows (where the HUD has content; a sprite in the zone can start higher with transparent pixels).
+void ge_draw_set_hud_zones(int top_rows, int bottom_rows, int bottom_visible);
+int ge_draw_hud_bottom_rows();   // the room kept for the HUD under the touch controls, PSP rows (0 = none)
+// Textures (tex_addr & 0xFFFFFF) whose 2D draws are never pinned: markers that follow a fighter (the lock-on ring) stay on the picture.
+void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n);
 
 /// Change the render scale live (settings menu): resizes every render target,
 /// keeping its picture. Main (GL) thread, game paused. False if refused.

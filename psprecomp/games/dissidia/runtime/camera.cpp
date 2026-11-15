@@ -189,7 +189,6 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
     // the lock-on ring, see the PSP aspect); the runtime's draw_wide_x widens the drawing as before.
     static const bool wide_cull = !(std::getenv("PSPRECOMP_WIDE_CULL") && std::getenv("PSPRECOMP_WIDE_CULL")[0] == '0');   // =0: the PSP's own aspect (A/B tests)
     const bool set_wide = wide_cull && ge_draw_widescreen();
-    ge_draw_note_scene_view();   // a battle view: on a tall window the picture is centred, the scene fills above and below
     auto set_aspect = [&](float asp) { std::memcpy(rdram + ((g_mgr + 0xCCu) & 0x07FFFFFFu), &asp, sizeof asp); };
     if (set_wide) set_aspect(480.0f / 272.0f);
     float sx = 0, sy = 0;

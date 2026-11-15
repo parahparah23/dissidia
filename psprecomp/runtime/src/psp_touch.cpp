@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "psp_gl.h"
+#include "psp_ge_draw.h"
 
 namespace {
 
@@ -88,11 +89,12 @@ float g_u = 1.0f;      // size unit (pixels), unit_for the current window
 void default_controls_tall(std::vector<Ctl>& v, float w, float h) {
     // Like a controller: L, Select, menu, Start, R along the top edge; along the bottom edge the d-pad and the stick side by side on the
     // left and the face buttons on the right. The bottom row is k_tall_row units high; the picture (in battle, centred) stays above it.
-    const float u = g_u, m = 0.04f * u;
+    // (a game whose HUD strip is pinned to the bottom edge in battle, ge_draw_set_hud_zones, gets the bottom row just above that strip)
+    const float u = g_u, m = 0.04f * u, strip = (float)ge_draw_hud_bottom_rows() * w / 480.0f;
     const float ty = m + 0.055f * u;                                    // top row centre
-    const float by = h - m - 0.17f * u;                                 // bottom row centre
+    const float by = h - strip - m - 0.17f * u;                         // bottom row centre
     const float dx = m + 0.16f * u, sx = m + 0.32f * u + 0.05f * u + 0.17f * u;
-    const float fx = w - m - 0.21f * u, fy = h - m - 0.19f * u, d = 0.115f * u;
+    const float fx = w - m - 0.21f * u, fy = h - strip - m - 0.19f * u, d = 0.115f * u;
     v.push_back(make("stick", T_STICK, sx / w, by / h));
     v.push_back(make("dpad", T_DPAD, dx / w, by / h));
     v.push_back(make("tri", T_FACE, fx / w, (fy - d) / h, {SDL_CONTROLLER_BUTTON_Y}, 0));
@@ -551,6 +553,7 @@ void edit_finger(const SDL_Event& ev, float x, float y) {
 bool psp_touch_enabled() { return resolve_mode() != 2 || g_edit; }
 bool psp_touch_tall_layout(int w, int h) { return psp_touch_enabled() && tall_shape(w, h); }
 int psp_touch_tall_bottom(int w, int h) { return tall_shape(w, h) ? (int)std::ceil(k_tall_row * unit_for(w, h, true)) : 0; }
+int psp_touch_tall_top(int w, int h) { return tall_shape(w, h) ? (int)std::ceil(0.17f * unit_for(w, h, true)) : 0; }
 int psp_touch_mode() { return resolve_mode(); }
 void psp_touch_set_mode(int m) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
