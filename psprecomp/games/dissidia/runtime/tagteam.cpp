@@ -88,6 +88,9 @@ int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n o
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
 struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; };
+int g_real_partner[2] = {0, 0};   // 1 per team when the member on the stage beside the slot fighter is the real next member of the party (a group battle), not a clone
+std::string char_label(int id, bool full);
+int party_partner_char(int team, uint32_t hum, uint32_t cpu);   // below: the charId of the next party member after the one on the stage, 0 = no party (a clone)
 std::vector<Late> g_late_q;
 std::vector<Late> g_late_load;   // call-in members whose character files still have to be loaded (done from the frame hook, outside any fighter's update)   // extras still to be made (after the intro)
 bool g_late_ready = false;    // the intro is over, the queue may spawn   // PSPRECOMP_TAGTEAM_EXTRAS: 1 = enemy side fighter, 2 = partner on the human's side
@@ -369,7 +372,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     g_owned.clear(); g_own_ctx = 0;
     g_orig_setup(rdram, ctx);
     g_ram = rdram; g_ctx = ctx;
-    g_nextra = 0; g_bs = 0; g_late_q.clear(); g_late_load.clear(); g_late_ready = false;
+    g_nextra = 0; g_bs = 0; g_late_q.clear(); g_late_load.clear(); g_late_ready = false; g_real_partner[0] = g_real_partner[1] = 0;
     if (!g_enabled) return;
     if (!ok(bs, 0x2800)) return;
     const uint32_t a0 = rd(bs + 56), a1 = rd(bs + 60), mode = rd(bs + 76), human = rd(bs + 84);
@@ -403,6 +406,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     // Slot 0 is side 0 and slot 1 side 1 in the setup, whoever the human is; the CPU brain settings are the CPU slot's.
     const uint32_t cpu_side = human == 0 ? 1 : 0, hum_side = human;
+    g_bs = bs;
     if ((eff_mask() & 1) && g_late) { g_late_q.push_back({cpu_side, hum, cpu_side, g_enemy2_char ? static_cast<uint32_t>(100 + g_enemy2_char) : cpu_side, cpu}); g_bs = bs; }
     else if (eff_mask() & 1) {   // the enemy team's second fighter: a copy of the CPU fighter, foe = the human
         Extra& e = g_extra[g_nextra];
@@ -548,6 +552,18 @@ PartyList read_party(int side) {
     p.n = n;
     return p;
 }
+// The member after the one on the stage in a team's party (a group battle), 0 when there is no party (count 1) or no loadable record. team 0 = the human's.
+int party_partner_char(int team, uint32_t hum, uint32_t cpu) {
+    const PartyList lists[2] = {read_party(0), read_party(1)};
+    auto has = [](const PartyList& l, int c) { for (int i = 0; i < l.n; i++) if (l.ids[i] == c) return true; return false; };
+    const int hc = ok(hum, 0x12D0) ? actor_char(hum) : -1;
+    const int ho = has(lists[0], hc) || !has(lists[1], hc) ? 0 : 1;
+    const PartyList& l = lists[team == 0 ? ho : 1 - ho];
+    if (l.n <= 1) return 0;
+    const int cur = actor_char(team == 0 ? hum : cpu);
+    for (int i = 0; i + 1 < l.n; i++) if (l.ids[i] == cur) { const int c = l.ids[i + 1]; return info_for_char(c) ? c : 0; }
+    return 0;
+}
 int g_party_last[2] = {0, 0};   // index of the member on the stage per team (only moves forward while the party list stays the same)
 void update_party_reserve() {
     if (std::getenv("PSPRECOMP_TAGTEAM_RESERVE") || !g_bs) return;   // an env list overrides
@@ -571,7 +587,7 @@ void update_party_reserve() {
         for (int i = 0; i < g_party_last[t] && at < 0; i++) if (l.ids[i] == cur) at = i;   // a new battle of the same party starts over at the first member
         if (at < 0) continue;
         g_party_last[t] = at;
-        for (int i = at + 1; i < l.n; i++) { g_reserve[t].names.push_back(char_label(l.ids[i], false)); g_reserve_ids[t].push_back(l.ids[i]); }
+        for (int i = at + 1 + g_real_partner[t]; i < l.n; i++) { g_reserve[t].names.push_back(char_label(l.ids[i], false)); g_reserve_ids[t].push_back(l.ids[i]); }
     }
     if (g_log) {
         static std::string last;
@@ -836,6 +852,25 @@ bool content_swap(uint32_t H, uint32_t P) {
     fix_assist();
     wr(H + 0x4A0u, nextH); wr(P + 0x4A0u, nextP);
     return true;
+}
+
+// debug (PSPRECOMP_TAGTEAM_SWAPPROBE=1): what differs between two different characters' actor blocks, classified (to design a swap that needs no clones)
+void swap_probe(uint32_t H, uint32_t P) {
+    auto ih = g_owned.find(H), ip = g_owned.find(P);
+    if (ih == g_owned.end() || ip == g_owned.end()) { std::fprintf(stderr, "[PROBE] no ownership record\n"); return; }
+    auto own = [&](const std::vector<Blk>& v, uint32_t x) -> int { for (size_t k = 0; k < v.size(); k++) if (x >= v[k].addr && x < v[k].addr + v[k].size) return static_cast<int>(k); return -1; };
+    int nnum = 0;
+    for (uint32_t o = 0; o < 0x12D0; o += 4) {
+        const uint32_t x = rd(H + o), y = rd(P + o);
+        if (x == y) continue;
+        const bool px = isptr(x), py = isptr(y);
+        if (!px && !py) { nnum++; continue; }
+        const int ox = px ? own(ih->second, x) : -2, oy = py ? own(ip->second, y) : -2;
+        const char* kx = ox == 0 ? "actorH" : ox > 0 ? "ownH" : px ? "ext" : "num";
+        const char* ky = oy == 0 ? "actorP" : oy > 0 ? "ownP" : py ? "ext" : "num";
+        std::fprintf(stderr, "[PROBE] +%04X H %08X (%s %d)  P %08X (%s %d)\n", o, x, kx, ox, y, ky, oy);
+    }
+    std::fprintf(stderr, "[PROBE] %d numeric differences; H owns %zu blocks, P %zu\n", nnum, ih->second.size(), ip->second.size());
 }
 
 void swap_content() {
@@ -1566,10 +1601,35 @@ template <int... I> void install_chain(std::integer_sequence<int, I...>) {
 // Called by the scene tick (hooks_main.cpp) before every frame's update: between frames no fighter is mid-update, the safe point for the swap.
 uint32_t dissidia_camera_manager();
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
-    if (!g_late_load.empty() && g_bs) {   // a called-in member's files: loading them inside a fighter's update could stall the game
+    if (g_bs && !g_late_q.empty() && rd(g_bs + 72) != 0) {   // a group battle: the extras at the start are the party's second members, not clones (the party record is not filled when the setup runs, so this is decided once the battle runs)
+        g_ram = rdram; g_ctx = ctx;
+        static uint32_t planned_bs = 0;
+        if (planned_bs != g_bs) {
+            planned_bs = g_bs;
+            const uint32_t hs = rd(g_bs + 84u) & 1u, hum = rd(g_bs + 56u + 4u * hs), cpu = rd(g_bs + 56u + 4u * (1u - hs));
+            static const bool no_real = std::getenv("PSPRECOMP_TAGTEAM_NOREAL") != nullptr;
+            std::vector<Late> keep;
+            for (Late& l : g_late_q) {
+                const int team = (l.slot_actor == hum) ? 0 : 1;
+                const int c = (no_real || l.callin || l.info_slot >= 100) ? 0 : party_partner_char(team, hum, cpu);
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] team %d extra: party member %d (%s)\n", team, c, c ? char_label(c, true).c_str() : "clone");
+                if (c) { l.info_slot = static_cast<uint32_t>(100 + c); l.charId = c; g_real_partner[team] = 1; g_late_load.push_back(l); }
+                else keep.push_back(l);
+            }
+            g_late_q = keep;   // the real ones come back through the load below once their files are in
+        }
+    }
+    if (!g_late_load.empty() && g_bs && rd(g_bs + 72) != 0) {   // a called-in member's files: loading them inside a fighter's update could stall the game
         g_ram = rdram; g_ctx = ctx;
         for (const Late& l : g_late_load) { load_character(l.charId); g_late_q.push_back(l); }
         g_late_load.clear();
+    }
+    if (g_log && g_nextra && g_bs && std::getenv("PSPRECOMP_TAGTEAM_SWAPPROBE")) {
+        static bool done = false;
+        if (!done && dissidia_battle_age() > 9.f * 60.f && g_extra[0].started) {
+            done = true; g_ram = rdram; g_ctx = ctx;
+            for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) { std::fprintf(stderr, "[PROBE] slot %08X vs extra %08X\n", g_extra[i].slot_actor, g_extra[i].actor); swap_probe(g_extra[i].slot_actor, g_extra[i].actor); break; }
+        }
     }
     if (g_nextra && g_bs && !std::getenv("PSPRECOMP_TAGTEAM_NOCAMFOE")) {   // the camera manager keeps the human's foe at mgr+0x8B4: follow the locked enemy
         g_ram = rdram; g_ctx = ctx;
