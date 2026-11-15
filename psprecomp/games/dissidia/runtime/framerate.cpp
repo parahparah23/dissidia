@@ -1809,6 +1809,10 @@ void task_run_hook(uint8_t* rdram, recomp_context* ctx) {
 
 void task_exec_hook(uint8_t* rdram, recomp_context* ctx) { task_note("OBJ_MANAGER::ExecTask 088413D0", ctx); g_orig_task_exec(rdram, ctx); }
 void task_draw_hook(uint8_t* rdram, recomp_context* ctx) { task_note("draw task 088881BC", ctx); g_orig_task_draw(rdram, ctx); }
+// Tag team call-in: for `ticks` frame ends every fighter but `keep` gets time step 0 (the match is paused while the new member makes an entrance).
+uint32_t g_pause_keep = 0; uint64_t g_pause_until = 0;
+void pause_match_impl(uint32_t keep, float seconds) { g_pause_keep = keep; g_pause_until = g_tick + static_cast<uint64_t>(seconds > 0.f ? seconds * static_cast<float>(g_target.load()) : 0.f); }
+bool match_paused_impl() { return g_tick < g_pause_until; }
 
 void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]);
@@ -1841,6 +1845,7 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     const float before = ctx->f[0];
     struct NoteDt { recomp_context* c; ~NoteDt() { g_face_dt = c->f[0]; g_face_dt_set = true; } } note_dt{ctx};   // for face_step_hook
+    if (g_tick < g_pause_until && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != g_pause_keep) { ctx->f[0] = 0.f; return; }
     if (g_test_freeze_cpu && g_gt_started && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != test_player()) { ctx->f[0] = 0.f; return; }
     if (g_ticks != 2.0f && ok(actor) && own) ctx->f[0] *= g_ticks * 0.5f;   // own clock: a fixed 2.0 per frame
     if (g_action_start_step && g_ticks < 2.0f && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0) {
@@ -2653,3 +2658,6 @@ void dissidia_framerate_install(uint8_t* rdram) {
     psp_present_set_target_fps(g_target.load());
     std::fprintf(stderr, "[FPS] frame rate %d (battle logic; scope %s)\n", g_target.load(), g_scope_all ? "all" : "battle");
 }
+
+void dissidia_pause_match(uint32_t keep, float seconds) { pause_match_impl(keep, seconds); }   // tag team call-in: the match stands still (see actor_dt_hook)
+bool dissidia_match_paused() { return match_paused_impl(); }

@@ -19,3 +19,6 @@ struct TagHudReserve {
 // Draws the overlay for these fighters and reserves and hands it to the engine; draws nothing (and clears an earlier overlay)
 // when both lists are empty.
 void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vector<TagHudReserve>& reserves);
+
+// A line of text centred near the top of the screen ("NAME JOINS THE BATTLE"); empty string removes it. Shown with the next draw.
+void tagteam_hud_set_banner(const std::string& text);

@@ -425,3 +425,29 @@ victim's bravery) and a gdb hardware watchpoint on the victim's BRV word (the wr
 The tag-hp fix (extra takes the slot fighter's assist pointer) broke real assists: the extra was treated as an invisible assist (assist animation, no model, attacks do nothing).
 It is now OFF by default (`PSPRECOMP_TAGTEAM_SWAPASSIST=1` brings it back). Tried instead: a second `FUN_08AFD424` pass for the extras (`PSPRECOMP_TAGTEAM_AFDMODE=1` module clone, `=2` second assist call, off by default): extras still deal no damage as attackers
 (the hit-time readers of `slot+0x1108` are in `FUN_08AE259C/08AE6678/08AE6160/08AE5BC8...`). Open: make the extras attackers work without taking the assist pointer (substitute the pointer around those readers).
+
+## One round, timed call-in (branch tag-call)
+Spec: no round restart and no round end while the side has members left; a fighter that falls stays down, the fight goes on with the rest,
+and ~20 s later the next member comes in with an entrance. Findings and implementation (`ko_oneround()` in `tagteam.cpp`):
+- **Retail cannot "continue after a KO"**: the KO of a slot fighter always runs the finish object (state machine `FUN_08A0AAD4`, state
+  `FUN_08A0ABE0` -> `FUN_08B33914` = stock-- and revive word `actor+0x10D0` = 1 -> round restart / battle end). Skipping `FUN_08B33914`
+  only loops the round end. So the KO is taken away from the slot: the frame a slot fighter's live HP reaches 0 (the finish object is seconds
+  away) `content_swap(slot, living team mate)` runs at the camera safe point. The slot (HUD, camera, pad) holds the living fighter, the KO'd
+  content plays out at the other address (AI gate bit +0x380 bit 2, `g_down`, panel shows KO). The slot's stock / revive words are put back
+  to the values before the retail chain touched them (tracked while alive). `stock_hook` (hook of `FUN_08B33914`) skips a late finish
+  step for a slot fighter that is alive again. Default on; `PSPRECOMP_TAGTEAM_ONEROUND=0` = the old restart flow (extra stocks, `ko_watch`).
+- **Bug found on the way (CPU-side swap hung the game)**: the actor list link `actor+0x4A0` (walked by `FUN_088417f8` to unlink an actor,
+  gdb backtrace of the hung game thread) belongs to the address like the brain / lock block / player flag. Swapped with the content it made a
+  cycle: an endless loop in the main thread. `content_swap` now keeps it (also makes the SELECT swap safer).
+- **Call-in**: a down fighter comes back after `kCallInDelaySec` = 20 s (`PSPRECOMP_TAGTEAM_CALLIN_DELAY=<s>`) when its side still has reserve
+  names (party lists / `PSPRECOMP_TAGTEAM_RESERVE`), `call_in(DownRec&, charId)` (charId is the hook for spawning other characters later; today a
+  clone): full HP/BRV, placed beside the slot fighter, then the entrance: match pause (`dissidia_pause_match(keep, seconds)` in `framerate.cpp`:
+  every other fighter gets time step 0 for `PSPRECOMP_TAGTEAM_ENTRANCE_PAUSE` = 2.5 s) while the entrant plays script `PSPRECOMP_TAGTEAM_ENTRANCE_ACTION`
+  (default 1100, the battle-start pose every fighter has, with its voice/animation) and a banner "<NAME> JOINS THE BATTLE" (`tagteam_hud_set_banner`)
+  is shown; when the pause ends it stands up (script 1) and the AI takes over. The reserve strip hides names already called in.
+- **Evidence (headless, `PSPRECOMP_TAGTEAM_KO=<human|cpu>:10 _KO_HP0=1`, forced KO)**: human and CPU slot: swap at the HP-0 frame, round continues, no
+  DEFEATED, camera 1 bad frame in 636; call-in at +8 s (shortened delay): the entrant's script 1100 at gt 7867, the other three fighters'
+  motion time frozen 8233..10700 ms then running again, entrant back to idle at 10367. `tagteam_test.py --baseline` PASS.
+- **Not verified**: a real lethal hit (the forced HP 0 skips the KO fall animation; a real KO carries its fall with the content),
+  both team members down with reserve left (retail ends the round: nobody to swap), assist-summon style entrance (the assist call needs
+  the assist object, not tried), audio of the entrance beyond the pose's own, other characters (needs the loader fork).

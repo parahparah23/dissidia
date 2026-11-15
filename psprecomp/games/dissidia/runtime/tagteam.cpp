@@ -27,7 +27,9 @@ extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 void psp_dump_func_ring(const char* tag);   // runtime/src/psp_dispatch.cpp
 void dissidia_model_pool_request_extra(uint32_t bytes);   // hooks_models.cpp: a bigger model pool for the extra characters
 float dissidia_battle_age();   // framerate.cpp: ticks (1/60 s) since the battle started running
-bool dissidia_cpu_ai_off();    // framerate.cpp: the debug menu's Enemy AI option / the test harness switched the CPU brains off
+bool dissidia_cpu_ai_off();
+void dissidia_pause_match(uint32_t keep, float seconds);   // framerate.cpp: every fighter but `keep` stands still for that long
+bool dissidia_match_paused();    // framerate.cpp: the debug menu's Enemy AI option / the test harness switched the CPU brains off
 uint32_t dissidia_camera_manager();   // camera.cpp
 void psp_mem_watch_set(uint32_t addr);   // runtime/src/psp_dispatch.cpp
 
@@ -479,6 +481,8 @@ void flow_hook(uint8_t* rdram, recomp_context* ctx) {
 // ---- HUD (tagteam_hud.cpp) ----
 std::vector<uint32_t> g_down;   // KO'd characters that stay down (tag-in): their live HP is left alone, writing 0 to it makes the retail rules treat the team as lost
 bool is_down(uint32_t a) { for (uint32_t d : g_down) if (d == a) return true; return false; }
+uint32_t g_entrant = 0; float g_entrant_until = 0;   // the call-in's pose ends with the match pause
+float g_banner_until = 0; std::string g_banner_text;   // the call-in announcement (battle age ticks)
 int g_called[2] = {0, 0};   // call-ins made per team (0 = the human's), the reserve strip hides that many names
 std::vector<TagHudReserve> g_reserve;   // waiting fighters per side (placeholder list until the roster call-ins exist)
 bool g_hud_on = true;
@@ -587,6 +591,7 @@ void hud_update() {
     // sides in the HUD: the human's team on the left (side value of the human's slot), the other on the right
     const uint32_t hum_side = g_bs ? rd(g_bs + 84u) : 0u;
     for (TagHudFighter& f : fs) f.side = (static_cast<uint32_t>(f.side) == hum_side) ? 0 : 1;
+    tagteam_hud_set_banner(dissidia_battle_age() < g_banner_until ? g_banner_text : std::string());
     {   // members already called in are not in reserve any more
         std::vector<TagHudReserve> shown = g_reserve;
         for (size_t t = 0; t < shown.size() && t < 2; t++) { const size_t n = std::min(static_cast<size_t>(g_called[t]), shown[t].names.size()); shown[t].names.erase(shown[t].names.begin(), shown[t].names.begin() + static_cast<long>(n)); }
@@ -1217,8 +1222,14 @@ void call_in(DownRec& d, int charId) {
     wrf(vec, rdf(ref + 0x80u) + 3.0f); wrf(vec + 4, rdf(ref + 0x84u)); wrf(vec + 8, rdf(ref + 0x88u)); wrf(vec + 12, 1.0f);
     call(PLACE, A, vec, 1);
     g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
-    call(START_ACTION, A + 304u, 1, 0);
+    static const int entr = std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_ACTION") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_ACTION")) : 1100;   // the battle-start pose every fighter has (script 1100); 1 = just stand up
+    static const float pause_s = std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_PAUSE") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_ENTRANCE_PAUSE"))) : 2.5f;
+    call(START_ACTION, A + 304u, static_cast<uint32_t>(entr), 0);
     g_ctx->r[29] = static_cast<int32_t>(sp0);
+    { const int t = team_of(d.side); const std::string nm = (g_reserve.size() > static_cast<size_t>(t) && static_cast<size_t>(g_called[t]) < g_reserve[t].names.size()) ? g_reserve[t].names[static_cast<size_t>(g_called[t])] : char_label(actor_char(A), true);
+      g_banner_text = nm + " JOINS THE BATTLE"; g_banner_until = dissidia_battle_age() + pause_s * 60.f; }
+    if (pause_s > 0.f) dissidia_pause_match(A, pause_s);
+    g_entrant = A; g_entrant_until = dissidia_battle_age() + pause_s * 60.f;
     g_called[team_of(d.side)]++;
     if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs CALLIN actor %08X (side %u, char %d) is back with full HP\n", dissidia_battle_age() / 60.0f, A, d.side, charId);
 }
@@ -1254,6 +1265,10 @@ void ko_oneround() {
         g_down.push_back(T);                                   // the KO'd content now at T: it plays out its fall and stays down
         g_downrec.push_back({T, age, side_of(T)});
         if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs slot %u now holds the team mate; the KO'd character is down at %08X\n", age / 60.0f, k, T);
+    }
+    if (g_entrant && age >= g_entrant_until) {   // the pose is over with the pause: stand up and fight
+        const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u);
+        call(START_ACTION, g_entrant + 304u, 1, 0); g_ctx->r[29] = static_cast<int32_t>(sp0); g_entrant = 0;
     }
     for (size_t i = 0; i < g_downrec.size();) {
         DownRec& d = g_downrec[i];

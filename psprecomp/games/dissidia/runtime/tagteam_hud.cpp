@@ -99,8 +99,11 @@ void reserve_strip(const TagHudReserve& r) {
 
 }  // namespace
 
+static std::string g_banner;
+void tagteam_hud_set_banner(const std::string& t) { g_banner = t; }
+
 void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vector<TagHudReserve>& reserves) {
-    if (fighters.empty() && reserves.empty()) {
+    if (fighters.empty() && reserves.empty() && g_banner.empty()) {
         if (g_shown) { ge_draw_set_game_overlay(nullptr, 0, 0); g_shown = false; }
         return;
     }
@@ -112,6 +115,13 @@ void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vec
         panel(f, s == 0 ? 4 : W - 4 - 104, y);
     }
     for (const TagHudReserve& r : reserves) if (!r.names.empty()) reserve_strip(r);
+    if (!g_banner.empty()) {   // a short announcement, centred, on a dark plate
+        const int sc = 2, tw = static_cast<int>(g_banner.size()) * 6 * sc, x = (W - tw) / 2, y = 52;
+        rect(x - 10, y - 6, tw + 20, 7 * sc + 12, rgba(10, 12, 40, 200));
+        rect(x - 10, y - 6, tw + 20, 2, rgba(120, 160, 255, 255));
+        rect(x - 10, y + 7 * sc + 4, tw + 20, 2, rgba(120, 160, 255, 255));
+        text(x, y, g_banner, rgba(255, 255, 255, 255), sc);
+    }
     if (g_shown && g_canvas == g_last) return;   // unchanged: nothing to upload
     g_last = g_canvas;
     ge_draw_set_game_overlay(g_canvas.data(), W, H);
