@@ -60,9 +60,9 @@ void ge_transform_vertices(
 void ge_set_wide(float wx, bool cover, bool extend_fb);
 void ge_set_fb_u(float u_scale, float u_off, float shader_remap);
 // Tall render target (taller than 272 PSP pixels, see g_tall_px in psp_ge_draw.cpp; the buffer's viewport is its whole height):
-// through_s = 272 / height puts a 2D draw in the top 272 rows (one that covers the whole screen untextured, a fade, is stretched over
-// the whole height instead); xf_s is draw_tall_y's factor for a 3D draw (clip y -> y * s + (1 - s) * w). 1, 1 = a normal target.
-void ge_set_tall(float through_s, float xf_s);
+// a 2D draw's NDC y becomes y * through_s + through_t, which puts it in the PSP's band (one that covers the whole screen untextured, a
+// fade, is stretched over the whole height instead); a 3D draw's clip y becomes y * xf_s + xf_t * w (draw_tall_y). 1, 0, 1, 0 = normal.
+void ge_set_tall(float through_s, float through_t, float xf_s, float xf_t);
 bool ge_soft_focus();            // PSPRECOMP_SOFT_FOCUS / settings 'soft_focus' (default on)
 void ge_set_soft_focus(bool on);
 

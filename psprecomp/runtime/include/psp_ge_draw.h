@@ -32,6 +32,9 @@ int ge_draw_render_scale();
 void ge_draw_set_widescreen(bool on);
 bool ge_draw_widescreen();
 int ge_draw_widescreen_width();
+// Called by a game module once per frame while a full-screen 3D view is up (a battle): on a tall window the PSP's picture is then
+// centred in the taller buffer instead of at its top (menus), with the 3D scene filling above and below. Any thread.
+void ge_draw_note_scene_view();
 
 /// Change the render scale live (settings menu): resizes every render target,
 /// keeping its picture. Main (GL) thread, game paused. False if refused.

@@ -64,15 +64,21 @@ Ctl make(const char* id, Type t, float x, float y, std::vector<Btn> b = {}, int 
     return c;
 }
 // ---- window shape ----------------------------------------------------------------------------------------------------
-// Tall windows (a folding phone's inner screen, about square): the PSP's 480x272 picture fills the width at the top of the window
-// (psp_touch_tall_layout, read by the presenter; the 3D scene goes on below it) and the controls get their own layout under that band.
+// Tall windows (a folding phone's inner screen, about square): the PSP's 480x272 picture fills the width (menus at the top of the
+// window, battles in the middle with the 3D scene filling the rest; psp_touch_tall_layout, read by the presenter) and the controls get
+// their own layout along the top and bottom edges.
 bool tall_shape(int w, int h) { return w > 0 && h > 0 && (float)h - (float)w * 272.0f / 480.0f >= 0.3f * (float)w; }
 float picture_bottom(float w) { return w * 272.0f / 480.0f; }
 // The size unit of every control (and of the layout editor). Wide windows: the height, but no more than 0.625 x the width, so the
-// controls do not grow out of proportion on a squarer screen (16:10 and wider are unchanged). Tall windows: what fits the control
-// area (its layout needs 0.95 units of height), no more than a 16:9 screen of the same width would give.
+// controls do not grow out of proportion on a squarer screen (16:10 and wider are unchanged). Tall windows: what lets the bottom row
+// (k_tall_row units high) fit under a picture centred in the window, no more than a 16:9 screen of the same width would give and no
+// less than 0.8 of that (the picture then moves up to clear the row, see psp_touch_tall_bottom).
+constexpr float k_tall_row = 0.44f;
 float unit_for(int w, int h, bool tall) {
-    if (tall) return std::max(1.0f, std::min((float)w * 9.0f / 16.0f, ((float)h - picture_bottom((float)w)) / 0.95f));
+    if (tall) {
+        const float full = (float)w * 9.0f / 16.0f, fit = ((float)h - picture_bottom((float)w)) / 2.0f / k_tall_row;
+        return std::max(1.0f, std::min(full, std::max(fit, 0.8f * full)));
+    }
     return std::max(1.0f, std::min((float)h, (float)w * 0.625f));
 }
 std::recursive_mutex g_lock;   // the controls are read by the GL thread (drawing) and changed by the main thread (touches, editor)
@@ -80,24 +86,24 @@ bool g_tall = false;   // the layout loaded is the tall one
 float g_u = 1.0f;      // size unit (pixels), unit_for the current window
 
 void default_controls_tall(std::vector<Ctl>& v, float w, float h) {
-    // The area under the picture: L, menu, R along its top; d-pad over the stick on the left; the face buttons on the right;
-    // Select / Start along the bottom.
-    const float u = g_u, m = 0.04f * u, top = picture_bottom(w);
-    const float ry = top + m + 0.055f * u, rb = top + m + 0.11f * u;    // L / R row centre and bottom
-    const float sx = m + 0.2f * u, sy = h - m - 0.2f * u;              // stick
-    const float dx = sx, dy = (rb + (sy - 0.17f * u)) / 2;              // d-pad between the L button and the stick
-    const float fx = w - m - 0.26f * u, fy = (rb + h - m) / 2, d = 0.115f * u;
-    v.push_back(make("stick", T_STICK, sx / w, sy / h));
-    v.push_back(make("dpad", T_DPAD, dx / w, dy / h));
+    // Like a controller: L, Select, menu, Start, R along the top edge; along the bottom edge the d-pad and the stick side by side on the
+    // left and the face buttons on the right. The bottom row is k_tall_row units high; the picture (in battle, centred) stays above it.
+    const float u = g_u, m = 0.04f * u;
+    const float ty = m + 0.055f * u;                                    // top row centre
+    const float by = h - m - 0.17f * u;                                 // bottom row centre
+    const float dx = m + 0.16f * u, sx = m + 0.32f * u + 0.05f * u + 0.17f * u;
+    const float fx = w - m - 0.21f * u, fy = h - m - 0.19f * u, d = 0.115f * u;
+    v.push_back(make("stick", T_STICK, sx / w, by / h));
+    v.push_back(make("dpad", T_DPAD, dx / w, by / h));
     v.push_back(make("tri", T_FACE, fx / w, (fy - d) / h, {SDL_CONTROLLER_BUTTON_Y}, 0));
     v.push_back(make("cir", T_FACE, (fx + d) / w, fy / h, {SDL_CONTROLLER_BUTTON_B}, 1));
     v.push_back(make("cro", T_FACE, fx / w, (fy + d) / h, {SDL_CONTROLLER_BUTTON_A}, 2));
     v.push_back(make("sqr", T_FACE, (fx - d) / w, fy / h, {SDL_CONTROLLER_BUTTON_X}, 3));
-    v.push_back(make("l", T_RECT, (m + 0.13f * u) / w, ry / h, {SDL_CONTROLLER_BUTTON_LEFTSHOULDER}, -1, 'L'));
-    v.push_back(make("r", T_RECT, (w - m - 0.13f * u) / w, ry / h, {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER}, -1, 'R'));
-    v.push_back(make("select", T_RECT, (w * 0.5f - 0.16f * u) / w, (h - m - 0.0375f * u) / h, {SDL_CONTROLLER_BUTTON_BACK}, -1, 'E'));
-    v.push_back(make("start", T_RECT, (w * 0.5f + 0.16f * u) / w, (h - m - 0.0375f * u) / h, {SDL_CONTROLLER_BUTTON_START}, -1, 'S'));
-    v.push_back(make("menu", T_MENU, 0.5f, ry / h, {SDL_CONTROLLER_BUTTON_GUIDE}));
+    v.push_back(make("l", T_RECT, (m + 0.13f * u) / w, ty / h, {SDL_CONTROLLER_BUTTON_LEFTSHOULDER}, -1, 'L'));
+    v.push_back(make("r", T_RECT, (w - m - 0.13f * u) / w, ty / h, {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER}, -1, 'R'));
+    v.push_back(make("select", T_RECT, (w * 0.5f - 0.16f * u) / w, ty / h, {SDL_CONTROLLER_BUTTON_BACK}, -1, 'E'));
+    v.push_back(make("start", T_RECT, (w * 0.5f + 0.16f * u) / w, ty / h, {SDL_CONTROLLER_BUTTON_START}, -1, 'S'));
+    v.push_back(make("menu", T_MENU, 0.5f, ty / h, {SDL_CONTROLLER_BUTTON_GUIDE}));
 }
 
 void default_controls(std::vector<Ctl>& v, float w, float h) {
@@ -544,6 +550,7 @@ void edit_finger(const SDL_Event& ev, float x, float y) {
 
 bool psp_touch_enabled() { return resolve_mode() != 2 || g_edit; }
 bool psp_touch_tall_layout(int w, int h) { return psp_touch_enabled() && tall_shape(w, h); }
+int psp_touch_tall_bottom(int w, int h) { return tall_shape(w, h) ? (int)std::ceil(k_tall_row * unit_for(w, h, true)) : 0; }
 int psp_touch_mode() { return resolve_mode(); }
 void psp_touch_set_mode(int m) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);

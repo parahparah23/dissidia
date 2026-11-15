@@ -100,6 +100,14 @@ static int g_wide_px = 480;      // width of the displayed buffers, PSP pixels (
 // screen with no texture (a fade, a flash) is stretched over the whole height. PSPRECOMP_TALL_FILL=0 turns it off (the picture
 // then stays 480x272 at the top of the window).
 static int g_tall_px = 272;      // height of the displayed buffers, PSP pixels (even, 272..960)
+// Where the PSP's band sits in a tall buffer this frame, PSP pixels from its top: 0 (menus, the default), or centred (moved up to clear
+// the touch controls' bottom row if need be) while the game reports a battle view (ge_draw_note_scene_view, by the game module).
+static int g_band_off = 0;
+static std::atomic<uint32_t> g_scene_note{0};   // present count when the game last reported a battle view (0 = never)
+static uint32_t g_present_count = 0;
+// GL row (from the bottom) of the band's lowest row in a buffer `h` PSP pixels tall (0 for a normal buffer)
+static int band_b(int h) { return h > 272 ? h - 272 - std::min(g_band_off, h - 272) : 0; }
+void ge_draw_note_scene_view() { g_scene_note.store(g_present_count + 1, std::memory_order_relaxed); }
 static uint32_t g_main_keys[8];
 static int g_main_n = 0;
 static const bool g_scale_all = [] { const char* e = std::getenv("PSPRECOMP_RENDER_SCALE_ALL"); return e && e[0] && e[0] != '0'; }();
@@ -550,7 +558,7 @@ static void read_fbo_native(GLuint fbo, std::vector<uint8_t>& out, int* ow = nul
     const int fw = w480_of_fbo(fbo) * n, fh = 272 * n;   // a tall buffer: its top 480x272 band (the PSP's picture)
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     std::vector<uint8_t> pixels(size_t(fw) * fh * 4);
-    glReadPixels(0, (h272_of_fbo(fbo) - 272) * n, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glReadPixels(0, band_b(h272_of_fbo(fbo)) * n, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     static const bool full = std::getenv("PSPRECOMP_SHOT_FULL") != nullptr;
     if (n == 1 || full) {
         // Flip vertically (GL origin is bottom-left)
@@ -888,7 +896,7 @@ static void mark_main_key(uint32_t key) {
         const GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
         if (sc) glDisable(GL_SCISSOR_TEST);
         // the PSP's 480x272 band (the top rows of a tall buffer) of the old buffer into the band of the new one
-        glBlitFramebuffer(0, (t.h272 - 272) * t.rs, t.w480 * t.rs, t.h272 * t.rs, 0, (n.h272 - 272) * n.rs, n.w480 * n.rs, n.h272 * n.rs,
+        glBlitFramebuffer(0, band_b(t.h272) * t.rs, t.w480 * t.rs, (band_b(t.h272) + 272) * t.rs, 0, band_b(n.h272) * n.rs, n.w480 * n.rs, (band_b(n.h272) + 272) * n.rs,
                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (sc) glEnable(GL_SCISSOR_TEST);
         glDeleteFramebuffers(1, &t.fbo);
@@ -1031,17 +1039,17 @@ static bool apply_gl_pipeline_impl(uint8_t* rdram, const GeState& state, int pri
     if (!ge_vtype_through(state.vertex_type)) {
         const GeViewportDepth vp = compute_state_viewport_depth(state);
         const int crs = cur_rs(), cw = cur_w480(), ch = cur_h272();
-        // tall buffer: the PSP's rows are the top 272 (GL y up: shifted up by ch - 272); a whole-screen 3D draw covers the whole height
-        // (its projection is extended downwards by draw_tall_y)
+        // tall buffer: the PSP's rows are the band (GL y up: shifted up by band_b); a whole-screen 3D draw covers the whole height
+        // (its projection is extended by draw_tall_y)
         const bool tall_full = ch > 272 && vp.y <= 0 && vp.y + vp.h >= 272;
-        const int vy = tall_full ? 0 : vp.y + (ch - 272), vh = tall_full ? ch : vp.h;
+        const int vy = tall_full ? 0 : vp.y + band_b(ch), vh = tall_full ? ch : vp.h;
         if (cw > 480 && vp.x <= 0 && vp.x + vp.w >= 480) gl_viewport(0, vy * crs, cw * crs, vh * crs);   // widescreen: whole width (x scaled by draw_wide_x)
         else gl_viewport((vp.x + (cw - 480) / 2) * crs, vy * crs, vp.w * crs, vh * crs);                  // a partial viewport: shifted to the middle
         
         gl_depth_range(vp.near_z, vp.far_z);
         depth_reversed = depth_range_reversed(vp);
     } else {
-        // 2D: the whole buffer (on a tall buffer the vertex transform puts the draw in the top band, see ge_set_tall)
+        // 2D: the whole buffer (on a tall buffer the vertex transform puts the draw in the band, see ge_set_tall)
         gl_viewport(0, 0, cur_w480() * cur_rs(), cur_h272() * cur_rs());
         gl_depth_range(0.0, 1.0);
     }
@@ -1063,7 +1071,9 @@ static bool apply_gl_pipeline_impl(uint8_t* rdram, const GeState& state, int pri
             int dw = 1 << (state.tex_size[0] & 0xFF);
             int dh = 1 << ((state.tex_size[0] >> 8) & 0xFF);
             ge_texture_bind_external(fbo_tex, state);
-            ge_shader_set_tex_remap(dw / 480.0f, dh / float(g_fbtex_h272), true);   // a tall target: v 0..272 is its top band (flipped: GL y up)
+            // a tall target: v 0..272 is its band (flipped: GL y up; the band's top row is band_b + 272 from the bottom)
+            ge_shader_set_tex_remap(dw / 480.0f, dh / float(g_fbtex_h272), true,
+                                    g_fbtex_h272 > 272 ? float(g_fbtex_h272 - 272 - band_b(g_fbtex_h272)) / float(g_fbtex_h272) : 0.0f);
         } else {
             ge_texture_bind(rdram, g_frame_counter);
             ge_shader_set_tex_remap(1.0f, 1.0f, false);
@@ -1358,18 +1368,20 @@ static float draw_wide_x(const GeState& st) {
     return (vp.x <= 0 && vp.x + vp.w >= 480) ? 480.0f / float(w) : 1.0f;
 }
 
-// Tall buffer (g_tall_px): the factor s = 272 / height for a 3D draw whose PSP viewport covers the whole screen (its GL viewport is the
-// whole buffer), else 1. Its clip y becomes y * s + (1 - s) * w: the PSP's picture lands in the top 272 rows unchanged and the view
-// goes on below it.
-static float draw_tall_y(const GeState& st) {
+// Tall buffer (g_tall_px): a 3D draw whose PSP viewport covers the whole screen gets the whole buffer as its GL viewport and its clip y
+// becomes y * s + t * w, s = 272 / height, t = s - 1 + 2 * band_b / height: the PSP's picture lands on the band unchanged and the view
+// goes on above and below it. Other draws: s = 1, t = 0.
+struct TallY { float s = 1.0f, t = 0.0f; };
+static TallY band_map(int h) { TallY r; if (h > 272) { r.s = 272.0f / float(h); r.t = r.s - 1.0f + 2.0f * float(band_b(h)) / float(h); } return r; }
+static TallY draw_tall_y(const GeState& st) {
     const int h = cur_h272();
-    if (h <= 272 || ge_vtype_through(st.vertex_type)) return 1.0f;
+    if (h <= 272 || ge_vtype_through(st.vertex_type)) return TallY{};
     const GeViewportDepth vp = compute_state_viewport_depth(st);
-    return (vp.y <= 0 && vp.y + vp.h >= 272) ? 272.0f / float(h) : 1.0f;
+    return (vp.y <= 0 && vp.y + vp.h >= 272) ? band_map(h) : TallY{};
 }
-static void tall_proj(float* p, float s) {   // column-major: row 1 (clip y) += (1 - s) * row 3 (clip w), after scaling by s
-    if (s == 1.0f) return;
-    for (int c = 0; c < 4; c++) p[c * 4 + 1] = p[c * 4 + 1] * s + (1.0f - s) * p[c * 4 + 3];
+static void tall_proj(float* p, TallY m) {   // column-major: row 1 (clip y) -> s * row 1 + t * row 3 (clip w)
+    if (m.s == 1.0f && m.t == 0.0f) return;
+    for (int c = 0; c < 4; c++) p[c * 4 + 1] = p[c * 4 + 1] * m.s + m.t * p[c * 4 + 3];
 }
 
 static void build_xf(const GeState& st, Xf3D& x) {
@@ -3113,7 +3125,7 @@ static void ge_draw_prim_one(
     }
     // Widescreen: tell the vertex transform how this draw is placed (psp_ge_vertex.h)
     ge_set_wide(draw_wide_x(state), fbo_tex == 0, fbo_tex != 0);
-    ge_set_tall(272.0f / float(cur_h272()), draw_tall_y(state));
+    { const TallY b = band_map(cur_h272()), x = draw_tall_y(state); ge_set_tall(b.s, b.t, x.s, x.t); }
     if (fbo_tex && g_fbtex_w480 > 480) {   // the shader multiplies u by declared_width / 480 afterwards (ge_shader_set_tex_remap): pre-divide the offset
         const float dw = float(1 << (state.tex_size[0] & 0xFF));
         ge_set_fb_u(480.0f / float(g_fbtex_w480), 0.5f * float(g_fbtex_w480 - 480) / float(g_fbtex_w480) * (480.0f / dw), dw / 480.0f);
@@ -4772,9 +4784,10 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         cpr.x0 = pr.x0 + (fw - cw) / 2;
         cpr.x1 = cpr.x0 + cw;
     }
-    if (g_present_h272 > 272) {   // tall: the overlays go in the PSP's band, the top 272 rows of the picture (GL y up: y1 is the top)
-        const int fh = pr.y1 - pr.y0, ch = int(fh * 272.0 / g_present_h272 + 0.5);
-        cpr.y0 = pr.y1 - ch;
+    if (g_present_h272 > 272) {   // tall: the overlays go in the PSP's band (GL y up: y1 is the top)
+        const double k = double(pr.y1 - pr.y0) / g_present_h272;
+        cpr.y0 = pr.y0 + int(band_b(g_present_h272) * k + 0.5);
+        cpr.y1 = cpr.y0 + int(272 * k + 0.5);
     }
     // Tell the savedata-dialog renderer how big the output is so the overlay
     // is rendered at (at least) output resolution rather than upscaled.
@@ -4971,6 +4984,23 @@ static int tall_px_for_window() {
     return std::max(272, std::min(px, cap));
 }
 static void tall_update() {
+    g_present_count++;
+    {   // the band: centred while the game reports a battle view (within the last 10 presents), kept above the controls' bottom row
+        int off = 0;
+        const uint32_t note = g_scene_note.load(std::memory_order_relaxed);
+        SDL_Window* w = psp_get_sdl_window();
+        int dw = 0, dh = 0;
+        if (w) psp_gl_drawable_size(w, &dw, &dh);
+        if (note && g_present_count - note < 10 && g_tall_px > 272 && dh > 0) {
+            const int room = g_tall_px - 272;
+            const int below = int(std::ceil(double(psp_touch_tall_bottom(dw, dh)) * g_tall_px / dh));   // PSP pixels under the band kept clear
+            off = std::max(0, std::min(room / 2, room - below));
+        }
+        if (off != g_band_off) {
+            std::fprintf(stderr, "[DRAW] tall window: the picture %s (band at %d of %d PSP rows)\n", off ? "centred (battle view)" : "at the top", off, g_tall_px);
+            g_band_off = off;
+        }
+    }
     const int px = tall_px_for_window();
     if (px == g_tall_px) return;
     g_tall_px = px;
