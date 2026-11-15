@@ -2651,7 +2651,9 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
             } else if (!st.texture_enable) { col[0] = col[1] = col[2] = 0.5f; }
         }
         const float t3[3] = {tr, tg, tb};
-        uint32_t alpha = 255;
+        // Opaque layer: a cut-out (alpha-tested / texture-alpha) draw keeps its texture's mean alpha as coverage, so a reflection
+        // hit on it off screen lets what lies behind show through (k_rt_refl); a solid draw is 255.
+        uint32_t alpha = (st.texture_enable && (st.tex_func_rgba || st.alpha_test_enable)) ? (tex >> 24) : 255u;
         if (fx) {   // coverage: the texture's mean alpha x the vertex alpha (the material alpha when lit)
             float al = st.texture_enable ? float(tex >> 24) / 255.f : 1.f;
             if (lit) al *= float(st.material_alpha & 0xFFu) / 255.f;
