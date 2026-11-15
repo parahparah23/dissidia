@@ -484,3 +484,34 @@ In a group (party) battle the timed call-in (20 s after a KO, `PSPRECOMP_TAGTEAM
 ## Partner copies the human's commands with Enemy AI off (fixed)
 The partner (clone of the human) shared the human's controller object (`actor+0x5A0`, an overlay array with stride 0x50, 08C15C50/CA0...): the pad is read through it, so with the CPU brain tick skipped (Enemy AI off) the partner mirrored every command (script sequences identical in the fighter log).
 Every extra now gets a private 0x50-byte copy of a CPU slot's controller object (`PSPRECOMP_TAGTEAM_KEEPSLOTOBJ=1` keeps the old pointer). With AI off the partner stands still; with AI on all four fighters still act (regression PASS). Debug: `PSPRECOMP_TAGTEAM_SHARED=1` lists the pointer words an extra shares with its slot fighter.
+
+## Group battle: the real 2nd party members from the start (tag-real, 14 Nov)
+User spec: no clones in a group battle; the match starts with the two party members on each stage.
+- **Where it is decided:** the party record (`bs + 0x13C21 - 6`, see "Party (group) battle roster") is **not filled yet when the setup runs**, so the
+  extras are queued as before (clones, `g_late_q`) and converted once the battle runs (`bs+72 != 0`, frame hook `dissidia_tagteam_frame`, once per battle):
+  `party_partner_char(team, hum, cpu)` returns the party member after the one on the stage (the slot fighter's charId, first match in the list order,
+  a count of 1 = no party = 0); with an id and a file record the queue entry becomes `info_slot = 100 + charId`, goes through `g_late_load`
+  (`load_character` from the frame hook, outside any fighter's update) and spawns after the intro like every late extra. Plain battles and
+  `PSPRECOMP_TAGTEAM_NOREAL=1` keep the clone. `g_real_partner[team]` makes the reserve strip start after the partner (members 3+).
+- **Verified (headless Party A: Jecht, Squall, CoD, Terra, Yuna vs Lightning, Vaan, Laguna):** `[TAGTEAM] team 0 extra: party member 15 (SQUALL)`, `team 1 extra:
+  party member 30 (VAAN)`, both with their own models in the screenshots, HUD panels `SQUALL` / `VAAN`, strips `COD TERR YUNA | LAGU`, script changes 21-42 per
+  fighter in 35 s (all four act), camera 1 bad frame in 800; `tagteam_test.py --baseline` PASS (clone battle and plain 1v1 unchanged).
+- **Still copied from the slot fighter:** HP / bravery / attack of the real member (known limitation, see the load_character notes).
+- **KO swap and pad swap do NOT work with real members** (`[TAGTEAM] swap: H owns 68 blocks, P 67: not clones`, the call-in keeps working but a slot
+  fighter's KO with a real partner has nobody to swap with, so the retail rules end the match for that side). Why, from `PSPRECOMP_TAGTEAM_SWAPPROBE=1`
+  (`[PROBE]` lines: the differing words of the slot actor Jecht against the extra Squall, 545 numeric words, ~60 pointer words):
+  1. `content_swap` exchanges the contents of equally shaped owned blocks and leaves every pointer that goes outside the owned blocks with its address.
+     For clones that is right (the model instance / file objects are interchangeable); for two characters the external pointers are the character
+     itself: `+0178/017C/01C0/01C4/0390/03A0/049C/0BA0..0BA8/0CE0` (heap objects of the model instance, 0x0AFF.... vs 0x0B01....), the info record `+02F8`,
+     `+05A4/05A8`, `+0844`, the form table `+0D5C`. Those would have to move with the content, while list links (`+04A0/04A4`), brain, lock block,
+     assist (`+1108`), the overlay per-slot table words (`+0394`) and the player flag stay with the address, and the unrecorded heap objects keep
+     back-pointers to their owner actor of unknown size that would have to be rewritten.
+  2. The ownership records (`g_owned`) hold 68 vs 67 blocks of different sizes, so a block-by-block exchange is impossible; moving whole blocks
+     (swapping the actor's own block pointers and fixing every back-pointer to the actor address H<->P) needs the list of every object that points back at
+     the actor, which the allocation recording does not have for the model-heap objects.
+  3. The other route, rebuild the member in the slot's memory (`FUN_08B2EDC4(this, flags)` is the fighter destructor, vtable slot 3 of `0x08B3A9A8`; then
+     `FUN_08B39E5C` + the setup's per-fighter init as `spawn_fighter` does, keeping the old brain and lock block because ~50 camera mode words cache the lock
+     block) was not tried: it needs the destructor's unregistrations from the world / collision / render lists verified and the HUD portrait re-bound.
+  Result: with real members the two on the stage fight, the called-in members (after a KO of an EXTRA) work, but a KO of a slot fighter ends the round; use
+  `PSPRECOMP_TAGTEAM_NOREAL=1` (clones) when the swap matters more than real characters.
+- Debug: `PSPRECOMP_TAGTEAM_SWAPPROBE=1` (differences + fighter vtable), `PSPRECOMP_TAGTEAM_NOREAL=1`.

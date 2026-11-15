@@ -1628,6 +1628,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static bool done = false;
         if (!done && dissidia_battle_age() > 9.f * 60.f && g_extra[0].started) {
             done = true; g_ram = rdram; g_ctx = ctx;
+            std::fprintf(stderr, "[PROBE] fighter vtable %08X:", FIGHTER_VT); for (uint32_t o = 0; o < 0x140; o += 4) std::fprintf(stderr, "%s%08X", (o % 32 == 0) ? "\n[PROBE]  " : " ", rd(FIGHTER_VT + o)); std::fprintf(stderr, "\n");
             for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) { std::fprintf(stderr, "[PROBE] slot %08X vs extra %08X\n", g_extra[i].slot_actor, g_extra[i].actor); swap_probe(g_extra[i].slot_actor, g_extra[i].actor); break; }
         }
     }
