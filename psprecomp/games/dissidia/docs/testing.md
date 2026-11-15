@@ -403,6 +403,13 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
   Experiments (framerate.cpp): `PSPRECOMP_MT_SNAP=1` trims the step so the motion time lands on the step lattice; about half the hits come
   back on time (intervals 166.7 and 177.8 alternate), so another summed clock is involved. The rehit timer (FUN_0880ACBC, record `+68 <= 0`,
   reloaded from 0x089C6CA0 by FUN_0880AD28) is not it: counting 0 < t < 0.001 as run out changed nothing. Not fixed.
+- **Repeatability (two 30 fps runs of the same character)**: what made runs differ and what was done about it.
+  The analogue camera (`camera.cpp`) times itself with the wall clock, which varies under fast-forward, and turns the left stick: off in
+  parity runs (`PSPRECOMP_CAM_FREE=0`; the game's own camera, on game time, stays). Trial state carried over (bravery, break, HP damage):
+  `home` puts both fighters' status blocks (actor+0x52C, 0x80 bytes) back as they were at the first `home`. Right after the `home`
+  teleport a jump was sometimes not taken and the dummy sometimes not hittable: trials start 0.6 s after it. Left (Squall, 80 trials):
+  7 trials whose dummy reactions or one air jump differ, and the HP damage of an HP attack (the attacker's bravery) differing by a steady
+  ~190 between runs in 11 trials; where that comes from was not found. `--repeat-base` reports such trials as NONDETERMINISTIC.
 - **The first seconds after the intro are not repeatable**: a first trial right after the fight starts gave 0 hits in one 30 fps run and
   19 in the next. Every run now starts with a 3 s settle (`mark SETTLE`); with it two 30 fps runs agree.
 - **Camera**: after `home` the 120 fps camera ends up on the other side (running forward goes +z instead of -z).
