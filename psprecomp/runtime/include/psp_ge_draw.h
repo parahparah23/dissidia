@@ -99,6 +99,13 @@ void ge_draw_flash(uint32_t rgb, int ms);
 /// own eye, so a camera we move ourselves needs it done here). Call once per camera update (game thread).
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]);   // eye: the game camera's eye this update; only draws made from that view fade
 
+/// Game layer: a translucent RGBA image (straight alpha, byte order R,G,B,A, row 0 = top) that a game module draws over the game's
+/// picture, covering the PSP's 480x272 area (w x h = 480*s x 272*s), under dialogs, menus and touch controls. Used to add elements to
+/// the game's own screens (an extra menu row). The image is copied; it is shown until cleared, or for 0.15 s after the last call
+/// (so a screen that stops calling it loses the layer by itself). Any thread.
+void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h);
+void ge_draw_clear_game_layer();
+
 /// Present the last frame with the dialog/menu overlay now (game paused).
 /// Main (GL) thread.
 void ge_draw_present_overlay_now();

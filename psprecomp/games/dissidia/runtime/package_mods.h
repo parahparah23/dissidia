@@ -111,4 +111,7 @@ private:
 bool read_asset(const std::string& data_dir, const std::string& mods_dir, const std::string& asset,
                 std::vector<uint8_t>* out);
 
+/// Where the retail entry of `asset` lies in <data_dir>/PACKAGE.BIN (byte offset and size), from PACKAGE_INFO.BIN.
+bool asset_location(const std::string& data_dir, const std::string& asset, uint64_t* off, uint32_t* size);
+
 }  // namespace dissidia

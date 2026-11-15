@@ -364,6 +364,20 @@ bool first_existing(const std::string& dir, const char* a, const char* b, std::s
 
 }  // namespace
 
+bool asset_location(const std::string& data_dir, const std::string& asset, uint64_t* off, uint32_t* size) {
+    std::string info;
+    if (!first_existing(data_dir, "PACKAGE_INFO.BIN", "package_info.bin", &info)) return false;
+    std::vector<uint8_t> raw;
+    std::string err;
+    PackageIndex idx;
+    if (!read_whole_file(info, &raw) || !idx.parse(raw.data(), raw.size(), &err)) return false;
+    const IndexEntry* e = idx.find(package_crc(normalize_asset_path(asset)));
+    if (!e || e->size() == 0) return false;
+    *off = uint64_t(e->sector) * kSectorSize;
+    *size = e->size();
+    return true;
+}
+
 bool read_asset(const std::string& data_dir, const std::string& mods_dir, const std::string& asset,
                 std::vector<uint8_t>* out) {
     const std::string norm = normalize_asset_path(asset);

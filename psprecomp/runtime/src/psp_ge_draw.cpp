@@ -4037,6 +4037,62 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     ge_shader_note_external_program();
 }
 
+// ---- Game layer (ge_draw_set_game_layer) ----
+static std::mutex g_gl_mu;
+static std::vector<uint32_t> g_gl_px;
+static int g_gl_w = 0, g_gl_h = 0;
+static bool g_gl_dirty = false;
+static std::chrono::steady_clock::time_point g_gl_time;
+void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h) {
+    if (!rgba || w <= 0 || h <= 0) { ge_draw_clear_game_layer(); return; }
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_px.assign(rgba, rgba + size_t(w) * size_t(h));
+    g_gl_w = w; g_gl_h = h; g_gl_dirty = true;
+    g_gl_time = std::chrono::steady_clock::now();
+}
+void ge_draw_clear_game_layer() {
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true;
+}
+static void draw_overlay_alpha(GLuint tex, const PresentRect& pr);
+// Draws the game layer over the PSP area `band` (render thread, inside a present).
+static void present_game_layer(const PresentRect& band) {
+    static GLuint tex = 0;
+    static int tw = 0, th = 0;
+    static bool shown = false;
+    {
+        std::lock_guard<std::mutex> lk(g_gl_mu);
+        if (g_gl_w > 0 && std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) { g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true; }
+        if (g_gl_dirty) {
+            g_gl_dirty = false;
+            shown = g_gl_w > 0;
+            if (shown) {
+                GLint prev_tex = 0, prev_align = 4, prev_row = 0;
+                glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+                glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
+                glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prev_row);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                if (!tex) glGenTextures(1, &tex);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                if (tw != g_gl_w || th != g_gl_h) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_gl_w, g_gl_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    tw = g_gl_w; th = g_gl_h;
+                }
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_gl_w, g_gl_h, GL_RGBA, GL_UNSIGNED_BYTE, g_gl_px.data());
+                glBindTexture(GL_TEXTURE_2D, GLuint(prev_tex));
+                glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row);
+            }
+        }
+    }
+    if (shown && tex) draw_overlay_alpha(tex, band);
+}
+
 static void note_overlay_rect(SDL_Window* window, const PresentRect& r);
 // The PSP's 480x272 part of the picture `pr`: the middle of a wide one, the band of a tall one (GL y up: y1 is the top).
 static PresentRect band_rect(const PresentRect& pr) {
@@ -5018,6 +5074,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         psp_gl_drawable_size(window, &sdw, &sdh);
         psp_post_scene_snapshot(sdw, sdh);
     }
+    present_game_layer(cpr);
     if (std::strcmp(why, "menu") != 0) { present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
     present_dialog_overlay(cpr, pr);
     if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)

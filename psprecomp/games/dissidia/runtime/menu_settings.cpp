@@ -15,12 +15,23 @@
 #include "psp_settings.h"
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
+#include "gim_decode.h"
+#include "menu_layer.h"
+#include "../../../runtime/src/hle/psp_savedata_dialog.h"
+#include "package_mods.h"
+#include <chrono>
+#include <functional>
+#include <string>
+#include <vector>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <initializer_list>
 
+std::string dissidia_package_dir();   // hooks_io.cpp
+std::string dissidia_mods_dir();
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
 
@@ -125,7 +136,164 @@ void text_get_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_text(rdram, ctx);
 }
 
+
+// ---- Start menu (main menu) ------------------------------------------------------------------------------------------
+// The start menu (menu overlay) lists 7 modes; their positions are nodes 0..6 of entry 0 of
+// menu/menu_pk_upper_start_menu_seq_0.bin (int16 x, y at entry offset 1630 + 104 * row, and again 40 bytes later: the node's second keyframe). The rows are pulled 21 px apart
+// instead of 24 (x follows the original curve) so an eighth row fits above the help bar. The cursor is the generic cursor
+// helper FUN_088D688C on state + 0xA28 (+4 index, +32 min, +36 max), state = [menu + 320]; its max is raised from 6 to 7.
+// Index 7 is "Settings": the game draws no row there (it has 7 row objects), the runtime layer draws it, and a confirm on it
+// (ovl_menu FUN_089E45E8 would index its 7-entry mode table) opens the settings screen instead.
+constexpr uint32_t MAIN_TICK = 0x089E45E8u;     // ovl_menu: top-level start menu update (input, confirm)
+constexpr uint32_t PAD_OBJ = 0x088729A0u;       // EBOOT: pad object (a0 = 0)
+constexpr uint32_t CONFIRM_ARGS = 0x089E7298u;  // ovl_menu: the two words FUN_089E45E8 passes to the pad's "pressed" test for confirm
+constexpr uint32_t PLAY_SE = 0x088D4BF4u;       // EBOOT: menu sound effect (1 cursor, 2 confirm)
+constexpr const char* kStartSeq = "menu/menu_pk_upper_start_menu_seq_0.bin";
+constexpr int kRowNodeOff = 1630, kRowNodeStride = 104, kKeyStride = 40;   // each node has two keyframes with the position
+constexpr int16_t kRowX[8] = {204, 207, 211, 217, 226, 237, 252, 271};
+constexpr int16_t kRowY0 = 60, kRowPitch = 21;
+
+FuncPtr g_orig_main_tick = nullptr, g_pad_obj = nullptr, g_play_se = nullptr;
+uint32_t g_main_state = 0;       // start menu state block while the top level is on screen (0 otherwise)
+int g_main_seen_frames = 0;
+
+bool edit_start_seq(std::vector<uint8_t>& pak) {
+    const uint8_t* p = nullptr; size_t len = 0;
+    if (!dissidia::menu_pak_entry(pak.data(), pak.size(), 0, &p, &len) || len < size_t(kRowNodeOff + 7 * kRowNodeStride + 4)) return false;
+    uint8_t* e = pak.data() + (p - pak.data());
+    static const int16_t retail[7][2] = {{204, 60}, {207, 84}, {213, 108}, {220, 132}, {232, 156}, {248, 180}, {268, 204}};
+    for (int r = 0; r < 7; r++)   // only a retail layout is touched
+        for (int k : {0, kKeyStride}) {
+            int16_t xy[2]; std::memcpy(xy, e + kRowNodeOff + kRowNodeStride * r + k, 4);
+            if (xy[0] != retail[r][0] || xy[1] != retail[r][1]) return false;
+        }
+    for (int r = 0; r < 7; r++)
+        for (int k : {0, kKeyStride}) {
+            const int16_t xy[2] = {kRowX[r], static_cast<int16_t>(kRowY0 + kRowPitch * r)};
+            std::memcpy(e + kRowNodeOff + kRowNodeStride * r + k, xy, 4);
+        }
+    return true;
+}
+
+// The pad's "pressed" test exactly as FUN_089E45E8 calls it for confirm (it follows the Cross / Circle swap).
+bool confirm_pressed(uint8_t* rdram, recomp_context* ctx) {
+    const int32_t pad = call(g_pad_obj, rdram, ctx, {0});
+    const uint32_t vt = r32(static_cast<uint32_t>(pad) + 52) + 16;
+    const int16_t adj = static_cast<int16_t>(r32(vt) & 0xFFFF);
+    const uint32_t fn = r32(vt + 4);
+    recomp_context save = *ctx;
+    ctx->r[4] = pad + adj; ctx->r[5] = static_cast<int32_t>(fn);
+    ctx->r[6] = static_cast<int32_t>(r32(CONFIRM_ARGS)); ctx->r[7] = static_cast<int32_t>(r32(CONFIRM_ARGS + 4));
+    RECOMP_LOOKUP(fn)(rdram, ctx);
+    const bool on = ctx->r[2] != 0;
+    *ctx = save;
+    return on;
+}
+
+
+// ---- The Settings row of the start menu, drawn on the game layer ----------------------------------------------------
+// Measured from the retail rows (the Options row, layout origin = its node): text in the game's bold face at 8.6 units, left at
+// origin + 28, baseline + 9.2, colour (40, 42, 65); idle: a 0.75-unit line (119, 114, 149) at + 11.3 from + 10.5 to + 206 (fading
+// out over the last 40) with a soft white dot at its start; selected: a royal-blue band (63, 53, 174) from - 2 to + 12 that fades in over the
+// first 30 units and lightens towards (134, 136, 207) at the right edge, white text with a dark edge, the pointing hand
+// (common UI sheet) at - 10, and the row's help text in the help bar (bold 7.9, centred at 232, baseline 239.3).
+dissidia::MenuLayer g_layer;
+dissidia::GimImage g_ui_sheet;        // menu/en/menu_lpk_label_gim_0.bin entry 0 (128x128): the pointing hand at (2, 50, 38, 24)
+int g_ui_sheet_state = 0;
+float g_sel_anim = 0.f;               // 0..1, the selected look fading in
+std::chrono::steady_clock::time_point g_last_draw;
+const char* const kMainHelp = "Display, graphics, controls and other settings of this port.";
+
+void load_ui_sheet() {
+    if (g_ui_sheet_state != 0) return;
+    g_ui_sheet_state = -1;
+    std::vector<uint8_t> bytes;
+    const std::string dir = dissidia_package_dir();
+    if (dir.empty()) { g_ui_sheet_state = 0; return; }   // try again once the game has opened PACKAGE.BIN
+    const uint8_t* p = nullptr; size_t len = 0;
+    if (dissidia::read_asset(dir, dissidia_mods_dir(), "menu/en/menu_lpk_label_gim_0.bin", &bytes) &&
+        dissidia::menu_pak_entry(bytes.data(), bytes.size(), 0, &p, &len) && len && dissidia::gim_decode(p, len, 0, &g_ui_sheet))
+        g_ui_sheet_state = 1;
+}
+
+void draw_settings_row(float ox, float oy, bool selected, float alpha) {
+    using dissidia::LayerColor;
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::min(0.1f, std::chrono::duration<float>(now - g_last_draw).count());   // 0.1 = first frame after a gap
+    g_last_draw = now;
+    static float appear = 0.f;   // fades in when the top level comes back (after a gap the row was not drawn)
+    appear = dt >= 0.1f ? 0.f : std::min(1.f, appear + dt / 0.2f);
+    alpha *= appear;
+    g_sel_anim = selected ? std::min(1.f, g_sel_anim + dt / 0.12f) : 0.f;
+    load_ui_sheet();
+    g_layer.begin(std::max(2, psp_sddialog::output_scale()));
+    const float sa = g_sel_anim * alpha, ia = (1.f - g_sel_anim) * alpha;
+    if (ia > 0.f) {   // idle: the line with its dot
+        g_layer.band(ox + 10.5f, oy + 10.9f, ox + 206.f, oy + 11.65f, [&](float x, float) {
+            const float fade = x < ox + 166.f ? 1.f : std::max(0.f, 1.f - (x - (ox + 166.f)) / 40.f);
+            return LayerColor{119, 114, 149, ia * fade};
+        });
+        g_layer.glow(ox + 10.5f, oy + 11.3f, 2.6f, LayerColor{255, 255, 255, 0.95f * ia});
+    }
+    if (sa > 0.f) {   // selected: the band
+        g_layer.band(ox - 15.f, oy - 2.f, 480.f, oy + 12.f, [&](float x, float y) {
+            const float ramp = std::min(1.f, std::max(0.f, (x - (ox - 15.f)) / 30.f));
+            const float t = x < 390.f ? 0.f : std::min(1.f, (x - 390.f) / 90.f);
+            float r = 63 + (134 - 63) * t, g = 53 + (136 - 53) * t, b = 174 + (207 - 174) * t;
+            if (y < oy - 1.f) { r += 30; g += 33; b += 11; }          // lighter top edge
+            else if (y > oy + 11.f) { r += 7; g += 8; b -= 9; }       // darker bottom edge
+            return LayerColor{r, g, b, sa * ramp};
+        });
+    }
+    const float tx = ox + 28.f, base = oy + 9.2f, em = 8.6f;
+    if (ia > 0.f) g_layer.text(kLabel, true, em, tx, base, LayerColor{40, 42, 65, ia});
+    if (sa > 0.f) {
+        for (const auto& o : {std::pair<float, float>{0.6f, 0.6f}, {0.6f, 0.f}, {0.f, 0.6f}, {-0.4f, 0.f}, {0.f, -0.4f}})
+            g_layer.text(kLabel, true, em, tx + o.first, base + o.second, LayerColor{30, 24, 80, 0.75f * sa});
+        g_layer.text(kLabel, true, em, tx, base, LayerColor{255, 255, 255, sa});
+        if (g_ui_sheet_state == 1)
+            g_layer.image(g_ui_sheet.rgba.data(), g_ui_sheet.w, g_ui_sheet.h, 2, 50, 38, 24, ox - 10.f, oy - 1.f, 26.f, 16.4f, sa);
+        const float hw = g_layer.text(kMainHelp, true, 7.9f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        g_layer.text(kMainHelp, true, 7.9f, 232.f - hw / 2.f, 239.3f, LayerColor{108, 102, 128, sa});
+    }
+    g_layer.publish();
+}
+
+void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(MAIN_TICK)) f(rdram, ctx); return; }
+    const uint32_t state = r32(static_cast<uint32_t>(ctx->r[4]) + 320);
+    const uint32_t cur = state + 0xA28u;
+    if (state && r32(cur + 32) == 0 && r32(cur + 36) == 6) {   // the top level's range: one more row
+        const uint32_t seven = 7;
+        std::memcpy(rdram + ((cur + 36) & 0x07FFFFFFu), &seven, 4);
+    }
+    g_main_state = state;
+    g_main_seen_frames = 0;
+    if (state && r32(cur + 4) == 7 && r32(cur + 36) == 7 && !psp_settings_menu_open() && confirm_pressed(rdram, ctx)) {
+        call(g_play_se, rdram, ctx, {2});
+        std::fprintf(stderr, "[MENUSET] Settings chosen in the start menu\n");
+        psp_settings_request_open();
+        return;   // this frame's update is skipped: the retail code would read past its 7-entry mode table
+    }
+    const uint32_t menu = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_main_tick(rdram, ctx);
+    // The eighth row follows the Options row (instance 0xE of the start menu scene, handle state + 0x408 + 4 * 0xE; float origin
+    // at +0x10 / +0x14), one row further down the curve.
+    const uint32_t st = r32(menu + 320);
+    if (st && r32(st + 0xA28 + 36) == 7) {
+        const uint32_t inst = r32(st + 0x408 + 4 * 0xE);
+        float ox = kRowX[6], oy = kRowY0 + kRowPitch * 6;
+        if (inst >= 0x08800000u && inst < 0x0A000000u) { std::memcpy(&ox, rdram + ((inst + 0x10) & 0x07FFFFFFu), 4); std::memcpy(&oy, rdram + ((inst + 0x14) & 0x07FFFFFFu), 4); }
+        static int dbg = 0;
+        if (std::getenv("PSPRECOMP_MENUSET_DEBUG") && dbg++ % 120 == 0) std::fprintf(stderr, "[MENUSET] inst %08X origin %.1f %.1f cursor %u\n", inst, ox, oy, r32(st + 0xA28 + 4));
+        if (std::isfinite(ox) && std::isfinite(oy) && ox > 100.f && ox < 400.f && oy > 0.f && oy < 260.f)
+            draw_settings_row(ox + float(kRowX[7] - kRowX[6]), oy + float(kRowPitch), r32(st + 0xA28 + 4) == 7, 1.f);
+    }
+}
+
 }  // namespace
+
+void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::vector<uint8_t>&)> edit);   // hooks_io.cpp
 
 void dissidia_menu_settings_install(uint8_t* rdram) {
     g_ram = rdram;
@@ -145,5 +313,15 @@ void dissidia_menu_settings_install(uint8_t* rdram) {
     psp_dispatch_register(TEXT_GET, text_get_hook);
     psp_dispatch_register(PAUSE_BUILD, pause_build_hook);
     psp_dispatch_register(LIST_OPEN, list_open_hook);
+
+    g_orig_main_tick = ovl_menu_lookup(MAIN_TICK);
+    g_pad_obj = psp_dispatch_probe_lookup(PAD_OBJ);
+    g_play_se = psp_dispatch_probe_lookup(PLAY_SE);
+    if (g_orig_main_tick && g_pad_obj && g_play_se) {
+        dissidia_add_asset_patch(kStartSeq, edit_start_seq);
+        psp_dispatch_register(MAIN_TICK, main_tick_hook);
+    } else {
+        std::fprintf(stderr, "[MENUSET] start menu hooks not installed (a function is missing)\n");
+    }
     psp_dispatch_register(CORE_UPDATE, core_update_hook);
 }
