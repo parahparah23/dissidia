@@ -81,6 +81,15 @@ uint32_t psp_texpack_ppsspp_content_hash(const uint8_t* mem, size_t mem_len, int
 /// PPSSPP's StableQuickTexHash (kind 3 = hash=quick); `aligned` = guest address is 16-byte aligned.
 uint32_t psp_texpack_quick_hash(const uint8_t* p, size_t size, bool aligned);
 
+/// Game art drawn by a game module itself (an element it adds to a screen) should use the same HD image the game gets. Register the
+/// texture's id (psp_texpack_make_id of the original texels) with psp_texpack_watch; when the game binds that texture, the
+/// image it is replaced with (id-named pack, PPSSPP-style pack or upscaler) is kept, and psp_texpack_watched returns it
+/// (false while the texture was not bound yet or nothing replaces it). Registering a watch turns id computation on. Any thread.
+void psp_texpack_watch(uint64_t id);
+bool psp_texpack_watching();
+bool psp_texpack_watched(uint64_t id, std::vector<uint8_t>& rgba, int& w, int& h);
+void psp_texpack_watch_store(uint64_t id, const uint8_t* rgba, int w, int h);   // the texture binder
+
 /// Write textures.txt now (also called periodically and at shutdown).
 void psp_texpack_flush();
 

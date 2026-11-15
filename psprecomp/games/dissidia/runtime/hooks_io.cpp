@@ -20,6 +20,8 @@
 #include "psp_tex_pack.h"
 
 #include <algorithm>
+#include <cstring>
+#include <functional>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -53,6 +55,42 @@ bool g_built = false;
 bool g_active = false;
 int g_trace_left = 0;
 uint32_t g_index_capacity = dissidia::kIndexBufferBytes;   // raised by hooks_index.cpp once its hooks are installed
+
+// ---- In-flight asset patches ------------------------------------------------
+// A game module can edit one retail PACKAGE.BIN entry as the game reads it (dissidia_add_asset_patch): the entry is read
+// once, the edit applied, and every PACKAGE.BIN read that overlaps the entry gets the edited bytes. An entry a loose-file
+// mod replaces is left alone (the mod wins).
+struct AssetPatch {
+    std::string asset;
+    std::function<bool(std::vector<uint8_t>&)> edit;
+    int state = 0;            // 0 not prepared, 1 ready, -1 unavailable
+    uint64_t off = 0;
+    std::vector<uint8_t> bytes;
+};
+std::vector<AssetPatch>& asset_patches() { static std::vector<AssetPatch> v; return v; }
+std::string g_data_dir;       // host folder of PACKAGE.BIN (set when the game first opens it)
+
+void prepare_patch(AssetPatch& p) {
+    if (p.state != 0) return;
+    p.state = -1;
+    if (g_data_dir.empty()) return;
+    for (const auto& o : g_mods.overrides())
+        if (o.asset == dissidia::normalize_asset_path(p.asset)) { std::fprintf(stderr, "[MODS] %s is replaced by a mod: built-in edit skipped\n", p.asset.c_str()); return; }
+    uint32_t size = 0;
+    if (!dissidia::asset_location(g_data_dir, p.asset, &p.off, &size)) return;
+    if (!dissidia::read_asset(g_data_dir, "", p.asset, &p.bytes) || p.bytes.size() != size) return;
+    if (!p.edit(p.bytes)) { std::fprintf(stderr, "[MODS] built-in edit of %s did not apply\n", p.asset.c_str()); return; }
+    p.state = 1;
+}
+
+void apply_asset_patches(int64_t off, uint32_t n, uint8_t* dest) {
+    for (AssetPatch& p : asset_patches()) {
+        prepare_patch(p);
+        if (p.state != 1) continue;
+        const int64_t a = std::max<int64_t>(off, (int64_t)p.off), b = std::min<int64_t>(off + n, (int64_t)(p.off + p.bytes.size()));
+        if (a < b) std::memcpy(dest + (a - off), p.bytes.data() + (a - (int64_t)p.off), size_t(b - a));
+    }
+}
 
 // ---- Load trace -------------------------------------------------------------
 // Always on and cheap: the last 32 PACKAGE.BIN reads (time, offset, size, the index entry's crc, and the mod
@@ -244,7 +282,12 @@ int classify_open(const char* psp_path) {
         if (host.empty()) return TAG_NONE;
         ensure_built(host);
     }
-    if (!g_active) return TAG_NONE;
+    if (pkg && g_data_dir.empty()) {
+        std::string host = psp_path_to_host(psp_path);
+        const size_t slash = host.find_last_of('/');
+        if (slash != std::string::npos) g_data_dir = host.substr(0, slash);
+    }
+    if (!g_active) return (pkg && !asset_patches().empty()) ? TAG_PACKAGE : TAG_NONE;
     return info ? TAG_INDEX : TAG_PACKAGE;
 }
 
@@ -260,9 +303,6 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
         dissidia_roster_patch_overlay(tag - TAG_OVL_BASE, off, (uint32_t)got, dest);
         return true;
     }
-    if (!g_active) return false;
-    if (tag == TAG_INDEX) return g_mods.read_index(off, size, dest, nread);
-    if (tag != TAG_PACKAGE) return false;
     auto base = [host_fd](uint8_t* d, uint32_t n, int64_t o) -> int64_t {
         int64_t got = 0;
         while (got < (int64_t)n) {
@@ -272,11 +312,24 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
         }
         return got;
     };
+    if (tag == TAG_PACKAGE && !asset_patches().empty() && !g_active) {   // no loose-file mods: plain read plus the built-in edits
+        const int64_t got = base(dest, size, off);
+        *nread = (uint32_t)std::max<int64_t>(got, 0);
+        apply_asset_patches(off, *nread, dest);
+        return true;
+    }
+    if (!g_active) return false;
+    if (tag == TAG_INDEX) return g_mods.read_index(off, size, dest, nread);
+    if (tag != TAG_PACKAGE) return false;
     static const bool pkg_trace = std::getenv("PSPRECOMP_PKG_TRACE") != nullptr;   // log every PACKAGE.BIN read
     if (pkg_trace) std::fprintf(stderr, "[PKG] off=0x%llX sector=%lld size=%u dest=0x%08X\n", (unsigned long long)off, (long long)(off / 2048), size,
                                   g_dbg_rdram ? (uint32_t)(dest - g_dbg_rdram) + 0x08000000u : 0u);
     if (pkg_trace && size >= 0x100000) psp_dump_func_ring("PKG-RING");
     bool hit = g_mods.read_package(off, size, dest, nread, base);
+    if (!asset_patches().empty()) {   // the built-in edits apply to retail entries, so the read is done here when no mod touched it
+        if (!hit) { const int64_t got = base(dest, size, off); *nread = (uint32_t)std::max<int64_t>(got, 0); hit = true; }
+        apply_asset_patches(off, *nread, dest);
+    }
     load_trace_note(off, size, hit ? *nread : size, hit);
     if (hit && g_trace_left > 0) {
         g_trace_left--;
@@ -289,6 +342,13 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
 }  // namespace
 
 std::string dissidia_mods_dir() { return mods_dir(); }
+std::string dissidia_package_dir() { return g_data_dir; }
+void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::vector<uint8_t>&)> edit) {
+    AssetPatch p;
+    p.asset = asset;
+    p.edit = std::move(edit);
+    asset_patches().push_back(std::move(p));
+}
 
 // hooks_index.cpp: called by the index loader hook before the game reads PACKAGE_INFO.BIN. Builds the patched
 // index (once) and returns its size in bytes, or 0 when no loose-file mods are active.

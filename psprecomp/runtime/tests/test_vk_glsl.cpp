@@ -35,6 +35,14 @@ int main() {
     ConvertedProgram p; std::string err;
     CHECK(!convert_glsl_to_vulkan("", "void main(){}", "uniform float a;\nuniform int a;\nvoid main(){}", &p, &err));
     CHECK(!convert_glsl_to_vulkan("", "void main(){}", "uniform dmat4 m;\nvoid main(){}", &p, &err));
+    {   // only a sampler (the settings screen's overlay quad): the block must not be empty, and both stages compile
+        ConvertedProgram q; std::vector<uint32_t> v, f;
+        CHECK(convert_glsl_to_vulkan("", "in vec2 a_pos;\nin vec2 a_uv;\nout vec2 v_uv;\nvoid main() { v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }\n",
+                                     "in vec2 v_uv;\nout vec4 o_col;\nuniform sampler2D u_tex;\nvoid main() { o_col = texture(u_tex, v_uv); }\n", &q, &err));
+        CHECK(compile_to_spirv(Stage::Vertex, q.vertex, &v, &err));
+        CHECK(compile_to_spirv(Stage::Fragment, q.fragment, &f, &err));
+        CHECK(q.samplers.size() == 1 && q.ubo_size > 0);
+    }
     std::printf(fails ? "FAILED\n" : "PASS\n");
     return fails ? 1 : 0;
 }

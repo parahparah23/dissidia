@@ -3931,7 +3931,11 @@ static void present_service_window_capture() {
 // The overlay texture drawn with its own alpha over the window (the settings screen's opening circle): a textured quad over the
 // picture rectangle instead of the opaque blit.
 // (The Vulkan layer's GLSL translator reads one in / out / uniform declaration per line: keep them on separate lines.)
-static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
+static void draw_overlay_quad(GLuint tex, const PresentRect& pr, float u0, float v_top, float u1, float v_bot, bool blend);
+static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) { draw_overlay_quad(tex, pr, 0.f, 0.f, 1.f, 1.f, true); }
+// A textured quad over the window rectangle `pr` (GL y up: y1 is the top): texture coordinates u0..u1 left to right, v_top at the
+// top edge and v_bot at the bottom; `blend` = straight alpha, otherwise opaque.
+static void draw_overlay_quad(GLuint tex, const PresentRect& pr, float u0, float v_top, float u1, float v_bot, bool blend) {
     static GLuint prog = 0, vao = 0, vbo = 0;
     static GLint u_tex = -1;
     static bool failed = false;
@@ -3948,7 +3952,7 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
             glCompileShader(sh);
             GLint ok = 0;
             glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
-            if (!ok) { glDeleteShader(sh); return GLuint(0); }
+            if (!ok) { char log[512] = {}; glGetShaderInfoLog(sh, sizeof log, nullptr, log); std::fprintf(stderr, "[OVERLAY] alpha shader compile failed: %s\n", log); glDeleteShader(sh); return GLuint(0); }
             return sh;
         };
         GLuint vs = compile(GL_VERTEX_SHADER, vs_body), fs = compile(GL_FRAGMENT_SHADER, fs_body);
@@ -3960,7 +3964,7 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
         glDeleteShader(vs); glDeleteShader(fs);
         GLint ok = 0;
         glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-        if (!ok) { glDeleteProgram(prog); prog = 0; failed = true; return; }
+        if (!ok) { { char log[1024] = {}; glGetProgramInfoLog(prog, sizeof log, nullptr, log); std::fprintf(stderr, "[OVERLAY] alpha program link failed: %s\n", log); } glDeleteProgram(prog); prog = 0; failed = true; return; }
         u_tex = glGetUniformLocation(prog, "u_tex");
         GLint prev_vao = 0, prev_abo = 0;
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
@@ -3983,11 +3987,11 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     auto cy = [&](float y) { return y / float(dh) * 2.f - 1.f; };
     const float x0 = float(std::min(pr.x0, pr.x1)), x1 = float(std::max(pr.x0, pr.x1));
     const float yb = float(std::min(pr.y0, pr.y1)), yt = float(std::max(pr.y0, pr.y1));
-    const float verts[] = {   // texture row 0 = canvas top = the top edge of the quad
-        cx(x0), cy(yt), 0.f, 0.f,
-        cx(x1), cy(yt), 1.f, 0.f,
-        cx(x0), cy(yb), 0.f, 1.f,
-        cx(x1), cy(yb), 1.f, 1.f,
+    const float verts[] = {   // (canvas images: texture row 0 = canvas top = the top edge of the quad)
+        cx(x0), cy(yt), u0, v_top,
+        cx(x1), cy(yt), u1, v_top,
+        cx(x0), cy(yb), u0, v_bot,
+        cx(x1), cy(yb), u1, v_bot,
     };
     GLint prev_prog = 0, prev_vao = 0, prev_abo = 0, prev_vp[4], bsrc_rgb, bdst_rgb, bsrc_a, bdst_a, prev_fbo = 0, prev_tex = 0, prev_active = 0;
     GLboolean prev_blend = glIsEnabled(GL_BLEND), prev_depth = glIsEnabled(GL_DEPTH_TEST), prev_cull = glIsEnabled(GL_CULL_FACE),
@@ -4010,8 +4014,8 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     glViewport(0, 0, dw, dh);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_SCISSOR_TEST); glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    else glDisable(GL_BLEND);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUseProgram(prog);
     glUniform1i(u_tex, 0);
@@ -4035,6 +4039,90 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     glActiveTexture(GLenum(prev_active));
     glc::invalidate();
     ge_shader_note_external_program();
+}
+
+// ---- Game layer (ge_draw_set_game_layer) ----
+static std::mutex g_gl_mu;
+static std::vector<uint32_t> g_gl_px;
+static int g_gl_w = 0, g_gl_h = 0;
+static bool g_gl_dirty = false;
+static std::chrono::steady_clock::time_point g_gl_time;
+static std::vector<GeLayerCopy> g_gl_copies;
+void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h) {
+    if (!rgba || w <= 0 || h <= 0) { ge_draw_clear_game_layer(); return; }
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_px.assign(rgba, rgba + size_t(w) * size_t(h));
+    g_gl_w = w; g_gl_h = h; g_gl_dirty = true;
+    g_gl_time = std::chrono::steady_clock::now();
+}
+void ge_draw_clear_game_layer() {
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true;
+    g_gl_copies.clear();
+}
+void ge_draw_set_game_layer_copies(const GeLayerCopy* c, int n) {
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_copies.assign(c, c + std::max(0, n));
+}
+// Redraws parts of the shown picture elsewhere (ge_draw_set_game_layer_copies), straight from the game's colour target `src_tex`
+// (sw x sh texels, GL rows bottom up, the PSP's 480x272 part where the band and wide extension put it), into the PSP area `band`.
+static void present_game_layer_copies(GLuint src_tex, int spw, int h272, const PresentRect& band) {
+    std::vector<GeLayerCopy> copies;
+    {
+        std::lock_guard<std::mutex> lk(g_gl_mu);
+        if (g_gl_w <= 0 || std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) return;
+        copies = g_gl_copies;
+    }
+    if (copies.empty() || !src_tex || spw <= 0 || h272 <= 0) return;
+    const float ox = (spw - 480) / 2.f, bb = float(band_b(h272));
+    const float bw = float(band.x1 - band.x0), bh = float(band.y1 - band.y0);
+    for (const GeLayerCopy& c : copies) {
+        PresentRect d = band;
+        d.x0 = band.x0 + int(c.dx0 / 480.f * bw + 0.5f); d.x1 = band.x0 + int(c.dx1 / 480.f * bw + 0.5f);
+        d.y1 = band.y1 - int(c.dy0 / 272.f * bh + 0.5f); d.y0 = band.y1 - int(c.dy1 / 272.f * bh + 0.5f);
+        if (d.x1 <= d.x0 || d.y1 <= d.y0) continue;
+        const float u0 = (c.sx0 + ox) / spw, u1 = (c.sx1 + ox) / spw;
+        const float vt = (bb + 272.f - c.sy0) / h272, vb = (bb + 272.f - c.sy1) / h272;
+        draw_overlay_quad(src_tex, d, u0, vt, u1, vb, false);
+    }
+}
+static void draw_overlay_alpha(GLuint tex, const PresentRect& pr);
+// Draws the game layer over the PSP area `band` (render thread, inside a present).
+static void present_game_layer(const PresentRect& band) {
+    static GLuint tex = 0;
+    static int tw = 0, th = 0;
+    static bool shown = false;
+    {
+        std::lock_guard<std::mutex> lk(g_gl_mu);
+        if (g_gl_w > 0 && std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) { g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true; }
+        if (g_gl_dirty) {
+            g_gl_dirty = false;
+            shown = g_gl_w > 0;
+            if (shown) {
+                GLint prev_tex = 0, prev_align = 4, prev_row = 0;
+                glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+                glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
+                glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prev_row);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                if (!tex) glGenTextures(1, &tex);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                if (tw != g_gl_w || th != g_gl_h) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_gl_w, g_gl_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    tw = g_gl_w; th = g_gl_h;
+                }
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_gl_w, g_gl_h, GL_RGBA, GL_UNSIGNED_BYTE, g_gl_px.data());
+                glBindTexture(GL_TEXTURE_2D, GLuint(prev_tex));
+                glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row);
+            }
+        }
+    }
+    if (shown && tex) draw_overlay_alpha(tex, band);
 }
 
 static void note_overlay_rect(SDL_Window* window, const PresentRect& r);
@@ -5018,6 +5106,15 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         psp_gl_drawable_size(window, &sdw, &sdh);
         psp_post_scene_snapshot(sdw, sdh);
     }
+    {   // the game layer's copies of the picture, then its image
+        GLuint src_tex = 0;
+        for (int i = 0; i < GE_MAX_TARGETS && !src_tex; ++i) {
+            if (g_targets[i].fbo == fbo) src_tex = g_targets[i].color_tex;
+            else if (g_targets[i].ab_fbo && g_targets[i].ab_fbo == fbo) src_tex = g_targets[i].ab_tex;
+        }
+        present_game_layer_copies(src_tex, spw, h272_of_fbo(fbo), cpr);
+    }
+    present_game_layer(cpr);
     if (std::strcmp(why, "menu") != 0) { present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
     present_dialog_overlay(cpr, pr);
     if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)

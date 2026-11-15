@@ -851,7 +851,7 @@ GLuint ge_texture_bind(
     const bool pack_on = fmt <= GE_TFMT_CLUT8 && psp_texpack_active();
     // The FX shader overrides match draws by the same id (psp_fx_shader.h).
     // The reflectivity table (psp_refl_table.h) is keyed by the same id.
-    const bool id_on = pack_on || (fmt <= GE_TFMT_CLUT8 && (psp_fx_want_ids() || psp_refl_table_active()));
+    const bool id_on = pack_on || (fmt <= GE_TFMT_CLUT8 && (psp_fx_want_ids() || psp_refl_table_active() || psp_texpack_watching()));
     uint64_t tid = 0;
     std::vector<uint8_t> pack_px;      // replacement / upscaled pixels
     int pack_w = 0, pack_h = 0;
@@ -909,6 +909,8 @@ GLuint ge_texture_bind(
         }
     }
 
+    if (replaced && tid && psp_texpack_watching()) psp_texpack_watch_store(tid, pack_px.data(), pack_w, pack_h);
+
     // Convert to RGBA8888
     std::vector<uint8_t> rgba;
     if (!replaced) {
@@ -954,6 +956,10 @@ GLuint ge_texture_bind(
         if (psp_texpack_upscale(tid, rgba.data(), width, height, up, uw, uh)) {
             pack_px.swap(up); pack_w = uw; pack_h = uh;
         }
+    }
+    if (tid && psp_texpack_watching()) {   // what the game gets for a watched texture: the upscale, or nothing (the original)
+        if (!pack_px.empty()) psp_texpack_watch_store(tid, pack_px.data(), pack_w, pack_h);
+        else psp_texpack_watch_store(tid, nullptr, 0, 0);
     }
     }   // !replaced
 

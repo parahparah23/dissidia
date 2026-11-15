@@ -171,6 +171,9 @@ bool convert_glsl_to_vulkan(const std::string& defines, const std::string& vs, c
     if (!convert_stage(Stage::Vertex, vs, sh, &vb, err) || !convert_stage(Stage::Fragment, fs, sh, &fb, err)) return false;
     // Pass 1 saw every declaration, so the block can be finalised; bool uniforms keep their GL-visible name via #define.
     // A bool uniform named like a #define target would recurse, which GLSL forbids; the sources never do that.
+    // A program whose only uniforms are samplers would get an empty block, which is a GLSL syntax error ("unexpected RIGHT_BRACE"):
+    // give it one unused member (the settings screen's see-through opening circle was such a program and never drew on Vulkan).
+    if (sh.uniforms.empty()) { UniformMember u; u.name = "psp_unused_"; u.type = "float"; sh.uniforms.push_back(u); }
     uint32_t total = 0;
     layout_block(sh.uniforms, &total);
     const std::string blk = block_text(sh.uniforms);
