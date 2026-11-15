@@ -15,6 +15,16 @@ at 30, 60 and 120 fps (at 30 fps the edges can only fall on update boundaries, 3
 
   combo_timing.py sweep   --work W --rates 30,120 --prefix 'CIRCLE@800=10001' --probe CIRCLE --from 150 --to 700   # one transition
   combo_timing.py combos  --work W --rates 30,60,120                                                              # every wiki combo
+                                                                                                    # (exit 1 when a window differs)
+Boot: by default the recorded Quick Battle walk is replayed inside the game (`--direct`, tests/replays/quick_battle_walk.txt) with the
+fighter swapped in (PSPRECOMP_TEST_CHAR_SWAP, runtime/direct_battle.cpp): ~35 s to the fight instead of the ~3 min picture walk
+(`--menus` for the old walk). On the GPU when there is one (battle_test BT_GPU, default auto here). The analogue camera is off
+(PSPRECOMP_CAM_FREE=0: it runs on the wall clock and turns the stick, and Up 2 is a stick input). Also run by
+`fps_parity.py run --jecht-combos` (docs/testing.md "Frame-rate parity tests").
+
+Verdict (`combos`): for every transition, every script the probe starts at 30 fps (the chain move, the too-early / too-late repeat,
+the HP finisher) must be started at every rate, with its first and last probe delay within --tol ms of 30 fps (default 34: at 30 fps an
+edge can only fall on an update, 33.3 ms apart), and no rate may start a script 30 fps never does.
 
 Step syntax: BUTTON[:STICK][@delay][=script]   STICK n (neutral) | u (up) | d (down) | l | r   delay in ms after the previous move
 started (default 400); `=script` is the script id the press must start (the next step is timed from that start).
@@ -33,6 +43,7 @@ sys.path.insert(0, HERE)
 import battle_test as bt            # noqa: E402
 
 STICK = {'n': (128, 128), 'u': (128, 0), 'd': (128, 255), 'l': (0, 128), 'r': (255, 128)}
+WALK = os.path.join(HERE, '..', 'tests', 'replays', 'quick_battle_walk.txt')
 TAP_MS = 67                         # a press: two updates at 30 fps (a 1-update tap is sometimes missed by the game)
 GRID = 1000.0 / 120.0               # default probe grid: one update at 120 fps
 
@@ -68,9 +79,9 @@ def trial_script(i, prefix, probe, d, dist=3.0, tail=900):
 class Session(threading.Thread):
     """a running battle at one frame rate"""
 
-    def __init__(self, work, fps, out, char='jecht', ff_menus=0):
+    def __init__(self, work, fps, out, char='jecht', ff_menus=0, direct=True):
         super().__init__(daemon=True)
-        self.work, self.fps, self.out, self.char, self.ff_menus = work, fps, out, char, ff_menus
+        self.work, self.fps, self.out, self.char, self.ff_menus, self.direct = work, fps, out, char, ff_menus, direct
         self.ready = threading.Event()
         self.error = None
         self.n = 0
@@ -86,13 +97,22 @@ class Session(threading.Thread):
         xp, disp = bt.start_xvfb()
         try:
             init = os.path.join(self.out, 'init_%d.txt' % self.fps)
-            with open(init, 'w') as f:
-                f.write('5000 waitidle 8000\n+0 batch %s\n' % self.batch_path(0))
-            self.g = bt.Game(self.work, self.fps, self.out, disp, bt.free_port(), script=init,
-                             extra_env={'PSPRECOMP_TEST_PLAYER_CHAR': str(bt.CHAR_ID[self.char]), 'PSPRECOMP_TEST_FREEZE_CPU': '0', 'PSPRECOMP_TEST_AI_OFF': '1',
-                                        'PSPRECOMP_FIGHTER_LOG': '0'})   # the fighter log is a line per fighter per update: tens of GB at 120 fps
+            with open(init, 'w') as f:                    # (3 s of settling: the first seconds after the intro are not repeatable)
+                f.write('5000 waitidle 8000\n+3000 mark settled\n+0 batch %s\n' % self.batch_path(0))
+            cid = bt.CHAR_ID[self.char]
+            env = {'PSPRECOMP_TEST_PLAYER_CHAR': str(cid), 'PSPRECOMP_TEST_FREEZE_CPU': '0', 'PSPRECOMP_TEST_AI_OFF': '1',
+                   'PSPRECOMP_FIGHTER_LOG': '0',                 # the fighter log is a line per fighter per update: tens of GB at 120 fps
+                   'PSPRECOMP_CAM_FREE': '0'}                    # the analogue camera runs on the wall clock and turns the stick
+            if self.direct:
+                env['PSPRECOMP_TEST_DIRECT_BATTLE'] = os.path.abspath(WALK)
+                if cid != 15:
+                    env['PSPRECOMP_TEST_CHAR_SWAP'] = '15=%d' % cid if cid != 31 else '15=31,31=15'
+            self.g = bt.Game(self.work, self.fps, self.out, disp, bt.free_port(), script=init, extra_env=env)
             self.g.start()
-            bt.walk_menus(self.g, self.char, ff_menus=self.ff_menus)
+            if self.direct:
+                bt.walk_direct(self.g, ff_menus=4)
+            else:
+                bt.walk_menus(self.g, self.char, ff_menus=self.ff_menus)
             self.ready.set()
             last = 0
             while not self.stop_flag and self.g.alive():
@@ -220,14 +240,16 @@ def windows(rows):
     return res
 
 
-def run_rates(work, rates, out, fn, char='jecht', ff_menus=0, attempts=3):
+def run_rates(work, rates, out, fn, char='jecht', ff_menus=0, attempts=3, direct=True):
     """boot one session per rate (in parallel), run fn(session) in a thread each, return {rate: result}. A session whose display was killed
     (this host: low memory, other sessions' cleanups) is started again from the menus, up to `attempts` times."""
     results, errs = {}, {}
 
     def go(r):
         for attempt in range(attempts):
-            s = Session(work, r, os.path.join(out, 'r%d' % r if attempt == 0 else 'r%d_try%d' % (r, attempt + 1)), char, ff_menus)
+            s = Session(work, r, os.path.join(out, 'r%d' % r if attempt == 0 else 'r%d_try%d' % (r, attempt + 1)), char, ff_menus, direct)
+            if attempt == 0 and r != rates[0]:
+                time.sleep(3 * rates.index(r))             # two games started in the same second can pick the same X display
             s.start()
             s.ready.wait()
             try:
@@ -239,7 +261,7 @@ def run_rates(work, rates, out, fn, char='jecht', ff_menus=0, attempts=3):
             except Exception as e:                    # noqa: BLE001
                 errs[r] = e
                 print('rate %d: attempt %d failed: %r' % (r, attempt + 1, e), file=sys.stderr)
-                if 'display died' not in str(e):
+                if 'display died' not in str(e) and 'never started' not in str(e) and 'Connection refused' not in str(e):
                     return
             finally:
                 s.finish()
@@ -310,6 +332,51 @@ def report(res, rates):
     return '\n'.join(lines)
 
 
+def verdict(res, rates, tol=34.0):
+    """[(transition, rate, problem)] where a rate differs from the reference (rates[0], 30 fps) ([] = all the same): every script the probe
+    starts at the reference (the chain move, the too-early / too-late repeats, the HP finisher; not "nothing started") must be started at
+    the other rate too, with its first and last probe delay within `tol` ms. A rate whose session failed counts as a difference."""
+    bad = []
+    base_rate = rates[0]
+    if base_rate not in res:
+        return [('*', base_rate, 'no result at the reference rate')]
+    for name, rows in res[base_rate].items():
+        w0 = {k: v for k, v in windows(rows).items() if k is not None}
+        if not w0:
+            bad.append((name, base_rate, 'the probe never started a move at the reference rate'))
+            continue
+        for r in rates[1:]:
+            if r not in res or name not in res[r]:
+                bad.append((name, r, 'not measured'))
+                continue
+            w = windows(res[r][name])
+            for k, v0 in sorted(w0.items()):
+                v = w.get(k)
+                if not v:
+                    bad.append((name, r, 'script %d never starts (%d fps: %.0f..%.0f ms)' % (k, base_rate, v0[0], v0[1])))
+                elif abs(v[0] - v0[0]) > tol or abs(v[1] - v0[1]) > tol:
+                    bad.append((name, r, 'script %d window %.0f..%.0f ms vs %.0f..%.0f ms at %d fps' % (k, v[0], v[1], v0[0], v0[1], base_rate)))
+            for k in sorted(set(x for x in w if x is not None) - set(w0)):
+                bad.append((name, r, 'script %d starts (%.0f..%.0f ms), never at %d fps' % (k, w[k][0], w[k][1], base_rate)))
+    return bad
+
+
+def run_combos(work, rates, out, char='jecht', direct=True, ff_menus=0, tol=34.0):
+    """the `combos` test: report + verdict files in out, returns 0 (all windows the same as at 30 fps) or 1"""
+    os.makedirs(out, exist_ok=True)
+    t0 = time.time()
+    res = run_rates(work, rates, out, combos_run, char, ff_menus, direct=direct)
+    bad = verdict(res, rates, tol)
+    text = report(res, rates) + '\n\n' + ('PASS: every chain window the same as at %d fps (within %.0f ms)' % (rates[0], tol) if not bad else
+                                          'FAIL:\n' + '\n'.join('  %s, %d fps: %s' % b for b in bad)) + '\ntook %.0f s\n' % (time.time() - t0)
+    with open(os.path.join(out, 'combos.txt'), 'w') as f:
+        f.write(text)
+    with open(os.path.join(out, 'combos.json'), 'w') as f:
+        json.dump({str(r): res[r] for r in res}, f)
+    print(text)
+    return 1 if bad else 0
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='what', required=True)
@@ -328,27 +395,28 @@ def main(argv):
     p = sub.add_parser('combos')
     p.add_argument('--work', required=True)
     p.add_argument('--out', default='/tmp/combo_timing')
-    p.add_argument('--rates', default='30,120')
+    p.add_argument('--rates', default='30,60,120')
     p.add_argument('--char', default='jecht')
     p.add_argument('--ff-menus', type=int, default=0)
+    p.add_argument('--tol', type=float, default=34.0, help='ms a window edge may differ from 30 fps (default 34: one 30 fps update)')
+    for x in sub.choices.values():
+        x.add_argument('--menus', action='store_true', help='walk the menus by pictures (slow) instead of the recorded walk')
+        x.add_argument('--gpu', default='auto', choices=['auto', 'on', 'off'], help='render on the NVIDIA GPU with no X server (default auto)')
     a = ap.parse_args(argv)
+    os.environ['BT_GPU'] = {'auto': 'auto', 'on': '1', 'off': '0'}[a.gpu]
     if a.what == 'combos':
         work, out = os.path.abspath(os.path.expanduser(a.work)), os.path.abspath(a.out)
         rates = [int(x) for x in a.rates.split(',')]
-        t0 = time.time()
-        res = run_rates(work, rates, out, combos_run, a.char, a.ff_menus)
-        print(report(res, rates))
-        with open(os.path.join(out, 'combos.json'), 'w') as f:
-            json.dump({str(r): res[r] for r in res}, f)
-        print('took %.0f s' % (time.time() - t0))
-        return 0
+        if 30 in rates:
+            rates = [30] + [r for r in rates if r != 30]
+        return run_combos(work, rates, out, a.char, not a.menus, a.ff_menus, a.tol)
     work, out = os.path.abspath(os.path.expanduser(a.work)), os.path.abspath(a.out)
     rates = [int(x) for x in a.rates.split(',')]
     prefix = [parse_step(x) for x in a.prefix.split(',')] if a.prefix else []
     probe = parse_step(a.probe)
     ds = [round(a.lo + k * a.step, 2) for k in range(int((a.hi - a.lo) / a.step) + 1)]
     t0 = time.time()
-    res = run_rates(work, rates, out, lambda s: sweep(s, prefix, probe, ds, a.dist), a.char, a.ff_menus)
+    res = run_rates(work, rates, out, lambda s: sweep(s, prefix, probe, ds, a.dist), a.char, a.ff_menus, direct=not a.menus)
     for r in rates:
         if r in res:
             print('%3d fps  %s' % (r, fmt_windows(windows(res[r]))))

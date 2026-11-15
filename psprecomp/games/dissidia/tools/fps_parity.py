@@ -95,6 +95,8 @@ def slug(cid):
 def parse_chars(spec):
     if spec in ('all', ''):
         return sorted(CHARS)
+    if spec == 'none':                                     # e.g. only the Jecht combo test: --chars none --jecht-combos
+        return []
     out = []
     for t in spec.split(','):
         t = t.strip().lower()
@@ -595,6 +597,9 @@ def main(argv):
     p.add_argument('--jobs', type=int, default=4)
     p.add_argument('--actions', default='', help='only these action ids (default: every action the fighter has)')
     p.add_argument('--max-actions', dest='max_actions', type=int, default=0, help='only the first N actions (quick checks)')
+    p.add_argument('--jecht-combos', dest='jecht_combos', action='store_true',
+                   help='also run the Jecht combo window test (tools/combo_timing.py combos) after the parity games; off by default')
+    p.add_argument('--combo-rates', dest='combo_rates', default='', help='rates for --jecht-combos (default: --rates)')
     p.add_argument('--moves-only', dest='moves_only', action='store_true', help='only the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--no-moves', dest='no_moves', action='store_true', help='leave out the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--variants', default='plain,mash')
@@ -654,7 +659,17 @@ def main(argv):
         t.start()
     for t in th:
         t.join()
-    return summarize(a, chars)
+    rc = summarize(a, chars) if jobs is not None and chars else 0
+    if a.jecht_combos:                                     # optional: Jecht's timed chain windows (tools/combo_timing.py), one game per rate
+        import combo_timing
+        crates = [int(x) for x in (a.combo_rates or a.rates).split(',')]
+        crates = [30] + [r for r in crates if r != 30]
+        print('[fps_parity] Jecht combo windows at %s fps' % ','.join(map(str, crates)), file=sys.stderr)
+        crc = combo_timing.run_combos(os.path.abspath(a.work), crates, os.path.join(a.out, 'jecht_combos'))
+        with open(os.path.join(a.out, 'summary.txt'), 'a') as f:
+            f.write('\nJecht combo windows (jecht_combos/combos.txt): %s\n' % ('PASS' if crc == 0 else 'FAIL'))
+        rc = rc or crc
+    return rc
 
 
 if __name__ == '__main__':

@@ -5,6 +5,8 @@
 #
 #   run_fps_parity_test.sh <work dir> [out dir] [fps_parity.py run options...]
 #     e.g. run_fps_parity_test.sh ~/dissidia/work /tmp/parity --chars squall,exdeath --rates 30,60,120
+#          run_fps_parity_test.sh ~/dissidia/work /tmp/parity --jecht-combos            # + Jecht's combo windows (optional)
+#          run_fps_parity_test.sh ~/dissidia/work /tmp/combos --chars none --jecht-combos # only the Jecht combo test
 #
 # Needs a runtime built from this tree in <work dir>/build, Xvfb, python3 + Pillow and a save with Quick Battle unlocked.
 set -e

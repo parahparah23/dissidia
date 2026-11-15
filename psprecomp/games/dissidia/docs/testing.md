@@ -288,6 +288,16 @@ Notes from the Jecht combo work (2026-11-11), for whoever needs a live value aga
 
 ## Combo input windows across frame rates (`tools/combo_timing.py`)
 
+**Optional part of the parity tests (15 Nov):** `fps_parity.py run --jecht-combos` (or `combo_timing.py combos --work W --rates 30,60,120`)
+runs this after the parity games and judges it: every script a probe starts at 30 fps (chain move, too-early / too-late repeat, HP
+finisher) must start at every rate, first and last probe delay within `--tol` 34 ms (one 30 fps update), and no rate may start a script
+30 fps never does; exit code 1 otherwise, results in `<out>/jecht_combos/combos.txt`. It now boots like the parity tests: the recorded
+walk with the fighter swapped in (`PSPRECOMP_TEST_CHAR_SWAP=15=20`, ~35 s to the fight instead of ~3 min; `--menus` for the old picture
+walk), on the GPU when there is one (`--gpu`), analogue camera off, 3 s settle before the first trial. The verdict was checked against
+the saved 11 Nov results: PASS for the windows after the action start step fix (120 fps within 25 ms of 30 fps), FAIL naming Rush >
+Neutral 2 / Up 2 (317..408 vs 267..358 ms) for the ones before it. A game run of the new boot path has not been made yet (left for after
+the next changes).
+
 Built 2026-11-11 for Jecht (his chain inputs have 3 to 5 frame windows at 30 fps; the wiki list is
 https://dissidia.wiki/Jecht_(Dissidia_012)/Combos). One battle per frame rate runs in parallel (own display / port / memory stick); the CPU
 fighter has no AI input (`PSPRECOMP_TEST_AI_OFF=1`) but is hit normally; trials are fed as script batches (`batch`), so menus are walked once
@@ -339,6 +349,8 @@ character by character, with no menu walking per character:
     fps_parity.py show DIR squall 1454 mash                                    # one trial at every rate, side by side, 30 Hz frames
     fps_parity.py chars                                                        # the 31 playable characters and their charIds
     tests/run_fps_parity_test.sh W [out] [run options]                          # the same as a test (exit code 1 on a difference)
+    fps_parity.py run --work W ... --jecht-combos [--combo-rates 30,60,120]      # optional: Jecht's chain windows too (combo_timing.py)
+    fps_parity.py run --work W --chars none --jecht-combos --rates 30,60,120     # only the Jecht combo test
 
 Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every failing trial and why), `DIR/results.json`.
 
