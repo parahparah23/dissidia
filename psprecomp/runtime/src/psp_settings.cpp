@@ -14,6 +14,7 @@
 #include "hle/psp_hle_adhoc.h"
 #include "hle/psp_cloud_service.h"
 #include "psp_gpu_driver.h"
+#include "psp_gl_window.h"
 
 #include <SDL.h>
 #if defined(PSPRECOMP_HAVE_VKGL)
@@ -155,7 +156,7 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_WIDE, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -228,6 +229,13 @@ bool g_l3 = false, g_r3 = false;
 uint32_t g_pad_dpad = 0;
 
 SDL_Window* win() { return psp_get_sdl_window(); }
+// The window is tall (a folding phone's inner screen): Display > Tall Screen is offered (psp_touch.h).
+bool window_is_tall() {
+    int w = 0, h = 0;
+    if (!win()) return false;
+    psp_gl_drawable_size(win(), &w, &h);
+    return psp_touch_tall_window(w, h);
+}
 
 void build_res_options() {
     g_res.clear();
@@ -993,6 +1001,14 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "Flicker test (--ge-sync)\nWaits for the GPU at each step: slower, rules out timing. This session only.";
             break;
         }
+        case ROW_TALL: {
+            const bool on = psp_touch_tall_enabled();
+            m.label = "Tall Screen";
+            m.value = on ? "On" : "Off";
+            m.can_dec = on; m.can_inc = !on;
+            m.help = "Tall screen layout (PSPRECOMP_TALL_SCREEN)\nFor a nearly square screen (a folding phone opened up). On: the picture fills the screen (battles in the middle with the scene above and below, the HUD at the top and bottom edges, menus at the top) and the touch controls use their own layout. Off: the 16:9 picture in the middle, as on other screens. Needs the touch controls (not Off). Saved.";
+            break;
+        }
         case ROW_SOFT: {
             const bool on = ge_soft_focus();
             m.label = "Soft Focus";
@@ -1244,7 +1260,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
-    case ROW_FPSCOUNT: case ROW_WIDE: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
+    case ROW_FPSCOUNT: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
@@ -1564,6 +1580,9 @@ void change(int d) {   // left / right on the selected row
         if (s >= 0 && s <= 4) ge_draw_set_sync_mode(s);
         break;
     }
+    case ROW_TALL:
+        if ((d > 0) != psp_touch_tall_enabled()) { psp_touch_set_tall_enabled(d > 0); save("tall_screen", d > 0 ? "1" : "0"); }
+        break;
     case ROW_SOFT:
         if ((d > 0) != ge_soft_focus()) { ge_set_soft_focus(d > 0); save("soft_focus", d > 0 ? "1" : "0"); }
         break;
@@ -1721,7 +1740,7 @@ void build_rows() {
     auto add = [&](Row r) { g_rows.push_back(r); };
     switch (page_id()) {
     case PAGE_DISPLAY:
-        add(ROW_SEC_WINDOW); add(ROW_DISPLAY); if (!is_fullscreen()) add(ROW_RES); add(ROW_WIDE); add(ROW_UPSCALE);
+        add(ROW_SEC_WINDOW); add(ROW_DISPLAY); if (!is_fullscreen()) add(ROW_RES); add(ROW_WIDE); if (window_is_tall()) add(ROW_TALL); add(ROW_UPSCALE);
         add(ROW_SEC_PERF);
         if (g_fps.get && g_fps.count > 1) add(ROW_FPS);
         add(ROW_FPSCOUNT);
@@ -2067,6 +2086,7 @@ void confirm_row() {
     case ROW_SYNC: ge_draw_set_sync_mode((ge_draw_sync_mode() + 1) % 5); break;
     case ROW_RING: change((g_ring_next >= 0 ? g_ring_next : ge_draw_ring_mode()) ? -1 : 1); return;
     case ROW_SOFT: change(ge_soft_focus() ? -1 : 1); return;
+    case ROW_TALL: change(psp_touch_tall_enabled() ? -1 : 1); return;
     case ROW_AA: change(psp_post_aa() >= POST_AA_SMAA ? -int(POST_AA_SMAA) : 1); return;
     case ROW_SHARP: change(psp_post_sharpen() >= 4 ? -4 : 1); return;
     case ROW_HDR: if (psp_hdr_available()) change(psp_hdr_wanted() ? -1 : 1); return;
@@ -2156,12 +2176,13 @@ uint32_t dpad_bit(uint8_t b) {
 // ---- mouse and touch -----------------------------------------------------------------------------------------------
 // Pointer positions arrive as fractions of the window; the overlay occupies the picture's rectangle (ge_draw_overlay_rect), so they are
 // mapped to 480x272 canvas units, the space SettingsView's geometry is in.
+int g_canvas_dh = psp_sddialog::SCREEN_H;   // design height of the settings canvas last drawn (taller on a tall window)
 bool to_canvas(float fx, float fy, float* ux, float* uy) {
     float a, b, c, d;
     ge_draw_overlay_rect(&a, &b, &c, &d);
     if (c <= a || d <= b) return false;
     *ux = (fx - a) / (c - a) * float(psp_sddialog::SCREEN_W);
-    *uy = (fy - b) / (d - b) * float(psp_sddialog::SCREEN_H);
+    *uy = (fy - b) / (d - b) * float(g_canvas_dh);   // the canvas' design height (taller on a tall window)
     return true;
 }
 bool mouse_to_canvas(int mx, int my, float* ux, float* uy) {
@@ -2353,6 +2374,7 @@ void psp_settings_load_early() {
         put("PSPRECOMP_RENDER_SCALE", it->second);
     if ((it = g_saved.find("widescreen")) != g_saved.end()) put("PSPRECOMP_WIDESCREEN", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("soft_focus")) != g_saved.end()) put("PSPRECOMP_SOFT_FOCUS", it->second == "0" ? "0" : "1");
+    if ((it = g_saved.find("tall_screen")) != g_saved.end()) put("PSPRECOMP_TALL_SCREEN", it->second == "0" ? "0" : "1");
     if ((it = g_saved.find("post_aa")) != g_saved.end()) put("PSPRECOMP_POST_AA", it->second == "2" ? "2" : it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("aniso")) != g_saved.end()) put("PSPRECOMP_ANISO", it->second);
     if ((it = g_saved.find("sharpen")) != g_saved.end()) put("PSPRECOMP_SHARPEN", it->second);
@@ -2676,7 +2698,8 @@ void psp_settings_tick() {
     }
     static std::unique_ptr<psp_sddialog::Canvas> canvas;
     const int scale = std::max(1, std::min(psp_sddialog::output_scale(), g_ui_cap));
-    if (!canvas || canvas->scale != scale) canvas = std::make_unique<psp_sddialog::Canvas>(scale);
+    const int dh = ge_draw_tall_rows();   // a tall window: the screen is as tall as the picture (480 x dh design units)
+    if (!canvas || canvas->scale != scale || canvas->dh != dh) { canvas = std::make_unique<psp_sddialog::Canvas>(scale, dh); g_canvas_dh = dh; }
     const auto r0 = Clock::now();
     g_view.render(*canvas, sc, double(t));
     const auto r1 = Clock::now();

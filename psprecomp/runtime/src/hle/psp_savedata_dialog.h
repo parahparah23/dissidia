@@ -122,12 +122,13 @@ enum class Result { Running, Selected, Cancelled };
 
 // RGBA8 canvas of (SCREEN_W*scale) x (SCREEN_H*scale) pixels (byte order
 // R,G,B,A in memory; uint32 = 0xAABBGGRR on LE). Always opaque once rendered.
+// design_h: the height in design units (SCREEN_H; the settings screen is taller on a tall window, see ge_draw_tall_rows).
 struct Canvas {
-    int scale, w, h;
+    int scale, dh, w, h;
     std::vector<uint32_t> px;
-    explicit Canvas(int s = 1)
-        : scale(s < 1 ? 1 : (s > MAX_SCALE ? MAX_SCALE : s)),
-          w(SCREEN_W * scale), h(SCREEN_H * scale),
+    explicit Canvas(int s = 1, int design_h = SCREEN_H)
+        : scale(s < 1 ? 1 : (s > MAX_SCALE ? MAX_SCALE : s)), dh(design_h < SCREEN_H ? SCREEN_H : design_h),
+          w(SCREEN_W * scale), h(dh * scale),
           px(size_t(w) * size_t(h), 0) {}
     static constexpr uint32_t rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
         return uint32_t(r) | uint32_t(g) << 8 | uint32_t(b) << 16 | uint32_t(a) << 24;

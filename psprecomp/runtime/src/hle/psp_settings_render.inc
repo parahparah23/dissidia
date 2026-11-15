@@ -8,13 +8,27 @@
 namespace {
 
 const SetRect R_BACK{392, 8, 78, 20};
-const SetRect R_SIDE{10, 43, 108, 201};
-const SetRect R_LIST{126, 43, 344, 144};
-const SetRect R_DETAIL{126, 192, 344, 52};
+// The panels of a 480 x 272 canvas; a taller canvas (Canvas::dh, the settings screen on a tall window) stretches them: the category list
+// and the settings list grow, the description panel grows a little and moves down, the hint bar stays at the bottom (layout_for).
+const SetRect R0_SIDE{10, 43, 108, 201};
+const SetRect R0_LIST{126, 43, 344, 144};
+const SetRect R0_DETAIL{126, 192, 344, 52};
 // without the category sidebar (SetScene::hide_side) the list and the description panel take its place
-const SetRect R_LIST_W{10, 43, 460, 144};
-const SetRect R_DETAIL_W{10, 192, 460, 52};
-const SetRect R_FOOT{10, 249, 460, 21};
+const SetRect R0_LIST_W{10, 43, 460, 144};
+const SetRect R0_DETAIL_W{10, 192, 460, 52};
+const SetRect R0_FOOT{10, 249, 460, 21};
+SetRect R_SIDE = R0_SIDE, R_LIST = R0_LIST, R_DETAIL = R0_DETAIL, R_LIST_W = R0_LIST_W, R_DETAIL_W = R0_DETAIL_W, R_FOOT = R0_FOOT;
+int g_layout_dh = SCREEN_H;
+void layout_for(int dh) {
+    g_layout_dh = dh;
+    const float ex = float(dh - SCREEN_H), el = std::floor(ex * 0.75f), ed = ex - el;   // extra rows: 3/4 to the list, 1/4 to the description
+    R_SIDE = R0_SIDE; R_SIDE.h += ex;
+    R_LIST = R0_LIST; R_LIST.h += el;
+    R_LIST_W = R0_LIST_W; R_LIST_W.h += el;
+    R_DETAIL = R0_DETAIL; R_DETAIL.y += el; R_DETAIL.h += ed;
+    R_DETAIL_W = R0_DETAIL_W; R_DETAIL_W.y += el; R_DETAIL_W.h += ed;
+    R_FOOT = R0_FOOT; R_FOOT.y += ex;
+}
 constexpr float ROW_PITCH = 18.5f, HEAD_H = 15.f, LIST_PAD = 3.f;
 
 const Col C_INK = rgb(30, 38, 150), C_DIM = rgb(104, 112, 172), C_NAVY = rgb(26, 28, 88), C_RED = rgb(176, 44, 70);
@@ -172,14 +186,16 @@ void navy_plate(Painter& P, float x, float y, float w, float h, float tip, float
 // The frosted panels (shadow, rim, translucent body) are the most expensive shapes on the screen and never change, so each is drawn
 // once per canvas scale into a premultiplied RGBA image and composited every frame (at any offset and opacity: the open animation
 // slides them in). The alpha is recovered by drawing the panel over black and over white.
-const SetRect R_KB{44, 46, 392, 198};
+const SetRect R0_KB{44, 46, 392, 198};
+SetRect R_KB = R0_KB;   // centred on a taller canvas (layout_for_kb)
 struct PanelImg { int x0 = 0, y0 = 0, w = 0, h = 0; std::vector<uint32_t> px; };
 struct PanelCache {
     bool built[MAX_SCALE + 1] = {};
+    int built_dh[MAX_SCALE + 1] = {};
     PanelImg img[MAX_SCALE + 1][6];
 };
 void build_panel_img(PanelImg& out, const SetRect& r, float radius, float strength, int scale) {
-    Canvas cb(scale), cw(scale);
+    Canvas cb(scale, g_layout_dh), cw(scale, g_layout_dh);   // as tall as the layout (a panel may sit below row 272)
     cb.clear(Canvas::rgba(0, 0, 0));
     cw.clear(Canvas::rgba(255, 255, 255));
     { Painter p(cb); glass_panel(p, r, radius, strength); }
@@ -199,8 +215,9 @@ void build_panel_img(PanelImg& out, const SetRect& r, float radius, float streng
 const PanelImg& panel_img(int kind, int scale) {
     static PanelCache pc;
     scale = std::clamp(scale, 1, MAX_SCALE);
-    if (!pc.built[scale]) {   // once per canvas scale (the scale changes only when the output size does, or drawing is slow)
+    if (!pc.built[scale] || pc.built_dh[scale] != g_layout_dh) {   // once per canvas scale and height (they change only with the output size, or drawing is slow)
         pc.built[scale] = true;
+        pc.built_dh[scale] = g_layout_dh;
         build_panel_img(pc.img[scale][0], R_SIDE, 6.f, 0.92f, scale);
         build_panel_img(pc.img[scale][1], R_LIST, 6.f, 1.f, scale);
         build_panel_img(pc.img[scale][2], R_DETAIL, 6.f, 1.f, scale);
@@ -417,7 +434,11 @@ struct SettingsDraw {
             if (cached_for != &T->background) { for (auto& v : cache) v.clear(); cached_for = &T->background; }
             if (cb.size() != c.px.size()) {
                 c.clear(Canvas::rgba(200, 204, 232));
-                draw_sprite(c, T->background, 0, 0, float(SCREEN_W), float(SCREEN_H), 1.f, true);
+                if (c.dh == SCREEN_H) draw_sprite(c, T->background, 0, 0, float(SCREEN_W), float(SCREEN_H), 1.f, true);
+                else {   // a taller canvas: the artwork covers it (its height, cropped at the sides), not squashed
+                    const float bw = float(SCREEN_W) * float(c.dh) / float(SCREEN_H);
+                    draw_sprite(c, T->background, (float(SCREEN_W) - bw) / 2.f, 0, bw, float(c.dh), 1.f, true);
+                }
                 cb = c.px;
             } else {
                 const int y0 = std::max(0, tl_band_y0), y1 = std::min(c.h, tl_band_y1);
@@ -426,7 +447,13 @@ struct SettingsDraw {
         } else {   // no game theme (a host test): the painted background, built once per scale
             static std::vector<uint32_t> plain[MAX_SCALE + 1];
             std::vector<uint32_t>& pb = plain[std::clamp(c.scale, 0, int(MAX_SCALE))];
-            if (pb.size() != c.px.size()) { pb = background(c.scale); c.px = pb; }
+            if (pb.size() != c.px.size()) {
+                const std::vector<uint32_t>& b0 = background(c.scale);   // 480 x 272: stretched down a taller canvas (a soft gradient)
+                const int h0 = SCREEN_H * c.scale;
+                pb.resize(c.px.size());
+                for (int y = 0; y < c.h; ++y) std::memcpy(&pb[size_t(y) * size_t(c.w)], &b0[size_t(std::min(h0 - 1, y * h0 / c.h)) * size_t(c.w)], size_t(c.w) * 4);
+                c.px = pb;
+            }
             else {
                 const int y0 = std::max(0, tl_band_y0), y1 = std::min(c.h, tl_band_y1);
                 if (y1 > y0) std::memcpy(&c.px[size_t(y0) * size_t(c.w)], &pb[size_t(y0) * size_t(c.w)], size_t(y1 - y0) * size_t(c.w) * 4);
@@ -439,7 +466,7 @@ struct SettingsDraw {
             if (ph < 0.55f) {
                 const float u = ph / 0.55f, x0 = -120.f + u * 720.f, amp = 0.17f * std::sin(u * 3.14159f), hw = 40.f;
                 for (int y = 0; y < c.h; ++y) {
-                    const float yd = (float(y) + 0.5f) / P.s, cx = x0 - 130.f * yd / float(SCREEN_H);
+                    const float yd = (float(y) + 0.5f) / P.s, cx = x0 - 130.f * yd / float(c.dh);
                     const int xa = std::max(0, int((cx - hw) * P.s)), xb = std::min(c.w, int((cx + hw) * P.s) + 1);
                     for (int x = xa; x < xb; ++x) {
                         const float d = 1.f - std::fabs((float(x) + 0.5f) / P.s - cx) / hw;
@@ -454,7 +481,7 @@ struct SettingsDraw {
             const float a1 = std::fabs(h1), a2 = std::fabs(h2);
             const float speed = 3.f + a2 * 7.f, size = 1.1f + a1 * 2.2f;
             const float x = std::fmod(a1 * 520.f + t * speed * 0.6f + std::sin(t * 0.4f + float(i)) * 6.f, 500.f) - 10.f;
-            const float y = std::fmod(a2 * 300.f - t * speed + 600.f, 290.f) - 8.f;
+            const float y = std::fmod(a2 * 300.f - t * speed + 600.f + float(c.dh) * 2.f, float(c.dh) + 18.f) - 8.f;
             const float tw = 0.5f + 0.5f * std::sin(t * (1.2f + a1) + float(i) * 1.7f);
             const Col k = (i % 4 == 0) ? rgb(246, 220, 140, 0.55f * tw) : rgb(255, 255, 255, 0.55f * tw);
             diamond(P, x, y, size, k);
@@ -974,9 +1001,9 @@ struct SettingsDraw {
         if (p <= 0.001f) return;
         const SetDialog& D = S.dlg;
         P.ga = 1.f;
-        P.rrect(0, 0, float(SCREEN_W), float(SCREEN_H), 0.f, rgb(12, 14, 46, 0.55f * p));
+        P.rrect(0, 0, float(SCREEN_W), float(c.dh), 0.f, rgb(12, 14, 46, 0.55f * p));
         P.ga = p;
-        const float w = 300.f, h = 124.f, x = (float(SCREEN_W) - w) / 2.f, y = (float(SCREEN_H) - h) / 2.f + (1.f - p) * 12.f;
+        const float w = 300.f, h = 124.f, x = (float(SCREEN_W) - w) / 2.f, y = (float(c.dh) - h) / 2.f + (1.f - p) * 12.f;
         P.shadow(x, y, w, h, 8.f, 6.f, 0.35f);
         P.rrect(x, y, w, h, 8.f, rgb(236, 238, 252));
         P.rrect(x + 1.f, y + 1.f, w - 2.f, h - 2.f, 7.f, Ramp(rgb(248, 249, 255), rgb(222, 226, 246), y, y + h));
@@ -1019,7 +1046,7 @@ struct SettingsDraw {
         V.g_.keys.clear();
         if (p <= 0.001f) return;
         P.ga = 1.f;
-        P.rrect(0, 0, float(SCREEN_W), float(SCREEN_H), 0.f, rgb(12, 14, 46, 0.60f * p));
+        P.rrect(0, 0, float(SCREEN_W), float(c.dh), 0.f, rgb(12, 14, 46, 0.60f * p));
         P.ga = p;
         const SetRect pn{44.f, 46.f + (1.f - p) * 26.f, 392.f, 198.f};
         blit_panel(c, panel_img(3, c.scale), 0, int(std::lround((1.f - p) * 26.f * P.s)), P.ga);
@@ -1100,7 +1127,7 @@ struct SettingsDraw {
         const float p = clamp01(V.p_open_ / 0.42f);
         if (p >= 0.999f) return;
         const float e = ease_io(p);
-        const float cx = float(SCREEN_W) / 2.f, cy = float(SCREEN_H) / 2.f, R = e * 310.f;
+        const float cx = float(SCREEN_W) / 2.f, cy = float(c.dh) / 2.f, R = e * (310.f + float(c.dh - SCREEN_H) * 0.6f);
         const float s = float(c.scale);
         const float edge = 14.f;
         const int ya = std::max(0, tl_band_y0), yb = std::min(c.h, tl_band_y1);
@@ -1164,6 +1191,10 @@ void SettingsView::render(Canvas& c, const SetScene& s, double now_ms) {
     last_ms_ = now_ms;
     t_ += dt;
     help_t_ += dt;
+    if (c.dh != g_layout_dh) {   // the canvas height changed (a tall window): stretch the panels
+        layout_for(c.dh);
+        R_KB = R0_KB; R_KB.y += float(c.dh - SCREEN_H) / 2.f;
+    }
     SettingsDraw D(*this, s, c);
     D.lastdt = dt;
     D.step(dt);
@@ -1173,6 +1204,8 @@ void SettingsView::render(Canvas& c, const SetScene& s, double now_ms) {
     static unsigned primed = 0;
     static const int cfg = [] { const char* e = std::getenv("PSPRECOMP_SETTINGS_THREADS"); return e ? std::atoi(e) : 0; }();
     int nt = cfg > 0 ? cfg : int(std::min(8u, std::max(1u, std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u)));
+    static int primed_dh = SCREEN_H;
+    if (c.dh != primed_dh) { primed = 0; primed_dh = c.dh; }   // a new canvas height: the scaled artwork is built again
     const unsigned bit = 1u << std::clamp(c.scale, 0, 31);
     if (!(primed & bit) || nt <= 1) { primed |= bit; D.draw_all(); return; }
     const int nbands = nt * 3;

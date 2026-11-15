@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <string>
@@ -69,6 +70,15 @@ Ctl make(const char* id, Type t, float x, float y, std::vector<Btn> b = {}, int 
 // window, battles in the middle with the 3D scene filling the rest; psp_touch_tall_layout, read by the presenter) and the controls get
 // their own layout along the top and bottom edges.
 bool tall_shape(int w, int h) { return w > 0 && h > 0 && (float)h - (float)w * 272.0f / 480.0f >= 0.3f * (float)w; }
+// Settings > Display > Tall Screen (settings.ini tall_screen, PSPRECOMP_TALL_SCREEN=0|1, default on): off = a tall window is treated like
+// any other (the 16:9 picture in the middle, the normal touch layout).
+std::atomic<int> g_tall_on{-1};
+bool tall_on() {
+    int v = g_tall_on.load();
+    if (v < 0) { const char* e = std::getenv("PSPRECOMP_TALL_SCREEN"); v = (e && e[0] == '0') ? 0 : 1; g_tall_on.store(v); }
+    return v != 0;
+}
+bool eff_tall(int w, int h) { return tall_on() && tall_shape(w, h); }
 float picture_bottom(float w) { return w * 272.0f / 480.0f; }
 // The size unit of every control (and of the layout editor). Wide windows: the height, but no more than 0.625 x the width, so the
 // controls do not grow out of proportion on a squarer screen (16:10 and wider are unchanged). Tall windows: what lets the bottom row
@@ -197,7 +207,7 @@ void save_layout() {
 void load_layout() {
     if (g_loaded || g_win_w <= 0) return;
     g_loaded = true;
-    g_tall = tall_shape(g_win_w, g_win_h);
+    g_tall = eff_tall(g_win_w, g_win_h);
     g_u = unit_for(g_win_w, g_win_h, g_tall);
     g_float = false;
     default_controls(g_ctl, (float)g_win_w, (float)g_win_h);
@@ -551,9 +561,12 @@ void edit_finger(const SDL_Event& ev, float x, float y) {
 }  // namespace
 
 bool psp_touch_enabled() { return resolve_mode() != 2 || g_edit; }
-bool psp_touch_tall_layout(int w, int h) { return psp_touch_enabled() && tall_shape(w, h); }
-int psp_touch_tall_bottom(int w, int h) { return tall_shape(w, h) ? (int)std::ceil(k_tall_row * unit_for(w, h, true)) : 0; }
-int psp_touch_tall_top(int w, int h) { return tall_shape(w, h) ? (int)std::ceil(0.17f * unit_for(w, h, true)) : 0; }
+bool psp_touch_tall_layout(int w, int h) { return psp_touch_enabled() && eff_tall(w, h); }
+int psp_touch_tall_bottom(int w, int h) { return eff_tall(w, h) ? (int)std::ceil(k_tall_row * unit_for(w, h, true)) : 0; }
+int psp_touch_tall_top(int w, int h) { return eff_tall(w, h) ? (int)std::ceil(0.17f * unit_for(w, h, true)) : 0; }
+bool psp_touch_tall_window(int w, int h) { return tall_shape(w, h); }
+bool psp_touch_tall_enabled() { return tall_on(); }
+void psp_touch_set_tall_enabled(bool on) { g_tall_on.store(on ? 1 : 0); }
 int psp_touch_mode() { return resolve_mode(); }
 void psp_touch_set_mode(int m) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
@@ -1024,14 +1037,15 @@ void psp_touch_draw(int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (resolve_mode() == 2 && !g_edit) return;
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    if (w != g_win_w || h != g_win_h) {
+    if (w != g_win_w || h != g_win_h || (g_loaded && eff_tall(w, h) != g_tall)) {
         g_win_w = w; g_win_h = h;
-        if (g_loaded && tall_shape(w, h) != g_tall) {   // the window changed shape (a folding phone opened or closed): the other layout
+        // the window changed shape (a folding phone opened or closed) or Tall Screen was switched: the other layout
+        if (g_loaded && eff_tall(w, h) != g_tall) {
             release_all();
             g_sel = -1; g_pick = false; g_drags.clear(); g_ui_fingers.clear();   // an open editor stays open, on the other layout
             g_loaded = false;
         }
-        g_u = unit_for(w, h, tall_shape(w, h));
+        g_u = unit_for(w, h, eff_tall(w, h));
     }
     load_layout();
     {   // PSPRECOMP_TOUCH_EDIT=1: open the layout editor at start (testing)

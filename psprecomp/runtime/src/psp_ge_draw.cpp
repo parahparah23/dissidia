@@ -115,6 +115,7 @@ void ge_draw_set_hud_zones(int top_rows, int bottom_rows, int bottom_visible) {
     g_hud_top = std::max(0, top_rows); g_hud_bottom = std::max(0, bottom_rows); g_hud_visible = std::clamp(bottom_visible, 0, g_hud_bottom);
 }
 int ge_draw_hud_bottom_rows() { return g_hud_visible; }
+int ge_draw_tall_rows() { return g_tall_px; }
 static uint32_t g_hud_fixed[8];
 static int g_hud_fixed_n = 0;
 void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n) {
@@ -3966,7 +3967,24 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     ge_shader_note_external_program();
 }
 
-static void present_dialog_overlay(const PresentRect& pr) {
+static void note_overlay_rect(SDL_Window* window, const PresentRect& r);
+// The PSP's 480x272 part of the picture `pr`: the middle of a wide one, the band of a tall one (GL y up: y1 is the top).
+static PresentRect band_rect(const PresentRect& pr) {
+    PresentRect cpr = pr;
+    if (g_present_w480 > 480) {
+        const int fw = pr.x1 - pr.x0, cw = int(fw * 480.0 / g_present_w480 + 0.5);
+        cpr.x0 = pr.x0 + (fw - cw) / 2;
+        cpr.x1 = cpr.x0 + cw;
+    }
+    if (g_present_h272 > 272) {
+        const double k = double(pr.y1 - pr.y0) / g_present_h272;
+        cpr.y0 = pr.y0 + int(band_b(g_present_h272) * k + 0.5);
+        cpr.y1 = cpr.y0 + int(272 * k + 0.5);
+    }
+    return cpr;
+}
+// pr: where a 480x272 canvas goes (the PSP's band); full: the whole picture, for a taller canvas (the settings screen on a tall window)
+static void present_dialog_overlay(const PresentRect& band, const PresentRect& full) {
     static GLuint ovl_tex = 0, ovl_fbo = 0;
     static int tex_w = 0, tex_h = 0;
     static std::vector<uint32_t> px;
@@ -3975,6 +3993,12 @@ static void present_dialog_overlay(const PresentRect& pr) {
     if (!psp_sddialog::overlay_fetch(px, &ow, &oh, &translucent) || ow <= 0 || oh <= 0 ||
         px.size() != size_t(ow) * size_t(oh))
         return;
+    PresentRect pr = band;
+    if (int64_t(oh) * 480 > int64_t(ow) * 272 + ow) {   // taller than 480:272: the whole picture's width, from its top (GL y up)
+        pr = full;
+        pr.y0 = pr.y1 - int(int64_t(pr.x1 - pr.x0) * oh / ow);
+        note_overlay_rect(psp_get_sdl_window(), pr);   // pointer mapping (the settings screen) follows
+    }
     GLint prev_tex = 0, prev_align = 4, prev_row_len = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
@@ -4841,17 +4865,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
     g_present_h272 = h272_of_fbo(fbo);
     const PresentRect pr = present_layout(window);
     // Widescreen: the dialog / settings overlays are 480x272 canvases; they go in the middle of the picture
-    PresentRect cpr = pr;
-    if (g_present_w480 > 480) {
-        const int fw = pr.x1 - pr.x0, cw = int(fw * 480.0 / g_present_w480 + 0.5);
-        cpr.x0 = pr.x0 + (fw - cw) / 2;
-        cpr.x1 = cpr.x0 + cw;
-    }
-    if (g_present_h272 > 272) {   // tall: the overlays go in the PSP's band (GL y up: y1 is the top)
-        const double k = double(pr.y1 - pr.y0) / g_present_h272;
-        cpr.y0 = pr.y0 + int(band_b(g_present_h272) * k + 0.5);
-        cpr.y1 = cpr.y0 + int(272 * k + 0.5);
-    }
+    const PresentRect cpr = band_rect(pr);
     // Tell the savedata-dialog renderer how big the output is so the overlay
     // is rendered at (at least) output resolution rather than upscaled.
     psp_sddialog::set_output_scale(std::max({g_rs, (cpr.x1 - cpr.x0 + 479) / 480, 1}));
@@ -4935,7 +4949,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         psp_post_scene_snapshot(sdw, sdh);
     }
     if (std::strcmp(why, "menu") != 0) { present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
-    present_dialog_overlay(cpr);
+    present_dialog_overlay(cpr, pr);
     if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)
         int tw = 0, th = 0;
         psp_gl_drawable_size(window, &tw, &th);
@@ -5322,16 +5336,16 @@ void ge_draw_present_overlay_now() {
     if (GLuint fbo = front_fbo_id()) { present_blit(fbo, "menu"); return; }
     SDL_Window* window = psp_get_sdl_window();
     if (!window) return;
-    const PresentRect pr = present_layout(window);
-    psp_sddialog::set_output_scale(std::max({g_rs, (pr.x1 - pr.x0 + 479) / 480, 1}));
-    note_overlay_rect(window, pr);
+    const PresentRect pr = present_layout(window), cpr = band_rect(pr);
+    psp_sddialog::set_output_scale(std::max({g_rs, (cpr.x1 - cpr.x0 + 479) / 480, 1}));
+    note_overlay_rect(window, cpr);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     const GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
     if (sc) glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    present_dialog_overlay(pr);
+    present_dialog_overlay(cpr, pr);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     { psp_perf::Scope swap_scope_(psp_perf::SWAP); psp_gl_swap(window); }
     if (sc) glEnable(GL_SCISSOR_TEST);

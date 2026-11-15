@@ -26,6 +26,11 @@ void psp_touch_set_mode(int m);               // runtime change (settings menu)
 bool psp_touch_tall_layout(int w, int h);
 // On a tall window: the height (pixels) of the controls' bottom row; the picture is kept above it. 0 on other windows.
 int psp_touch_tall_bottom(int w, int h);
+// Settings > Display > Tall Screen: whether a tall window gets the treatment above (default on; settings.ini tall_screen,
+// PSPRECOMP_TALL_SCREEN). psp_touch_tall_window: the window has that shape (the setting is shown only then). Any thread.
+bool psp_touch_tall_window(int w, int h);
+bool psp_touch_tall_enabled();
+void psp_touch_set_tall_enabled(bool on);
 // On a tall window: the height (pixels) of the controls' top row (L, Select, menu, Start, R). 0 on other windows.
 int psp_touch_tall_top(int w, int h);
 
