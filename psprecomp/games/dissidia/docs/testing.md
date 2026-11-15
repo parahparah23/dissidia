@@ -395,7 +395,15 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
   one update. Dodge and block still differ after the alignment (0.8 m / 0.3 m around the first frame).
 - **Jumps get lower as the rate rises**: Squall's jump peaks at 4.10 m (30 fps), 3.94 (60), 3.85 (120), 3.80 (240); double jump 6.71,
   6.39, 6.21, 6.12; an Exdeath air action started 0.4 s after a jump starts 0.2 m lower at 120 fps and lands 67 ms earlier.
-- **Multi-hit moves land a different number of hits**: Exdeath's action 1960 (script 10000, attack 1271 repeated): 19 hits at 30 fps,
-  18 at 120; Squall's action 1454 (script 10015): 2 hits at 30, 1 at 60; follow-ups chosen by a mash differ.
+- **Multi-hit moves land a different number of hits, and at 90 / 150 / 180 / 210 fps every hit is one update late.** Exdeath's action
+  1960 (script 10000, attack 1271 every 10 ticks): a hit every 166.7 ms at 30, 60, 120 and 240 fps, but 177.8 ms at 90, 173.3 at 150,
+  172.2 at 180, 171.4 at 210: exactly the rates whose step (2/3, 0.4, 1/3, 2/7 ticks) is not exact in floating point. The summed motion
+  time lands at 69.99999 instead of 70, so the event keyed at tick 70 fires an update later; 17 hits instead of 19 at 90 fps. Squall's
+  action 1454 (script 10015): 2 hits at 30, 1 at 60; follow-ups chosen by a mash differ.
+  Experiments (framerate.cpp): `PSPRECOMP_MT_SNAP=1` trims the step so the motion time lands on the step lattice; about half the hits come
+  back on time (intervals 166.7 and 177.8 alternate), so another summed clock is involved. The rehit timer (FUN_0880ACBC, record `+68 <= 0`,
+  reloaded from 0x089C6CA0 by FUN_0880AD28) is not it: counting 0 < t < 0.001 as run out changed nothing. Not fixed.
+- **The first seconds after the intro are not repeatable**: a first trial right after the fight starts gave 0 hits in one 30 fps run and
+  19 in the next. Every run now starts with a 3 s settle (`mark SETTLE`); with it two 30 fps runs agree.
 - **Camera**: after `home` the 120 fps camera ends up on the other side (running forward goes +z instead of -z).
 - Whole-roster results: see the latest `summary.txt` of a full run (`~/dissidia/fpsparity/full1` on the test host).

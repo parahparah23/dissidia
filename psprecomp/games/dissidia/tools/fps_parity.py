@@ -115,8 +115,8 @@ _start_lock = threading.Lock()
 
 def trial_lines(acts, variants, only=None, moves=True):
     """the batch of trials for a fighter's action list [(id, script, later, side, button)] (the same text at every rate)"""
-    lines = []
-    for name, steps in (MOVES.items() if moves and not only else []):
+    lines = ['+0 waitidle 8000', '+0 home %.2f %.2f %.2f' % (HOME_DIST, HOME_X, HOME_Z), '+3000 mark SETTLE']   # the first seconds after the intro are not
+    for name, steps in (MOVES.items() if moves and not only else []):                                       # repeatable (a first trial gave 0 or 19 hits)
         lines.append('+0 waitidle 8000')
         lines.append('+0 home %.2f %.2f %.2f' % (HOME_DIST, HOME_X, HOME_Z))
         lines.append('+1100 mark T 0 %s' % name)               # 1 s to settle first: running is camera-relative, and the camera swings after `home`

@@ -231,6 +231,7 @@ uint32_t g_par_scratch = 0;   // 16 guest bytes for the facing vector handed to 
 // Not a latency fix: a press starts the motion on the same update at every rate (motion time 0 on the first update); what differs is
 // how far the fighter moves on that first update (see docs/testing.md "Frame-rate parity tests").
 double g_par_input_delay = 0;
+bool g_mt_snap = false;   // PSPRECOMP_MT_SNAP=1, see mt_snap()
 uint32_t g_human_vt = 0;   // vtable of the human's controller object (found at the first battle: the one a scripted press reaches)
 FILE* g_record = nullptr;
 char g_record_path[512] = {};
@@ -683,7 +684,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         char buf[512]; int n = std::snprintf(buf, sizeof buf, "[PAR] %.2f%s", g_gt_ms, lattice ? "" : "~");
         for (uint32_t a : {pa, da}) {
             if (!a || !ok(a)) { n += std::snprintf(buf + n, sizeof buf - n, " | -"); continue; }
-            n += std::snprintf(buf + n, sizeof buf - n, " | %d %d %.2f %.3f %.3f %.3f %.3f %.3f", static_cast<int>(static_cast<int16_t>(r32(a + 0x540u) & 0xFFFFu)),
+            n += std::snprintf(buf + n, sizeof buf - n, " | %d %d %.4f %.3f %.3f %.3f %.3f %.3f", static_cast<int>(static_cast<int16_t>(r32(a + 0x540u) & 0xFFFFu)),
                                static_cast<int>(static_cast<int16_t>(r32(a + 0x180u) & 0xFFFFu)), rdf(a + 0x1A8u), rdf(a + 0x110u), rdf(a + 0x114u), rdf(a + 0x118u), rdf(a + 0x90u), rdf(a + 0x98u));
         }
         std::fprintf(stderr, "%s | %u %u\n", buf, g_par_hits[0], g_par_hits[1]);
@@ -962,6 +963,7 @@ void testdrive_install() {
     if (const char* pc = std::getenv("PSPRECOMP_TEST_PLAYER_CHAR"); pc && pc[0]) g_player_char = std::atoi(pc);
     if (const char* pp = std::getenv("PSPRECOMP_TEST_PARITY"); pp && pp[0] && pp[0] != '0') g_parity = true;
     if (const char* id = std::getenv("PSPRECOMP_TEST_INPUT_DELAY"); id && id[0]) g_par_input_delay = std::atof(id);
+    if (const char* ms = std::getenv("PSPRECOMP_MT_SNAP"); ms && ms[0] == '1') g_mt_snap = true;
     g_test_go = std::getenv("PSPRECOMP_TEST_GO");
     if (g_test_go && !g_test_go[0]) g_test_go = nullptr;
     const char* e = std::getenv("PSPRECOMP_TEST_SCRIPT");
@@ -1357,9 +1359,24 @@ int g_actor_log_left = 4000;
 struct ActorSeen { uint32_t actor; float res; int own; };
 ActorSeen g_actor_seen[24];
 
+// PSPRECOMP_MT_SNAP=1 (experiment): a move's motion time (actor +0x1A8) sums the step every update. At 90 / 150 / 180 / 210 fps the step
+// (2/3, 0.4, 1/3, 2/7 ticks) is not exact in floating point and the sum lands just under a whole tick (69.99999 instead of 70), so an event
+// keyed at tick 70 fires one update late (Exdeath's multi-hit 1960: a hit every 177.8 ms at 90 fps instead of 166.7; fps_parity.py). The
+// step handed to the actor is trimmed so the new motion time lands on the step lattice (+1e-5, so a key on that tick fires this update).
+// Result (15 Nov): about half of the late hits come back on time (90 fps: intervals 166.7 and 177.8 ms alternate), so another summed
+// clock is involved too. The rehit timer (FUN_0880ACBC: record +68 <= 0) is not it: treating 0 < t < 0.001 as run out changed nothing.
+void mt_snap(uint32_t actor, recomp_context* ctx) {
+    if (!g_mt_snap || g_ticks >= 2.0f || !ok(actor)) return;
+    const float mt = rdf(actor + 0x1A8u), dt = ctx->f[0];
+    if (!(dt > 0.0f) || !(mt >= 0.0f) || mt > 100000.0f) return;
+    const double want = static_cast<double>(mt) + dt, k = std::round(want / g_ticks), target = k * static_cast<double>(g_ticks);
+    if (std::fabs(want - target) < 1e-3 && std::fabs(dt - g_ticks) < 1e-4) ctx->f[0] = static_cast<float>(target + 1e-5 - mt);
+}
+
 void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]);
     g_orig_actor_dt(rdram, ctx);
+    mt_snap(actor, ctx);
     bool own = false;
     if (ok(actor)) own = ((r32(actor + 0x388u) & r32(OWN_MASK0)) | (r32(actor + 0x38Cu) & r32(OWN_MASK1))) != 0;
     if (ok(actor)) {   // remember the fighters (kind 0: camera.cpp pivots on one) and, for the log, the other actors
