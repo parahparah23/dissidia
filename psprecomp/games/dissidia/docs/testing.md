@@ -513,3 +513,11 @@ bug and is not. Measured on a 3440x1440 175 Hz VRR monitor (GNOME 50 Wayland, VR
 (FIFO) 6.67 ms, standard deviation 0.14-0.63, at most 2 uneven frames. On a fixed 175 Hz refresh FIFO would put 150 fps frames on a
 5.71 ms grid (5.7 / 11.4 ms); even 6.67 ms frames mean the refresh followed the game. Both modes show a single 20-26 ms frame every
 few seconds: that comes from the game side, not from presenting.
+
+## Building the Android APK on this host
+No desktop needed. One-time setup (done 14 Nov, ~2.7 GB under `~/dissidia/android_vk` and `~/dissidia/android_local`):
+- Full NDK r27c: `unzip ~/andtc/dl/android-ndk-r27c-linux.zip` into `~/dissidia/android_local/ndk_unz`, linked as `~/dissidia/android_vk/sdk/ndk/27.2.12479018` (the copy in `~/andtc/android-ndk-r27c` is stripped, no `build/cmake`); `build-tools`, `platforms`, `platform-tools` link to `~/android-build/sdk`.
+- Pinned sources (toolchain/versions.json: freetype, sdl2, mbedtls, ffmpeg, glslang, libadrenotools, liblinkernsbypass) downloaded to `~/dissidia/android_local/cache`, then
+  `python3 psprecomp/android/build_deps.py --sdk ~/dissidia/android_vk/sdk --cache ~/dissidia/android_local/cache --cmake /usr/bin/cmake --ninja /usr/bin/ninja --out ~/dissidia/android_vk/and_deps29 --api 29` (4 min).
+- Skeleton: `PATH=~/android-build/jdk/bin:$PATH python3 psprecomp/android/make_skeleton.py --sdk ~/android-build/sdk --sdl-src ~/dissidia/android_vk/and_deps29/src-sdl2 -o ~/dissidia/android_vk/skeleton.apk`.
+Build: `games/dissidia/tools/build_apk_local.sh [psprecomp dir] [work folder with output/ + overlays/]` (copy at `~/dissidia/tt/build_apk.sh`) -> `~/dissidia/tt/dissidia_tt.apk`. It builds the core + game in `~/dissidia/android_local/tt` (`-DPSPRECOMP_ALLOW_STALE=ON`, the work folder's generated code is older than the emitter), packs shaders and signs with `android/debug_key.json` (same certificate as the desktop builds, so `adb install -r` upgrades in place). Full build 1 m 51 s (20 cores), unchanged rebuild 6 s; the APK has the same entries and a libmain.so within 2 KB of the desktop build.
