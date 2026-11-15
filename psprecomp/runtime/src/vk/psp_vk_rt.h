@@ -56,7 +56,11 @@ public:
     void destroy();
     /// Record "upload vertices, build BLAS, build TLAS, barrier to fragment/compute shader reads" into cb (outside a render pass).
     /// `tri_cols` (optional): one RGBA8 per triangle, read back by the shader as `rt_tri_col[]` (cols_buffer()); grey when null.
-    bool record_build(VkCommandBuffer cb, const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols, std::string* err);
+    /// `st_*`: the static part of the scene (settled stage geometry), a third instance whose structure is only rebuilt when `st_version`
+    /// changes (it is most of the scene, and rebuilding it every frame cost 1.7 ms of GPU time per frame on the RP6). Its colours come first
+    /// in `rt_tri_col[]`; each opaque instance's custom index is the offset of its colours there.
+    bool record_build(VkCommandBuffer cb, const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols,
+                      const float* st_xyz, uint32_t st_count, const uint32_t* st_cols, uint64_t st_version, std::string* err);
     /// The effects layer (second instance, mask 2: blended, depth-tested draws): its per-triangle RGBA8 (alpha = coverage).
     VkBuffer fx_cols_buffer() const { return cols2_.buf; }
     VkDeviceSize fx_cols_size() const { return cols2_.size; }
@@ -69,13 +73,15 @@ private:
     struct Buf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkDeviceAddress addr = 0; void* map = nullptr; VkDeviceSize size = 0; };
     bool make_buffer(Buf* b, VkDeviceSize size, VkBufferUsageFlags usage, bool host, std::string* err);
     void free_buffer(Buf* b);
-    bool allocate(uint32_t cap, uint32_t cap2, std::string* err);
+    bool allocate(uint32_t cap, uint32_t cap2, uint32_t cap3, std::string* err);
     void free_all();
     Context* ctx_ = nullptr;
-    VkAccelerationStructureKHR blas_ = VK_NULL_HANDLE, blas2_ = VK_NULL_HANDLE, tlas_ = VK_NULL_HANDLE;
-    Buf verts_, blas_buf_, tlas_buf_, inst_buf_, scratch_, cols_, verts2_, blas2_buf_, cols2_;
+    VkAccelerationStructureKHR blas_ = VK_NULL_HANDLE, blas2_ = VK_NULL_HANDLE, blas3_ = VK_NULL_HANDLE, tlas_ = VK_NULL_HANDLE;
+    Buf verts_, blas_buf_, tlas_buf_, inst_buf_, scratch_, cols_, verts2_, blas2_buf_, cols2_, verts3_, blas3_buf_;
     VkDeviceSize scratch_align_ = 128;
-    uint32_t cap_ = 0, cap2_ = 0, tris_ = 0, fx_tris_ = 0, gen_ = 0;
+    uint32_t cap_ = 0, cap2_ = 0, cap3_ = 0, tris_ = 0, fx_tris_ = 0, gen_ = 0, st_tris_ = 0;
+    uint64_t st_built_ = ~0ull;   // the static version the static structure holds (~0: none)
+    uint32_t built_n_[2] = {0, 0}, since_build_[2] = {0, 0};   // dynamic / effects: triangles at the last full build, updates since (refits)
 };
 
 }  // namespace pspvk

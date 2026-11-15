@@ -160,7 +160,8 @@ void ge_decode_vertices(
     const GeState& state,
     int prim_type,
     int count,
-    std::vector<DecodedVertex>& out
+    std::vector<DecodedVertex>& out,
+    bool pos_color_only
 ) {
     uint32_t vtype = state.vertex_type;
     const VtxLayout L = vtx_layout(vtype);
@@ -168,9 +169,9 @@ void ge_decode_vertices(
 
     if (stride <= 0 || count <= 0) return;
 
-    int tc_type  = ge_vtype_tc(vtype);
+    int tc_type  = pos_color_only ? GE_VTYPE_TC_NONE : ge_vtype_tc(vtype);
     int col_type = ge_vtype_col(vtype);
-    int nrm_type = ge_vtype_nrm(vtype);
+    int nrm_type = pos_color_only ? GE_VTYPE_NRM_NONE : ge_vtype_nrm(vtype);
     int pos_type = ge_vtype_pos(vtype);
     int idx_type = ge_vtype_idx(vtype);
 

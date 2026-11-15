@@ -2503,6 +2503,12 @@ static bool g_fx_done[GE_MAX_TARGETS];
 // The projection / view pair the scene was drawn with: the one most depth-writing draws used (a Boyer-Moore majority
 // vote), not the last draw's, which can belong to a character or an effect with a matrix of its own. The light direction
 // and "up" come from the view matrix, so a per-object one made shadows follow the player.
+// PSPRECOMP_RT_CPU_LOG=1: render-thread time of the ray-traced scene's CPU side per scene (capture decode, persistence, merge, upload + build).
+struct RtCpu { double cap = 0, note = 0, merge = 0, build = 0; int scenes = 0; long draws = 0; };
+static RtCpu g_rt_cpu;
+static const bool g_rt_cpu_log = std::getenv("PSPRECOMP_RT_CPU_LOG") != nullptr;
+struct RtCpuT { double* acc; std::chrono::steady_clock::time_point t0; explicit RtCpuT(double* a) : acc(g_rt_cpu_log ? a : nullptr) { if (acc) t0 = std::chrono::steady_clock::now(); }
+    ~RtCpuT() { if (acc) *acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); } };
 struct FxVote { float proj[16]; float view[12]; float near_z, far_z; int n; };
 static FxVote g_fx_vote[GE_MAX_TARGETS];
 // Ray-queried shadows: the opaque 3D draws of a scene as world-space triangles (psp_rt.h). Decoded a second time on the CPU
@@ -2528,17 +2534,63 @@ static void rt_fix_view(std::vector<float>& tr, size_t t0, const float* vd, cons
 }
 // Only baked stage geometry / props (vertex type 0x11a) persist: skinned models and debris move, repeat poses and would leave ghosts.
 // An entry becomes settled after 8 frames in a row and stays settled however often the game hides and shows it (walls toggle with the camera).
-static void rt_persist_note(int target, size_t t0, size_t c0, uint32_t vt) {
-    if (vt != 0x11au) return;
+// The draw's identity is its source (addresses, vertex type, primitive, count, the first 64 vertex bytes), its world matrix and, when
+// rt_fix_view re-expresses it, its own view matrix. Hashing every transformed float instead cost 0.5 ms of render-thread time per scene on
+// the RP6. Stage geometry (0x11a) does not rewrite its vertices in place, so this is the same test.
+static inline uint64_t rt_mix(uint64_t h, uint64_t w) { h ^= w; h *= 0x9E3779B97F4A7C15ull; return h ^ (h >> 31); }
+static uint64_t rt_persist_key(const GeState& st, uint8_t* rdram, int prim_type, int count, bool fixed) {
+    uint64_t h = rt_mix(0xCBF29CE484222325ull, ((uint64_t)st.vertex_addr << 32) | st.index_addr);
+    h = rt_mix(h, ((uint64_t)st.vertex_type << 32) | ((uint64_t)(uint32_t)count << 3) | (uint64_t)prim_type);
+    auto mixf = [&](const float* f, int n) { for (int k = 0; k + 1 < n; k += 2) { uint64_t w; std::memcpy(&w, f + k, 8); h = rt_mix(h, w); } };
+    mixf(st.world_matrix, 12);
+    if (fixed) mixf(st.view_matrix, 12);
+    const uint32_t va = st.vertex_addr & 0x07FFFFFFu;
+    if (va + 64 <= 0x08000000u) for (int k = 0; k < 64; k += 8) { uint64_t w; std::memcpy(&w, rdram + va + k, 8); h = rt_mix(h, w); }
+    return h;
+}
+// Static part of the ray-traced scene: every settled entry, kept in its own acceleration structure that the Vulkan layer only rebuilds
+// when this list changes (an entry settles or is dropped). Rebuilding all of the stage every frame cost 1.7 ms of GPU time per frame on the
+// RP6. PSPRECOMP_RT_NO_STATIC=1: everything goes into the per-frame list as before.
+static std::vector<float> g_rt_st_tris[GE_MAX_TARGETS];
+static std::vector<uint32_t> g_rt_st_cols[GE_MAX_TARGETS];
+static bool g_rt_st_dirty[GE_MAX_TARGETS];
+static uint64_t g_rt_st_ver[GE_MAX_TARGETS], g_rt_st_next = 1;
+static const bool g_rt_static = std::getenv("PSPRECOMP_RT_NO_STATIC") == nullptr && std::getenv("PSPRECOMP_RT_NO_PERSIST") == nullptr;
+static void rt_static_refresh(int target) {
+    if (!g_rt_static || !g_rt_st_dirty[target]) return;
+    g_rt_st_dirty[target] = false;
+    g_rt_st_tris[target].clear(); g_rt_st_cols[target].clear();
+    for (auto& kv : g_rt_persist[target]) {
+        const RtPersist& e = kv.second;
+        if (!e.settled) continue;
+        g_rt_st_tris[target].insert(g_rt_st_tris[target].end(), e.tris.begin(), e.tris.end());
+        g_rt_st_cols[target].insert(g_rt_st_cols[target].end(), e.cols.begin(), e.cols.end());
+    }
+    g_rt_st_ver[target] = g_rt_st_next++;
+}
+// A settled stage draw seen again with the same key: nothing to decode, its triangles are in the static part (or, without it, appended
+// from the kept copy). True = done.
+static bool rt_persist_reuse(int target, uint64_t key) {
+    static const bool off = std::getenv("PSPRECOMP_RT_NO_REUSE") != nullptr;
+    if (off) return false;
+    auto it = g_rt_persist[target].find(key);
+    if (it == g_rt_persist[target].end() || !it->second.settled || it->second.tris.empty()) return false;
+    RtPersist& e = it->second;
+    if (!g_rt_static) {
+        g_rt_tris[target].insert(g_rt_tris[target].end(), e.tris.begin(), e.tris.end());
+        g_rt_cols[target].insert(g_rt_cols[target].end(), e.cols.begin(), e.cols.end());
+    }
+    if (e.last_frame != g_rt_frame[target]) { e.streak = e.last_frame + 1 == g_rt_frame[target] ? e.streak + 1 : 1; e.last_frame = g_rt_frame[target]; }
+    return true;
+}
+static void rt_persist_note(int target, size_t t0, size_t c0, uint64_t h) {
+    RtCpuT rt_cpu_t_(&g_rt_cpu.note);
     const std::vector<float>& tr = g_rt_tris[target]; const std::vector<uint32_t>& co = g_rt_cols[target];
     if (tr.size() <= t0 || co.size() <= c0) return;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = t0; i < tr.size(); ++i) { uint32_t b; std::memcpy(&b, &tr[i], 4); h = (h ^ b) * 1099511628211ull; }
-    h ^= (uint64_t)(tr.size() - t0) * 0x9E3779B97F4A7C15ull;
     RtPersist& e = g_rt_persist[target][h];
     if (e.last_frame == g_rt_frame[target]) return;                       // the same draw twice in a frame
     e.streak = e.last_frame + 1 == g_rt_frame[target] ? e.streak + 1 : 1;
-    if (e.streak >= 8) e.settled = true;
+    if (e.streak >= 8 && !e.settled) { e.settled = true; g_rt_st_dirty[target] = true; }
     e.last_frame = g_rt_frame[target];
     if (e.tris.empty()) {
         e.tris.assign(tr.begin() + t0, tr.end()); e.cols.assign(co.begin() + c0, co.end());
@@ -2550,11 +2602,12 @@ static void rt_persist_note(int target, size_t t0, size_t c0, uint32_t vt) {
 struct RtFrameTick { int t; ~RtFrameTick() { ++g_rt_frame[t]; } };   // the persistence "frame" is one completed scene (clear events come 1.5 per scene)
 static void rt_persist_merge(int target, const float* proj, const float* view) {
     RtFrameTick tick{target};
+    RtCpuT rt_cpu_t_(&g_rt_cpu.merge);
     auto& map = g_rt_persist[target];
     const uint32_t now = g_rt_frame[target];
     static int last_stage[GE_MAX_TARGETS] = {-1, -1, -1, -1, -1, -1, -1, -1};
     const int stage = psp_stage_id();
-    if (stage >= 0 && stage != last_stage[target]) { if (last_stage[target] >= 0) map.clear(); last_stage[target] = stage; }   // a new stage: forget the old geometry (-1 = battle overlay briefly not loaded: ignored)
+    if (stage >= 0 && stage != last_stage[target]) { if (last_stage[target] >= 0) { map.clear(); g_rt_st_dirty[target] = true; } last_stage[target] = stage; }   // a new stage: forget the old geometry (-1 = battle overlay briefly not loaded: ignored)
     const bool keep_all = psp_stage_keeps_geometry();
     static const bool off = std::getenv("PSPRECOMP_RT_NO_PERSIST") != nullptr;
     if (off) return;
@@ -2579,10 +2632,12 @@ static void rt_persist_merge(int target, const float* proj, const float* view) {
             if (behind > 0 && behind < 8) keep = false;   // straddles the camera plane: could be on screen
         }
         if (!e.settled) ++n_unsettled;
-        if (!keep) { if (e.settled) ++n_drop; it = map.erase(it); continue; }
+        if (!keep) { if (e.settled) { ++n_drop; g_rt_st_dirty[target] = true; } it = map.erase(it); continue; }
         ++n_keep;
-        g_rt_tris[target].insert(g_rt_tris[target].end(), e.tris.begin(), e.tris.end());
-        g_rt_cols[target].insert(g_rt_cols[target].end(), e.cols.begin(), e.cols.end());
+        if (!g_rt_static) {   // with the static part, every settled entry is in it already
+            g_rt_tris[target].insert(g_rt_tris[target].end(), e.tris.begin(), e.tris.end());
+            g_rt_cols[target].insert(g_rt_cols[target].end(), e.cols.begin(), e.cols.end());
+        }
         ++it;
     }
     static int lg = 0;
@@ -2606,6 +2661,8 @@ static void rtdump_printf(const char* fmt, ...) {
 void psp_rt_request_dump() { g_rtdump.store(1); }
 static const bool g_rt_nofix = std::getenv("PSPRECOMP_RT_NO_VIEWFIX") != nullptr;   // debug: do not re-express draws that use their own view matrix
 static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int count, int target, bool fx = false) {
+    RtCpuT rt_cpu_t_(&g_rt_cpu.cap);
+    ++g_rt_cpu.draws;
     static const bool dbg = std::getenv("PSPRECOMP_RT_DEBUG") != nullptr;
     static int why[4] = {}, seen = 0;
     if (dbg && (++seen % 20000) == 0) std::fprintf(stderr, "[RT] capture: seen %d, rejected prim/count %d, blend %d, atest %d (blend_en=%d atest_en=%d)\n", seen, why[0], why[1], why[2], st.alpha_blend_enable, st.alpha_test_enable);
@@ -2615,22 +2672,28 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     // GE_BLEND on for nearly every draw (opaque blend function), so blending cannot be used as a filter.
     std::vector<float>& out = fx ? g_rt_fx_tris[target] : g_rt_tris[target];
     if (out.size() > 9u * (fx ? 100000u : 400000u)) { g_rt_why = "limit"; return; }
-    static thread_local std::vector<DecodedVertex> dv;
-    ge_decode_vertices(rdram, st, prim_type, count, dv);
-    const size_t n = dv.size();
-    if (n < 3) return;
-    const float* m = st.world_matrix;
-    auto push = [&](const DecodedVertex& v) {
-        out.push_back(m[0] * v.pos[0] + m[3] * v.pos[1] + m[6] * v.pos[2] + m[9]);
-        out.push_back(m[1] * v.pos[0] + m[4] * v.pos[1] + m[7] * v.pos[2] + m[10]);
-        out.push_back(m[2] * v.pos[0] + m[5] * v.pos[1] + m[8] * v.pos[2] + m[11]);
-    };
     // What a reflection shows where it hits one of these triangles (cheap hit shade, docs/VULKAN_PORT.md): the average of the
     // texture bound for the draw times the vertex colour (or the lit material), one RGBA8 per triangle.
     const uint32_t tex = st.texture_enable ? ge_texture_bound_avg_color() : 0xFFFFFFFFu;
     // A texture that is mostly transparent is a cut-out / glow / haze card: the game draws it alpha-tested or blended, and as an opaque
     // reflector it showed up as a bright flat quad behind far ruins. Leave such draws out of the scene.
     if (!fx && st.texture_enable && (tex >> 24) < 200 && (st.tex_func_rgba || st.alpha_test_enable)) { g_rt_why = "transparent-texture"; return; }
+    static thread_local std::vector<DecodedVertex> dv;
+    ge_decode_vertices(rdram, st, prim_type, count, dv, true);   // positions and colours only
+    const size_t n = dv.size();
+    if (n < 3) return;
+    const float* m = st.world_matrix;
+    // Written into a pre-sized tail of `out` (a push_back per float was 5% of the RP6 render thread)
+    const size_t ntri = prim_type == GE_PRIM_TRIANGLES ? n / 3 : n - 2;
+    const size_t o0 = out.size();
+    out.resize(o0 + ntri * 9);
+    float* op = out.data() + o0;
+    auto push = [&](const DecodedVertex& v) {
+        op[0] = m[0] * v.pos[0] + m[3] * v.pos[1] + m[6] * v.pos[2] + m[9];
+        op[1] = m[1] * v.pos[0] + m[4] * v.pos[1] + m[7] * v.pos[2] + m[10];
+        op[2] = m[2] * v.pos[0] + m[5] * v.pos[1] + m[8] * v.pos[2] + m[11];
+        op += 3;
+    };
     const float tr = float(tex & 255) / 255.f, tg = float((tex >> 8) & 255) / 255.f, tb = float((tex >> 16) & 255) / 255.f;
     const bool lit = st.lighting_enable != 0;
     const bool replace = st.texture_enable && st.tex_func == 3;
@@ -2700,7 +2763,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         if (st.depth_test_enable && !st.depth_write_disable) {
             g_fx_n[cur]++;
             const size_t dump_t0 = g_rt_tris[cur].size();
-            if (psp_rt_scene_wanted()) { const size_t t0 = g_rt_tris[cur].size(), c0 = g_rt_cols[cur].size(); rt_capture(st, rdram, prim_type, count, cur); if (g_fx_vote[cur].n > 0 && !g_rt_nofix) rt_fix_view(g_rt_tris[cur], t0, st.view_matrix, g_fx_vote[cur].view); rt_persist_note(cur, t0, c0, st.vertex_type); }
+            if (psp_rt_scene_wanted()) { const size_t t0 = g_rt_tris[cur].size(), c0 = g_rt_cols[cur].size(); const bool fixed = g_fx_vote[cur].n > 0 && !g_rt_nofix && std::memcmp(st.view_matrix, g_fx_vote[cur].view, 12 * sizeof(float)) != 0; const bool stage = st.vertex_type == 0x11au; const uint64_t pkey = stage ? rt_persist_key(st, rdram, prim_type, count, fixed) : 0; if (!(stage && rt_persist_reuse(cur, pkey))) { rt_capture(st, rdram, prim_type, count, cur); if (fixed) rt_fix_view(g_rt_tris[cur], t0, st.view_matrix, g_fx_vote[cur].view); if (stage) rt_persist_note(cur, t0, c0, pkey); } }
             if (g_rtdump.load() == 2) rtdump_printf("[RTDUMP] draw prim %d n %d  %s: blend %d atest %d tex %d texalpha %u rgba %d lit %d mask %06x/%02x bm %03x fa %06x fb %06x zw %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, g_rt_why, st.alpha_blend_enable, st.alpha_test_enable, st.texture_enable, (unsigned)(st.texture_enable ? ge_texture_bound_avg_color() >> 24 : 255u), st.tex_func_rgba, st.lighting_enable, (unsigned)st.mask_rgb, (unsigned)(st.mask_alpha & 0xFF), (unsigned)st.blend_mode, (unsigned)st.blend_fix_a & 0xFFFFFFu, (unsigned)st.blend_fix_b & 0xFFFFFFu, st.depth_write_disable ? 0 : 1, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
             if (g_rtdump.load() == 2 && g_rt_tris[cur].size() > dump_t0) { float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f}; const std::vector<float>& tv = g_rt_tris[cur];
                 for (size_t q = dump_t0; q + 2 < tv.size(); q += 3) for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], tv[q + k]); hi[k] = std::max(hi[k], tv[q + k]); }
@@ -2725,7 +2788,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active()) rt_capture(st, rdram, prim_type, count, cur, true);
+        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2) rt_capture(st, rdram, prim_type, count, cur, true);   // the effects layer is only traced from Medium up
         return;
     }
     for (int i = 0; i < GE_MAX_TARGETS; ++i) {
@@ -2740,11 +2803,21 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         s.near_z = g_fx_vote[i].near_z; s.far_z = g_fx_vote[i].far_z;
         s.clear_z = g_fx_clearz[i];
         { static int dbg = 0; if (psp_rt_available() && dbg++ % 600 == 0) std::fprintf(stderr, "[RT] scene complete: %zu captured triangles, rt %d\n", g_rt_tris[i].size() / 9, (int)psp_rt_available()); }
-        if (psp_rt_scene_wanted() && !g_rt_tris[i].empty()) rt_persist_merge(i, s.proj, s.view);
+        if (psp_rt_scene_wanted() && (!g_rt_tris[i].empty() || !g_rt_persist[i].empty())) rt_persist_merge(i, s.proj, s.view);
+        if (psp_rt_scene_wanted()) rt_static_refresh(i);
         if (g_rtdump.load() == 2) { g_rtdump.store(0); rtdump_printf("[RTDUMP] end: %zu scene triangles, %zu effects triangles\n", g_rt_tris[i].size() / 9, g_rt_fx_tris[i].size() / 9);
             rtdump_printf("[RTDUMP] proj"); for (int k = 0; k < 16; ++k) rtdump_printf(" %g", s.proj[k]); rtdump_printf("\n");
             rtdump_printf("[RTDUMP] view"); for (int k = 0; k < 12; ++k) rtdump_printf(" %g", s.view[k]); rtdump_printf("\n"); }
-        s.rt_ready = !g_rt_tris[i].empty() && psp_rt_scene_wanted() && g_psp_rt.set_scene(g_rt_tris[i].data(), (uint32_t)(g_rt_tris[i].size() / 9), g_rt_cols[i].size() == g_rt_tris[i].size() / 9 ? g_rt_cols[i].data() : nullptr, g_rt_fx_tris[i].data(), g_rt_fx_cols[i].size() == g_rt_fx_tris[i].size() / 9 ? (uint32_t)g_rt_fx_cols[i].size() : 0u, g_rt_fx_cols[i].data());
+        RtCpuT* rt_cpu_b_ = new RtCpuT(&g_rt_cpu.build);
+        const uint32_t st_n = g_rt_static ? (uint32_t)(g_rt_st_tris[i].size() / 9) : 0u;
+        s.rt_ready = (!g_rt_tris[i].empty() || st_n) && psp_rt_scene_wanted() && g_psp_rt.set_scene(g_rt_tris[i].data(), (uint32_t)(g_rt_tris[i].size() / 9), g_rt_cols[i].size() == g_rt_tris[i].size() / 9 ? g_rt_cols[i].data() : nullptr, g_rt_fx_tris[i].data(), g_rt_fx_cols[i].size() == g_rt_fx_tris[i].size() / 9 ? (uint32_t)g_rt_fx_cols[i].size() : 0u, g_rt_fx_cols[i].data(),
+                                                                                              g_rt_st_tris[i].data(), st_n, g_rt_st_cols[i].size() == (size_t)st_n ? g_rt_st_cols[i].data() : nullptr, g_rt_st_ver[i]);
+        delete rt_cpu_b_;
+        if (g_rt_cpu_log && psp_rt_scene_wanted() && ++g_rt_cpu.scenes == 600) {
+            std::fprintf(stderr, "[RTCPU] ms/scene: capture %.3f (%.0f draws)  persist note %.3f  merge %.3f  upload+build %.3f  (%zu tris, %zu fx, %zu persisted draws)\n", g_rt_cpu.cap / 600,
+                         g_rt_cpu.draws / 600.0, g_rt_cpu.note / 600, g_rt_cpu.merge / 600, g_rt_cpu.build / 600, g_rt_tris[i].size() / 9, g_rt_fx_tris[i].size() / 9, g_rt_persist[i].size());
+            g_rt_cpu = RtCpu{};
+        }
         s.rt_fx = s.rt_ready && !g_rt_fx_cols[i].empty();
         { static int n = 0; if (std::getenv("PSPRECOMP_SSR_FX_LOG") && n++ % 120 == 0) std::fprintf(stderr, "[SSR] effects layer used=%d fbo=%u draws=%d\n", (int)g_fxl[i].used, g_fxl[i].fbo, g_fxl_draws); }
         if (g_fxl[i].used && g_fxl[i].fbo) { s.fx_color = g_fxl[i].color; s.fx_depth = g_fxl[i].depth; }

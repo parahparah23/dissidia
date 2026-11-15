@@ -12,7 +12,10 @@ struct PspRtHooks {
     /// triangle: the shader reads it as `rt_tri_col[gl_PrimitiveID]` (storage buffer, set 2 binding 1).
     /// The optional effects layer (fx_*: blended, depth-tested, non-depth-writing draws, alpha byte = coverage) is a second instance the
     /// reflection traces separately (`rt_fx_col[]`, binding 2) and blends over the opaque hit; it casts no shadows.
-    bool (*set_scene)(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols) = nullptr;
+    /// st_*: the static part (settled stage geometry), kept in its own structure that is only rebuilt when st_version changes; its
+    /// colours come first in rt_tri_col[] (a hit's colour is rt_tri_col[instance custom index + primitive index]).
+    bool (*set_scene)(const float* xyz, uint32_t tri_count, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_tri_count, const uint32_t* fx_cols,
+                 const float* st_xyz, uint32_t st_count, const uint32_t* st_cols, uint64_t st_version) = nullptr;
     /// Set by the Vulkan layer whenever it is active: why ray tracing is not available on this GPU (null / empty = available).
     const char* (*unavailable_reason)() = nullptr;
 };

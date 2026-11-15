@@ -728,7 +728,7 @@ const char* const k_rt_refl = R"GLSL(
                 hit = rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
                 if (!hit) { hit_t = u_rt_refl_len; break; }
                 hit_t = rayQueryGetIntersectionTEXT(rq, true);
-                uint pc = rt_tri_col[rayQueryGetIntersectionPrimitiveIndexEXT(rq, true)];
+                uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true) + rayQueryGetIntersectionPrimitiveIndexEXT(rq, true)];
                 col = vec3(float(pc & 255u), float((pc >> 8) & 255u), float((pc >> 16) & 255u)) / 255.0;
                 float cov = float(pc >> 24) / 255.0;
                 dbg = vec3(1.0, 0.0, 0.0);       // hit, shaded by the triangle's colour

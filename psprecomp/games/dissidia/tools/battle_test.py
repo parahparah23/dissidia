@@ -197,6 +197,13 @@ def free_port():
         return s.getsockname()[1]
 
 
+def hud_dark(im):
+    """how many of the fight HUD's dark probes are dark (>= 3: the HUD is up). The two gauge segments at x 120 / 360 count double: the
+    outer probes at x 30 / 450 sit next to the character portraits, which some settings (the RP6 with the player's own settings) draw bright."""
+    d = [sum(im.getpixel(p)) < 330 for p in ((120, 262), (360, 262), (30, 262), (450, 262))]
+    return 4 if d[0] and d[1] else sum(d)
+
+
 def walk_direct(g, ff_menus=4):
     """boot -> battle with no menu walk: the runtime replays a recorded pad sequence by poll number (PSPRECOMP_TEST_DIRECT_BATTLE,
     games/dissidia/runtime/direct_battle.cpp), so nothing here depends on screenshots until the fight's HUD is up."""
@@ -212,7 +219,7 @@ def walk_direct(g, ff_menus=4):
         im = g.shot()
         if im.size != (480, 272):                      # PSPRECOMP_SHOT_FULL / widescreen: the probes are in 480x272 picture coordinates
             im = im.resize((480, 272))
-        dark = sum(1 for p in ((120, 262), (360, 262), (30, 262), (450, 262)) if sum(im.getpixel(p)) < 330)
+        dark = hud_dark(im)
         seen = seen + 1 if dark >= 3 else 0
         if dark < 3 and _ % 4 == 3:
             g.press('cross')                           # a slow load (real GPU, ray tracing) can leave the replay's last presses on the loading / VS ("Next") page
@@ -283,7 +290,7 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
             raise RuntimeError('the game exited')
         time.sleep(1.0)
         im = g.shot()
-        dark = sum(1 for p in ((120, 262), (360, 262), (30, 262), (450, 262)) if sum(im.getpixel(p)) < 330)
+        dark = hud_dark(im)
         seen = seen + 1 if dark >= 3 else 0
         if seen >= 2:
             g.touch_go()                   # the runtime starts its game clock now

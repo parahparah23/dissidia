@@ -298,8 +298,11 @@ void RtAccel::free_all() {
     if (tlas_) { p_destroy(ctx_->device(), tlas_, nullptr); tlas_ = VK_NULL_HANDLE; }
     if (blas_) { p_destroy(ctx_->device(), blas_, nullptr); blas_ = VK_NULL_HANDLE; }
     if (blas2_) { p_destroy(ctx_->device(), blas2_, nullptr); blas2_ = VK_NULL_HANDLE; }
+    if (blas3_) { p_destroy(ctx_->device(), blas3_, nullptr); blas3_ = VK_NULL_HANDLE; }
     free_buffer(&verts_); free_buffer(&blas_buf_); free_buffer(&tlas_buf_); free_buffer(&inst_buf_); free_buffer(&scratch_); free_buffer(&cols_); free_buffer(&verts2_); free_buffer(&blas2_buf_); free_buffer(&cols2_);
-    cap_ = 0; cap2_ = 0; fx_tris_ = 0; tris_ = 0;
+    free_buffer(&verts3_); free_buffer(&blas3_buf_);
+    cap_ = 0; cap2_ = 0; cap3_ = 0; fx_tris_ = 0; tris_ = 0; st_tris_ = 0; st_built_ = ~0ull;
+    built_n_[0] = built_n_[1] = 0; since_build_[0] = since_build_[1] = 0;
 }
 
 bool RtAccel::init(Context& ctx) {
@@ -320,7 +323,7 @@ void RtAccel::destroy() {
     ctx_ = nullptr;
 }
 
-bool RtAccel::allocate(uint32_t cap, uint32_t cap2, std::string* err) {
+bool RtAccel::allocate(uint32_t cap, uint32_t cap2, uint32_t cap3, std::string* err) {
     VkDevice d = ctx_->device();
     if (std::getenv("PSPRECOMP_RT_DEBUG")) std::fprintf(stderr, "[RT] allocate: create=%p sizes=%p build=%p addr=%p destroy=%p dev=%p\n", (void*)p_create, (void*)p_sizes, (void*)p_build, (void*)p_addr, (void*)p_destroy, (void*)d);
     vkDeviceWaitIdle(d);   // the previous structures may still be read by frames in flight
@@ -333,69 +336,87 @@ bool RtAccel::allocate(uint32_t cap, uint32_t cap2, std::string* err) {
         g.geometry.triangles.maxVertex = c * 3 - 1; g.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
         return g;
     };
-    auto blas_size = [&](uint32_t c, VkAccelerationStructureBuildSizesInfoKHR* out) {
+    auto blas_size = [&](uint32_t c, VkAccelerationStructureBuildSizesInfoKHR* out, bool fast_trace = false) {
         VkAccelerationStructureGeometryKHR g = blas_geom(c);
         VkAccelerationStructureBuildGeometryInfoKHR bg{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
         bg.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        bg.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;   // rebuilt every frame
+        bg.flags = fast_trace ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR   // the static part: built rarely, traced every frame
+                              : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;   // rebuilt or refitted every frame
         bg.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; bg.geometryCount = 1; bg.pGeometries = &g;
         *out = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
         p_sizes(d, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &bg, &c, out);
     };
-    VkAccelerationStructureBuildSizesInfoKHR bsz, bsz2;
-    blas_size(cap, &bsz); blas_size(cap2, &bsz2);
+    VkAccelerationStructureBuildSizesInfoKHR bsz, bsz2, bsz3;
+    blas_size(cap, &bsz); blas_size(cap2, &bsz2); blas_size(cap3, &bsz3, true);
     VkAccelerationStructureGeometryKHR tg{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     tg.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR; tg.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
     tg.geometry.instances = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
     VkAccelerationStructureBuildGeometryInfoKHR tb{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     tb.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR; tb.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
     tb.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; tb.geometryCount = 1; tb.pGeometries = &tg;
-    const uint32_t two = 2;
+    const uint32_t three = 3;
     VkAccelerationStructureBuildSizesInfoKHR tsz{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    p_sizes(d, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tb, &two, &tsz);
-    VkDeviceSize scratch_sz = std::max(std::max(bsz.buildScratchSize, bsz2.buildScratchSize), tsz.buildScratchSize) + scratch_align_;
+    p_sizes(d, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &tb, &three, &tsz);
+    VkDeviceSize scratch_sz = std::max({bsz.buildScratchSize, bsz2.buildScratchSize, bsz3.buildScratchSize, tsz.buildScratchSize, bsz.updateScratchSize, bsz2.updateScratchSize}) + scratch_align_;
     const VkBufferUsageFlags asu = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
     const VkBufferUsageFlags bi = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     if (!make_buffer(&verts_, (VkDeviceSize)cap * 36, bi, true, err) || !make_buffer(&verts2_, (VkDeviceSize)cap2 * 36, bi, true, err)
         || !make_buffer(&blas_buf_, bsz.accelerationStructureSize, asu, false, err) || !make_buffer(&blas2_buf_, bsz2.accelerationStructureSize, asu, false, err)
         || !make_buffer(&tlas_buf_, tsz.accelerationStructureSize, asu, false, err)
         || !make_buffer(&scratch_, scratch_sz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, err)
-        || !make_buffer(&cols_, (VkDeviceSize)cap * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, err)
+        || !make_buffer(&verts3_, (VkDeviceSize)cap3 * 36, bi, true, err) || !make_buffer(&blas3_buf_, bsz3.accelerationStructureSize, asu, false, err)
+        || !make_buffer(&cols_, (VkDeviceSize)(cap3 + cap) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, err)   // static colours, then dynamic
         || !make_buffer(&cols2_, (VkDeviceSize)cap2 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, err)
-        || !make_buffer(&inst_buf_, 2 * sizeof(VkAccelerationStructureInstanceKHR), bi, true, err)) { free_all(); return false; }
+        || !make_buffer(&inst_buf_, 3 * sizeof(VkAccelerationStructureInstanceKHR), bi, true, err)) { free_all(); return false; }
     VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
     ci.buffer = blas_buf_.buf; ci.size = bsz.accelerationStructureSize; ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     if (p_create(d, &ci, nullptr, &blas_) != VK_SUCCESS) { *err = "create BLAS"; free_all(); return false; }
     ci.buffer = blas2_buf_.buf; ci.size = bsz2.accelerationStructureSize;
     if (p_create(d, &ci, nullptr, &blas2_) != VK_SUCCESS) { *err = "create effects BLAS"; free_all(); return false; }
+    ci.buffer = blas3_buf_.buf; ci.size = bsz3.accelerationStructureSize;
+    if (p_create(d, &ci, nullptr, &blas3_) != VK_SUCCESS) { *err = "create static BLAS"; free_all(); return false; }
     ci.buffer = tlas_buf_.buf; ci.size = tsz.accelerationStructureSize; ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     if (p_create(d, &ci, nullptr, &tlas_) != VK_SUCCESS) { *err = "create TLAS"; free_all(); return false; }
-    cap_ = cap; cap2_ = cap2; gen_++;
-    if (std::getenv("PSPRECOMP_RT_DEBUG")) std::fprintf(stderr, "[RT] allocated cap %u + effects %u\n", cap, cap2);
+    cap_ = cap; cap2_ = cap2; cap3_ = cap3; gen_++;
+    if (std::getenv("PSPRECOMP_RT_DEBUG")) std::fprintf(stderr, "[RT] allocated cap %u + effects %u + static %u\n", cap, cap2, cap3);
     return true;
 }
 
-bool RtAccel::record_build(VkCommandBuffer cb, const float* xyz, uint32_t n, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_n, const uint32_t* fx_cols, std::string* err) {
+bool RtAccel::record_build(VkCommandBuffer cb, const float* xyz, uint32_t n, const uint32_t* tri_cols, const float* fx_xyz, uint32_t fx_n, const uint32_t* fx_cols,
+                           const float* st_xyz, uint32_t st_n, const uint32_t* st_cols, uint64_t st_version, std::string* err) {
     std::string e; if (!err) err = &e;
-    if (!ctx_ || !n) return false;
+    if (!ctx_ || (!n && !st_n)) return false;
     if (std::getenv("PSPRECOMP_RT_DEBUG")) std::fprintf(stderr, "[RT] record_build n=%u cap=%u fx=%u\n", n, cap_, fx_n);
     static const uint32_t fx_min = std::getenv("PSPRECOMP_RT_FX_CAP") ? (uint32_t)std::atoi(std::getenv("PSPRECOMP_RT_FX_CAP")) : 8192u;   // test knob: a small start forces re-allocations when an effect spawns
-    if ((n > cap_ || fx_n > cap2_) && !allocate(n > cap_ ? std::max<uint32_t>(n + n / 2, 30000u) : cap_, fx_n > cap2_ ? std::max<uint32_t>(fx_n + fx_n / 2, fx_min) : (cap2_ ? cap2_ : fx_min), err)) return false;
-    std::memcpy(verts_.map, xyz, (size_t)n * 36);
-    if (tri_cols) std::memcpy(cols_.map, tri_cols, (size_t)n * 4);
-    else for (uint32_t i = 0; i < n; i++) static_cast<uint32_t*>(cols_.map)[i] = 0xFF808080u;
+    if ((n > cap_ || fx_n > cap2_ || st_n > cap3_ || !cap_)
+        && !allocate(n > cap_ || !cap_ ? std::max<uint32_t>(n + n / 2, 30000u) : cap_, fx_n > cap2_ ? std::max<uint32_t>(fx_n + fx_n / 2, fx_min) : (cap2_ ? cap2_ : fx_min),
+                     st_n > cap3_ ? std::max<uint32_t>(st_n + st_n / 4, 16384u) : (cap3_ ? cap3_ : 16384u), err)) return false;
+    // the static part: re-uploaded and rebuilt only when it changed (or this frame slot's structures were re-allocated)
+    const bool st_build = st_n && st_version != st_built_;
+    if (st_build) {
+        std::memcpy(verts3_.map, st_xyz, (size_t)st_n * 36);
+        if (st_cols) std::memcpy(cols_.map, st_cols, (size_t)st_n * 4);
+        else for (uint32_t i = 0; i < st_n; i++) static_cast<uint32_t*>(cols_.map)[i] = 0xFF808080u;
+    }
+    if (!st_n) st_built_ = ~0ull;
+    uint32_t* dcols = static_cast<uint32_t*>(cols_.map) + st_n;
+    if (n) std::memcpy(verts_.map, xyz, (size_t)n * 36);
+    if (tri_cols) std::memcpy(dcols, tri_cols, (size_t)n * 4);
+    else for (uint32_t i = 0; i < n; i++) dcols[i] = 0xFF808080u;
     if (fx_n) { std::memcpy(verts2_.map, fx_xyz, (size_t)fx_n * 36); if (fx_cols) std::memcpy(cols2_.map, fx_cols, (size_t)fx_n * 4); }
     const VkDeviceSize sa = (scratch_.addr + scratch_align_ - 1) & ~(scratch_align_ - 1);
-    auto build_blas = [&](VkAccelerationStructureKHR dst, const Buf& vb, uint32_t cnt) {
+    auto build_blas = [&](VkAccelerationStructureKHR dst, const Buf& vb, uint32_t cnt, bool fast_trace = false, bool update = false) {
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR; g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
         g.geometry.triangles = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
         g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT; g.geometry.triangles.vertexData.deviceAddress = vb.addr;
         g.geometry.triangles.vertexStride = 12; g.geometry.triangles.maxVertex = cnt * 3 - 1; g.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
         VkAccelerationStructureBuildGeometryInfoKHR bg{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-        bg.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR; bg.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
-        bg.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; bg.geometryCount = 1; bg.pGeometries = &g;
-        bg.dstAccelerationStructure = dst; bg.scratchData.deviceAddress = sa;
+        bg.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        bg.flags = fast_trace ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                              : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+        bg.mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; bg.geometryCount = 1; bg.pGeometries = &g;
+        bg.dstAccelerationStructure = dst; bg.srcAccelerationStructure = update ? dst : VK_NULL_HANDLE; bg.scratchData.deviceAddress = sa;
         VkAccelerationStructureBuildRangeInfoKHR br{cnt, 0, 0, 0};
         const VkAccelerationStructureBuildRangeInfoKHR* brp = &br;
         p_build(cb, 1, &bg, &brp);
@@ -406,17 +427,35 @@ bool RtAccel::record_build(VkCommandBuffer cb, const float* xyz, uint32_t n, con
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, dst_stage, 0, 1, &mb, 0, nullptr, 0, nullptr);
     };
     const VkAccessFlags asrw = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    build_blas(blas_, verts_, n);
-    as_barrier(asrw, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);   // the scratch buffer is reused
-    if (fx_n) { build_blas(blas2_, verts2_, fx_n); as_barrier(asrw, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR); }
-    // two instances: mask 1 = the opaque scene, mask 2 = the effects layer (reference 0 = inactive when there are none)
-    VkAccelerationStructureInstanceKHR inst[2] = {};
+    // Dynamic and effects parts: refitted in place (MODE_UPDATE, much cheaper) while their triangle count stays the same as at the last
+    // full build (a skinned fighter keeps its triangles), rebuilt when it changes and every kRebuildEvery frames so the tree stays tight.
+    // PSPRECOMP_RT_NO_REFIT=1: always rebuild.
+    static const bool no_refit = std::getenv("PSPRECOMP_RT_NO_REFIT") != nullptr;
+    constexpr uint32_t kRebuildEvery = 30;
+    auto dyn_build = [&](int k, VkAccelerationStructureKHR dst, const Buf& vb, uint32_t cnt) {
+        const bool upd = !no_refit && cnt == built_n_[k] && since_build_[k] < kRebuildEvery;
+        build_blas(dst, vb, cnt, false, upd);
+        if (upd) ++since_build_[k]; else { built_n_[k] = cnt; since_build_[k] = 0; }
+        static const bool lg = std::getenv("PSPRECOMP_RT_BUILD_LOG") != nullptr;
+        static uint32_t n_upd[2], n_full[2], n_st = 0;
+        if (lg) { (upd ? n_upd : n_full)[k]++; if (k == 0 && (n_upd[0] + n_full[0]) % 600 == 0) { std::fprintf(stderr, "[RTBUILD] dynamic %u refits / %u builds (%u tris), effects %u / %u (%u tris), static builds %u (%u tris)\n", n_upd[0], n_full[0], cnt, n_upd[1], n_full[1], fx_n, n_st, st_n); } if (k == 0 && st_build) n_st++; }
+        as_barrier(asrw, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);   // the scratch buffer is reused
+    };
+    if (n) dyn_build(0, blas_, verts_, n); else built_n_[0] = 0;
+    if (fx_n) dyn_build(1, blas2_, verts2_, fx_n); else built_n_[1] = 0;
+    if (st_build) { build_blas(blas3_, verts3_, st_n, true); as_barrier(asrw, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR); st_built_ = st_version; }
+    // three instances: 0 the dynamic opaque scene and 2 the static one (mask 1; custom index = where their colours start in rt_tri_col[]),
+    // 1 the effects layer (mask 2). Reference 0 = inactive when a part is empty.
+    VkAccelerationStructureInstanceKHR inst[3] = {};
     VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-    for (int k = 0; k < 2; k++) {
+    const VkAccelerationStructureKHR as_of[3] = {blas_, blas2_, blas3_};
+    const uint32_t cnt_of[3] = {n, fx_n, st_n};
+    for (int k = 0; k < 3; k++) {
         inst[k].transform.matrix[0][0] = inst[k].transform.matrix[1][1] = inst[k].transform.matrix[2][2] = 1.0f;
-        inst[k].mask = k ? 0x2 : 0x1; inst[k].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        dai.accelerationStructure = k ? blas2_ : blas_;
-        inst[k].accelerationStructureReference = (k && !fx_n) ? 0 : p_addr(ctx_->device(), &dai);
+        inst[k].mask = k == 1 ? 0x2 : 0x1; inst[k].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        inst[k].instanceCustomIndex = k == 0 ? st_n : 0;
+        dai.accelerationStructure = as_of[k];
+        inst[k].accelerationStructureReference = cnt_of[k] ? p_addr(ctx_->device(), &dai) : 0;
     }
     std::memcpy(inst_buf_.map, inst, sizeof inst);
     VkAccelerationStructureGeometryKHR tg{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -427,11 +466,11 @@ bool RtAccel::record_build(VkCommandBuffer cb, const float* xyz, uint32_t n, con
     tb.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR; tb.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
     tb.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; tb.geometryCount = 1; tb.pGeometries = &tg;
     tb.dstAccelerationStructure = tlas_; tb.scratchData.deviceAddress = sa;
-    VkAccelerationStructureBuildRangeInfoKHR tr{2, 0, 0, 0};
+    VkAccelerationStructureBuildRangeInfoKHR tr{3, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* trp = &tr;
     p_build(cb, 1, &tb, &trp);
     as_barrier(VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    tris_ = n; fx_tris_ = fx_n;
+    tris_ = n + st_n; fx_tris_ = fx_n; st_tris_ = st_n;
     return true;
 }
 

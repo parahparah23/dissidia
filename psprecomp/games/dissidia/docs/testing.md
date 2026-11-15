@@ -141,6 +141,18 @@ everything goes through adb (debug socket forwarded, log read from the game fold
   (`/tmp/claude-1000`, 11 GB): write to `~/dissidia/ssrfx_out` instead (a full /tmp makes `adb pull` die at 8%).
 - Never `pkill -f android_battle` from a shell whose own command line contains the pattern (it kills that shell); use `pgrep` and `kill <pid>`.
 
+### Faster phone runs and profiling (2026-11-15)
+- `android_battle.py --direct` skips the menu walk like the desktop harness (the recorded walk is pushed as `bt_walk.txt`; needs a build with
+  `direct_battle.cpp`): in battle after ~34 s on the RP6. `--use-settings --drop rt_refl_level --env PSPRECOMP_VK_RT_REFL=2` tests the player's own
+  settings with one row changed. The fight HUD check counts the two gauge probes double (`hud_dark`): with the player's settings the portraits
+  next to the outer probes are bright and the old check never fired.
+- The game folder moved to `/sdcard/Android/media/org.psprecomp.game/game` in newer builds; the harness picks whichever has `last_run.log`.
+- Achieved frame rate: `[FPS] <n> GE frames/s` lines in `run.log` every 5 s. GPU per pass: `--env PSPRECOMP_VK_PASSPROF=1` (`[VKPASS]` lines).
+- CPU hot spots (rooted device): `simpleperf record -p <pid> -f 2000 --duration 10 -o /data/local/tmp/perf.data` as root during the fight, push the
+  unstripped `game_and/libmain.so` to `/data/local/tmp/symfs/<the app's lib path>`, then
+  `simpleperf report -i ... --symfs /data/local/tmp/symfs --tids <render thread> --sort symbol` (the render thread is the one with samples in `vulkan.ad07xx.so`).
+- Local APK build on this host: `~/dissidia/rtrefl_apk/build_perf.sh <psprecomp dir> <work dir>` (a copy of the tag-team script), ~1.5 min.
+
 ### Shader gotchas found on the phone
 - The Vulkan layer allows **4 samplers per program** (`kMaxSamplerBindings`, "too many samplers" at link) and only `DEPTH24_STENCIL8`
   depth textures (`[VKGL] unsupported texture format 0x81a6` = DEPTH_COMPONENT24). A failing screen-space shader switches shadows, AO and
