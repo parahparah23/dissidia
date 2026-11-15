@@ -456,6 +456,19 @@ void start_extra(Extra& e) {
     e.started = true;
     if (e.callin) entrance_effect(e.actor, char_label(e.charId, true));   // a real party member called in: pose + pause + banner
     if (g_log) for (uint32_t a : {e.slot_actor, e.actor}) { const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[TAGTEAM] stats %08X: +10A8 %u %u %u %u %u status %08X +0x14 %08X +0x18 %08X +0x1C %08X\n", a, rd(a + 0x10A8u), rd(a + 0x10ACu), rd(a + 0x10B0u), rd(a + 0x10B4u), rd(a + 0x10B8u), st, rd(st + 0x14u), rd(st + 0x18u), rd(st + 0x1Cu)); }
+    if (g_bs && !std::getenv("PSPRECOMP_TAGTEAM_KEEPSLOTOBJ")) {   // +0x5A0 points at the slot's controller object (a stride-0x50 array in the overlay): a clone of the human shares the human's, which reads the pad. Give the extra a private copy of a CPU slot's
+        const uint32_t hs = rd(g_bs + 84u), cpu = rd(g_bs + 56u + 4u * (1u - hs));
+        const uint32_t src = (side_of(e.actor) == side_of(cpu)) ? rd(e.actor + 0x5A0u) : rd(cpu + 0x5A0u);
+        if (ok(src, 0x50)) {
+            const uint32_t cp = call(ALLOC, 0x80u);
+            if (ok(cp, 0x80)) { for (uint32_t o = 0; o < 0x50u; o += 4) wr(cp + o, rd(src + o)); wr(e.actor + 0x5A0u, cp); if (g_log) std::fprintf(stderr, "[TAGTEAM] extra %08X: controller object %08X -> private copy %08X of %08X\n", e.actor, rd(e.actor + 0x5A0u), cp, src); }
+        }
+    }
+    if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_SHARED")) {   // debug: pointer words the extra shares with its slot fighter (clone of the human: shared input buffers?)
+        const uint32_t H = e.slot_actor;
+        for (uint32_t o = 0; o < 0x12D0u; o += 4) { const uint32_t x = rd(H + o); if (x == rd(e.actor + o) && x >= 0x08800000u && x < 0x0BF00000u && (x & 3) == 0 && x != H) std::fprintf(stderr, "[SHARED] extra %08X slot %08X +%04X = %08X\n", e.actor, H, o, x); }
+    }
+    if (g_log && g_bs) { const uint32_t hs = rd(g_bs + 84u); for (uint32_t a : {rd(g_bs + 56u + 4u * hs), e.actor}) std::fprintf(stderr, "[TAGTEAM] flags %08X: +5B0 %02X +380 %08X brain %08X +54 %u\n", a, g_ram[(a + 0x5B0u) & 0x07FFFFFFu], rd(a + 0x380u), rd(a + 0x5C4u), rd(rd(a + 0x5C4u) + 0x54u)); }
     if (g_log) std::fprintf(stderr, "[TAGTEAM] extra %08X (side %u) started, target %08X foe %08X\n", e.actor, e.side, rd(e.actor + 0x2FCu), e.foe);
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_ACTORDUMP")) {   // debug: every word of the extra's actor (diff a clone against another character)
         for (uint32_t o = 0; o < 0x12D0; o += 4) std::fprintf(stderr, "[ACTORDUMP] %04X %08X\n", o, rd(e.actor + o));

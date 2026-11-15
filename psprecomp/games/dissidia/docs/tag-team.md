@@ -480,3 +480,7 @@ In a group (party) battle the timed call-in (20 s after a KO, `PSPRECOMP_TAGTEAM
 - Limits: the called-in member's HP / bravery / attack are the slot fighter's (the setup record of his side), his voice bank is not requested (probably silent), the assist-style summon
   entrance is not done (pose + pause + banner only). A second KO of the slot fighter while the team mate is a REAL member cannot swap (`content_swap` needs clones: the slot holds the clone,
   the real member lives in his own actor), so the retail round end applies there. The timed call-in after a natural (non-recipe) KO was not exercised.
+
+## Partner copies the human's commands with Enemy AI off (fixed)
+The partner (clone of the human) shared the human's controller object (`actor+0x5A0`, an overlay array with stride 0x50, 08C15C50/CA0...): the pad is read through it, so with the CPU brain tick skipped (Enemy AI off) the partner mirrored every command (script sequences identical in the fighter log).
+Every extra now gets a private 0x50-byte copy of a CPU slot's controller object (`PSPRECOMP_TAGTEAM_KEEPSLOTOBJ=1` keeps the old pointer). With AI off the partner stands still; with AI on all four fighters still act (regression PASS). Debug: `PSPRECOMP_TAGTEAM_SHARED=1` lists the pointer words an extra shares with its slot fighter.
