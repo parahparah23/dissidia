@@ -8,6 +8,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 
@@ -43,8 +45,16 @@ Faces& faces() {
     std::call_once(once, [] {
         if (FT_Init_FreeType(&f.lib)) { f.lib = nullptr; return; }
         FT_New_Memory_Face(f.lib, psp_ui_font_bodyb, FT_Long(psp_ui_font_bodyb_len), 0, &f.serif);
+        // The same faces sceFont uses (psp_hle_font.cpp ft_init): the embedded Noto Sans on Android / Windows and wherever the host
+        // has no font, the host file elsewhere; PSPRECOMP_FONT (a file) wins, PSPRECOMP_FONT=embedded forces Noto.
         std::string reg, bold;
-        psp_font_host_files(&reg, &bold);
+        const char* fenv = std::getenv("PSPRECOMP_FONT");
+        bool embedded = fenv && !std::strcmp(fenv, "embedded");
+#if defined(__ANDROID__) || defined(_WIN32)
+        if (!(fenv && *fenv)) embedded = true;
+#endif
+        if (!embedded && !psp_font_host_files(&reg, &bold)) embedded = true;
+        if (embedded) reg.clear(), bold.clear();
         if (!reg.empty() && read_file(reg, &f.reg_bytes)) FT_New_Memory_Face(f.lib, f.reg_bytes.data(), FT_Long(f.reg_bytes.size()), 0, &f.reg);
         if (!bold.empty() && read_file(bold, &f.bold_bytes)) FT_New_Memory_Face(f.lib, f.bold_bytes.data(), FT_Long(f.bold_bytes.size()), 0, &f.bold);
         if (!f.reg) FT_New_Memory_Face(f.lib, psp_sans_regular, FT_Long(psp_sans_regular_len), 0, &f.reg);
