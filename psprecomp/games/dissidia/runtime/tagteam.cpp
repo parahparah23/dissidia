@@ -24,6 +24,8 @@
 #include <vector>
 
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
+void psp_dump_func_ring(const char* tag);   // runtime/src/psp_dispatch.cpp
+void dissidia_model_pool_request_extra(uint32_t bytes);   // hooks_models.cpp: a bigger model pool for the extra characters
 float dissidia_battle_age();   // framerate.cpp: ticks (1/60 s) since the battle started running
 bool dissidia_cpu_ai_off();    // framerate.cpp: the debug menu's Enemy AI option / the test harness switched the CPU brains off
 uint32_t dissidia_camera_manager();   // camera.cpp
@@ -88,6 +90,7 @@ bool g_late_ready = false;    // the intro is over, the queue may spawn   // PSP
 
 uint32_t rd(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
 uint32_t rdh(uint32_t a) { return static_cast<uint32_t>(g_ram[a & 0x07FFFFFFu]) | (static_cast<uint32_t>(g_ram[(a + 1) & 0x07FFFFFFu]) << 8); }
+void wrh(uint32_t a, uint16_t v) { g_ram[a & 0x07FFFFFFu] = static_cast<uint8_t>(v & 0xFF); g_ram[(a + 1) & 0x07FFFFFFu] = static_cast<uint8_t>(v >> 8); }
 float rdf(uint32_t a) { float f; std::memcpy(&f, g_ram + (a & 0x07FFFFFFu), 4); return f; }
 void wr(uint32_t a, uint32_t v) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &v, 4); }
 void wrf(uint32_t a, float f) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &f, 4); }
@@ -178,10 +181,54 @@ uint32_t info_for_char(int charId) {
 }
 int g_partner_char = 0, g_enemy2_char = 0;   // PSPRECOMP_TAGTEAM_PARTNER_CHAR / _ENEMY2_CHAR: a different character for the extra (0 = a copy of the fighter it stands beside)
 
+// Resources of a character that is not in the battle's loading list. Retail registers the file slots (staging heap, model / motion
+// slots) of every character of the battle record at the loading screen (FUN_08B45310 -> FUN_089121F4(charId)); calling it again for the
+// extra's character does the same late.
+constexpr uint32_t LOAD_FILE_GROUP = 0x08844C14u;   // EBOOT: load file id + its companions (a0 = file id, a1 = model heap, a2 = flag)
+constexpr uint32_t FILE_FIND = 0x088444D4u;         // EBOOT: registered file object of an id (a0 = file manager), 0 = not loaded
+constexpr uint32_t MODEL_HEAP = 0x088908E0u;        // EBOOT: the heap the battle's character files are loaded into
+constexpr uint32_t FILE_MGR_PTR = 0x089D0000u + 18784u;
+// The retail staging heap (0x095CD080, FUN_0888204C(0x270800)) is given back to the main heap after the loading screen and reused, so a
+// load during the battle needs a heap of its own: a block of the host heap, initialised like retail (FUN_0885C40C(block, size, name, 0x40)).
+uint32_t g_load_heap = 0;
+uint32_t load_heap() {
+    if (g_load_heap) return g_load_heap;
+    constexpr uint32_t kSize = 0x290000u;
+    const uint32_t block = psp_kmem_bump_alloc_named(kSize, "TAGTEAM_LOAD_HEAP");
+    if (!block) return 0;
+    call(0x0885C40Cu, block, kSize, 0x089E076Cu, 0x40);
+    g_load_heap = block;
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] staging heap for character loads: %08X (%X bytes)\n", block, kSize);
+    return block;
+}
+void dump_file_obj(const char* tag, uint32_t mgr, uint32_t id) {
+    const uint32_t o = call(FILE_FIND, mgr, id);
+    std::fprintf(stderr, "[FILEOBJ] %s id %u obj %08X:", tag, id, o);
+    if (ok(o, 0xF0)) for (uint32_t k = 0; k < 0xEC; k += 4) std::fprintf(stderr, " %08X", rd(o + k));
+    std::fprintf(stderr, "\n");
+}
+void load_character(int charId) {
+    if (g_log) for (uint32_t a : {0x089C88B8u, 0x089E076Cu, 0x089C93E0u, 0x089CAC10u, 0x089CAF0Cu, 0x089C9ED0u, 0x089CBA28u, 0x089CBDD4u, 0x089C9564u, 0x089C9574u}) { char b[24] = {}; for (int i = 0; i < 23; i++) b[i] = static_cast<char>(g_ram[(a + i) & 0x07FFFFFFu]); std::fprintf(stderr, "[TAGTEAM] heap name %08X: %s\n", a, b); }
+    if (charId <= 0 || std::getenv("PSPRECOMP_TAGTEAM_NOLOAD")) return;
+    const uint32_t rec = info_for_char(charId);
+    if (!rec) { std::fprintf(stderr, "[TAGTEAM] load_character(%d): no file record\n", charId); return; }
+    const uint32_t mgr = rd(FILE_MGR_PTR), heap = load_heap();
+    if (!heap) { std::fprintf(stderr, "[TAGTEAM] load_character(%d): no staging heap\n", charId); return; }
+    const uint32_t ids[2] = {rdh(rec + 0u), rdh(rec + 4u)};   // the model file and its D_ data file (retail loads both at the loading screen)
+    for (uint32_t id : ids) {
+        if (id == 0xFFFFu) continue;
+        const uint32_t have = call(FILE_FIND, mgr, id);
+        if (!have) call(LOAD_FILE_GROUP, id, heap, 0);
+        if (g_log && std::getenv("PSPRECOMP_TAGTEAM_FILEOBJ")) { dump_file_obj("cloud-after", mgr, id); dump_file_obj("squall", mgr, 2); dump_file_obj("squallD", mgr, 189); }
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] load_character(%d): file id %u %s -> object %08X\n", charId, id, have ? "already loaded" : "loaded", call(FILE_FIND, mgr, id));
+    }
+}
+
 uint32_t spawn_fighter(uint32_t bs, uint32_t side, uint32_t foe, uint32_t cpu_side, uint32_t info_slot, uint32_t slot_actor) {
     const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
     g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x200u);   // scratch below the stack pointer, clear of the callees' frames
     const uint32_t buf = sp0 - 0x1C0u, lockargs = sp0 - 0x180u;
+    { const int w0 = static_cast<int>(info_slot) >= 100 ? static_cast<int>(info_slot) - 100 : 0; if (w0) load_character(w0); }
     uint32_t mem = call(ALLOC, 0x12D0);
     if (!ok(mem, 0x12D0)) { std::fprintf(stderr, "[TAGTEAM] alloc failed\n"); g_ctx->r[29] = static_cast<int32_t>(sp0); return 0; }
     g_owned[mem].clear(); g_owned[mem].push_back({mem, 0x12D0u}); g_own_ctx = mem;   // everything allocated from here on belongs to this fighter
@@ -388,10 +435,11 @@ void start_extra(Extra& e) {
     g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
     const uint32_t vec = sp0 - 0xC0u;
     // Stand 3 m beside the fighter it copies (the retail pair is placed by the stage at this point).
-    wrf(vec, rdf(e.slot_actor + 0x80u) + 3.0f); wrf(vec + 4, rdf(e.slot_actor + 0x84u)); wrf(vec + 8, rdf(e.slot_actor + 0x88u)); wrf(vec + 12, 1.0f);
+    float pdx = 3.0f, pdz = 0.0f; if (const char* pe = std::getenv("PSPRECOMP_TAGTEAM_PLACE")) std::sscanf(pe, "%f,%f", &pdx, &pdz);   // debug: offset from the fighter it copies (x, z)
+    wrf(vec, rdf(e.slot_actor + 0x80u) + pdx); wrf(vec + 4, rdf(e.slot_actor + 0x84u)); wrf(vec + 8, rdf(e.slot_actor + 0x88u) + pdz); wrf(vec + 12, 1.0f);
     call(PLACE, e.actor, vec, 1);
     g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
-    call(START_ACTION, e.actor + 304u, 1, 0);
+    { const uint32_t rv = call(START_ACTION, e.actor + 304u, 1, 0); if (g_log) std::fprintf(stderr, "[TAGTEAM] START_ACTION(%08X, 1) -> %u, script now %d\n", e.actor + 304u, rv, static_cast<int16_t>(rd(e.actor + 0x180u) & 0xFFFFu)); }
     call(LOCK_SET, rd(e.actor + 0x5ACu), e.foe);          // lock on to the foe: the AI and the turn-to-target ops read it
     {   // Bravery: the retail pair gets its base bravery (actor +0x10AC) in both halves of status +0x14 at battle start; the extras start at 0 (broken).
         const uint32_t st = rd(e.actor + 0x52Cu), b = rd(e.actor + 0x10ACu) & 0xFFFFu;
@@ -400,6 +448,9 @@ void start_extra(Extra& e) {
     e.started = true;
     if (g_log) for (uint32_t a : {e.slot_actor, e.actor}) { const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[TAGTEAM] stats %08X: +10A8 %u %u %u %u %u status %08X +0x14 %08X +0x18 %08X +0x1C %08X\n", a, rd(a + 0x10A8u), rd(a + 0x10ACu), rd(a + 0x10B0u), rd(a + 0x10B4u), rd(a + 0x10B8u), st, rd(st + 0x14u), rd(st + 0x18u), rd(st + 0x1Cu)); }
     if (g_log) std::fprintf(stderr, "[TAGTEAM] extra %08X (side %u) started, target %08X foe %08X\n", e.actor, e.side, rd(e.actor + 0x2FCu), e.foe);
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_ACTORDUMP")) {   // debug: every word of the extra's actor (diff a clone against another character)
+        for (uint32_t o = 0; o < 0x12D0; o += 4) std::fprintf(stderr, "[ACTORDUMP] %04X %08X\n", o, rd(e.actor + o));
+    }
     g_ctx->r[29] = static_cast<int32_t>(sp0);
 }
 
@@ -1227,6 +1278,76 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     }
 }
 
+// ---- debugging: the game's resource lookups (PSPRECOMP_TAGTEAM_LOADLOG=1): FUN_088470B8(fileId) returns the file record (name at +36) ----
+FuncPtr g_orig_filerec = nullptr;
+void filerec_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t id = static_cast<uint32_t>(ctx->r[4]), ra = static_cast<uint32_t>(ctx->r[31]);
+    g_ram = rdram;
+    g_orig_filerec(rdram, ctx);
+    static int n = 0;
+    const uint32_t rec = static_cast<uint32_t>(ctx->r[2]);
+    if (n++ < 6000 && ok(rec, 0x60)) {
+        char nm[28] = {}; for (int i = 0; i < 24; i++) nm[i] = static_cast<char>(g_ram[(rec + 36 + i) & 0x07FFFFFFu]);
+        std::fprintf(stderr, "[LOAD] age=%.1f id=%u rec=%08X %s ra=%08X\n", dissidia_battle_age() / 60.0f, id, rec, nm, ra);
+    }
+}
+
+FuncPtr g_orig_ld1 = nullptr, g_orig_ld2 = nullptr;
+void ld1_hook(uint8_t* rdram, recomp_context* ctx) {   // FUN_08843014(out, fileId, heap, size, flag)
+    g_ram = rdram; const uint32_t a1 = static_cast<uint32_t>(ctx->r[5]), a2 = static_cast<uint32_t>(ctx->r[6]), a3 = static_cast<uint32_t>(ctx->r[7]), ra = static_cast<uint32_t>(ctx->r[31]);
+    std::fprintf(stderr, "[LOAD1] age=%.1f FUN_08843014 id=%u heap=%08X size=%X ra=%08X\n", dissidia_battle_age() / 60.0f, a1, a2, a3, ra);
+    psp_dump_func_ring("LOAD1-RING");
+    g_orig_ld1(rdram, ctx);
+}
+void ld2_hook(uint8_t* rdram, recomp_context* ctx) {   // FUN_08845230(out, fileId, buf, size, flag)
+    g_ram = rdram; const uint32_t a1 = static_cast<uint32_t>(ctx->r[5]), a2 = static_cast<uint32_t>(ctx->r[6]), a3 = static_cast<uint32_t>(ctx->r[7]), ra = static_cast<uint32_t>(ctx->r[31]);
+    std::fprintf(stderr, "[LOAD2] age=%.1f FUN_08845230 id=%u buf=%08X size=%X ra=%08X\n", dissidia_battle_age() / 60.0f, a1, a2, a3, ra);
+    g_orig_ld2(rdram, ctx);
+}
+
+// ---- preload: characters of the extras are added to the battle's loading list ----
+// FUN_08B45310 (battle overlay, the loading screen) takes the battle's record (FUN_089132A4) whose halfwords at +72 are the characters
+// (6 slots, negative = end) and registers + loads their model files (FUN_089121F4 -> FUN_0884417C -> FUN_08843014). The character table the
+// lookup uses is freed after the loading screen, so a character has to be in this list to be loaded: the extras' characters are appended.
+FuncPtr g_orig_batrec = nullptr;
+int g_preload[4] = {0, 0, 0, 0};   // charIds to append (set from the settings before the loading screen)
+int g_npreload = 0;
+void batrec_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t ra = static_cast<uint32_t>(ctx->r[31]);
+    g_ram = rdram;
+    g_orig_batrec(rdram, ctx);
+    const uint32_t rec = static_cast<uint32_t>(ctx->r[2]);
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] FUN_089132A4(%08X, %08X) -> %08X\n", static_cast<uint32_t>(ctx->r[4]), static_cast<uint32_t>(ctx->r[5]), rec);
+    const bool from_loader = true;   // (the recompiled calls leave $ra unset: every record with a character list is patched)
+    (void)ra;
+    if (!ok(rec, 0x60) || !from_loader) return;
+    int16_t list[6]; for (int i = 0; i < 6; i++) list[i] = static_cast<int16_t>(rdh(rec + 72u + 2u * i));
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] battle record %08X characters: %d %d %d %d %d %d (ra %08X)\n", rec, list[0], list[1], list[2], list[3], list[4], list[5], ra);
+    if (!g_enabled) return;
+    for (int k = 0; k < g_npreload; k++) {
+        const int id = g_preload[k]; bool have = false; int free_slot = -1;
+        for (int i = 0; i < 6; i++) { if (list[i] == id) have = true; if (free_slot < 0 && list[i] < 0) free_slot = i; }
+        if (have || free_slot < 0) { if (!have && g_log) std::fprintf(stderr, "[TAGTEAM] no free slot in the loading list for charId %d\n", id); continue; }
+        wrh(rec + 72u + 2u * free_slot, static_cast<uint16_t>(id)); list[free_slot] = static_cast<int16_t>(id);
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] charId %d appended to the loading list (slot %d)\n", id, free_slot);
+    }
+}
+
+// generic call logger for the loading chain (PSPRECOMP_TAGTEAM_LOADLOG=1)
+constexpr uint32_t kChain[8] = {0x08844C14u, 0x0884417Cu, 0x088444D4u, 0x0888204Cu, 0x0885C6CCu, 0x0885C538u, 0x08844B58u, 0x08842308u};
+FuncPtr g_chain_orig[8] = {};
+template <int N> void chain_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]), a1 = static_cast<uint32_t>(ctx->r[5]);
+    const bool big = (N == 2 && dissidia_battle_age() > 100.f) || N < 2;
+    if (big) std::fprintf(stderr, "[CHAIN] age=%.1f FUN_%08X(%08X, %08X, %08X, %08X)\n", dissidia_battle_age() / 60.0f, kChain[N], a0, a1, static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]));
+    g_chain_orig[N](rdram, ctx);
+    if (N == 0 || N == 2) std::fprintf(stderr, "[CHAIN]   -> %08X\n", static_cast<uint32_t>(ctx->r[2]));   // (N == 2: FUN_088444D4 lookup result)
+}
+template <int... I> void install_chain(std::integer_sequence<int, I...>) {
+    ((g_chain_orig[I] = psp_dispatch_probe_lookup(kChain[I]), g_chain_orig[I] ? psp_dispatch_register(kChain[I], chain_hook<I>) : void()), ...);
+}
+
 }  // namespace
 
 // Called by the scene tick (hooks_main.cpp) before every frame's update: between frames no fighter is mid-update, the safe point for the swap.
@@ -1279,10 +1400,15 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
     g_tagin = !(std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '0');
+    if (std::getenv("PSPRECOMP_TAGTEAM_LOADLOG") && (g_orig_filerec = psp_dispatch_probe_lookup(0x088470B8u))) { psp_dispatch_register(0x088470B8u, filerec_hook); psp_mem_watch_set(0x0880FFF0u); install_chain(std::make_integer_sequence<int, 8>{}); if ((g_orig_ld1 = psp_dispatch_probe_lookup(0x08843014u))) psp_dispatch_register(0x08843014u, ld1_hook); if ((g_orig_ld2 = psp_dispatch_probe_lookup(0x08845230u))) psp_dispatch_register(0x08845230u, ld2_hook); }
+    if ((g_orig_batrec = psp_dispatch_probe_lookup(0x089132A4u))) psp_dispatch_register(0x089132A4u, batrec_hook);
     g_hud_on = !(std::getenv("PSPRECOMP_TAGTEAM_HUD") && std::getenv("PSPRECOMP_TAGTEAM_HUD")[0] == '0');
     if (const char* b = std::getenv("PSPRECOMP_TAGTEAM_SWAP_BUTTON")) g_swap_mask = static_cast<uint32_t>(std::strtoul(b, nullptr, 16));
     if (const char* c = std::getenv("PSPRECOMP_TAGTEAM_PARTNER_CHAR")) g_partner_char = std::atoi(c);
     if (const char* c = std::getenv("PSPRECOMP_TAGTEAM_ENEMY2_CHAR")) g_enemy2_char = std::atoi(c);
+    if (g_partner_char || g_enemy2_char) dissidia_model_pool_request_extra(0x600000u);   // room for up to two more characters' models
+    if (g_partner_char) g_preload[g_npreload++] = g_partner_char;
+    if (g_enemy2_char) g_preload[g_npreload++] = g_enemy2_char;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_STOP")) g_stop = std::atoi(m);
     g_ram = rdram;
     g_orig_alloc = psp_dispatch_probe_lookup(ALLOC_CORE);

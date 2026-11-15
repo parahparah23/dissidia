@@ -72,6 +72,8 @@ bool g_pool_extra_forced = false;             // PSPRECOMP_MODEL_POOL_EXTRA set:
 bool g_reserved = false;                      // pool + file heap reserved together (budget locked)
 uint32_t g_staging = kRetailStaging;
 uint32_t g_pool_block = 0, g_pool_size = 0;
+uint32_t g_tt_pool_extra = 0;   // tag team: extra pool bytes (dissidia_model_pool_request_extra)
+bool g_tt_pool = false;         // g_pool_block is the tag team pool (not tied to the budget reservation)
 bool g_pool_in_use = false;
 uint32_t g_wm_block = 0, g_wm_size = 0;      // host-heap block, allocated once and reused by every scene
 bool g_wm_in_use = false;
@@ -169,6 +171,17 @@ void alloc_hook(uint8_t* rdram, recomp_context* ctx) {
             }
         }
         if (g_wm_block != 0) { g_wm_in_use = true; if (g_trace) std::fprintf(stderr, "[MODELS]   -> host block\n"); ctx->r[2] = static_cast<int32_t>(g_wm_block); return; }
+    }
+    if (static_cast<uint32_t>(ctx->r[4]) == kRetailPool && !g_pool_in_use && g_tt_pool_extra && g_pool_block == 0 && !g_reserved) {
+        const uint32_t size = rd256(kRetailPool + g_tt_pool_extra), sizes[1] = {size};
+        if (psp_kmem_plan_fits(sizes, 1)) {
+            g_pool_size = kRetailPool + g_tt_pool_extra;
+            g_pool_block = psp_kmem_bump_alloc_named(size, "MODEL_POOL_TAGTEAM");
+            g_tt_pool = g_pool_block != 0;
+            if (g_pool_block) std::fprintf(stderr, "[MODELS] tag team model pool %u B at 0x%08X (retail %u B)\n", g_pool_size, g_pool_block, kRetailPool);
+        } else {
+            std::fprintf(stderr, "[MODELS] no room for a %u B tag team model pool: retail size\n", size);
+        }
     }
     if (static_cast<uint32_t>(ctx->r[4]) == kRetailPool && !g_pool_in_use) {
         if (g_pool_block == 0 && !g_reserved) {
@@ -311,6 +324,9 @@ uint32_t dissidia_model_budget_request(uint32_t bytes) {
     return g_staging;
 }
 uint32_t dissidia_model_budget() { return g_staging; }
+// tagteam.cpp: extra characters in the battle (tag team) need more room in the model pool than the retail two fighters and their assists.
+// The pool request at the loading screen is then served from the host heap with `bytes` more (kept like the budget pool, reused by every battle).
+void dissidia_model_pool_request_extra(uint32_t bytes) { if (bytes > g_tt_pool_extra) g_tt_pool_extra = bytes; }
 constexpr uint32_t dissidia_model_budget_retail() { return kRetailStaging; }
 
 void dissidia_models_install() {
