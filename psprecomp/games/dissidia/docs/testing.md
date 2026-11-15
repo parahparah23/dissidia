@@ -327,3 +327,72 @@ Added with `psp_settings_add_debug_toggle` (runtime/include/psp_settings.h: a ga
 - The game's own pressed test (`FUN_08AB399C`, the press latch's hook) returned no edges for the scripted Jecht chain presses at 30 or 120 Hz in test runs (`press latch: ... 0 edges` in the `[FPS]` line), so the press latch may not be doing anything for these inputs; not investigated.
 
 - Jecht's Circle / Square are handed to the game on a 30 Hz grid above 30 fps (`jecht_grid_filter`, `PSPRECOMP_JECHT_GRID=0` to turn it off): the Jecht Combo Timing helper above therefore sees each press on a grid update, and a press can reach the game up to one 30 Hz frame after you pressed it. Details and measurements: docs/frame-rate.md "Jecht timed windows on the 30 Hz grid".
+
+## Frame-rate parity tests (`tools/fps_parity.py`)
+
+Every move of every playable character has to play at every frame rate the settings offer (30, 60, 90, 120, 150, 180, 210, 240) as it
+does at 30 fps, the PSP's rate (issue #55: Exdeath's teleport and Squall's ground moves at 60 fps). `fps_parity.py` checks that,
+character by character, with no menu walking per character:
+
+    fps_parity.py run --work W [--chars all | exdeath,squall,10] [--rates 30,60,...,240] [--jobs 5] [--repeat-base] [--out DIR]
+    fps_parity.py compare DIR [--frame-tol 1 --pos-tol 0.25 --pos-rel 0.05]   # judge finished runs again
+    fps_parity.py show DIR squall 1454 mash                                    # one trial at every rate, side by side, 30 Hz frames
+    fps_parity.py chars                                                        # the 31 playable characters and their charIds
+    tests/run_fps_parity_test.sh W [out] [run options]                          # the same as a test (exit code 1 on a difference)
+
+Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every failing trial and why), `DIR/results.json`.
+
+### How a run works
+
+- **One game per character and rate**, in parallel (`--jobs`), each with its own display / port / memory stick copy. On the GPU by
+  default (`--gpu auto`, see "Rendering on the GPU without an X server").
+- **Any character from the one recorded walk.** `--direct` replays `tests/replays/quick_battle_walk.txt` (Squall vs Lightning) and
+  `PSPRECOMP_TEST_CHAR_SWAP=15=<charId>` (runtime/direct_battle.cpp) swaps the fighter. What the menu hands the battle is the block
+  at 0x09AFB8A0 (FUN_088FB1A4 copies it): per side a 0x1060-byte fighter record (stride 0x1060) that starts with a copy of the
+  character's 0x778-byte save record (byte 0 charId, byte 1 level, abilities...; the CPU side's is generated), and at +0xF3A the object
+  table id of the model the loading screen (FUN_0888C4C8, `bs+2008`) loads (`P_<code>_1P`: object table `*(0x089D4968)`, byte 6
+  charId, byte 7 costume 1, byte 8 type 0; +0xF3E is the assist's `_A` entry). Team structs (count byte, charIds, stride 0x38)
+  follow at +0x272F. On every pad poll a side whose record holds `<from>` gets `<to>`'s own save record (save records at
+  `*(0x089D712C) + 0xF58 + 0x778 * index in the 31-entry id list at 0x089CBC98`), its charId and its model id. Lightning under test
+  uses `15=31,31=15` (the dummy becomes Squall). Things that did NOT change the fighter: the menu's selectable list, the grid cells
+  (their +4 is not a charId), the battle setters FUN_08A48DB0 / 08A491E0 and FUN_089132A4 / 089121F4 (not on the Quick Battle path),
+  FUN_08846E18 (charId -> object entry; not called there), the team structs alone.
+- **The dummy**: the CPU fighter never presses a button and its brain does not tick (`PSPRECOMP_TEST_NO_AI`, `_AI_OFF`) but it runs at
+  the normal time step and reacts to hits; 100,000,000 HP so no hit ends the fight.
+- **Trials**: the game lists the player's plya actions (`action -1 player`: id, script, `later` +3, `side` +5 2 ground / 1 air,
+  `button` +0x0F 1 brave / 2 HP); the tool writes the trials into the running battle (`batch`). Each trial: `waitidle`, `home 3.5 0 0`
+  (dummy at stage point 0,0, player 3.5 m away, both turned to face each other with FUN_08835BA4, velocities zeroed), then
+  - every action, **plain**: `action <id> player` (air actions 0.4 s after a jump);
+  - first presses of an attack, **mash**: the same, plus the move's button (Circle / Square) tapped every 200 ms for 2.4 s, so the
+    follow-up presses and chains run too;
+  - movement every fighter has (pad input, not plya): jump, double jump, dodge, air dodge, dash (R+Triangle held), air dash, block
+    (R held), run (stick forward 1.5 s), run + jump. They start after 1 s of settling. Running is camera-relative, so `run` also checks
+    that the camera ends up in the same place.
+- **Samples on the 30 Hz lattice** (`PSPRECOMP_TEST_PARITY=1`, framerate.cpp): every rate is a multiple of 30, so each has an update
+  at game time k x 33.3 ms; there the runtime logs `[PAR] <ms> | player: script motion motion-time x y z fwd.x fwd.z | dummy: same | hits`.
+  `sync` / `waitidle` end on the lattice and event times are compared with a 0.01 ms tolerance (the sum of 8.33 ms steps is
+  99.99999 at 100 ms), so a trial starts at the same game moment at every rate. `[PARHIT] <ms> dummy atkp=<id> react=<n> flags dmg by=`
+  comes from FUN_0883A150 (take hit: a0 defender, a1 the 64-byte hit record).
+- **Judging**, each rate against 30 fps, per trial (index k = the same game moment): the player's script sequence and the dummy's
+  motion sequence (same ids in order, each change within `--frame-tol` 30 Hz frames); the dummy's hits (count, attack ids and
+  reactions in order, time, damage); both paths (largest gap <= `--pos-tol` m or `--pos-rel` of the distance covered); when the player
+  is idle again. `--repeat-base` makes a second 30 fps run: trials that differ between two 30 fps runs are reported as
+  NONDETERMINISTIC, not as failures. With the GPU, two 30 fps runs agreed on every trial in the checks made (Squall, Exdeath).
+- **Speed**: boot to fight ~35 s (`--direct`, 4x menus); then fast-forward. On the GPU about 10x real time at 30 fps, 3.5x at 120.
+  `PSPRECOMP_TEST_NO_DRAW=2` (set by `--no-draw`) stops the draw calls once the clock runs (`ge_draw_request_no_raster`): 2.6x faster
+  with llvmpipe, no gain on the GPU.
+
+### Findings so far (15 Nov, Squall and Exdeath, 30 vs 60 / 120 fps)
+
+- **The first update of a motion moves the fighter a whole 30 Hz frame at 60 fps and above.** Block (Squall, motion 470): at 30 fps
+  the first sample after the press has motion time 0 at x -3.327 and the next motion time 2 at -3.087; at 60 fps the first sample has
+  motion time 1 but already x -3.087, at 120 fps motion time 1.5 and -3.087. The motion clock starts on the same update at every rate;
+  the displacement of the first update(s) is not scaled. The fighter stays a frame ahead from then on (0.3-0.8 m in the first 100 ms of
+  block, jump, dodge and most attacks). NOT a latency difference: delaying the scripted presses by a frame
+  (`PSPRECOMP_TEST_INPUT_DELAY=33.3`, `--input-delay`) makes 60 / 120 fps a frame late instead.
+- **Jumps are lower**: Squall's jump peaks at 4.10 m (30 fps), 3.94 m (60), 3.85 m (120); an Exdeath air action started 0.4 s after a
+  jump starts 0.2 m lower at 120 fps and lands 67 ms earlier.
+- **Multi-hit moves land a different number of hits**: Exdeath's action 1960 (script 10000, attack 1271 repeated): 19 hits at 30 fps,
+  18 at 120; Squall's action 1454 (script 10015): 2 hits at 30, 1 at 60; follow-ups chosen by a mash differ.
+- **Camera**: after `home` the 120 fps camera ends up on the other side (running forward goes +z instead of -z).
+- Whole-roster results: see the latest `summary.txt` of a full run (`~/dissidia/fpsparity/full1` on the test host).
