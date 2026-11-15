@@ -484,7 +484,8 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             if (!a || !ok(a) || g_tick - g_fighter_seen[i] > stale_ticks() || a == test_player()) continue;
             if (a != keep_actor || !g_gt_started || g_gt_ms < 34) { keep_actor = a; keep_hp = r32(a + 0x10B0u); }
             else if (keep_hp) w32(a + 0x10B0u, g_test_ai_off ? 100000000u : keep_hp);   // AI-off dummies get a huge pool: once broken, hits do HP damage and the KO check runs inside the update, before this write
-            if (g_parity) {   // +0x10B0 is only the maximum: the live HP is the status block's (actor+0x52C: +0x8 HP damage taken, +0xC HP; docs/tag-team.md). No damage piles up
+            if (g_parity || g_test_ai_off) {   // +0x10B0 is only the maximum: the live HP is the status block's (actor+0x52C: +0x8 HP damage taken, +0xC HP; docs/tag-team.md). No damage
+                                                // piles up (the Jecht combo sweep's HP finishers KO'd the dummy after ~10 min of game time: every later trial timed out)
                 const uint32_t st = r32(a + 0x52Cu);
                 if (ok(st)) w32(st + 0x8u, 0u);
             }

@@ -62,7 +62,7 @@ def press_lines(delay, btn, stick, hold=TAP_MS):
 
 def trial_script(i, prefix, probe, d, dist=3.0, tail=900):
     """script lines of trial i. prefix: steps (parse_step) pressed in order; probe: a step whose delay is replaced by d"""
-    L = ['+0 waitidle 8000', '+400 place %g' % dist, '+700 mark trial %d' % i]
+    L = ['+0 waitidle 8000', '+400 home %g' % dist, '+700 mark trial %d' % i]   # home: place, face each other, status blocks (bravery, HP damage) as at the first trial
     first = True
     for st in prefix:
         L += press_lines(st['delay'] if not first else max(st['delay'], 800), st['btn'], st['stick'])
