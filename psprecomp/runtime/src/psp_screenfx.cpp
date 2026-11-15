@@ -601,11 +601,38 @@ void main() {
 }
 )GLSL";
 
+// Sky map update (ray-traced reflections): an equirectangular map of the stage's sky by WORLD direction, filled from the sky
+// pixels on screen and kept across frames, so a reflection ray that misses (or hits the dome) shows the sky in its direction
+// even where that part of the sky is off screen. Before it the picture's own sky was used only while on screen and a flat
+// colour elsewhere, which cut the reflected sky off along a hard line. Premultiplied (blend one / one-minus-src-alpha):
+// alpha says how much of a texel has been seen.
+const char* const k_fs_env = R"GLSL(
+layout(location = 0) out vec4 o_env;
+uniform sampler2D u_color;
+uniform mat4 u_view;        // world -> view
+uniform float u_w;          // weight of this frame (the rest is the map so far)
+void main() {
+    float az = (v_uv.x - 0.5) * 6.2831853;
+    float el = (v_uv.y - 0.5) * 3.14159265;
+    vec3 d = vec3(cos(el) * cos(az), sin(el), cos(el) * sin(az));
+    vec3 dv = (u_view * vec4(d, 0.0)).xyz;
+    if (dv.z > -0.02) discard;
+    vec4 c = u_proj * vec4(dv * 1000.0, 1.0);
+    if (c.w <= 1e-5) discard;
+    vec2 uv = c.xy / c.w * 0.5 + 0.5;
+    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99) discard;
+    vec2 o = 3.0 / u_size;      // the colour copy is half resolution: keep clear of geometry so its edge does not bleed in
+    if (!is_far(wd_at(uv)) || !is_far(wd_at(uv + vec2(o.x, 0.0))) || !is_far(wd_at(uv - vec2(o.x, 0.0)))
+        || !is_far(wd_at(uv + vec2(0.0, o.y))) || !is_far(wd_at(uv - vec2(0.0, o.y)))) discard;
+    o_env = vec4(texture(u_color, uv).rgb * u_w, u_w);
+}
+)GLSL";
+
 struct Prog {
     GLuint id = 0;
     bool failed = false;
 };
-Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p;
+Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_p;
 
 // Ray-queried contact shadow (PSPRECOMP_VK_RT, Vulkan only; docs/VULKAN_PORT.md): the pass-1 shader with the screen-space march
 // replaced by a ray query from the surface toward the light against the frame's world-space triangles (psp_rt.h). The GL
@@ -635,6 +662,28 @@ uniform vec4 u_lc[16];
 uniform vec4 u_lvp[16];     // the same lights in view space (markers)
 uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
+//@SKY_DECL
+uniform int u_env_on;
+// The sky seen in world direction d. A direction never on screen yet (overhead, behind the camera) falls back to the same
+// bearing nearer the horizon, which the camera sees most. rgb is the colour, a how sure (0: not seen at all).
+vec4 sky_map(vec3 d) {
+    if (u_env_on == 0) return vec4(0.0);
+    float az = atan(d.z, d.x);
+    float el = asin(clamp(d.y, -1.0, 1.0));
+    vec3 acc = vec3(0.0);
+    float aa = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        float e = el * (1.0 - float(i) / 3.0 * 0.85);
+        vec4 s = texture(u_env, vec2(az / 6.2831853 + 0.5, e / 3.14159265 + 0.5));
+        if (s.a > 0.02) {
+            float c = min(1.0, s.a * 1.5) * (1.0 - aa);
+            acc += s.rgb / s.a * c;
+            aa += c;
+        }
+        if (aa > 0.95) break;
+    }
+    return aa > 0.0 ? vec4(acc / aa, aa) : vec4(0.0);
+}
 )GLSL";
 // Ray-traced reflection: the closest hit along the reflected view ray. Shading the hit: the geometry has positions only, so a
 // hit shows the triangle's colour captured at draw time (texture average x vertex colour / lit material, rt_tri_col[]); where
@@ -645,55 +694,88 @@ const char* const k_rt_refl = R"GLSL(
             float upness = dot(n, u_up);
             vec3 V = normalize(P);
             vec3 R0 = reflect(V, n);
+            float el0 = max(dot(R0, n), 0.0);
             vec4 racc = vec4(0.0);
             for (int ri = 0; ri < u_rt_refl_rays; ++ri) {
             vec3 R = R0;
             if (u_rt_refl_rays > 1) {
+                // Glossy jitter. The part along the normal is limited to half the ray's own elevation: at a grazing angle a fixed
+                // angular jitter bent rays up by many times their elevation and smeared the horizon over the whole floor (High looked blurry).
                 float ja = ign(gl_FragCoord.xy + 31.0 * float(ri + 1)) * 6.2831853, jb = ign(gl_FragCoord.yx + 57.0 * float(ri + 1)) * 2.0 - 1.0, jr = sqrt(1.0 - jb * jb);
-                R = normalize(R0 + vec3(cos(ja) * jr, jb, sin(ja) * jr) * u_rt_rough);
-                R = normalize(R + n * max(0.0, 0.05 - dot(R, n)));
+                vec3 J = vec3(cos(ja) * jr, jb, sin(ja) * jr) * u_rt_rough;
+                float jn = dot(J, n);
+                J += n * (clamp(jn, -0.5 * el0, 0.5 * el0) - jn);
+                R = normalize(R0 + J);
             }
             vec3 O = P + n * (0.01 + 0.004 * lp);
-            rayQueryEXT rq;
-            rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsOpaqueEXT, 0x1, (u_view_inv * vec4(O, 1.0)).xyz, 0.0,
-                                  normalize((u_view_inv * vec4(R, 0.0)).xyz), u_rt_refl_len);
-            while (rayQueryProceedEXT(rq)) {}
+            vec3 Ow = (u_view_inv * vec4(O, 1.0)).xyz;
+            vec3 Rw = normalize((u_view_inv * vec4(R, 0.0)).xyz);
             vec3 col = u_rt_sky;
             float hit_t = u_rt_refl_len;
-            bool hit = rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
-            vec3 dbg = vec3(0.0, 0.0, 1.0);                                   // miss
-            if (hit) {
+            bool hit = false;
+            bool hidden = false;                 // the hit shows a flat triangle colour (not visible on screen)
+            vec3 dbg = vec3(0.0, 0.0, 1.0);      // miss
+            vec3 cut = vec3(0.0);                // cut-out cards passed through off screen, weighted by their coverage
+            float trans = 1.0;
+            float tmin = 0.0;
+            // Up to 4 hits: a hit on a see-through texel of a cut-out card (tree, spire, fence: the triangle is a whole quad) is not
+            // a reflector. On screen that shows as a hit point the picture does not draw (the picture is farther there, or sky):
+            // trace on past it. Off screen the triangle's mean texture alpha (coverage) blends it with what lies behind.
+            for (int pass = 0; pass < 4; ++pass) {
+                rayQueryEXT rq;
+                rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsOpaqueEXT, 0x1, Ow, tmin, Rw, u_rt_refl_len);
+                while (rayQueryProceedEXT(rq)) {}
+                hit = rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+                if (!hit) { hit_t = u_rt_refl_len; break; }
                 hit_t = rayQueryGetIntersectionTEXT(rq, true);
                 uint pc = rt_tri_col[rayQueryGetIntersectionPrimitiveIndexEXT(rq, true)];
                 col = vec3(float(pc & 255u), float((pc >> 8) & 255u), float((pc >> 16) & 255u)) / 255.0;
-                dbg = vec3(1.0, 0.0, 0.0);                                    // hit, shaded by the triangle's colour
+                float cov = float(pc >> 24) / 255.0;
+                dbg = vec3(1.0, 0.0, 0.0);       // hit, shaded by the triangle's colour
+                hidden = true;
+                vec3 H = O + R * hit_t;
+                float lh = length(H);
+                if (lh >= u_rt_sky_dist) break;  // the sky dome: shown from the sky map below
+                vec4 ch = u_proj * vec4(H, 1.0);
+                if (ch.w > 1e-5) {
+                    vec2 uvh = ch.xy / ch.w * 0.5 + 0.5;
+                    if (uvh.x > 0.0 && uvh.x < 1.0 && uvh.y > 0.0 && uvh.y < 1.0) {
+                        float wdh = wd_at(uvh);
+                        float ls = is_far(wdh) ? 1e9 : length(vpos(uvh, wdh));
+                        if (abs(ls - lh) < 0.03 * lh + 0.05) { col = texture(u_color, uvh).rgb; dbg = vec3(0.0, 1.0, 0.0); hidden = false; break; }   // visible: the real shaded colour
+                        if (ls > lh * 1.04 + 0.3) { tmin = hit_t + 0.05; hit = false; continue; }   // the picture shows what is behind it: a see-through texel
+                    }
+                }
+                if (cov > 0.97 || pass == 3) break;
+                cut += trans * cov * col * u_rt_hidden;
+                trans *= 1.0 - cov;
+                tmin = hit_t + 0.05;
+                hit = false;
             }
             vec3 H = O + R * (hit ? hit_t : 500.0);
-            bool hidden = hit;                                                    // cleared below when the hit shows its real on-screen colour
-            bool sky = !hit || length(H) >= u_rt_sky_dist;                        // the sky dome (or nothing): the floor already carries a baked sky, so it counts less
-            vec4 ch = u_proj * vec4(H, 1.0);
-            if (ch.w > 1e-5) {
-                vec2 uvh = ch.xy / ch.w * 0.5 + 0.5;
-                bool on = uvh.x > 0.0 && uvh.x < 1.0 && uvh.y > 0.0 && uvh.y < 1.0;
-                if (hit && length(H) < u_rt_sky_dist) {
-                    if (on) {
-                        float wdh = wd_at(uvh);
-                        if (!is_far(wdh) && abs(length(vpos(uvh, wdh)) - length(H)) < 0.03 * length(H) + 0.05) { col = texture(u_color, uvh).rgb; dbg = vec3(0.0, 1.0, 0.0); hidden = false; }   // visible: the real shaded colour
-                    }
-                } else {                                                      // the sky (a miss or a hit on the dome): the picture's sky in that direction
-                    vec2 uvs = clamp(uvh, vec2(0.02), vec2(0.98));
-                    if ((on || !hit) && is_far(wd_at(uvs))) { col = texture(u_color, uvs).rgb; dbg = vec3(1.0, 1.0, 0.0); hidden = false; }   // off screen, a dome hit keeps its triangle colour
-                    hit_t = 0.25 * u_rt_refl_len;
+            bool sky = !hit || length(H) >= u_rt_sky_dist;    // the sky dome (or nothing): the floor already carries a baked sky, so it counts less
+            if (sky) {
+                vec4 sm = sky_map(Rw);                         // the stage's sky as seen so far, by world direction
+                vec3 scr = u_rt_sky;
+                vec4 ch = u_proj * vec4(H, 1.0);
+                if (ch.w > 1e-5) {                              // old fallback: the picture's sky in that direction, if it is the sky there
+                    vec2 uvs = clamp(ch.xy / ch.w * 0.5 + 0.5, vec2(0.02), vec2(0.98));
+                    if (is_far(wd_at(uvs))) scr = texture(u_color, uvs).rgb;
                 }
-            } else if (hit && length(H) >= u_rt_sky_dist) hit_t = 0.25 * u_rt_refl_len;
+                col = mix(scr, sm.rgb, sm.a);
+                hidden = false;
+                dbg = vec3(1.0, 1.0, 0.0);
+                hit_t = 0.25 * u_rt_refl_len;
+            }
+            if (hidden) col *= u_rt_hidden;      // a surface the camera cannot see (an underside, a back): its flat colour is unlit, so show it dim
+            col = cut + trans * col;
             // The effects layer (orbs, auras, glass: blended draws that write no depth): the closest one in front of the opaque hit,
             // shown with its real on-screen colour when it is visible there, else its triangle colour, blended over the opaque reflection.
             vec3 fxc = vec3(0.0);
             float fxa = 0.0, fx_t = 0.0;
             if (u_rt_fx != 0 && !(u_rt_fx == 2 && v_uv.x < 0.5)) {   // 2 = debug split: no effects layer in the left half
                 rayQueryEXT rf;
-                rayQueryInitializeEXT(rf, u_tlas, gl_RayFlagsOpaqueEXT, 0x2, (u_view_inv * vec4(O, 1.0)).xyz, 0.0,
-                                      normalize((u_view_inv * vec4(R, 0.0)).xyz), hit ? hit_t : u_rt_refl_len);
+                rayQueryInitializeEXT(rf, u_tlas, gl_RayFlagsOpaqueEXT, 0x2, Ow, 0.0, Rw, hit ? hit_t : u_rt_refl_len);
                 while (rayQueryProceedEXT(rf)) {}
                 if (rayQueryGetIntersectionTypeEXT(rf, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
                     fx_t = rayQueryGetIntersectionTEXT(rf, true);
@@ -707,9 +789,8 @@ const char* const k_rt_refl = R"GLSL(
                     }
                 }
             }
-            if (hidden && !sky) col *= u_rt_hidden;      // a surface the camera cannot see (an underside, a back): its flat colour is unlit, so show it dim
             float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -V), 0.0, 1.0), 5.0);
-            float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden && !sky ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
+            float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
             o_refl = vec4(col * k, k);
             if (fxa > 0.0) {
                 float kf = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
@@ -784,10 +865,18 @@ const char* const k_rt_code = R"GLSL(
             } else
 )GLSL";
 static int env_int_dbg() { const char* e = std::getenv("PSPRECOMP_RT_REFL_DEBUG"); return e ? (std::atoi(e) == 2 ? 2 : 1) : 0; }
-std::string rt_main_source() {
+// sky: the variant for ray-traced reflections, which reads the sky map (u_env). The Vulkan layer has 4 sampler bindings per
+// program, so that variant gives the screen-space effects layer's two samplers to the sky map (the effects layer is never on
+// together with ray-traced reflections: have_fx). The other variant has no sky map (u_env_on is 0 there).
+std::string rt_main_source(bool sky) {
     std::string s = k_fs_main;
     auto rep = [&](const char* marker, const char* with) { size_t i = s.find(marker); if (i != std::string::npos) s.replace(i, std::strlen(marker), with); };
+    if (sky) {
+        rep("uniform sampler2D u_fxc;", "uniform sampler2D u_env;");
+        rep("uniform sampler2D u_fxd;", "#define u_fxc u_env\n#define u_fxd u_env");
+    }
     rep("//@RT_DECL", k_rt_decl);
+    rep("//@SKY_DECL", sky ? "" : "#define u_env u_color");
     rep("//@RT_CODE", k_rt_code);
     rep("//@RT_REFL", k_rt_refl);
     rep("//@RT_LIGHTS", k_rt_lights);
@@ -802,6 +891,10 @@ GLuint g_depth_tex = 0, g_depth_fbo = 0;
 GLuint g_color_tex = 0, g_color_fbo = 0;                     // half-res copy of the scene
 GLuint g_fx_tex[2] = {0, 0}, g_refl_tex = 0;
 GLuint g_main_fbo = 0, g_fx_fbo[2] = {0, 0};                 // main: fx[0] + refl; fx_fbo[i]: fx[i] alone
+GLuint g_env_tex = 0, g_env_fbo = 0;                          // the sky map (k_fs_env), not tied to the screen size
+bool g_env_fp16 = false;
+int g_env_stage = -2;
+constexpr int kEnvW = 512, kEnvH = 256;
 
 GLuint compile(GLenum type, const char* const* body, int n) {
     const char* src[6];
@@ -1102,8 +1195,9 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     bool use_rt = false;
     const bool use_rt_sh = sc.rt_ready && cs > 0 && psp_rt_enabled(), use_rt_refl = sc.rt_ready && rt_refl_on;
     if (use_rt_sh || use_rt_refl) {
-        if (!g_main_rt_p.id && !g_main_rt_p.failed) { static const std::string src = rt_main_source(); build(g_main_rt_p, src.c_str()); }
-        use_rt = g_main_rt_p.id != 0;
+        Prog& rp = use_rt_refl ? g_main_rt_sky_p : g_main_rt_p;
+        if (!rp.id && !rp.failed) { const std::string src = rt_main_source(use_rt_refl); build(rp, src.c_str()); }
+        use_rt = rp.id != 0;
     }
     view_dir(sc.view, wup, up);
     if (dbg_print) {
@@ -1156,8 +1250,46 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     };
     auto loc = [](GLuint p, const char* n) { return glGetUniformLocation(p, n); };
 
+    float vm[16] = {sc.view[0], sc.view[1], sc.view[2], 0.f, sc.view[3], sc.view[4], sc.view[5], 0.f,
+                    sc.view[6], sc.view[7], sc.view[8], 0.f, sc.view[9], sc.view[10], sc.view[11], 1.f};
+    // 0: the sky map (ray-traced reflections only), from this frame's sky pixels
+    bool have_env = false;
+    if (use_rt && use_rt_refl && build(g_env_p, k_fs_env)) {
+        const int sid = psp_stage_id();
+        if (!g_env_fbo || g_env_fp16 != g_fp16) {
+            if (g_env_fbo) glDeleteFramebuffers(1, &g_env_fbo);
+            if (g_env_tex) glDeleteTextures(1, &g_env_tex);
+            g_env_fp16 = g_fp16;
+            g_env_tex = make_tex(g_fp16 ? GL_RGBA16F : GL_RGBA8, GL_RGBA, g_fp16 ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE, kEnvW, kEnvH, GL_LINEAR);
+            glGenFramebuffers(1, &g_env_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, g_env_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_env_tex, 0);
+            if (!complete()) { std::fprintf(stderr, "[SCREENFX] sky map framebuffer incomplete\n"); glDeleteFramebuffers(1, &g_env_fbo); glDeleteTextures(1, &g_env_tex); g_env_fbo = g_env_tex = 0; }
+            g_env_stage = -2;
+        }
+        if (g_env_fbo) {
+            glBindFramebuffer(GL_FRAMEBUFFER, g_env_fbo);
+            glViewport(0, 0, kEnvW, kEnvH);
+            if (sid != g_env_stage) {   // a new stage (or none): forget the old sky
+                glClearColor(0.f, 0.f, 0.f, 0.f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                g_env_stage = sid;
+            }
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            set_common(g_env_p.id, kEnvW, kEnvH);
+            bind_tex(1, g_color_tex, g_smp_lin);
+            glUniform1i(loc(g_env_p.id, "u_color"), 1);
+            glUniformMatrix4fv(loc(g_env_p.id, "u_view"), 1, GL_FALSE, vm);
+            glUniform1f(loc(g_env_p.id, "u_w"), env_float("PSPRECOMP_RT_SKY_MAP_W", 0.25f));
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glDisable(GL_BLEND);
+            have_env = !std::getenv("PSPRECOMP_RT_SKY_MAP_OFF");
+        }
+    }
+
     // 1: AO + contact shadow + reflection (half resolution)
-    Prog& mp = use_rt ? g_main_rt_p : g_main_p;
+    Prog& mp = !use_rt ? g_main_p : use_rt_refl ? g_main_rt_sky_p : g_main_rt_p;
     glBindFramebuffer(GL_FRAMEBUFFER, g_main_fbo);
     glViewport(0, 0, g_hw, g_hh);
     set_common(mp.id, g_hw, g_hh);
@@ -1190,7 +1322,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1i(loc(mp.id, "u_use_rt_refl"), use_rt_refl ? 1 : 0);
         glUniform1i(loc(mp.id, "u_rt_dbg"), env_int_dbg());
         { const int q = psp_rt_refl_quality(); glUniform1i(loc(mp.id, "u_rt_refl_rays"), q >= 3 ? 3 : 1); }
-        glUniform1f(loc(mp.id, "u_rt_rough"), env_float("PSPRECOMP_RT_ROUGH", 0.03f));
+        glUniform1f(loc(mp.id, "u_rt_rough"), env_float("PSPRECOMP_RT_ROUGH", 0.02f));
         glUniform1i(loc(mp.id, "u_rt_fx"), !sc.rt_fx || psp_rt_refl_quality() < 2 || std::getenv("PSPRECOMP_RT_FX_OFF") ? 0 : std::getenv("PSPRECOMP_RT_FX_SPLIT") ? 2 : 1);
         glUniform1f(loc(mp.id, "u_rt_hidden"), env_float("PSPRECOMP_RT_HIDDEN", 0.45f));
         glUniform1f(loc(mp.id, "u_rt_sky_amt"), env_float("PSPRECOMP_RT_SKY_AMT", 0.4f));
@@ -1198,8 +1330,10 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1i(loc(mp.id, "u_refl_split"), std::getenv("PSPRECOMP_RT_REFL_SPLIT") ? 1 : 0);
         glUniform1f(loc(mp.id, "u_rt_refl_len"), env_float("PSPRECOMP_RT_REFL_LEN", 300.f));
         glUniform3f(loc(mp.id, "u_rt_sky"), env_float("PSPRECOMP_RT_SKY_R", 0.45f), env_float("PSPRECOMP_RT_SKY_G", 0.55f), env_float("PSPRECOMP_RT_SKY_B", 0.75f));
-        float vm[16] = {sc.view[0], sc.view[1], sc.view[2], 0.f, sc.view[3], sc.view[4], sc.view[5], 0.f,
-                        sc.view[6], sc.view[7], sc.view[8], 0.f, sc.view[9], sc.view[10], sc.view[11], 1.f}, vinv[16];
+        float vinv[16];
+        // the sky map, or a blank one (alpha 0 = never seen: the old fallback) when it is off
+        if (use_rt_refl) { bind_tex(4, have_env ? g_env_tex : g_fx_tex[1], g_smp_lin); glUniform1i(loc(mp.id, "u_env"), 4); }
+        glUniform1i(loc(mp.id, "u_env_on"), have_env ? 1 : 0);
         if (!invert4(vm, vinv)) std::memset(vinv, 0, sizeof vinv);
         glUniformMatrix4fv(loc(mp.id, "u_view_inv"), 1, GL_FALSE, vinv);
         glUniform3f(loc(mp.id, "u_light_w"), wl_n[0], wl_n[1], wl_n[2]);
@@ -1261,7 +1395,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glDisable(GL_BLEND);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glBindVertexArray(0);
-    for (int u = 3; u >= 0; --u) {
+    for (int u = 4; u >= 0; --u) {
         glActiveTexture(GL_TEXTURE0 + u);
         glBindSampler(u, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
