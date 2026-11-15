@@ -688,7 +688,7 @@ uint32_t trans(uint32_t v) {
 // them the hit messages. An extra is neither, so the victim of its attacks reacted but nobody took damage. The extra therefore takes the place of
 // its slot fighter's assist pointer (the retail assist actor is left alone otherwise; PSPRECOMP_TAGTEAM_KEEPASSIST=1 keeps the old behaviour).
 void fix_assist() {
-    if (std::getenv("PSPRECOMP_TAGTEAM_KEEPASSIST")) return;
+    if (!std::getenv("PSPRECOMP_TAGTEAM_SWAPASSIST")) return;   // old behaviour (the extra replaces the slot fighter's assist): the retail assist then stops working and the extra is treated as an invisible assist; off by default
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
         if (!e.started || !ok(e.actor, 0x12D0) || !ok(e.slot_actor, 0x12D0)) continue;
@@ -1194,6 +1194,39 @@ void ctrl_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_ctrl(rdram, ctx);
 }
 
+// FUN_08AFD424(m): the per-slot combat module (m+0 = the slot fighter) walks [slot actor, its assist] and runs FUN_08AFD170(m, is_main, &actor) for each (hit
+// results -> bravery / HP damage). The extras get the same call as if they were that slot fighter's second assist, without touching the real assist pointer.
+FuncPtr g_orig_afd424 = nullptr;
+void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const uint32_t m = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_afd424(rdram, ctx);
+    if (!g_nextra || !ok(m, 0x100)) return;
+    const uint32_t slot = rd(m);
+    static const int mode = std::getenv("PSPRECOMP_TAGTEAM_AFDMODE") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_AFDMODE")) : 0;   // 0 off (no effect found), 1 module clone, 2 second assist call
+    static uint32_t clone_of[8] = {}, clone_src[8] = {};
+    if (mode == 0) return;
+    for (int i = 0; i < g_nextra; i++) {
+        Extra& e = g_extra[i];
+        if (!e.started || e.slot_actor != slot || !alive(e.actor) || !ok(e.actor, 0x12D0)) continue;
+        if (mode == 2) {   // the extra as the module's second assist: FUN_08AFD170(m, 0, &actor)
+            const uint32_t scratch = static_cast<uint32_t>(ctx->r[29]) - 128u;
+            wr(scratch, e.actor);
+            call(0x08AFD170u, m, 0u, scratch);
+        } else {           // the extra as a slot fighter of its own: a copy of the slot's module whose actor is the extra (no assist)
+            if (clone_src[i] != m || !clone_of[i]) {
+                clone_of[i] = call(ALLOC, 0x400u); clone_src[i] = m;
+                for (uint32_t o = 0; o < 0x400u; o += 4) wr(clone_of[i] + o, ok(m + o, 4) ? rd(m + o) : 0u);
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] combat module of extra %08X cloned from %08X at %08X\n", e.actor, m, clone_of[i]);
+            }
+            wr(clone_of[i], e.actor);
+            const uint32_t keep = rd(e.actor + 0x1108u); wr(e.actor + 0x1108u, 0);
+            { const recomp_context sv = *ctx; ctx->r[4] = static_cast<int32_t>(clone_of[i]); g_orig_afd424(rdram, ctx); *ctx = sv; }
+            wr(e.actor + 0x1108u, keep);
+        }
+    }
+}
+
 }  // namespace
 
 // Called by the scene tick (hooks_main.cpp) before every frame's update: between frames no fighter is mid-update, the safe point for the swap.
@@ -1261,6 +1294,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     psp_dispatch_register(BATTLE_SETUP, setup_hook);
     psp_dispatch_register(FLOW_STEP, flow_hook);
     if (std::getenv("PSPRECOMP_TAGTEAM_HITLOG")) { g_orig_hit = fn(0x08AEF284u); if (g_orig_hit) psp_dispatch_register(0x08AEF284u, hit_hook); g_orig_world = fn(0x089DEDB0u); if (g_orig_world) psp_dispatch_register(0x089DEDB0u, world_hook); }
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOAFD")) { g_orig_afd424 = fn(0x08AFD424u); if (g_orig_afd424) psp_dispatch_register(0x08AFD424u, afd424_hook); }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOCTRL")) { g_orig_ctrl = fn(0x08886C88u); if (g_orig_ctrl) psp_dispatch_register(0x08886C88u, ctrl_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_ENDLOG")) install_end_log(std::make_integer_sequence<int, 16>{});
     g_orig_rel1 = psp_dispatch_probe_lookup(0x0886CAA0u); g_orig_rel2 = psp_dispatch_probe_lookup(0x0886A140u);

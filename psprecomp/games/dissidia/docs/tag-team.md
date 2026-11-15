@@ -388,3 +388,8 @@ victim's bravery) and a gdb hardware watchpoint on the victim's BRV word (the wr
   in that state; the reticle was not investigated.
 - Debug aids: `_HPLOG=1|2` (`[HP]` lines per fighter, `_HPBOOST=1`), `_HPSCAN=1` (holders of each fighter's address, actor diffs, fighter fields,
   vtable), `_HITLOG=1` (world hook), `_HPM_WATCH`, `_HPM_GDB` (raise SIGTRAP at a window start for gdb with the hardware watchpoint).
+
+## Assists vs the damage fix (play test 14 Nov, late)
+The tag-hp fix (extra takes the slot fighter's assist pointer) broke real assists: the extra was treated as an invisible assist (assist animation, no model, attacks do nothing).
+It is now OFF by default (`PSPRECOMP_TAGTEAM_SWAPASSIST=1` brings it back). Tried instead: a second `FUN_08AFD424` pass for the extras (`PSPRECOMP_TAGTEAM_AFDMODE=1` module clone, `=2` second assist call, off by default): extras still deal no damage as attackers
+(the hit-time readers of `slot+0x1108` are in `FUN_08AE259C/08AE6678/08AE6160/08AE5BC8...`). Open: make the extras attackers work without taking the assist pointer (substitute the pointer around those readers).
