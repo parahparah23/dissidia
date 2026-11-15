@@ -41,6 +41,9 @@ struct ScreenFxScene {
     GLuint fx_color = 0;   // screen-space effects layer (psp_ge_draw.cpp fxl_*): blended draws, RGBA8 (alpha = coverage) + depth texture; 0 = none
     GLuint fx_depth = 0;
     bool rt_ready = false; // psp_rt.h: this frame's world-space triangles are built; the contact shadow uses ray queries
+    bool refl_table = false;   // psp_refl_table.h is active: only surfaces in the reflectivity mask reflect (none without triangles)
+    const float* refl_tris = nullptr;   // the reflective draws' triangles (psp_ge_draw.cpp g_rml_tris): per vertex clip x y z w + material byte
+    int refl_nverts = 0;
 };
 
 /// Apply the effects to the colour of `fbo` (w x h texels, colour texture `color_tex`, depth renderbuffer attached).
