@@ -941,6 +941,17 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             if (sel != last_sel || t != last_t || rd(L + 264u) != last_mode) { last_mode = rd(L + 264u); std::fprintf(stderr, "[TAGTEAM] t=%.1fs human lock: sel %d -> %d, mode %u, target %08X -> %08X (+0x2FC %08X foe %08X)\n", dissidia_battle_age() / 60.0f, last_sel, sel, rd(L + 264u), last_t, t, rd(hum + 0x2FCu), rd(hum + 0x300u)); last_sel = sel; last_t = t; }
         }
     }
+    if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_NATKO")) {   // debugging, natural KO: "<who>:<seconds>:<hp>": the victim gets that live HP once and its bravery is held at 0 (broken), then a REAL HP attack kills it
+        static uint32_t vic = 0; static bool set = false;
+        char who[16] = {}; float at = 0; int hp = 40; std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_NATKO"), "%15[a-z0-9]:%f:%d", who, &at, &hp);
+        const uint32_t hs = rd(g_bs + 84u);
+        if (!set && dissidia_battle_age() / 60.0f >= at && g_nextra) {
+            uint32_t a = 0;
+            if (!std::strcmp(who, "human")) a = rd(g_bs + 56u + 4u * hs); else if (!std::strcmp(who, "cpu")) a = rd(g_bs + 56u + 4u * (1u - hs));
+            if (ok(a, 0x12D0)) { const uint32_t st = rd(a + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0xCu, static_cast<uint32_t>(hp)); vic = a; set = true; std::fprintf(stderr, "[TAGTEAM] t=%.1fs NATKO victim %s %08X live HP %d, bravery held at 0\n", dissidia_battle_age() / 60.0f, who, a, hp); } }
+        }
+        if (vic && owner == vic) { const uint32_t st = rd(vic + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0x14u, rd(st + 0x14u) & 0xFFFF0000u); static int lasthp = -1; const int h = static_cast<int32_t>(rd(st + 0xCu)); if (h != lasthp) { std::fprintf(stderr, "[TAGTEAM] t=%.2fs NATKO victim live HP %d script %d\n", dissidia_battle_age() / 60.0f, h, static_cast<int16_t>(rd(vic + 0x180u) & 0xFFFF)); lasthp = h; } } }
+    }
     if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_KO")) {   // debugging: "<who>:<seconds>" puts a fighter on 1 HP and 0 bravery so the next hit KOs it (who = human, cpu, enemy2, partner)
         static bool done = false; static uint32_t target = 0; static int lasthp = -1;
         char who[16] = {}; float at = 0; std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_KO"), "%15[a-z0-9]:%f", who, &at);
@@ -1115,6 +1126,9 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                     if (FILE* f = std::fopen("/home/schindler/dissidia/tt/wa.txt", "w")) { std::fprintf(f, "%p\n", static_cast<void*>(g_ram + (wa & 0x07FFFFFFu))); std::fclose(f); }
                     std::raise(SIGTRAP);   // under gdb (tt/gdbwrap.sh): stops here, the gdb script sets the watchpoint
                 }
+                if (const char* vh = std::getenv("PSPRECOMP_TAGTEAM_HPM_VHP")) { const uint32_t sv = rd(v + 0x52Cu); wr(sv + 0xCu, static_cast<uint32_t>(std::atoi(vh))); std::fprintf(stderr, "[HPM] victim live HP set to %s\n", vh); }   // a natural-KO setup: low HP, the next landed HP hit is lethal
+                if (const char* wo = std::getenv("PSPRECOMP_TAGTEAM_HPM_WATCH_ACT")) { const uint32_t o = static_cast<uint32_t>(std::strtoul(wo, nullptr, 16)); psp_mem_watch_set(v + o); std::fprintf(stderr, "[HPM] watching victim actor %08X + %X\n", v, o); }
+                if (std::getenv("PSPRECOMP_TAGTEAM_HPM_WATCHHP")) { psp_mem_watch_set(rd(v + 0x52Cu) + 0xCu); std::fprintf(stderr, "[HPM] watching victim live HP\n"); }
                 if (std::getenv("PSPRECOMP_TAGTEAM_HPM_WATCH")) { psp_mem_watch_set(rd(v + 0x52Cu) + 0x14u); std::fprintf(stderr, "[HPM] window %s -> %s: watching victim BRV\n", ra, rv); }
                 call(SET_FOE, a, v);
                 call(LOCK_SET, rd(a + 0x5ACu), v);
