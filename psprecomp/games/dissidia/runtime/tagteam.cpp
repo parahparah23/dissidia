@@ -610,8 +610,10 @@ void init_reserve() {
     flush();
 }
 
+uint32_t g_frame_ctr = 0, g_hud_last = 0; bool g_hud_up = false;   // the overlay is cleared when the battle stops ticking the HUD (match over, left, results screen)
 void hud_update() {
     if (!g_hud_on) return;
+    g_hud_last = g_frame_ctr; g_hud_up = true;
     static bool inited = false;
     if (!inited) { inited = true; init_reserve(); if (g_log) { std::fprintf(stderr, "[TAGTEAM] labels:"); for (int i = 0; i <= 36; i++) { const uint32_t p = rd(0x089D6CA8u + 4u * static_cast<uint32_t>(i)); char b[9] = {}; if (ok(p, 8)) for (int k = 0; k < 8; k++) b[k] = static_cast<char>(g_ram[(p + k) & 0x07FFFFFFu]); std::fprintf(stderr, " %d=%s", i, b); } std::fprintf(stderr, "\n"); } }
     update_party_reserve();
@@ -1601,6 +1603,8 @@ template <int... I> void install_chain(std::integer_sequence<int, I...>) {
 // Called by the scene tick (hooks_main.cpp) before every frame's update: between frames no fighter is mid-update, the safe point for the swap.
 uint32_t dissidia_camera_manager();
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
+    g_frame_ctr++;
+    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); }   // no battle tick for a while: take the panels and strips off the screen
     if (g_bs && !g_late_q.empty() && rd(g_bs + 72) != 0) {   // a group battle: the extras at the start are the party's second members, not clones (the party record is not filled when the setup runs, so this is decided once the battle runs)
         g_ram = rdram; g_ctx = ctx;
         static uint32_t planned_bs = 0;
