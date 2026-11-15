@@ -368,15 +368,20 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
   - movement every fighter has (pad input, not plya): jump, double jump, dodge, air dodge, dash (R+Triangle held), air dash, block
     (R held), run (stick forward 1.5 s), run + jump. They start after 1 s of settling. Running is camera-relative, so `run` also checks
     that the camera ends up in the same place.
-- **Samples on the 30 Hz lattice** (`PSPRECOMP_TEST_PARITY=1`, framerate.cpp): every rate is a multiple of 30, so each has an update
-  at game time k x 33.3 ms; there the runtime logs `[PAR] <ms> | player: script motion motion-time x y z fwd.x fwd.z | dummy: same | hits`.
+- **Samples every update** (`PSPRECOMP_TEST_PARITY=1`, framerate.cpp): `[PAR] <ms> | player: script motion motion-time x y z fwd.x fwd.z |
+  dummy: same | hits`; updates between two 30 Hz frames carry a `~` after the time. Every rate is a multiple of 30, so each has an update
+  at game time k x 33.3 ms (the lattice) as well.
   `sync` / `waitidle` end on the lattice and event times are compared with a 0.01 ms tolerance (the sum of 8.33 ms steps is
   99.99999 at 100 ms), so a trial starts at the same game moment at every rate. `[PARHIT] <ms> dummy atkp=<id> react=<n> flags dmg by=`
   comes from FUN_0883A150 (take hit: a0 defender, a1 the 64-byte hit record).
-- **Judging**, each rate against 30 fps, per trial (index k = the same game moment): the player's script sequence and the dummy's
-  motion sequence (same ids in order, each change within `--frame-tol` 30 Hz frames); the dummy's hits (count, attack ids and
-  reactions in order, time, damage); both paths (largest gap <= `--pos-tol` m or `--pos-rel` of the distance covered); when the player
-  is idle again. `--repeat-base` makes a second 30 fps run: trials that differ between two 30 fps runs are reported as
+- **Judging**, each rate against 30 fps, per trial: the player's script sequence and the dummy's motion sequence on the lattice (same
+  ids in order, each change within `--frame-tol` 30 Hz frames); the dummy's hits (count, attack ids and reactions in order, time within
+  `--frame-tol` frames, HP damage within `--dmg-tol` 3%: HP damage is the attacker's bravery, which varies by ~2% between two 30 fps
+  runs); both paths (largest gap <= `--pos-tol` m or `--pos-rel` of the distance covered) at the best alignment within `--shift` 1 frame,
+  in whole updates of the faster rate; peak heights within `--height-tol` 0.1 m; when the player is idle again.
+- **Phase is not judged.** A move starts at the end of the first update after it was asked for: 33 ms after the press at 30 fps, 17 ms
+  at 60, 8 ms at 120, so a faster rate can lead by up to a frame (the same 25 ms the Jecht chain windows showed). Comparing paths at a fixed
+  game time would fail every move for that; the report counts the trials where the player ran ahead instead. `--repeat-base` makes a second 30 fps run: trials that differ between two 30 fps runs are reported as
   NONDETERMINISTIC, not as failures. With the GPU, two 30 fps runs agreed on every trial in the checks made (Squall, Exdeath).
 - **Speed**: boot to fight ~35 s (`--direct`, 4x menus); then fast-forward. On the GPU about 10x real time at 30 fps, 3.5x at 120.
   `PSPRECOMP_TEST_NO_DRAW=2` (set by `--no-draw`) stops the draw calls once the clock runs (`ge_draw_request_no_raster`): 2.6x faster
@@ -384,14 +389,12 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
 
 ### Findings so far (15 Nov, Squall and Exdeath, 30 vs 60 / 120 fps)
 
-- **The first update of a motion moves the fighter a whole 30 Hz frame at 60 fps and above.** Block (Squall, motion 470): at 30 fps
-  the first sample after the press has motion time 0 at x -3.327 and the next motion time 2 at -3.087; at 60 fps the first sample has
-  motion time 1 but already x -3.087, at 120 fps motion time 1.5 and -3.087. The motion clock starts on the same update at every rate;
-  the displacement of the first update(s) is not scaled. The fighter stays a frame ahead from then on (0.3-0.8 m in the first 100 ms of
-  block, jump, dodge and most attacks). NOT a latency difference: delaying the scripted presses by a frame
-  (`PSPRECOMP_TEST_INPUT_DELAY=33.3`, `--input-delay`) makes 60 / 120 fps a frame late instead.
-- **Jumps are lower**: Squall's jump peaks at 4.10 m (30 fps), 3.94 m (60), 3.85 m (120); an Exdeath air action started 0.4 s after a
-  jump starts 0.2 m lower at 120 fps and lands 67 ms earlier.
+- **Moves lead by up to a frame at high rates** (block, jump, dodge and most attacks were 0.3-0.8 m "off" in the first 100 ms when
+  compared at the same game time): the phase described above, not a speed difference. Delaying the scripted presses by a whole frame
+  (`PSPRECOMP_TEST_INPUT_DELAY=33.3`, `--input-delay`) makes the fast rates a frame late instead; the right delay would be 33.3 ms minus
+  one update. Dodge and block still differ after the alignment (0.8 m / 0.3 m around the first frame).
+- **Jumps get lower as the rate rises**: Squall's jump peaks at 4.10 m (30 fps), 3.94 (60), 3.85 (120), 3.80 (240); double jump 6.71,
+  6.39, 6.21, 6.12; an Exdeath air action started 0.4 s after a jump starts 0.2 m lower at 120 fps and lands 67 ms earlier.
 - **Multi-hit moves land a different number of hits**: Exdeath's action 1960 (script 10000, attack 1271 repeated): 19 hits at 30 fps,
   18 at 120; Squall's action 1454 (script 10015): 2 hits at 30, 1 at 60; follow-ups chosen by a mash differ.
 - **Camera**: after `home` the 120 fps camera ends up on the other side (running forward goes +z instead of -z).
