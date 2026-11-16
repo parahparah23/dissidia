@@ -316,12 +316,23 @@ uniform float u_clearz;     // the cleared (background) depth
 uniform float u_sky;        // depth_t above which a pixel is the sky dome / background
 uniform vec2 u_fade;        // view distance where the effects start to fade out / are gone (the 16-bit depth is too coarse far away)
 
-float wd_at(vec2 uv) { return texture(u_depth, uv).r; }
+uniform int u_depth_snap;    // 0 = the old unsnapped read (PSPRECOMP_FX_DEPTH_SNAP=0, for comparison)
+// The depth at uv, from one definite full-resolution texel. The passes run at half resolution, where a pixel's centre lies exactly on
+// the border between two depth texels: nearest sampling then picks either one depending on the GPU's rounding (Adreno / Turnip did
+// not do it consistently), so the normals rebuilt from neighbouring depths jumped in bands along pixel columns and depth contours,
+// and AO and the ray-traced shadow's facing term drew evenly spaced lines on walls (RP6, render scale 2). The quarter-texel pull-back
+// makes every read land inside a texel.
+// The position is rebuilt at the same texel centre the depth came from (vpos): a depth from one place and a screen position from another
+// put a point off its surface by up to half a texel's depth change, which is large on a floor seen at a low angle (lines across floors).
+uniform int u_snap_split;   // debug PSPRECOMP_FX_SNAP_SPLIT=1
+vec2 snap_uv(vec2 uv) { return u_depth_snap == 0 ? uv : (floor(uv * u_size - 0.25) + 0.5) / u_size; }
+float wd_at(vec2 uv) { return texture(u_depth, snap_uv(uv)).r; }
 float depth_t(float wd) { return (wd - u_dr.x) / (u_dr.y - u_dr.x); }   // 0 at the near plane, 1 at the far plane
 bool is_far(float wd) { return abs(wd - u_clearz) < 3.0 / 65535.0 || depth_t(wd) > u_sky; }
 vec3 vpos(vec2 uv, float wd) {
     float z = depth_t(wd) * 2.0 - 1.0;
-    vec4 p = u_inv * vec4(uv * 2.0 - 1.0, z, 1.0);
+    vec2 ps = (u_snap_split != 0 && v_uv.x < 0.5) ? uv : snap_uv(uv);   // debug split: the left half rebuilds at the unsnapped point
+    vec4 p = u_inv * vec4(ps * 2.0 - 1.0, z, 1.0);
     return p.xyz / p.w;
 }
 vec3 vpos(vec2 uv) { return vpos(uv, wd_at(uv)); }
@@ -471,7 +482,7 @@ void main() {
     o_fx = vec4(ao, sh, 0.0, 1.0);
     if (u_fx_dbg == 2 && u_have_fx != 0) {   // debug: the effects layer itself, wherever the layer holds something
         vec4 fc = texture(u_fxc, v_uv);
-        if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, v_uv).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
+        if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, snap_uv(v_uv)).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
     }
 
     // How reflective this surface is (issue #2): the material's reflectivity from the mask, in any orientation (walls too). Without a
@@ -511,7 +522,7 @@ void main() {
                 // fragment's own depth; an effect later covered by opaque geometry (its depth behind the scene's) is not there.
                 vec4 fc = texture(u_fxc, uv2);
                 if (fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) {
-                    float efd = texture(u_fxd, uv2).r;
+                    float efd = texture(u_fxd, snap_uv(uv2)).r;
                     if ((is_far(wd2) || fx_floats(uv2, wd2, efd))) {
                         float de = length(vpos(uv2, efd)), ds = length(S);
                         if (ds > de - 0.02 * lp && ds < de + stepl * 2.5 + u_fx_thick) { fx_hit = true; fx_t = t; fx_c = fc; fx_uv = uv2; }
@@ -615,9 +626,9 @@ void main() {
     float r = 0.0;
     float wd = wd_at(v_uv);
     if (u_have != 0 && !is_far(wd)) {
-        float m = texture(u_mask, v_uv).a;
+        float m = texture(u_mask, snap_uv(v_uv)).a;
         if (m > 0.0) {
-            float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, v_uv).r));
+            float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, snap_uv(v_uv)).r));
             if (abs(a - b) < 0.002 * a + 0.01) r = m;
         }
     }
@@ -1431,6 +1442,10 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1f(c.clearz, sc.clear_z);
         glUniform1f(c.sky, sky_t);
         glUniform2f(c.fade, fade0, fade1);
+        static const int depth_snap = std::getenv("PSPRECOMP_FX_DEPTH_SNAP") ? std::atoi(std::getenv("PSPRECOMP_FX_DEPTH_SNAP")) : 1;
+        glUniform1i(glGetUniformLocation(prog, "u_depth_snap"), depth_snap);
+        static const int snap_split = std::getenv("PSPRECOMP_FX_SNAP_SPLIT") ? 1 : 0;
+        glUniform1i(glGetUniformLocation(prog, "u_snap_split"), snap_split);
     };
     auto loc = [](GLuint p, const char* n) { return glGetUniformLocation(p, n); };
 
@@ -1623,6 +1638,11 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
     if (ao || cs || dark < 0.999f) {
         glEnable(GL_BLEND);
+        // debug PSPRECOMP_FX_SHOW=<s>: the AO x shadow factor alone, as the picture, from <s> seconds after the first 3D frame
+        static const char* fx_show_e = std::getenv("PSPRECOMP_FX_SHOW");
+        static const auto fx_t0 = std::chrono::steady_clock::now();
+        const bool fx_show = fx_show_e && std::chrono::duration<double>(std::chrono::steady_clock::now() - fx_t0).count() >= std::atof(fx_show_e);
+        if (fx_show) glBlendFunc(GL_ONE, GL_ZERO); else
         glBlendFunc(GL_ZERO, GL_SRC_COLOR);              // dst * (AO * (1 - shadow))
         set_common(g_mul_p.id, w, h);
         bind_tex(1, g_fx_tex[0], g_smp_nn);
