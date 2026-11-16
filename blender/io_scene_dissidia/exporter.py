@@ -16,6 +16,9 @@ from .dfx import gim
 from . import common
 
 MAX_SUBSET = 8          # PSP GE skinning matrix limit per draw
+# a draw's vertex count is 16 bits on the GE (PRIM count; the GMO DrawCall's verts_per_prim feeds it) and its indices are
+# 16 bits: past 65,535 the count wraps and most of the draw is lost (a 41k-triangle body drew its head as a few scraps)
+MAX_DRAW_TRIS = 65535 // 3
 
 
 class ExportError(Exception):
@@ -81,13 +84,13 @@ def _limit_weights(w, limit=4):
     return {k: v / s for k, v in items}
 
 
-def _batch_triangles(tri_bones, limit=MAX_SUBSET):
-    """Greedy grouping of triangles so each batch references <= limit bones."""
+def _batch_triangles(tri_bones, limit=MAX_SUBSET, max_tris=MAX_DRAW_TRIS):
+    """Greedy grouping of triangles so each batch references <= limit bones and holds <= max_tris triangles."""
     batches = []
     for ti, bs in enumerate(tri_bones):
         for b in batches:
             u = b['bones'] | bs
-            if len(u) <= limit:
+            if len(u) <= limit and len(b['tris']) < max_tris:
                 b['bones'] = u
                 b['tris'].append(ti)
                 break
