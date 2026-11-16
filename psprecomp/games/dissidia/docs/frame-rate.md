@@ -244,3 +244,9 @@ Measured with `tools/combo_timing.py combos --rates 30,60,120` (accepted press d
 
 Rush > Neutral 2 at 120 Hz was repeated 5 times at 358 ms (Neutral 2 each time) and 367 ms (the repeat move each time). Everything is identical at 60 Hz and within one 8 ms update at 120 Hz.
 Not measured: the air chain at 60 / 120 Hz, other fighters (their first update still gets the step, no grid).
+
+### Face animation (blinks, mouth shapes) above 60 Hz (16 Nov)
+
+The face texture animation (`FUN_0886E5D0`: the GMO TexAnm groups, eyes and mouth, and the `face_texture` event 0x0214) is stepped by its only caller, the actor update `FUN_0883C2E8`, with `trunc(actor step)` whole ticks: 2 per update at 30 Hz, 1 at 60 Hz, **0 at 90 / 120 Hz** (step 0.67 / 0.5).
+Above 60 Hz faces then only moved on the rare update with a whole-tick step (a move's first update): a blink that had closed the eyes stayed closed (cutscenes have no move starts, so for good), pattern switches waited, and a model could keep showing a wrong cell.
+Fix (`face_step_hook`, on by default, `PSPRECOMP_FACE_STEP=0` turns it off): above 30 Hz the fraction is carried per model and the face steps whole ticks as they add up (every 2nd update at 120 Hz), 2 ticks per 33 ms at every rate. 30 Hz is unchanged. `PSPRECOMP_FACE_LOG=1` logs each call whose tick count it changed.
