@@ -125,6 +125,9 @@ Not yet run: the GitHub workflow, and an update against a real release.
 See [installer.md](installer.md), "Android progress": the renderer talks OpenGL ES through `runtime/include/psp_gl.h`; the release ships the prebuilt
 Android core and libraries (SDL2, FreeType, FFmpeg decoders) built with NDK r27c, an unsigned APK skeleton (manifest + SDL's Java activity) and a
 pure-Python packer/signer (APK Signature Scheme v2, `android/apk_pack.py`, a public debug key), so the player's machine needs only the NDK compiler.
+Every native library is linked for 16 KB pages (`ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES`, i.e. `-z max-page-size=16384`; the on-device link
+passes it to `ld.lld` directly), so the game loads on devices running a 16 KB-page kernel and debuggable builds show no "isn't 16 KB
+compatible" dialog; `apk_pack.py` warns about any `lib/*.so` whose LOAD segments are aligned below 16 KB.
 
 ## Keeping the shader list complete
 
