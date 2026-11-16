@@ -22,7 +22,7 @@ below. With one, in Konsole: clone the repo, put your game at `~/dissidia/game.i
 
 The install step creates a build container, installs the compilers and libraries inside it, extracts and decrypts your
 ISO, rebuilds the analysis from the shipped metadata (no Ghidra), compiles the game, writes
-`~/dissidia/work/play.sh` and (with `--add-to-steam`) puts it in the Steam library as "Dissidia Trēdecim",
+`~/dissidia/work/play.sh` and (with `--add-to-steam`) puts it in the Steam library as "Dissidia 012 Duodecim Recompiled",
 with its own library artwork. The compile alone takes a long time;
 nobody has timed it on a Deck. For scale: on a 2-core x86-64 VM sharing its CPU with other builds, the
 recompiler (cargo) plus the whole runtime took about 40 minutes from a clean work directory with a mostly cold
@@ -50,7 +50,7 @@ if it was downloaded on its own).
 * **First run.** If it is not inside a checkout (downloaded from GitHub on its own), it clones the project into
   `~/dissidia/repo`, asking for the address (prefilled). An existing
   `~/dissidia/repo` that predates the tool is pulled first. Then it starts the copy inside the checkout.
-* **Icons.** Every start writes a "Dissidia Trēdecim Setup" launcher to the desktop and to
+* **Icons.** Every start writes a "Dissidia 012 Duodecim Recompiled Setup" launcher to the desktop and to
   `~/.local/share/applications` (Games), pointing at the checkout's copy, with the Steam icon.
 * **Install** asks for the game file if `~/dissidia/game.iso` is missing (checks it is an ISO9660 or CSO image;
   hard-links it when it is on the same drive, copies it with a progress bar otherwise, e.g. from an SD card), then
@@ -209,7 +209,7 @@ In Desktop Mode (Konsole):
 (or add `--add-to-steam` to a full or `--update` run). `steam_shortcut.py` then, for every Steam account on the
 Deck:
 
-* adds a non-Steam shortcut to `~/dissidia/work/play.sh` named **Dissidia Trēdecim**, or renames the entry that is
+* adds a non-Steam shortcut to `~/dissidia/work/play.sh` named **Dissidia 012 Duodecim Recompiled**, or renames the entry that is
   already there for this launcher (an older `play.sh` / `run.sh` / `run.py` / "Dissidia 012 (native)" entry, or any
   entry pointing into `~/dissidia`), keeping its play time, collections and Launch Options; duplicates are removed.
   The first change backs up `shortcuts.vdf` to `shortcuts.vdf.before-tredecim` (same folder);
@@ -222,7 +222,7 @@ close it (`steam -shutdown`), makes the change and starts Steam again. It refuse
 Re-running it is harmless (it updates the same entry); after new artwork is pulled, run the same command again.
 
 Then: controller (below), return to Game Mode (the "Return to Gaming Mode" icon on the desktop) and start
-Dissidia Trēdecim from the library. Do not force a Proton compatibility tool on it; this is a native Linux program.
+Dissidia 012 Duodecim Recompiled from the library. Do not force a Proton compatibility tool on it; this is a native Linux program.
 Launch Options (`--crisp` etc.) are set in the entry's Properties as before.
 
 By hand instead: Desktop Mode, Steam: Games > Add a Non-Steam Game to My Library > Browse, filter "All files", pick
@@ -230,7 +230,7 @@ By hand instead: Desktop Mode, Steam: Games > Add a Non-Steam Game to My Library
 artwork (the files in `games/dissidia/steam/`).
 
 The artwork is the game's own: `steam_art.py` takes the PSP's XMB background (`PIC1.PNG`, the crystal sea),
-paints out its "Duodecim 012" logo and sets the DISSIDIA / TRĒDECIM title over it in Cinzel (SIL OFL,
+paints out its "Duodecim 012" logo and sets the DISSIDIA / DUODECIM RECOMPILED title over it in Cinzel (SIL OFL,
 `games/dissidia/steam/fonts`). It is drawn once on the Mac and the results are committed, so the Deck needs no
 Pillow. To redraw:
 

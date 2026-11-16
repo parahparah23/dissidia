@@ -22,13 +22,13 @@ import sys
 INSTALL = """## Download ONE file
 | Your device | Download this |
 |---|---|
-| Windows PC | `DissidiaRecomp-Setup-{v}-windows-x86_64.exe` |
-| Linux PC | `DissidiaRecomp-Setup-{v}-linux-x86_64` (`chmod +x` it, then run it) |
-| Android phone / handheld | `DissidiaRecomp-Setup-{v}-android.apk` |
+| Windows PC | `DissidiaRecomp-Setup-windows-x86_64.exe` |
+| Linux PC | `DissidiaRecomp-Setup-linux-x86_64` (`chmod +x` it, then run it; also for the Steam Deck) |
+| Android phone / handheld | `DissidiaRecomp-Setup-android.apk` |
 
 Run it and follow the wizard. You need your own copy of the game (ISO or CSO); the wizard writes `setup.log` into the install folder, so attach that to bug reports.
 
-The other files (`.tar.xz`, `.zip`, `manifest.json`, `manifest.json.sig`) are what the in-app updater downloads. You do not need them, unless you would rather unpack the Windows / Linux release by hand.
+The other files (`DissidiaRecomp-Setup-{v}-*` are the same setups with the version in the name; `.tar.xz`, `.zip`, `manifest.json`, `manifest.json.sig`) are what the in-app updater downloads. You do not need them, unless you would rather unpack the Windows / Linux release by hand.
 """
 
 # Titles / commit subjects that are about the project's own tooling, not the game a player runs.

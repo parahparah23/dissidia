@@ -247,4 +247,10 @@ jobs:
           python3 release/make_notes.py --tag "$VERSION" -o notes.md
           # The .sha256 / .fp files are build-time leftovers (manifest.json carries the signed hashes and fingerprints): not published, so the
           # asset list stays short.
+          # Stable-named copies of the setup files, so .../releases/latest/download/DissidiaRecomp-Setup-<platform> (the README's links)
+          # always reaches the newest one. The versioned files stay: manifest.json points at them.
+          for f in dist/DissidiaRecomp-Setup-*; do
+            case "$f" in *.sha256|*.fp) continue ;; esac
+            cp "$f" "dist/$(basename "$f" | sed -E 's/^DissidiaRecomp-Setup-[0-9][0-9.]*-/DissidiaRecomp-Setup-/')"
+          done
           find dist -type f ! -name '*.sha256' ! -name '*.fp' -print0 | xargs -0 gh release create "$VERSION" --repo "${{ github.repository }}" --title "$VERSION" --notes-file notes.md

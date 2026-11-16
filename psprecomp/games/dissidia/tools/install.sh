@@ -117,7 +117,7 @@ step "Python packages for the character mods"
 LAUNCH="$WORK/play.sh"
 cat > "$LAUNCH" <<EOS
 #!/usr/bin/env bash
-# Dissidia Trēdecim launcher, written by install.sh. Any run.sh flag works: --crisp, --fullscreen, --swap-ab ...
+# Dissidia 012 Duodecim Recompiled launcher, written by install.sh. Any run.sh flag works: --crisp, --fullscreen, --swap-ab ...
 exec "$HERE/run.sh" "$WORK" "\$@"
 EOS
 chmod +x "$LAUNCH"

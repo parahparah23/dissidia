@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""steam_shortcut.py - put the native build in the Steam library as "Dissidia Trēdecim", with its artwork.
+"""steam_shortcut.py - put the native build in the Steam library as "Dissidia 012 Duodecim Recompiled", with its artwork.
 
     steam_shortcut.py <launcher> [--name NAME] [--art DIR] [--match-dir DIR ...] [--launch-options OPTS]
                       [--steam-dir DIR] [--yes] [--dry-run]
@@ -32,8 +32,9 @@ import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ART = os.path.normpath(os.path.join(HERE, "..", "steam"))
-NAME = "Dissidia Trēdecim"
-OLD_NAMES = {"play.sh", "run.sh", "run.py", "dissidia 012 (native)", "dissidia 012", "dissidia"}
+NAME = "Dissidia 012 Duodecim Recompiled"
+OLD_NAMES = {"play.sh", "run.sh", "run.py", "dissidia 012 (native)", "dissidia 012", "dissidia",
+             "dissidia trēdecim"}                                 # the old name: renamed in place, play time kept
 ART = (("capsule.png", "{id}p.png"), ("wide.png", "{id}.png"), ("hero.png", "{id}_hero.png"),
        ("logo.png", "{id}_logo.png"), ("icon.png", "{id}_icon.png"))
 LOGO_POS = {"nVersion": 1, "logoPosition": {"pinnedPosition": "BottomLeft", "nWidthPct": 42, "nHeightPct": 60}}

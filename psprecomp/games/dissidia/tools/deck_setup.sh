@@ -9,7 +9,7 @@
 #   --dry-run            print the commands that would run, without running them
 #   --install-distrobox  if distrobox is missing, install it into ~/.local (downloads the official install
 #                        script from https://raw.githubusercontent.com/89luca89/distrobox/main/install)
-#   --add-to-steam       when finished, put the launcher in the Steam library as "Dissidia Trēdecim" with its artwork
+#   --add-to-steam       when finished, put the launcher in the Steam library as "Dissidia 012 Duodecim Recompiled" with its artwork
 #                        (steam_shortcut.py: capsule, banner, hero, logo, icon; an earlier entry for this launcher is
 #                        renamed in place, keeping play time and Launch Options). Steam is closed for a moment and
 #                        started again if it is running. Desktop Mode only.
@@ -229,7 +229,7 @@ echo "+ write $LAUNCH"
 if [ "$DRY" = 0 ]; then
   cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
-# Dissidia Trēdecim (the native Dissidia 012 build) launcher: runs the game inside the '$NAME' container. This file
+# Dissidia 012 Duodecim Recompiled (the native Dissidia 012 build) launcher: runs the game inside the '$NAME' container. This file
 # is what the Steam entry starts (deck_setup.sh --add-to-steam, see games/dissidia/docs/steamdeck.md).
 # Written by deck_setup.sh.
 #
@@ -258,7 +258,7 @@ EOF
 fi
 }
 add_to_steam() {
-  # The Steam entry ("Dissidia Trēdecim") and its library artwork; host python3, standard library only.
+  # The Steam entry ("Dissidia 012 Duodecim Recompiled") and its library artwork; host python3, standard library only.
   local args=("$WORK/play.sh" --art "$HERE/../steam" --match-dir "$WORK" --match-dir "$(dirname "$REPO")")
   [ "$DRY" = 0 ] || args+=(--dry-run)
   [ "$CLOSE_STEAM" = 0 ] || args+=(--yes)
@@ -370,6 +370,6 @@ LAUNCH="$WORK/play.sh"
 cat <<EOF
 
 Done. Play from Desktop Mode with:   $LAUNCH      (look: $PRESET; "$LAUNCH --retro" or "--crisp" for the other)
-Add it to Steam (Game Mode):         $0 --launcher-only --add-to-steam   (as "Dissidia Trēdecim", with artwork)
+Add it to Steam (Game Mode):         $0 --launcher-only --add-to-steam   (as "Dissidia 012 Duodecim Recompiled", with artwork)
 Saves:                               $WORK/ms0/PSP/SAVEDATA   (back this folder up)
 EOF
