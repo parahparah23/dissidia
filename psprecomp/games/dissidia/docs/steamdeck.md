@@ -1,33 +1,52 @@
 # Dissidia 012 (native build) on the Steam Deck
 
-Status: the game is playable end to end (menus, story mode with its movies, 3D battles); what is still off is
-under "Known limitations". **This guide has never been run on a Deck**: it was written and checked on a headless
-x86-64 Linux box (no Deck, no podman, no distrobox, no ISO). Every step that touches Deck hardware or SteamOS is
-listed again under "Known unknowns" at the end; read that list before you start so a failure there does not
-surprise you. If something breaks, `deck_setup.sh --check` and the log `~/dissidia/work/last_run.log` are what to
-attach to a bug report.
+Status: tested on an OLED Steam Deck (SteamOS, November 2026) in Desktop Mode and in Game Mode (through gamescope), with
+OpenGL and Vulkan. Real fights run at 90 fps, the OLED panel's refresh, at render scale 3 with HD textures on Vulkan, and
+ray-traced shadows and reflections keep 87-90 fps (RADV offers ray query). That build was cross-compiled on a PC with the
+release toolchain bundle and copied over. What is still off is under "Known limitations", and what has not been run on a Deck
+yet is under "Still untested" at the end. If something breaks, attach the log `~/dissidia/work/last_run.log` (and for the
+from-source route, `deck_setup.sh --check`) to a bug report.
 
 You need your own copy of the game: an `.iso`, or a `.cso` (read directly, no conversion). ZSO, DAX,
 raw 2352-byte `.bin` dumps and PSN `PBP` packages are not supported (convert with e.g.
 `maxcso --decompress`). No game data is distributed with this repository. The tooling targets the
 European PSN image (`ULES01505`); the US UMD (`ULUS10566`) has the same code and works too, with less testing.
-The setup script tells you if your disc is a different one.
+The setup tells you if your disc is a different one.
 
 ## The short version
 
-The steps are in the top-level README: [Steam Deck](../../../../README.md#steam-deck). Without a terminal: in Desktop
-Mode, double-click `tools/deck_gui.sh` in Dolphin (Execute) and follow the dialogs; see "No terminal: `deck_gui.sh`"
-below. With one, in Konsole: clone the repo, put your game at `~/dissidia/game.iso`, run `deck_setup.sh ~/dissidia/game.iso --check`, then
-`deck_setup.sh ~/dissidia/game.iso --install-distrobox --add-to-steam`.
+**With the setup app (recommended).** In Desktop Mode (Steam button > Power > Switch to Desktop), download the Linux setup
+from the top-level README ([Install](../../../../README.md#install)), make it executable (right-click > Properties >
+Permissions > **Is executable**), double-click it, pick your game file, tick **Add to Steam** among the extras and let it
+build. Then switch back to Game Mode and start the game from your library. The setup app needs no container: it carries its
+own compiler.
 
-The install step creates a build container, installs the compilers and libraries inside it, extracts and decrypts your
+**From source, without a terminal** (the older route; it builds inside a distrobox container):
+
+1. On GitHub, open `psprecomp/games/dissidia/tools/deck_gui.sh` and click **Download raw file**. It lands in your Downloads folder.
+2. In Dolphin, right-click it > Properties > Permissions > tick **Is executable**. Then double-click it and choose **Execute**.
+3. Follow the dialogs. It downloads the project into `~/dissidia/repo`, asks for your game file (`.iso` or `.cso`, from the
+   Deck, an SD card or a USB stick; it is placed at `~/dissidia/game.iso`), builds the game with a progress bar and adds
+   **Dissidia Trēdecim** to Steam. Details: "No terminal: `deck_gui.sh`" below.
+
+**From source, in Konsole:**
+
+```bash
+cd ~/dissidia
+git clone https://github.com/schindlershadow/dissidia repo
+repo/psprecomp/games/dissidia/tools/deck_setup.sh ~/dissidia/game.iso --check
+repo/psprecomp/games/dissidia/tools/deck_setup.sh ~/dissidia/game.iso --install-distrobox --add-to-steam
+```
+
+and to update: `~/dissidia/repo/psprecomp/games/dissidia/tools/deck_setup.sh ~/dissidia/game.iso --update`.
+
+The from-source install creates a build container, installs the compilers and libraries inside it, extracts and decrypts your
 ISO, rebuilds the analysis from the shipped metadata (no Ghidra), compiles the game, writes
 `~/dissidia/work/play.sh` and (with `--add-to-steam`) puts it in the Steam library as "Dissidia Trēdecim",
-with its own library artwork. The compile alone takes a long time;
-nobody has timed it on a Deck. For scale: on a 2-core x86-64 VM sharing its CPU with other builds, the
-recompiler (cargo) plus the whole runtime took about 40 minutes from a clean work directory with a mostly cold
-ccache; the Deck's 4-core/8-thread Zen 2 APU should be in the same range, and repeats take minutes. Leave the Deck plugged in, set Desktop Mode's screen
-dimming/sleep to "never" (System Settings > Power Management), and keep it awake.
+with its own library artwork. The compile alone takes a long time. For scale: on a 2-core x86-64 VM sharing its CPU with
+other builds, the recompiler (cargo) plus the whole runtime took about 40 minutes from a clean work directory with a mostly
+cold ccache; the Deck's 4-core/8-thread Zen 2 APU should be in the same range, and repeats take minutes. Leave the Deck
+plugged in, set Desktop Mode's screen dimming/sleep to "never" (System Settings > Power Management), and keep it awake.
 
 If it stops half-way (battery, sleep, SteamOS update, Ctrl+C): **run the same command again**. Finished steps
 are skipped and the C++ build resumes where it stopped. See "Resuming" below.
@@ -299,11 +318,13 @@ Input to any of the buttons above if you want them.
   Deck's buttons to the keyboard keys of the right-hand column. There is no keyboard quit key; leave with
   the Steam button > Exit Game, or close the window.
 
-## Settings menu and 60 fps
+## Settings menu and frame rate
 
-In game, L3 + R3 (press both sticks) opens the settings menu (Esc / F1 on a keyboard): resolution, render scale,
-frame rate (30 or 60 fps battles) and Quit Game. Choices are saved in the work folder's `settings.ini` and win over
-the launch flags below. Details: [frame-rate.md](frame-rate.md).
+In game, L3 + R3 (press both sticks) opens the Settings screen (Esc / F1 on a keyboard); it is also a row
+in the title screen, the start menu and the battle pause menu. Frame rate is any multiple of 30 up to 240: the default
+follows the display, so 60 on the LCD Deck and 90 on the OLED. Renderer (OpenGL or Vulkan; Vulkan is needed for the
+ray-traced effects), render scale, HD textures and the rest are there too. Choices are saved in the work folder's
+`settings.ini` and win over the launch flags below. Details: [settings-menu.md](settings-menu.md), [frame-rate.md](frame-rate.md).
 
 ## Window size and scaling (other options)
 
@@ -369,8 +390,10 @@ reports. Most other `PSPRECOMP_*` variables in the source are developer diagnost
 * **Battle flickers / characters partly drawn, menus fine** (seen on the first Deck run, 2026-10-18; the
   fast and the legacy renderer both do it, `--ge-sync 1` fixes it but is slow). The renderer was
   developed on a software GL where GPU work completes immediately; the Deck's real driver runs it
-  asynchronously. `run.sh` now defaults to `--ge-sync flush` on a Steam Deck, which fixed it completely in a
-  test on a Deck LCD (2026-10-26); `--ge-sync off` goes back to no sync. If it still flickers, try these in
+  asynchronously. With OpenGL, `run.sh` defaults to `--ge-sync flush` on a Steam Deck, which fixed it completely in a
+  test on a Deck LCD (2026-10-26); `--ge-sync off` goes back to no sync. With Vulkan there is no default sync (a
+  flush there is a queue submit per batch, which cost a third of the frame rate) and no flicker was seen in a
+  36-frame ray-traced test on an OLED Deck (2026-11-13). If it still flickers, try these in
   Steam (Properties > Launch Options), one at a time, cheapest first, and note which one makes battles clean:
   `--ge-sync 3` (wait for the GPU once per frame), `--ge-sync 2` (once per display list),
   `--ge-sync flush`, `--ge-sync 1` (after every batch: the known fix, slowest).
@@ -385,14 +408,21 @@ reports. Most other `PSPRECOMP_*` variables in the source are developer diagnost
 * Out of memory during the build: `deck_setup.sh <iso> --jobs 2` (or 1); finished work is kept.
 * Reclaim space after a successful build: `~/dissidia/work/output` and `overlays` (generated C++) are only
   needed to rebuild; `ccache -C` inside the container clears the compiler cache.
+* **Two "Controller opened" lines in the log, sticks jumping between devices**: the Deck's raw pad was opened through
+  SDL's own Steam Deck HID driver as well as Steam's virtual pad (the buttons are OR-ed, the sticks follow whichever
+  device moved last). Add `export SDL_JOYSTICK_HIDAPI_STEAMDECK=0` to `play.sh` above the `exec` line (Launch Options
+  variables do not reach the script, see Controls).
+* **Game file on an SD card or USB stick** (from-source route): paths outside `$HOME` are refused because `/run/media/...`
+  may not be visible inside the container at the same path. Copy the file into `~/dissidia/` (`deck_gui.sh` does this
+  for you).
 
 ## On a normal Linux PC
 
 Same thing without the container: install the packages above with your distribution's package manager
 (roughly Fedora: `SDL2-devel freetype-devel ffmpeg-free-devel mesa-libGL-devel zlib-devel openssl-devel`;
 Arch: `sdl2 freetype2 ffmpeg mesa zlib openssl base-devel cmake`; those two lists are from memory and
-unchecked), then follow [Linux PC](../../../../README.md#linux-pc) in the top-level README from step 2 (`run.sh` takes
-`--retro --fullscreen` too).
+unchecked), then follow [Building from source](../../../../README.md#building-from-source) in the top-level README
+(`run.sh` takes `--retro --fullscreen` too). Or skip all of it and use the setup app, which brings its own compiler.
 
 Ubuntu 24.04 is the only distribution the dependency list above has been built on.
 
@@ -445,50 +475,28 @@ ghidra-allegrex v21.3, see the top-level README), or `--skip-analyze` to reuse e
   possible outside gamescope (gamescope composites whole frames). `PSPRECOMP_VSYNC=1` turns the driver's vsync on at
   the risk of stalling the render thread.
 
-## Known unknowns (everything here needs a real Deck)
+## Tested on a Deck
 
-Verified on the development box (headless Xvfb 1280x800, Mesa software GL, a `distrobox` shim): `--retro` places the
-picture at 960x544 centred on a 1280x800 window (`[PRESENT] drawable 1280x800 -> dst (160,128)-(1120,672) nearest
-+bars`) with nearest-neighbour textures; `--crisp` gives `dst (0,37)-(1280,762) linear` at render scale 3; the
-preset/flag precedence in `run.sh`; `--check`, `--dry-run`, `--launcher-only` and the text of the generated
-`play.sh` including the environment hand-over; and that `pipeline.sh` builds the recompiler and the runtime from a
-clean work directory and a fresh build tree and the result boots to the title and a battle. Not covered even
-there: real `--fullscreen` (Xvfb has no window manager, so the borderless fullscreen request is ignored; the
-tests used an explicit 1280x800 window instead), the ISO extraction on a real disc image (none available; the
-existing extracted `disc0` and decrypted EBOOT were reused), apt and rustup (already installed there).
-Not verified, and the first things to look at if a step fails:
+On an OLED Steam Deck (SteamOS, Mesa RADV, November 2026) with a binary cross-compiled on a PC with the release toolchain
+bundle (`toolchain/build_bundle.py`) and copied over:
 
-1. **SteamOS has podman and distrobox.** Podman is believed to ship with SteamOS 3.5+; distrobox may or may
-   not. `--check` reports both. The install route (`--install-distrobox`) goes to `~/.local/bin`.
-2. **Rootless podman prerequisites** (`/etc/subuid`, `/etc/subgid`, user namespaces, `newuidmap`) and the
-   `docker.io/library/ubuntu:24.04` image on distrobox: a UID-1000 `ubuntu` user exists in that image; recent
-   distrobox handles it, older versions may not. Fallback image above.
-3. **Build time and RAM** of the compile on the Deck's APU (never timed), and whether three jobs fit beside
-   Desktop Mode. SteamOS swap is small.
-4. **ISO supply**: the script expects a file under `$HOME`. An SD card (`/run/media/...`) may not be visible
-   inside the container at the same path, which is why paths outside `$HOME` are refused. Copy the ISO in.
-5. **`pspdecrypt`** has never been built or run by this tooling on real input (the dev box already held a
-   decrypted EBOOT); the decrypt step is the likeliest first failure in step 4. Fallback: dump the decrypted EBOOT
-   with PPSSPP and pass it via `setup_from_iso.py --decrypted-eboot`.
-6. **Launching from Game Mode**: that Steam runs an executable shell script as a non-Steam shortcut (the file
-   picker needs "All files"), that `distrobox enter` works without a terminal, that the container's `bash`
-   receives the forwarded environment (`.play_env`), and that rootless podman starts at all from the Game Mode
-   session (it needs the user session bus and `XDG_RUNTIME_DIR`, which Steam launches inherit).
-7. **Controller**: the claim that the container sees Steam's virtual Xbox pad (it depends on `/dev/input/*`
-   being shared and on SDL finding the device without a udev database in the container; SDL falls back to
-   guessing the device class). Whether `SDL_GAMECONTROLLER_IGNORE_DEVICES` gets through (so the raw Deck pad
-   is not opened as well), and that the default "Gamepad" template is what a new non-Steam entry gets. The
-   Deck's raw pad would also open as a second controller through SDL's own Steam Deck HID driver; with both open
-   the buttons are OR-ed but the sticks follow whichever device moved last. If you see two "Controller opened"
-   lines in the log, set a Launch Option or `export SDL_JOYSTICK_HIDAPI_STEAMDECK=0` in `play.sh`.
-8. **Display**: that SDL creates a 3.3 core GL context from the container's Mesa on the Deck GPU under gamescope
-   (XWayland), that `FULLSCREEN_DESKTOP` gives exactly 1280x800 there, and that the picture is not rescaled again
-   by gamescope. Check the `[PRESENT] drawable ...` line in the log: it must say `drawable 1280x800 -> dst
-   (160,128)-(1120,672) nearest +bars` for `--retro`.
-9. **Performance and thermals**: the batched renderer at 2x/3x on the Deck's GPU, frame pacing without driver
-   vsync, battery draw. Nobody has measured any of it. The `[FPS]` lines in the log give frame rate.
-10. **Audio** through PipeWire from inside the container, and sleep/resume behaviour.
-11. **Steam integration details**: whether Game Mode picks up all five pictures from `grid/` (written by
-    `steam_shortcut.py`, not yet tried on the Deck), controller template,
-    Steam's own overlay and Quick Access menu do not work through the container (the overlay is not injected
-    into the container process).
+* Desktop Mode (KDE Wayland) and Game Mode. In Game Mode, gamescope only shows X11 windows: SDL 2 picks X11 when it
+  has it, and the toolchain bundle builds SDL with its X11 backend (a build without it played sound behind Steam's
+  launch splash, with no picture).
+* OpenGL and Vulkan; ray query is offered, so ray-traced shadows and reflections work. Real fights at render scale 3 with
+  HD textures run at 90 fps, the panel's refresh; all ray-traced effects at their highest settings at 87 fps (GPU-bound).
+  The render thread was the limit (42-52 fps) until the per-batch flush was turned off for Vulkan.
+* The Steam shortcut written by `steam_shortcut.py`.
+* An automated battle harness over ssh: `tools/deck_battle.py` ([testing.md](testing.md)).
+
+Earlier, on an LCD Deck (October 2026): the container route (`deck_setup.sh`), and the battle flicker fixed by
+`--ge-sync flush` (Troubleshooting).
+
+## Still untested
+
+* The setup app on a Deck (it is the same Linux x86-64 build that is tested on desktops).
+* The `deck_gui.sh` / `deck_setup.sh` route has not been re-run on a Deck since October: podman / distrobox on a
+  current SteamOS, the container's controller and audio passthrough, build time and RAM on the Deck's APU.
+* Sleep / resume in the middle of a fight, battery draw.
+* Steam's own overlay and Quick Access menu do not work through the container (the overlay is not injected
+  into the container process); the setup app's build does not use a container.

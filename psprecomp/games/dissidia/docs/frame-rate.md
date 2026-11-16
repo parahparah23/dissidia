@@ -1,13 +1,13 @@
-# 60 fps and the settings menu
+# Frame rates above 30 (60, 90, 120 ... 240 fps)
 
 ## Using it
 
-- **Settings menu**: Esc or F1 on a keyboard, Guide or L3 + R3 (both stick buttons) on a pad. The game pauses while it
-  is open. Rows: Display (Fullscreen / Window), Window Size (a whole multiple of 480x272, or 1280 x 800, the Deck's
-  screen, when the desktop is big enough; in fullscreen it is remembered for Window mode), Render Scale (1x to 4x),
-  Frame Rate (30 / 60), FPS Counter (a small transparent frames-per-second number in the top-right corner; saved as
-  `fps_counter`, `PSPRECOMP_FPS_COUNTER=1` turns it on without the menu), Quit Game (press twice). Left / right changes a value, Cross cycles it, Circle or Start closes.
-  It is drawn from the game's own menu textures, like the save dialog.
+- **Settings menu** (all pages and rows: [settings-menu.md](settings-menu.md)): Esc or F1 on a keyboard, Guide or L3 + R3
+  (both stick buttons) on a pad, or the Settings row in the title screen, start menu and battle pause menu. The game
+  pauses while it is open. **Frame Rate** is any multiple of 30 up to 240; the default follows the display's refresh
+  rate (60 on a 60 Hz screen, 90 on the OLED Steam Deck, 120 on a 120 Hz one). Menus stay at 30, battles run at the
+  chosen rate. **FPS Counter** shows a small frames-per-second number in the top-right corner (saved as `fps_counter`,
+  `PSPRECOMP_FPS_COUNTER=1` turns it on without the menu).
 - **Debug page**: L / R (shoulder buttons), or Q / E / Tab on a keyboard, switches between System and Debug:
   - Performance Overlay: for debugging. Frames per second, average and worst frame time over the last half second,
     presents per second (a gap to the fps means the presenter runs without new game frames), render scale and process

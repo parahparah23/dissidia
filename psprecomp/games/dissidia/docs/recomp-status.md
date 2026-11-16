@@ -1,5 +1,8 @@
 # Native build (static recompilation): history and findings
 
+> **Historical.** This is a dated log of October 2026; its "Where it stands" and "Next" parts describe the state then.
+> For the current state see the top-level README and the release notes on the Releases page.
+
 How the native build came together, from the first code census to the first battle, and the soak-test findings after. How to build and run it today: [../README.md](../README.md). Engine internals: [psprecomp/ARCHITECTURE.md](../../../ARCHITECTURE.md) and [psprecomp/DEBUGGING.md](../../../DEBUGGING.md).
 
 - [Dissidia 012 static recompilation (2026-10-15)](#dissidia-012-static-recompilation-2026-10-15)
@@ -74,6 +77,10 @@ Three more runtime bugs stood between the finite matrices and a picture: (1) the
 1. Battle fidelity: specular/fog, compare shading against PPSSPP, performance (software GL does millions of prims per minute — a real GPU on the Deck will be fine, but the vertex path is CPU-side), then play through to the end of the battle and the result screen.
 2. Packaging for Steam Deck (SDL2/OpenGL build, data from the user's own ISO via `setup_from_iso.py` + `pipeline.sh`; untested end to end on a Deck).
 3. Upstream the generic bits — none are Dissidia-specific.
+
+Outcome (November 2026): 1 is done (the batched GPU-skinning renderer and the Vulkan
+backend replaced the CPU vertex path as the default) and so is 2 (the setup app for Windows, Linux, Steam Deck and
+Android, and `deck_setup.sh`); 3, upstreaming the generic recompiler and runtime fixes to PSPRecomp, is still open.
 
 ### Tooling notes
 - Ghidra in the Claude VM on the Mac (arm64 Linux): built the missing decompiler from source; Ghidra 12 scripts are Java. PSPRecomp pins Ghidra 12.0.2 + allegrex v21.3, but 12.1.3 + v21.4 works.
