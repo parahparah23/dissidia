@@ -1291,7 +1291,10 @@ void ui_param_hook(uint8_t* rdram, recomp_context* ctx) {
     if (l30_active()) g_l30_calls[0][g_l30_logic_now ? 0 : 1]++;
     // 30 Hz logic: the UI update still runs on every frame (counted: as often on drawn-only frames as on gameplay ones), so its fixed
     // steps are scaled by 30 / rate as at a native high rate (EX gauge, EX core, lock-on reticle, banter ran 2-4x fast).
-    const float k = l30_active() ? 30.0f / static_cast<float>(g_rate) : g_ticks * 0.5f;
+    // (exact 1/256-tick steps, step_for: 30 / rate is not exact at 90, 150, 180, 210 fps, and a HUD animation that waits to land on its end
+    // value could then miss it)
+    static uint64_t ui_idx = 0;
+    const float k = l30_active() ? step_for(g_rate, ui_idx++) * 0.5f : g_ticks * 0.5f;
     const uint32_t mgr = r32(UI_MGR_PTR);
     if (!g_ui_step || k == 1.0f || overlay_id() != 1 || !ok(mgr) || g_ram[(mgr + 33u) & 0x07FFFFFFu] != 0 || g_ram[(mgr + 34u) & 0x07FFFFFFu] != 0) { g_orig_ui_param(rdram, ctx); return; }
     const float was = rdf(UI_STEP);

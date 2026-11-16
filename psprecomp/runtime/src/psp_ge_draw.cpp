@@ -30,6 +30,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <array>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -2641,6 +2642,22 @@ struct IpStat { float pw[3] = {}, eye[3] = {}; int pcount = -1; uint32_t gen = 0
     int scount = -1; float s_live[3] = {}, s_prev[3] = {}, s_blend[3] = {}; uint32_t s_key = 0; int s_how = 0; bool s_rec = false; };   // trace 2: the biggest unskinned 3D draw (stage): eye of its live / previous / blended view
 std::unordered_map<uint64_t, uint64_t> g_ip_vhash_prev, g_ip_vhash_cur;   // diagnostic (PSPRECOMP_INTERP_LOG): vertex bytes per draw key on gameplay frames
 uint8_t* g_ip_rdram = nullptr;
+// 2D draws that follow a fighter (lock-on ring, target pointer): the game aims them at the newest gameplay state, the 3D scene is drawn
+// blended. Per frame, every skinned draw's root on screen (PSP pixels) with the newest and with the blended matrices; a following 2D draw
+// moves by the difference of the nearest one.
+struct IpAnchor { float live[2], drawn[2]; };
+std::vector<IpAnchor> g_ip_anchors;
+uint32_t g_ip_anchor_seq = ~0u;
+bool g_ip2d_on = false;   // the draw being decoded is such a draw (set by ip_apply, cleared after the draw)
+bool ip_screen(const float* w, const float* v, const float* p, const float* b, float* out) {   // root (bone 0 origin) -> PSP screen pixels
+    float o[3] = {b[9], b[10], b[11]}, wp[3], vp[3], c[4];
+    for (int j = 0; j < 3; j++) wp[j] = o[0] * w[j] + o[1] * w[3 + j] + o[2] * w[6 + j] + w[9 + j];
+    for (int j = 0; j < 3; j++) vp[j] = wp[0] * v[j] + wp[1] * v[3 + j] + wp[2] * v[6 + j] + v[9 + j];
+    for (int j = 0; j < 4; j++) c[j] = vp[0] * p[j] + vp[1] * p[4 + j] + vp[2] * p[8 + j] + p[12 + j];
+    if (c[3] <= 0.01f) return false;
+    out[0] = (c[0] / c[3] + 1.0f) * 240.0f; out[1] = (1.0f - c[1] / c[3]) * 136.0f;
+    return true;
+}
 static IpStat g_ip_stat;
 static void ip_stat_flush() {
     static int left = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? std::atoi(e) : 0; }();
@@ -2658,14 +2675,19 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
     if (g_ip_phase <= -1.0f || ip_mode() == 0) return false;   // -1 = off; a gameplay frame shown a bit early has a small negative phase
     if (g_ip_stat.seq != g_ip_seq) ip_stat_flush();
     GeState& st = ge_get_state_mut();
-    if (st.clear_mode || ge_vtype_through(st.vertex_type)) { g_ip_stat.flat++; return false; }   // 2D (HUD, screen copies): no matrices
-    g_ip_stat.draws++;
+    if (st.clear_mode) { g_ip_stat.flat++; return false; }
     if (g_ip_rec && (!g_ip_have || g_ip_gen != g_ip_tab_gen)) {   // a new gameplay frame: its draws become the current table
         g_ip_prev.swap(g_ip_cur); g_ip_cur.clear();
         g_ip_have = g_ip_tab_gen + 1 == g_ip_gen;                       // the previous table is the gameplay frame just before
         g_ip_tab_gen = g_ip_gen;
     }
     if (g_ip_seq != g_ip_occ_seq) { g_ip_occ.clear(); g_ip_occ_seq = g_ip_seq; }
+    if (ge_vtype_through(st.vertex_type)) {   // 2D (HUD, screen copies): no matrices. The HUD that follows a fighter (lock-on ring, target
+        g_ip_stat.flat++;                     // pointer: hud_fixed_tex) is placed by the game on gameplay frames only: its screen position is
+        if (hud_fixed_tex(st)) g_ip2d_on = true;   // moved with the blended fighter it is on (ge_draw_through_ip, called by the vertex decoder)
+        return false;
+    }
+    g_ip_stat.draws++;
     const uint64_t base = ip_key(st, prim_type, count), lbase = ip_key(st, prim_type, count, true);
     const uint64_t key = base ^ (static_cast<uint64_t>(g_ip_occ[base]++) * 0x9E3779B97F4A7C15ull);
     const uint64_t lkey = lbase ^ (static_cast<uint64_t>(g_ip_occ[lbase]++) * 0x9E3779B97F4A7C15ull);
@@ -2706,6 +2728,14 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
         g_ip_stat.far++; return false; }
     g_ip_stat.applied++;
     *saved = cur;
+    if (st.vertex_type & 0x1C000u) {   // a skinned draw (fighter): its root on screen, newest and blended (for following 2D draws)
+        if (g_ip_anchor_seq != g_ip_seq) { g_ip_anchors.clear(); g_ip_anchor_seq = g_ip_seq; }
+        float bw[12], bv[12], bp[16], bb[12];
+        ip_lerp(bw, pv.w, cur.w, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 12); ip_lerp(bv, pv.v, cur.v, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 12);
+        ip_lerp(bp, pv.p, cur.p, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 16); ip_lerp(bb, pv.b, cur.b, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 12);
+        IpAnchor a;
+        if (g_ip_anchors.size() < 64 && ip_screen(cur.w, cur.v, cur.p, cur.b, a.live) && ip_screen(bw, bv, bp, bb, a.drawn)) g_ip_anchors.push_back(a);
+    }
     g_ge_state_gen++;   // the draw-key cache (keyed by this) must not reuse matrices built for another draw: the blend changes them without a GE command
     const float t = ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase;   // 1: prev -> cur (one frame behind); 2: cur projected ahead
     ip_lerp(st.world_matrix, pv.w, cur.w, t, 12); ip_lerp(st.view_matrix, pv.v, cur.v, t, 12);
@@ -2724,8 +2754,26 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
     return true;
 }
 
+// Vertex decoder (through mode, PSP pixels): the offset that moves this 2D draw from where the game put it (centre cx, cy) to the blend of
+// where it was on the last two gameplay frames. false = leave it.
+bool ge_draw_through_ip(float cx, float cy, float* dx, float* dy) {
+    if (!g_ip2d_on || g_ip_anchor_seq != g_ip_seq || g_ip_anchors.empty()) return false;
+    const IpAnchor* best = nullptr; float bd = 90.0f * 90.0f;   // the fighter whose newest root is nearest (within 90 px)
+    for (const auto& a : g_ip_anchors) {
+        const float d = (a.live[0] - cx) * (a.live[0] - cx) + (a.live[1] - cy) * (a.live[1] - cy);
+        if (d < bd) { bd = d; best = &a; }
+    }
+    if (!best) return false;
+    *dx = best->drawn[0] - best->live[0]; *dy = best->drawn[1] - best->live[1];
+    if (*dx * *dx + *dy * *dy > 60.0f * 60.0f) return false;   // a cut: leave it
+    if (ip_trace_level() >= 3) std::fprintf(stderr, "[IP2D] seq %u phase %.2f centre %.1f,%.1f anchor live %.1f,%.1f drawn %.1f,%.1f -> %+.1f,%+.1f\n", g_ip_seq, g_ip_phase,
+                                            cx, cy, best->live[0], best->live[1], best->drawn[0], best->drawn[1], *dx, *dy);
+    return true;
+}
+
 void ge_draw_prim(uint8_t* rdram, int prim_type, int count) {
     g_ip_rdram = rdram;
+    struct Ip2dOff { ~Ip2dOff() { g_ip2d_on = false; } } ip2d_off;
     IpMats ip_saved;
     struct IpRestore { IpMats* m; bool on; ~IpRestore() { if (!on) return; GeState& st = ge_get_state_mut();
         std::memcpy(st.world_matrix, m->w, sizeof m->w); std::memcpy(st.view_matrix, m->v, sizeof m->v);

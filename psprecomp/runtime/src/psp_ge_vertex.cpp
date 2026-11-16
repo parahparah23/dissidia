@@ -766,6 +766,13 @@ void ge_transform_vertices(
             if (g_hud_top_rows && maxy <= float(g_hud_top_rows)) tt = g_hud_top_t;
             else if (g_hud_bottom_rows && miny >= float(272 - g_hud_bottom_rows)) tt = g_hud_bottom_t;
         }
+        if (!verts.empty()) {   // frame interpolation: a 2D draw that follows a fighter moves with the blended 3D scene (psp_ge_draw.cpp)
+            extern bool ge_draw_through_ip(float cx, float cy, float* dx, float* dy);
+            float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+            for (const auto& v : verts) { minx = std::min(minx, v.pos[0]); maxx = std::max(maxx, v.pos[0]); miny = std::min(miny, v.pos[1]); maxy = std::max(maxy, v.pos[1]); }
+            float dx = 0.0f, dy = 0.0f;
+            if (ge_draw_through_ip(0.5f * (minx + maxx), 0.5f * (miny + maxy), &dx, &dy)) for (auto& v : verts) { v.pos[0] += dx; v.pos[1] += dy; }
+        }
         for (auto& v : verts) {
             v.pos[0] = (v.pos[0] / 240.0f - 1.0f) * wx;
             v.pos[1] = (1.0f - v.pos[1] / 136.0f) * ty + tt;
