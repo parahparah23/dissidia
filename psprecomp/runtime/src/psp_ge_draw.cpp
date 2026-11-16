@@ -1659,6 +1659,9 @@ static bool g_fxl_flag = false;   // the draws being queued are effects draws (s
 // a tiled mobile GPU pays for in full (RP6, a tower top built of many reflective pieces).
 static std::vector<float> g_rml_tris[GE_MAX_TARGETS];   // per vertex: clip x y z w, material byte
 static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int count, float refl);
+static void fighter_capture(const GeState& st, uint8_t* rdram, int prim_type, int count);
+static bool g_rml_fighters[GE_MAX_TARGETS];   // the mask list also holds fighter triangles (material byte 1, fighter_capture)
+static bool fighter_mask_wanted(const GeState& st);
 static bool g_rml_flag = false;   // the draws being queued may be reflective (set by fx_track; the value comes from the bound texture)
 static void fxl_free(FxLayer& L) {
     if (L.fbo) glDeleteFramebuffers(1, &L.fbo);
@@ -2164,6 +2167,7 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         static const bool fep_log = psp_fep_log_on();
         if (fep_log) psp_fep_log_draw(rdram, state, prim_type, n, ge_texture_bound_pack_id());
         if (g_batch.refl > 0.f && !vb_on && path == 1) rml_capture(state, rdram, prim_type, n, g_batch.refl);   // reflectivity mask
+        if (path == 2 && fighter_mask_wanted(state)) fighter_capture(state, rdram, prim_type, n);   // the fighter mask (no self-shadowing)
         uint8_t* dst = stage_reserve(g_s3d, (size_t)n);
         bool ok;
         {
@@ -2839,6 +2843,7 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     const bool replace = st.texture_enable && st.tex_func == 3;
     auto rgb = [](uint32_t c, int k) { return float((c >> (8 * k)) & 255) / 255.f; };
     std::vector<uint32_t>& cols = fx ? g_rt_fx_cols[target] : g_rt_cols[target];
+    const bool skinned = ge_vtype_weight(st.vertex_type) != 0;
     auto tri_color = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) {
         float col[3] = {1.f, 1.f, 1.f};
         if (!replace) {
@@ -2863,6 +2868,7 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
             else if (lit) al *= float(st.material_alpha & 0xFFu) / 255.f;
             alpha = uint32_t(std::min(255.f, std::max(24.f, al * 255.f)));
         }
+        if (!fx) alpha = (alpha & 0xFEu) | (skinned ? 1u : 0u);   // the low bit of the coverage: a fighter's triangle (k_rt_code skips a fighter's own body)
         uint32_t o = alpha << 24;
         for (int k = 0; k < 3; k++) o |= uint32_t(std::min(255.f, std::max(0.f, col[k] * t3[k] * 255.f + 0.5f))) << (8 * k);
         cols.push_back(o);
@@ -2923,6 +2929,49 @@ static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int co
     } else {
         for (size_t i = 1; i + 1 < n; i++) tri(dv[0], dv[i], dv[i + 1]);
     }
+}
+
+// Fighters do not shadow themselves: their low-poly models (and the solid cards of hair, fur and fringes) left grey blotches all
+// over the body, both with ray-traced and with screen-space shadows. The skinned draws' triangles (skinning included) go into the
+// mask list with material byte 1 (psp_refl_encode never gives 1: a reflective byte is >= 32), so the mask marks the pixels where a
+// fighter is visible; the shadow pass then ignores the fighters' own geometry for those pixels (psp_screenfx.cpp u_fmask).
+// PSPRECOMP_SELF_SHADOW=1 keeps the old self-shadowing.
+static bool self_shadow_on() { static const bool on = [] { const char* e = std::getenv("PSPRECOMP_SELF_SHADOW"); return e && e[0] == '1'; }(); return on; }
+static bool fighter_mask_wanted(const GeState& st) {
+    return !self_shadow_on() && g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && (psp_fx_contact() > 0 || psp_rt_active())
+           && ge_vtype_weight(st.vertex_type) != 0 && !ge_vtype_through(st.vertex_type) && st.depth_test_enable && !st.depth_write_disable
+           && is_main_key(g_targets[g_current_target].key);
+}
+static void fighter_capture(const GeState& st, uint8_t* rdram, int prim_type, int count) {
+    if (count < 3 || prim_type < GE_PRIM_TRIANGLES || prim_type > GE_PRIM_TRIANGLE_FAN) return;
+    std::vector<float>& out = g_rml_tris[g_current_target];
+    if (out.size() > 5u * 3u * 200000u) return;
+    static thread_local std::vector<DecodedVertex> dv;
+    ge_decode_vertices(rdram, st, prim_type, count, dv, true);   // skinned positions
+    const size_t n = dv.size();
+    if (n < 3) return;
+    const float* m = st.world_matrix;
+    const float* v = st.view_matrix;
+    const float* p = st.proj_matrix;
+    const float wx = draw_wide_x(st);
+    auto push = [&](const DecodedVertex& d) {
+        const float x = m[0] * d.pos[0] + m[3] * d.pos[1] + m[6] * d.pos[2] + m[9];
+        const float y = m[1] * d.pos[0] + m[4] * d.pos[1] + m[7] * d.pos[2] + m[10];
+        const float z = m[2] * d.pos[0] + m[5] * d.pos[1] + m[8] * d.pos[2] + m[11];
+        const float vx = v[0] * x + v[3] * y + v[6] * z + v[9], vy = v[1] * x + v[4] * y + v[7] * z + v[10], vz = v[2] * x + v[5] * y + v[8] * z + v[11];
+        float c[4];
+        for (int r = 0; r < 4; ++r) c[r] = p[r] * vx + p[4 + r] * vy + p[8 + r] * vz + p[12 + r];
+        out.push_back(c[0] * wx); out.push_back(c[1]); out.push_back(c[2]); out.push_back(c[3]); out.push_back(1.f);
+    };
+    auto tri = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) { push(a); push(b); push(c); };
+    if (prim_type == GE_PRIM_TRIANGLES) {
+        for (size_t i = 0; i + 2 < n; i += 3) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else if (prim_type == GE_PRIM_TRIANGLE_STRIP) {
+        for (size_t i = 0; i + 2 < n; i++) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else {
+        for (size_t i = 1; i + 1 < n; i++) tri(dv[0], dv[i], dv[i + 1]);
+    }
+    g_rml_fighters[g_current_target] = true;
 }
 
 // Effect lights (issue #4): glowing (additive) effect draws light the scene. Each such draw is summarised as a blob (world bbox,
@@ -3166,7 +3215,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         // The effects lists are not cleared here: the game draws most of its spell / beam effects after the 3D run (after the reflection pass
         // used the lists), so they are kept and traced by the next frame's pass, which clears them after use. Clearing them here left the
         // ray-traced reflection without Watera, Thundaga, ... (PSPRECOMP_RT_REFL_DEBUG=1 never showed an effect hit).
-        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); g_rml_tris[cur].clear(); }
+        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); g_rml_tris[cur].clear(); g_rml_fighters[cur] = false; }
         { static const int every = std::getenv("PSPRECOMP_RT_DUMP_EVERY") ? std::atoi(std::getenv("PSPRECOMP_RT_DUMP_EVERY")) : 0; static int fr = 0;
           if (every > 0 && g_rtdump.load() == 0 && (st.clear_flags == 0 || (st.clear_flags & 4)) && ++fr % every == 0) g_rtdump.store(1); }   // automated runs: one dump every N frames
         if (g_rtdump.load() == 1) { g_rtdump.store(2); rtdump_printf("[RTDUMP] begin target %d\n", cur); }
@@ -3335,6 +3384,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         s.refl_table = psp_refl_table_active();
         s.refl_tris = g_rml_tris[i].empty() ? nullptr : g_rml_tris[i].data();
         s.refl_nverts = (int)(g_rml_tris[i].size() / 5);
+        s.fighters = g_rml_fighters[i];
         if (s.rt_ready) {
             static int logged = 0;
             if (logged++ % 600 == 0) std::fprintf(stderr, "[RT] scene %zu triangles (frame %d)\n", g_rt_tris[i].size() / 9, logged);
@@ -3343,7 +3393,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         g_rt_tris[i].clear(); g_rt_cols[i].clear(); g_rt_fx_tris[i].clear(); g_rt_fx_cols[i].clear();
         g_fx_vote[i].n = 0;
         psp_screenfx_run(t.fbo, t.color_tex, t.w480 * t.rs, t.h272 * t.rs, s);
-        g_rml_tris[i].clear();
+        g_rml_tris[i].clear(); g_rml_fighters[i] = false;
         glBindFramebuffer(GL_FRAMEBUFFER, g_targets[g_current_target].fbo);
         glc::invalidate();
         ge_texture_invalidate_bind_cache();
