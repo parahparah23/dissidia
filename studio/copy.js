@@ -335,11 +335,23 @@ async function cpCopyMove(srcSpec, cmdId, opts = {}) {
     // sounds
     const sndMap = new Map();
     if (sounds.size && ps) {
-      const bank = SndBank.parseBank(S.files[ps].bin), slotMap = new Map();
+      const bank = SndBank.parseBank(S.files[ps].bin), slotMap = new Map(), reusedSnd = new Set(), before = bank.slots.length;
       const copySlot = (si) => {
         if (slotMap.has(si)) return slotMap.get(si);
         let s = sBank.slots[si]; if (s.kind === 'link') return copySlot(s.owner);
         let di;
+        // a slot this bank already has (the same clip with the same playback values, an earlier copy's included) is used
+        // as it is: Bartz's Dissidia 1 moves share most of their sounds with his 012 bank, and each copy used to add them again
+        const clipOf = (b, x) => (x.kind === 'alias' ? b.slots[x.owner].blob : x.blob);
+        const params = (raw) => cpHexOf(raw.subarray(0, 4)) + cpHexOf(raw.subarray(12));          // all but offset / size
+        const want = clipOf(sBank, s);
+        if (want && (s.kind === 'data' || s.kind === 'alias')) {
+          const same = (a, b) => a.length === b.length && a.every((v, k) => v === b[k]);
+          const hit = bank.slots.findIndex((x) => (x.kind === 'data' || x.kind === 'alias') && params(x.raw) === params(s.raw) && same(clipOf(bank, x), want));
+          if (hit >= 0) { slotMap.set(si, hit); reusedSnd.add(hit); return hit; }
+          const clip = bank.slots.findIndex((x) => x.kind === 'data' && same(x.blob, want));   // same clip, other values: an alias of it
+          if (clip >= 0) { bank.slots.push({ raw: s.raw.slice(), kind: 'alias', owner: clip, blob: null }); di = bank.slots.length - 1; SndBank.refresh(bank, di); slotMap.set(si, di); return di; }
+        }
         if (s.kind === 'alias') { const o = copySlot(s.owner); bank.slots.push({ raw: s.raw.slice(), kind: 'alias', owner: o, blob: null }); di = bank.slots.length - 1; }
         else if (s.kind === 'data') { bank.slots.push({ raw: s.raw.slice(), kind: 'data', owner: null, blob: s.blob.slice() }); di = bank.slots.length - 1; }
         else return -1;
@@ -348,8 +360,9 @@ async function cpCopyMove(srcSpec, cmdId, opts = {}) {
       const sBase = edTlBase(sBank), slotOf = (cue) => (cue - sBase >= 0 && cue - sBase < sBank.slots.length ? cue - sBase : -1);   // timeline numbers (the assist's are -50000)
       for (const cue of sounds) { const si = slotOf(cue), di = si >= 0 ? copySlot(si) : -1; if (di >= 0) sndMap.set(cue, edTlBase(bank) + di); }
       S.files[ps].bin = SndBank.bankToBytes(bank);
-      if (S.mod) { S.mod.sound_names = S.mod.sound_names || {}; for (const [a, b] of sndMap) S.mod.sound_names[String(b - edTlBase(bank))] = `${moveName} (${src.label} ${a})`; }
-      rep.copied.push(`${sndMap.size} sound${sndMap.size > 1 ? 's' : ''}`);
+      if (S.mod) { S.mod.sound_names = S.mod.sound_names || {}; for (const [a, b] of sndMap) if (!reusedSnd.has(b - edTlBase(bank))) S.mod.sound_names[String(b - edTlBase(bank))] = `${moveName} (${src.label} ${a})`; }
+      const added = bank.slots.length - before;
+      rep.copied.push(`${sndMap.size} sound${sndMap.size > 1 ? 's' : ''}` + (sndMap.size - added > 0 ? ` (${sndMap.size - added} already in this character's bank)` : ''));
     } else if (sounds.size) rep.left.push('its sounds (this character has no sound bank)');
     // animations into every model of this moveset
     const motMap = new Map(), stat = { noBone: new Set(), keptLength: new Set(), same: true };
