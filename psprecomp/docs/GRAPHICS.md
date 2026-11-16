@@ -526,6 +526,11 @@ reflection 10/16/22 steps). `PSPRECOMP_FX_DEBUG=1` logs the GPU time (desktop) a
 - Contact shadows: ray length `PSPRECOMP_CONTACT_LEN` view units (2.5, a fighter is about 2.4 tall), `PSPRECOMP_CONTACT_THICK`
   (0.5); the light is mostly overhead in world space (`PSPRECOMP_LIGHT_X/Y/Z`, default 0.4 / 1 / 0.3; the game's own lights
   are not read) and only lights surfaces that face it.
+- Fighters do not shadow themselves (contact and ray-traced shadows): the low-poly models and their solid hair / fur / fringe cards
+  left blotches over faces and bodies. Skinned draws go into the mask list as material byte 1 (`fighter_capture`; a reflective byte is
+  always >= 32), so the mask marks visible fighter pixels; there the screen-space march skips samples on fighter pixels and the shadow
+  ray passes fighter triangles (low bit of their `rt_tri_col` coverage) within `PSPRECOMP_RT_SELF_LEN`. The stage and objects still
+  shadow fighters. `PSPRECOMP_SELF_SHADOW=1` restores the old self-shadowing.
 - Which surfaces reflect (issue #2): a per-texture reflectivity table (`psp_refl_table.h`, keyed by texture-pack id, 0..1; a texture
   not listed does not reflect). The game module supplies a built-in list (Dissidia: `games/dissidia/runtime/refl_materials.cpp`,
   134 stage textures: water, ice, crystal, marble, polished tiles, some metal), `reflectivity.txt` in the game folder

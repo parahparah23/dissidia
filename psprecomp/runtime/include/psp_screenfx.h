@@ -63,6 +63,7 @@ struct ScreenFxScene {
     bool refl_table = false;   // psp_refl_table.h is active: only surfaces in the reflectivity mask reflect (none without triangles)
     const float* refl_tris = nullptr;   // the reflective draws' triangles (psp_ge_draw.cpp g_rml_tris): per vertex clip x y z w + material byte
     int refl_nverts = 0;
+    bool fighters = false;     // refl_tris also holds fighter triangles (material byte 1): the shadow pass leaves out a fighter's own body
     int n_glow_lights = 0;     // lights from glowing stage pieces (psp_ge_draw.cpp glow_draw): same layout as fx_lights
     float glow_lights[12][9];
     int n_fx_lights = 0;       // lights from glowing effects (psp_ge_draw.cpp fx_blob_lights): x y z, r g b, radius, intensity, clear
