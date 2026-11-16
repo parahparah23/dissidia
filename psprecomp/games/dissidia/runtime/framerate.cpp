@@ -41,6 +41,8 @@
 #include "hle/psp_hle_adhoc.h"
 #include "psp_ge_draw.h"
 #include <algorithm>
+#include <dlfcn.h>
+#include <execinfo.h>
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -114,6 +116,15 @@ float g_ticks = 2.0f;              // 1/60 s ticks one frame advances: 60 / g_ra
 // next value of a fixed cycle of rate / 30 multiples of 1/256 tick that add up to exactly 2.0 (spread evenly, within 0.3 % of 60 / rate):
 // any rate / 30 consecutive updates are exactly one 30 Hz frame, and every sum is exact. 60 / 120 / 240 fps (1, 0.5, 0.25) are exact already.
 bool g_exact_step = true;
+// 30 Hz logic (PSPRECOMP_LOGIC30=1, experiment): above 30 fps only every rate/30-th frame runs the battle's gameplay, with the PSP's 2-tick
+// step; the frames in between run the battle scene's task list with the pause filter (mask / value 4: what the game runs while paused,
+// every gameplay task skipped) and a zero step, so the game still draws but nothing advances. Gameplay is then the 30 fps game's by
+// construction; smoothing the frames in between is the renderer's job. The game's own frame-rate hooks see 30 fps (g_ticks 2).
+bool g_logic30 = false;
+bool l30_active();                 // 30 Hz logic is on and the fight is past its intro
+uint64_t g_l30_frame = 0;
+bool g_l30_logic_now = true;       // the frame being run is a gameplay frame
+float g_logic_step = 2.0f;         // ticks of gameplay the frame that just ran advanced (2 or 0 in 30 Hz logic mode, else g_ticks)
 uint64_t g_step_idx = 0;           // index of the step the next update uses
 float step_for(int rate, uint64_t i) {
     const int n = rate / 30;
@@ -477,10 +488,10 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             std::fprintf(stderr, "[TEST] recording to %s\n", path);
         }
     } else {
-        g_gt_ms += g_ticks * (1000.0 / 60.0);
+        g_gt_ms += g_logic_step * (1000.0 / 60.0);
         g_par_updates++;
     }
-    const bool lattice = !g_parity || g_par_updates % static_cast<uint64_t>(std::max(1, g_rate / 30)) == 0;   // a 30 Hz frame boundary (every update below 60 fps)
+    const bool lattice = !g_parity || (l30_active() ? g_logic_step > 0.0f : g_par_updates % static_cast<uint64_t>(std::max(1, g_rate / 30)) == 0);   // a 30 Hz frame boundary (every update below 60 fps; the gameplay frames in 30 Hz logic mode)
     if (g_record) {
         uint32_t b, a; psp_ctrl_last_sample(&b, &a);
         if (b != g_rec_buttons || a != g_rec_analog) {
@@ -783,6 +794,12 @@ uint32_t dissidia_walk_filter(uint32_t buttons);   // direct_battle.cpp
 namespace {
 uint32_t jecht_grid_filter(uint32_t raw) {
     raw = dissidia_walk_filter(raw);   // direct_battle.cpp: test-only pad record / replay of the menu walk (a no-op unless asked for)
+    if (l30_active()) {   // 30 Hz logic: the pad changes only on gameplay frames (the PSP reads it once per 30 Hz frame);
+        static uint32_t shown = 0, latched = 0;            // a press that came and went between two of them is shown once (latched)
+        latched |= raw & ~shown;
+        if (g_l30_logic_now) { shown = raw | (latched & ~shown); latched = 0; }
+        return shown;
+    }
     static uint32_t held = 0, pend = 0;
     static uint64_t decided = ~0ull;
     bool jecht = false;
@@ -1018,6 +1035,7 @@ void note_negotiated_rate(int cap) {
     shown = cap;
 }
 
+void task_dump_frame();
 void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t timer = static_cast<uint32_t>(ctx->r[4]);
     g_tick++;
@@ -1046,13 +1064,15 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         if (g_rate != rate) g_step_idx = 0;
         g_rate = rate;
         g_ticks = rate > 60 ? step_for(rate, g_step_idx) : 60.0f / static_cast<float>(rate);   // the step the update that just ran was given
+        g_logic_step = g_ticks;
+        if (l30_active()) { g_ticks = 2.0f; g_logic_step = g_l30_logic_now ? 2.0f : 0.0f; }
         g_fx_period = rate / 30;
     }
     g_orig_frame_end(rdram, ctx);
-    g_play_ms += g_ticks * (1000.0 / 60.0);
+    g_play_ms += 1000.0 / static_cast<double>(std::max(30, g_rate));
     input_debug_frame();
     testdrive_frame(rdram, ctx);
-    if (battle_running()) g_battle_age += g_ticks; else g_battle_age = 0.f;
+    if (battle_running()) g_battle_age += g_logic_step; else g_battle_age = 0.f;
     {   // tall windows: the picture is centred from the moment the fight runs until the battle overlay goes (summons, the pause menu and
         // the results keep it; the loading / opponent pages before the fight are at the top like the menus), see ge_draw_note_scene_view
         static bool in_battle = false;
@@ -1061,6 +1081,7 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         if (in_battle) ge_draw_note_scene_view();
     }
     fighter_log_frame();
+    task_dump_frame();
     combo_frame();
     if (g_battle_age > 420.f) g_ai_armed = true; else if (overlay_id() != 1) g_ai_armed = false;
     for (int i = 0; i < 4; i++) {
@@ -1069,7 +1090,14 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         if (scr != g_prev_scr[i] && g_fighters[i] && human_jecht(g_fighters[i])) g_grid_anchor = g_tick;   // the next update is the first read of the new move's grid
         g_prev_scr[i] = scr;
     }
-    if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
+    if (l30_active() && ok(timer)) {   // 30 Hz logic: the next frame is a gameplay frame (step 2) or a drawn-only one (step 0)
+        g_l30_frame++;
+        const uint64_t n = static_cast<uint64_t>(g_rate / 30);
+        g_l30_logic_now = g_l30_frame % n == 0;
+        // the timer step written now is copied into the global step (0x089D5EAC) by FUN_08864DD8 during the NEXT frame, after the battle's
+        // tasks, so the frame after next is the one that moves by it
+        wrf(timer + 0x18u, (g_l30_frame + 1) % n == 0 ? 2.0f : 0.0f);
+    } else if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
     if (g_log && ok(timer)) {
         const int64_t t = now_ms();
         if (!g_win_t0) g_win_t0 = t;
@@ -1397,6 +1425,83 @@ void mt_snap(uint32_t actor, recomp_context* ctx) {
     const double want = static_cast<double>(mt) + dt, k = std::round(want / g_ticks), target = k * static_cast<double>(g_ticks);
     if (std::fabs(want - target) < 1e-3 && std::fabs(dt - g_ticks) < 1e-4) ctx->f[0] = static_cast<float>(target + 1e-5 - mt);
 }
+
+// PSPRECOMP_TASK_TRACE=1 (diagnostic): who calls the object update task and the draw task (return addresses), once each per caller.
+FuncPtr g_orig_task_exec = nullptr, g_orig_task_draw = nullptr;
+void task_note(const char* what, recomp_context* ctx) {
+    static uint32_t seen[32]; static int n = 0;
+    const uint32_t ra = static_cast<uint32_t>(ctx->r[31]);
+    for (int i = 0; i < n; i++) if (seen[i] == ra) return;
+    if (n < 32) seen[n++] = ra;
+    std::fprintf(stderr, "[TASKTRACE] %s called from ra=%08X a0=%08X tick=%llu bt:", what, ra, static_cast<uint32_t>(ctx->r[4]), (unsigned long long)g_tick);
+    void* bt[24]; const int k = backtrace(bt, 24);
+    Dl_info di{}; dladdr(reinterpret_cast<void*>(&task_note), &di);
+    for (int i = 0; i < k; i++) std::fprintf(stderr, " %lx", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(bt[i]) - reinterpret_cast<uintptr_t>(di.dli_fbase)));
+    std::fprintf(stderr, "\n");
+}
+// PSPRECOMP_TASK_DUMP=<battle ticks> (diagnostic): once the battle has run that long, list the root task list (sys = *(0x089D69A8): list
+// *(sys+8192) -> head +4 first task, filter mask sys+8196 / value sys+8200; task: +0 function, +40 flags, +44 priority, +52 next).
+void task_dump_frame() {
+    static const char* e = std::getenv("PSPRECOMP_TASK_DUMP");
+    static int dumps = 0;
+    if (!e || dumps >= 8 || overlay_id() != 1 || g_tick % static_cast<uint64_t>(std::max(1, std::atoi(e))) != 0) return;   // every <n> frames in the battle overlay
+    dumps++;
+    const uint32_t sys = r32(0x089D0000u + 27048u);
+    if (!ok(sys)) return;
+    const uint32_t list = r32(sys + 8192u), mask = r32(sys + 8196u), value = r32(sys + 8200u);
+    std::fprintf(stderr, "[TASKDUMP] battle age %.0f sys=%08X list=%08X mask=%08X value=%08X\n", g_battle_age, sys, list, mask, value);
+    uint32_t t = ok(list) ? r32(list + 4u) : 0u;
+    for (int i = 0; i < 200 && ok(t); i++, t = r32(t + 52u)) {
+        std::fprintf(stderr, "[TASKDUMP]   task %08X fn=%08X flags=%08X prio=%d runs=%d words:", t, r32(t), r32(t + 40u), (int)r32(t + 44u), ((r32(t + 40u) & mask) == value) ? 1 : 0);
+        for (uint32_t o = 4; o < 40; o += 4) std::fprintf(stderr, " %08X", r32(t + o));
+        std::fprintf(stderr, "\n");
+    }
+}
+
+// PSPRECOMP_TASK_RUNLOG=<frame>,<frame>,... (diagnostic): during those frames (g_tick), every task-runner call (FUN_0888245C(list, mask, value))
+// with the tasks of the list: function, flags, and whether this filter runs it.
+FuncPtr g_orig_task_run = nullptr;
+std::vector<uint64_t> g_runlog_ticks;
+bool battle_scene_list(uint32_t list) {   // the battle scene's task list: the one holding the object manager task (FUN_08841798)
+    static uint32_t yes = 0, no = 0;
+    if (list == yes) return true;
+    if (list == no || !ok(list)) return false;
+    uint32_t t = r32(list + 4u);
+    for (int i = 0; i < 100 && ok(t); i++, t = r32(t + 52u)) if (r32(t) == 0x08841798u) { yes = list; return true; }
+    no = list;
+    return false;
+}
+void task_run_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (l30_active() && !g_l30_logic_now && ctx->r[5] == 1 && ctx->r[6] == 1 && battle_scene_list(static_cast<uint32_t>(ctx->r[4]))) {
+        ctx->r[5] = 4; ctx->r[6] = 4;   // a drawn-only frame: the battle runs as if paused
+        // PSPRECOMP_L30_SKIP=<fn>,<fn>... (experiment): tasks also left out of drawn-only frames (their filter flags cleared for this pass)
+        static std::vector<uint32_t> skip = [] { std::vector<uint32_t> v; if (const char* e = std::getenv("PSPRECOMP_L30_SKIP"))
+            for (const char* q = e; *q;) { v.push_back(static_cast<uint32_t>(std::strtoul(q, nullptr, 16))); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; } return v; }();
+        if (!skip.empty()) {
+            std::vector<std::pair<uint32_t, uint32_t>> saved;
+            uint32_t t = r32(static_cast<uint32_t>(ctx->r[4]) + 4u);
+            for (int i = 0; i < 200 && ok(t); i++, t = r32(t + 52u))
+                for (uint32_t f : skip) if (r32(t) == f) { saved.push_back({t, r32(t + 40u)}); w32(t + 40u, 0u); }
+            g_orig_task_run(rdram, ctx);
+            for (auto& sv : saved) w32(sv.first + 40u, sv.second);
+            return;
+        }
+    }
+    bool on = false;
+    for (uint64_t t : g_runlog_ticks) on |= g_tick == t;
+    if (on) {
+        const uint32_t list = static_cast<uint32_t>(ctx->r[4]), mask = static_cast<uint32_t>(ctx->r[5]), value = static_cast<uint32_t>(ctx->r[6]);
+        std::fprintf(stderr, "[TASKRUN] tick %llu list %08X mask %08X value %08X:", (unsigned long long)g_tick, list, mask, value);
+        uint32_t t = ok(list) ? r32(list + 4u) : 0u;
+        for (int i = 0; i < 100 && ok(t); i++, t = r32(t + 52u))
+            std::fprintf(stderr, " %s%08X/%X", ((r32(t + 40u) & mask) == value) ? "+" : "-", r32(t), r32(t + 40u));
+        std::fprintf(stderr, "\n");
+    }
+    g_orig_task_run(rdram, ctx);
+}
+
+void task_exec_hook(uint8_t* rdram, recomp_context* ctx) { task_note("OBJ_MANAGER::ExecTask 088413D0", ctx); g_orig_task_exec(rdram, ctx); }
+void task_draw_hook(uint8_t* rdram, recomp_context* ctx) { task_note("draw task 088881BC", ctx); g_orig_task_draw(rdram, ctx); }
 
 void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]);
@@ -2028,6 +2133,16 @@ uint32_t dissidia_player_actor() {
 
 // Ticks (1/60 s) one game frame advances: 2 at 30 Hz, 1 at 60 Hz, 2/3 at 90 Hz, 0.5 at 120 Hz.
 float dissidia_frame_ticks() { return g_ticks; }
+// 30 Hz logic applies once the fight is past its intro (7 s of battle: the intro sequence did not finish with drawn-only frames in it)
+namespace {
+bool l30_active() {
+    static bool on = false;
+    const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && g_gt_started;   // EXPERIMENT: from the test clock on (the intro stalled with drawn-only frames)
+    if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; }
+    on = want || (on && g_logic30 && g_rate > 30 && overlay_id() == 1 && battle_running());
+    return on;
+}
+}  // namespace
 // Factor for a value the game keeps as "ticks per 30 Hz frame" (the actor own clock): 1 at 30 Hz, 0.5 at 60 Hz.
 float dissidia_own_clock_scale() { return g_ticks * 0.5f; }
 
@@ -2117,6 +2232,14 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* d = std::getenv("PSPRECOMP_DBG_NOAI"); d && d[0] && d[0] != '0') g_dbg_no_ai = true;
     if (const char* na = std::getenv("PSPRECOMP_TEST_NO_AI"); na && na[0] && na[0] != '0') g_env_no_ai = true;
     if ((g_orig_cpu_tick = ovl_battle_lookup(CPU_TICK))) psp_dispatch_register(CPU_TICK, cpu_tick_noai_hook);
+    if (const char* l3 = std::getenv("PSPRECOMP_LOGIC30"); l3 && l3[0] == '1') g_logic30 = true;
+    if (const char* rl = std::getenv("PSPRECOMP_TASK_RUNLOG"))
+        for (const char* q = rl; *q;) { g_runlog_ticks.push_back(std::strtoull(q, nullptr, 10)); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; }
+    if ((g_logic30 || !g_runlog_ticks.empty()) && (g_orig_task_run = psp_dispatch_probe_lookup(0x0888245Cu))) psp_dispatch_register(0x0888245Cu, task_run_hook);
+    if (std::getenv("PSPRECOMP_TASK_TRACE")) {
+        if ((g_orig_task_exec = psp_dispatch_probe_lookup(0x088413D0u))) psp_dispatch_register(0x088413D0u, task_exec_hook);
+        if ((g_orig_task_draw = psp_dispatch_probe_lookup(0x088881BCu))) psp_dispatch_register(0x088881BCu, task_draw_hook);
+    }
     if (std::getenv("PSPRECOMP_TEST_PARITY") && (g_orig_take_hit = psp_dispatch_probe_lookup(0x0883A150u))) psp_dispatch_register(0x0883A150u, take_hit_hook);   // test only   // always: the debug menu switches it live
     else std::fprintf(stderr, "[FPS] CPU brain tick not found: no Enemy AI option\n");
     if (g_orig_cpu_tick) {
