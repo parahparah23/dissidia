@@ -3009,7 +3009,10 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
         d.l[6] = std::min(14.f, std::max(3.f, 3.f + 2.5f * size)) * k_rad;                       // reach grows with the effect's size
         // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
-        d.l[7] = std::min(1.2f, 0.35f * score) * k_int;   // score = brightness x sqrt(area): sparkles and markers stay faint, a big blast reaches 1.2
+        // score = peak brightness x sqrt(glowing area). Measured (Kain, Ultimecia): idle 0.9, jump / land 0.3-2, dodges 0.1-3.9, small hits 3-5,
+        // big attacks 10-26. Nothing below 1, then even up to full (1.2) at 16: dodges and landings stay faint, only big attacks light the scene.
+        d.l[7] = 1.2f * std::min(1.f, std::max(0.f, (score - 1.f) / 15.f)) * k_int;
+        if (d.l[7] < 0.02f) { ++n_dim; continue; }
         d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
         cand.push_back(d);
     }
