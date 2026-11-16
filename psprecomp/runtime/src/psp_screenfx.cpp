@@ -898,6 +898,7 @@ uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
 uniform int u_fx0;          // lights from u_fx0 on are effect lights (linear falloff)
 uniform int u_fx_split;     // debug: effect lights only on the left half of the screen
+uniform float u_fx_alb;     // the least albedo an effect light sees
 uniform int u_mark0;        // markers for lights [u_mark0, u_mark1) (the stage's own, not EX cores / effects)
 uniform int u_mark1;
 //@SKY_DECL
@@ -1073,7 +1074,7 @@ const char* const k_rt_lights = R"GLSL(
     if (u_n_lights > 0 && u_use_rt != 0) {
         vec3 Pw = (u_view_inv * vec4(P, 1.0)).xyz;
         vec3 nw = normalize((u_view_inv * vec4(n, 0.0)).xyz);
-        vec3 acc = vec3(0.0);
+        vec3 acc = vec3(0.0), acc_fx = vec3(0.0);
         for (int li = 0; li < u_n_lights; ++li) {
             vec3 d = u_lp[li].xyz - Pw;
             float dist = length(d), rad = u_lp[li].w;
@@ -1087,9 +1088,12 @@ const char* const k_rt_lights = R"GLSL(
             rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
             while (rayQueryProceedEXT(rl)) {}
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
-            acc += u_lc[li].rgb * (ndl * att);
+            if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
         }
-        o_refl.rgb += texture(u_color, v_uv).rgb * acc * fd * u_lscale;
+        vec3 alb = texture(u_color, v_uv).rgb;
+        // an attack's flash lights dark surfaces too (the scene colour is the albedo here, and a dark floor took almost nothing): effect lights
+        // see at least u_fx_alb
+        o_refl.rgb += (alb * acc + max(alb, vec3(u_fx_alb)) * acc_fx) * fd * u_lscale;
     }
     o_refl.rgb += mk * u_lscale;
 )GLSL";
@@ -1709,7 +1713,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
         static const bool mark_all = std::getenv("PSPRECOMP_FX_LIGHT_MARK") != nullptr;   // debug: markers on every light (EX cores, effects too)
         glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() || mark_all ? 1 : 0);
-        { static const bool split = std::getenv("PSPRECOMP_FX_LIGHT_SPLIT") != nullptr; glUniform1i(loc(mp.id, "u_fx0"), g_light_end); glUniform1i(loc(mp.id, "u_fx_split"), split ? 1 : 0); }
+        { static const bool split = std::getenv("PSPRECOMP_FX_LIGHT_SPLIT") != nullptr; glUniform1i(loc(mp.id, "u_fx0"), g_light_end); glUniform1i(loc(mp.id, "u_fx_split"), split ? 1 : 0); glUniform1f(loc(mp.id, "u_fx_alb"), env_float("PSPRECOMP_FX_LIGHT_MIN_ALBEDO", 0.35f)); }
         glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), mark_all ? 0 : g_light_first); glUniform1i(loc(mp.id, "u_mark1"), mark_all ? 64 : g_light_end);   // (the Vulkan GL layer has no glUniform2i)
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
