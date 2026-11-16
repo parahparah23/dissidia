@@ -2971,7 +2971,7 @@ static void fx_blob_note(int cur, size_t t0, size_t c0) {
 // Merge the scene's blobs (overlapping / near ones are one effect) and turn the brightest into lights: {x y z r g b radius intensity clear}.
 static int fx_blob_lights(int cur, float (*out)[9], int max) {
     std::vector<FxBlob>& B = g_fx_blobs[cur];
-    struct Cl { float lo[3], hi[3], rgb[3], area; };
+    struct Cl { float lo[3], hi[3], rgb[3], area, peak; };   // peak: the brightest blob (a big soft halo must not dim the core)
     std::vector<Cl> cl;
     static const float max_ext = 40.f;
     int n_big = 0, n_dim = 0; float big_ext = 0.f;
@@ -2984,7 +2984,9 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
             for (int a = 0; a < 3; ++a) ov = ov && b.lo[a] <= c.hi[a] + 1.f && b.hi[a] >= c.lo[a] - 1.f;
             if (ov) { hit = &c; break; }
         }
-        if (!hit) { cl.push_back({{b.lo[0], b.lo[1], b.lo[2]}, {b.hi[0], b.hi[1], b.hi[2]}, {b.rgb[0] * b.area, b.rgb[1] * b.area, b.rgb[2] * b.area}, b.area}); continue; }
+        const float bpk = std::max(b.rgb[0], std::max(b.rgb[1], b.rgb[2]));
+        if (!hit) { cl.push_back({{b.lo[0], b.lo[1], b.lo[2]}, {b.hi[0], b.hi[1], b.hi[2]}, {b.rgb[0] * b.area, b.rgb[1] * b.area, b.rgb[2] * b.area}, b.area, bpk}); continue; }
+        hit->peak = std::max(hit->peak, bpk);
         for (int a = 0; a < 3; ++a) { hit->lo[a] = std::min(hit->lo[a], b.lo[a]); hit->hi[a] = std::max(hit->hi[a], b.hi[a]); hit->rgb[a] += b.rgb[a] * b.area; }
         hit->area += b.area;
     }
@@ -2993,7 +2995,10 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     std::vector<Cand> cand;
     for (const Cl& c : cl) {
         float rgb[3] = {c.rgb[0] / c.area, c.rgb[1] / c.area, c.rgb[2] / c.area};
-        const float mx = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+        const float avg = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+        if (avg < 1e-4f) { ++n_dim; continue; }
+        const float mx = c.peak;   // brightness of the brightest part; the colour stays the area average (normalised below)
+        for (float& x : rgb) x *= mx / avg;
         if (mx < 0.03f) { ++n_dim; continue; }
         const float ext = 0.5f * std::sqrt((c.hi[0] - c.lo[0]) * (c.hi[0] - c.lo[0]) + (c.hi[1] - c.lo[1]) * (c.hi[1] - c.lo[1]) + (c.hi[2] - c.lo[2]) * (c.hi[2] - c.lo[2]));
         const float size = std::max(ext, std::sqrt(c.area) * 0.5f);   // a flat card's extent, a cloud of sparks' spread
@@ -3122,21 +3127,21 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             // the same glow drawn every frame for seconds (the lock-on reticle, a stage glow) is not an attack: keyed by texture, format, size
             bool steady = false;
             if (light_fx) {
-                struct Seen { double first, last; bool latched; };   // latched: drawn for k_steady seconds in a row once; stays out (the reticle comes and goes)
+                struct Seen { double first, last; bool latched; };   // first: start of the current unbroken streak; latched: the streak was logged
                 static std::unordered_map<uint64_t, Seen> seen;
                 const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                 const uint64_t key = (uint64_t(st.tex_addr[0]) << 32) ^ (uint64_t(st.vertex_type) << 12) ^ uint64_t(count) ^ (uint64_t(prim_type) << 28);
                 Seen& sn = seen[key];
-                if (sn.last == 0 || now - sn.last > 0.3) sn.first = now;
+                if (sn.last == 0 || now - sn.last > 0.3) { sn.first = now; sn.latched = false; }
                 sn.last = now;
-                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 8.0; }();   // longer than any attack
-                if (now - sn.first > k_steady && !sn.latched) {
-                    sn.latched = true;
+                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 10.0; }();   // longer than any attack (Hell's Judgment ~7 s)
+                if (now - sn.first > k_steady && !sn.latched) {   // logged once per streak; a gap of 0.3 s starts a new streak (no lasting latch:
+                    sn.latched = true;                            // particles share texture / format / size with every effect that uses them)
                     static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
                     if (dbg) std::fprintf(stderr, "[FXLIGHT] steady draw: tex %08x vt %08x prim %d n %d world t %.1f %.1f %.1f\n", (unsigned)st.tex_addr[0], (unsigned)st.vertex_type, prim_type, count, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11]);
                 }
-                steady = sn.latched;
-                if (seen.size() > 4096) { std::unordered_map<uint64_t, Seen> keep; for (const auto& kv : seen) if (kv.second.latched) keep.insert(kv); seen.swap(keep); }
+                steady = now - sn.first > k_steady;
+                if (seen.size() > 4096) seen.clear();
             }
             if (light_fx && steady) ++g_fx_n_steady[cur];
             if (light_fx && !steady && g_rt_fx_tris[cur].size() > t0) {
