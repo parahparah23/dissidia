@@ -43,6 +43,7 @@
 #include "hle/psp_hle_adhoc.h"
 #include "psp_ge_draw.h"
 #include "psp_screenfx.h"
+#include "psp_present_sync.h"
 #include <algorithm>
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -271,6 +272,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "fxlights") {   // fxlights <0|1>: lights from glowing effects off / on (psp_fx_lights_set), for an A/B of the same trial in one run
             int v = 1; ss >> v;
             ev.push_back({t, 16, static_cast<uint32_t>(v), 0, "", rel});
+        } else if (cmd == "vsync") {   // vsync <0|1>: vertical sync off / on while running (psp_vsync_set), for pacing A/B in one run
+            int v = 1; ss >> v;
+            ev.push_back({t, 30, static_cast<uint32_t>(v), 0, "", rel});
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
@@ -568,6 +572,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             g_injected_ranalog_deadline_ms.store(e.b == 0x8080u ? 0 : INT64_MAX, std::memory_order_relaxed);
             continue;
         }
+        if (e.kind == 30) { psp_vsync_set(e.a != 0); continue; }
         if (e.kind == 15) {
             const uint32_t a = test_fighter(e.text == "cpu" ? 1u : 0u);
             if (a) { w32(a + e.a, e.b); std::fprintf(stderr, "[TEST] gt=%.0f poke %s +%X = %d\n", g_gt_ms, e.text.c_str(), e.a, static_cast<int>(e.b)); }
@@ -1947,6 +1952,7 @@ void fps_set(int fps) {
     fps = fps < 30 ? 30 : fps > 240 ? 240 : (fps + 15) / 30 * 30;   // a multiple of 30
     if (g_target.exchange(fps) != fps) std::fprintf(stderr, "[FPS] target frame rate %d\n", fps);
     psp_adhoc_set_local_fps(fps);   // told to the other players
+    psp_present_set_target_fps(fps);   // Android: ask the display for a matching refresh rate
 }
 const int k_rates[] = {30, 60, 90, 120, 150, 180, 210, 240};
 
@@ -2111,5 +2117,6 @@ void dissidia_framerate_install(uint8_t* rdram) {
     fx_install();
     psp_settings_set_frame_rate_hook({k_rates, static_cast<int>(std::size(k_rates)), fps_get, fps_set});
     psp_adhoc_set_local_fps(g_target.load());
+    psp_present_set_target_fps(g_target.load());
     std::fprintf(stderr, "[FPS] frame rate %d (battle logic; scope %s)\n", g_target.load(), g_scope_all ? "all" : "battle");
 }

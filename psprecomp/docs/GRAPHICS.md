@@ -361,8 +361,12 @@ Two consequences of how this is implemented:
   framebuffer (software rendering, `sceGeEdram` writes) is invisible; only GE-rendered FBO
   content is shown. Double-buffer flips via `sceDisplaySetFrameBuf` all present the same FBO.
 - Frame pacing is driven by the *guest*, not the renderer: `sceDisplayWaitVblankStart` sleeps
-  16.667 ms on the game thread to simulate the 60 Hz vblank. No `SDL_GL_SetSwapInterval` is
-  called, so vsync is whatever the platform defaults to.
+  on the game thread to the next simulated vblank (60 Hz, or the battle frame rate above 60).
+  Whether the swap then waits for the display is the Vertical Sync setting
+  (`runtime/src/psp_present_sync.cpp`, `PSPRECOMP_VSYNC`): off = Vulkan IMMEDIATE / MAILBOX or
+  GL swap interval 0, on = FIFO / swap interval -1 or 1, which on a VRR display lets the refresh
+  follow the game. It can change while running: the Vulkan layer rebuilds its swapchain at the
+  next swap (the same path as the HDR switch), GL changes the swap interval on the presenting thread.
 
 ### Present-time post-processing
 

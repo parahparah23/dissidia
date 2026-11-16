@@ -119,6 +119,15 @@ backend is not built in or no device is usable the runtime stops at start-up (se
 `PSPRECOMP_VK_SUBMIT_EVERY=<draws>` (early GPU submits; 0 = only at sync points), `PSPRECOMP_VK_NO_PRESENT=1` (benchmark: never present),
 `PSPRECOMP_VK_NO_MULTIDRAW=1`, `PSPRECOMP_VK_TRACE=1` (log every draw). `[VKGL]` lines in the log give draws, pipelines, GPU time and CPU cost per frame.
 
+### `PSPRECOMP_VSYNC`
+`0` (default on desktops) or `1` (default on Android). Vertical sync: with `1` each frame waits for the display (Vulkan FIFO present mode, GL
+swap interval -1 where the driver offers adaptive sync, else 1), so the picture never tears, and on a variable refresh rate display
+(FreeSync, G-Sync, HDMI VRR) the refresh follows the game's frame rate. With `0` frames are shown at once (Vulkan IMMEDIATE / MAILBOX, GL
+swap interval 0). Also Settings > Display > Vertical Sync (saved as `vsync=0|1`, changes at the next frame, wins over this variable).
+`runtime/src/psp_present_sync.cpp`, issue #67. `PSPRECOMP_PRESENT_STATS=1` logs present-to-present timing every 5 s (`[PRESENT_STATS]`:
+mean, standard deviation, median, p99, max and the frames shown for more than 1.5x the median). Android also asks the display for a
+refresh rate that matches the game's frame rate (`ANativeWindow_setFrameRate`, Android 11+; `[PRESENT] asked the display for ...`).
+
 ### `PSPRECOMP_DISC0`
 - **Read in:** `runtime/src/main.cpp`
 - **Type:** env (path string).

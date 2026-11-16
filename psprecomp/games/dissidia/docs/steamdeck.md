@@ -471,9 +471,9 @@ ghidra-allegrex v21.3, see the top-level README), or `--skip-analyze` to reuse e
 * Music is ATRAC3/3+ decoded via libavcodec; a build without `libavcodec-dev` has no music.
 * The European PSN image (`ULES01505`) is the one tested in depth; the US UMD (`ULUS10566`) has been tried
   briefly (it works).
-* No driver vsync: the guest's 60 Hz vblank is simulated and the window is swapped without waiting, so tearing is
-  possible outside gamescope (gamescope composites whole frames). `PSPRECOMP_VSYNC=1` turns the driver's vsync on at
-  the risk of stalling the render thread.
+* Vertical sync is off by default: the guest's vblank is simulated and the window is swapped without waiting, so tearing
+  is possible outside gamescope (gamescope composites whole frames). Settings > Display > Vertical Sync (or
+  `PSPRECOMP_VSYNC=1`) makes each frame wait for the display; with an external VRR monitor the refresh then follows the game.
 
 ## Tested on a Deck
 

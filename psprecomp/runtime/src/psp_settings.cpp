@@ -156,7 +156,7 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -967,6 +967,17 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = g_quit_armed ? "Quit\nUnsaved progress is lost. Press again to quit, or move away to cancel."
                                   : "Quit\nClose the game and return to the desktop / Steam.";
             break;
+        case ROW_VSYNC: {
+            const bool on = psp_vsync_wanted() != 0;
+            m.label = "Vertical Sync";
+            m.value = on ? "On" : "Off";
+            m.can_dec = on; m.can_inc = !on;
+            m.help = "Vertical sync\nOn: each frame waits for the screen, so the picture never tears. With a variable refresh rate "
+                     "screen (FreeSync, G-Sync, HDMI VRR) the screen then follows the game's frame rate: smooth at any rate, "
+                     "no tearing. Off: frames are shown at once, the lowest delay, but the picture can tear (not inside "
+                     "Steam's Game Mode, which never tears). Saved.";
+            break;
+        }
         case ROW_FPSCOUNT: {
             const bool on = ge_draw_fps_counter();
             m.label = "FPS Counter";
@@ -1271,7 +1282,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
-    case ROW_FPSCOUNT: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
+    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
@@ -1572,6 +1583,12 @@ void change(int d) {   // left / right on the selected row
     case ROW_CLOUD_REPLAYS: if (g_cloud.replays != (d > 0)) { g_cloud.replays = d > 0; cloud_apply(); } break;
     case ROW_CLOUD_FOLDER: case ROW_CLOUD_URL: case ROW_CLOUD_USER: case ROW_CLOUD_PASS: case ROW_CLOUD_GOOGLE:
     case ROW_CLOUD_NOW: case ROW_CLOUD_STATUS: break;
+    case ROW_VSYNC:
+        if ((d > 0) != (psp_vsync_wanted() != 0)) {
+            psp_vsync_set(d > 0);
+            save("vsync", d > 0 ? "1" : "0");
+        }
+        break;
     case ROW_FPSCOUNT:
         if ((d > 0) != ge_draw_fps_counter()) {
             ge_draw_set_fps_counter(d > 0);
@@ -1764,6 +1781,7 @@ void build_rows() {
         add(ROW_SEC_WINDOW); add(ROW_DISPLAY); if (!is_fullscreen()) add(ROW_RES); add(ROW_WIDE); if (window_is_tall()) add(ROW_TALL); add(ROW_UPSCALE);
         add(ROW_SEC_PERF);
         if (g_fps.get && g_fps.count > 1) add(ROW_FPS);
+        add(ROW_VSYNC);
         add(ROW_FPSCOUNT);
         break;
     case PAGE_GRAPHICS:
@@ -2102,6 +2120,7 @@ void confirm_row() {
         break;
     case ROW_CLOUD_STATUS: break;
     case ROW_FPSCOUNT: change(ge_draw_fps_counter() ? -1 : 1); return;
+    case ROW_VSYNC: change(psp_vsync_wanted() ? -1 : 1); return;
     case ROW_PERF: change(ge_draw_perf_overlay() ? -1 : 1); return;
     case ROW_FX: change(ge_draw_fx_shaders() ? -1 : 1); return;
     case ROW_SYNC: ge_draw_set_sync_mode((ge_draw_sync_mode() + 1) % 5); break;
@@ -2445,6 +2464,7 @@ void psp_settings_load_early() {
     if ((it = g_saved.find("net_room")) != g_saved.end()) put("PSPRECOMP_ADHOC_ROOM", it->second);
     if ((it = g_saved.find("net_peers")) != g_saved.end()) put("PSPRECOMP_ADHOC_PEERS", it->second);
     if ((it = g_saved.find("fps_counter")) != g_saved.end()) put("PSPRECOMP_FPS_COUNTER", it->second == "1" ? "1" : "0");
+    if ((it = g_saved.find("vsync")) != g_saved.end() && (it->second == "0" || it->second == "1")) put("PSPRECOMP_VSYNC", it->second);
     if ((it = g_saved.find("perf_overlay")) != g_saved.end()) put("PSPRECOMP_PERF_HUD", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("ge_ring")) != g_saved.end() && (it->second == "map" || it->second == "sub"))
         put("PSPRECOMP_GE_RING", it->second);

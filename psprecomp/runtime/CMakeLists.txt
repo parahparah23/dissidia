@@ -211,6 +211,7 @@ set(RUNTIME_SOURCES
     src/psp_scheduler.cpp
     src/psp_render_queue.cpp
     src/psp_event_loop.cpp
+    src/psp_present_sync.cpp
     src/psp_settings.cpp
     src/psp_ge.cpp
     src/psp_ge_vertex.cpp

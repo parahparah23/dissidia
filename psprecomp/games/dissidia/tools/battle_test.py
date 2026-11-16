@@ -66,7 +66,9 @@ class Game:
         shutil.copytree(os.path.join(self.work, 'ms0'), ms0)
         ini = os.path.join(self.out, 'settings_%d.ini' % self.fps)
         with open(ini, 'w') as f:
-            f.write('display=window\nfps=%d\nrender_scale=%d\nwidescreen=%d\nvoice=en\ncheck_updates=0\nhd_textures=%d\n' % (self.fps, self.render_scale, self.widescreen, 1 if os.environ.get('PSPRECOMP_TEXPACK') else 0))
+            f.write('display=%s\nfps=%d\nrender_scale=%d\nwidescreen=%d\nvoice=en\ncheck_updates=0\nhd_textures=%d\n' % (
+                os.environ.get('BT_DISPLAY_MODE', 'window'),   # BT_DISPLAY_MODE=fullscreen: a real-display test the way players run (VRR, pacing)
+                self.fps, self.render_scale, self.widescreen, 1 if os.environ.get('PSPRECOMP_TEXPACK') else 0))
         env = dict(os.environ, DISPLAY=self.display, PSPRECOMP_SETTINGS=ini, PSPRECOMP_MS0=ms0, PSPRECOMP_FIGHTER_LOG='1',
                    PSPRECOMP_DEBUG_PORT=str(self.port), PSPRECOMP_SAVEDATA_AUTO='0', PSPRECOMP_TEST_FREEZE_CPU='1')
         env.pop('PSPRECOMP_FPS', None)
