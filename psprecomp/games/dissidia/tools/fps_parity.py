@@ -166,8 +166,10 @@ def run_one(a, cid, rate, out, tag=None):
     if cid == WALK_CPU:
         swap = '%d=%d,%d=%d' % (WALK_PLAYER, WALK_CPU, WALK_CPU, WALK_PLAYER)   # Lightning under test: the dummy becomes Squall
     env = {'PSPRECOMP_TEST_PLAYER_CHAR': str(cid), 'PSPRECOMP_TEST_PARITY': '1', 'PSPRECOMP_TEST_DIRECT_BATTLE': os.path.abspath(WALK),
-           'PSPRECOMP_FIGHTER_LOG': '0', 'PSPRECOMP_TEST_NO_AI': '0', 'PSPRECOMP_TEST_AI_OFF': '1',   # brain runs, its presses blocked: with
-                                                                                                    # the brain stopped (NO_AI) a CPU caught mid-dash at the start dashed for the whole run 'PSPRECOMP_TEST_FREEZE_CPU': '0',
+           'PSPRECOMP_FIGHTER_LOG': '0',
+           'PSPRECOMP_TEST_NO_AI': '1',         # the CPU's brain stopped (a running brain still starts moves even with its presses blocked)
+           'PSPRECOMP_TEST_AI_OFF': '1',        # its pad setters blocked and its pad cleared every update (framerate.cpp: nothing stays held)
+           'PSPRECOMP_TEST_FREEZE_CPU': '0',    # the dummy runs at the normal time step and reacts to hits
            'LP_NUM_THREADS': os.environ.get('LP_NUM_THREADS', '2'), 'PSPRECOMP_TEST_NO_DRAW': '0' if (a.draw or bt.gpu_headless()) and not a.no_draw else '2',
            'PSPRECOMP_TEST_INPUT_DELAY': str(a.input_delay),
            'PSPRECOMP_CAM_FREE': '0'}   # the analogue camera runs on the wall clock (not repeatable under fast-forward) and turns the stick
