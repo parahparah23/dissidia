@@ -24,6 +24,8 @@
 //   * Effect components that step once per update instead of x dt (docs/archive/open-questions/fx.md item 7): the
 //     ch61 envelope, the ch95/100/102/103 point and line emitters, the ch68/70 trail paths, the ch105 locus UV scroll
 //     and the ch106 locus history (weapon trails). See "Effect components" below.
+//   * The face texture animation (FUN_0886E5D0: blinking, mouth shapes) steps trunc(actor step) whole ticks per call, 0 above
+//     60 Hz: the fraction is carried per model (face_step_hook).
 // Mod code that counts per call rather than per tick uses dissidia_frame_ticks() (roster.cpp warp-dash link).
 //
 // Scope: the battle overlay only by default. Menus mostly count frames (4 dt reads in the menu overlay), so they
@@ -95,13 +97,14 @@ constexpr uint32_t EXB_PROMPT = 0x08A3D1C4u;    // battle overlay: EX Burst butt
 constexpr uint32_t EXB_UI = 0x08A40E60u;        // battle overlay: EX Burst quicktime UI update (calls the 08A41558 / 08A41774 states)
 constexpr uint32_t EXB_CTRL = 0x08A3FE10u;      // battle overlay: EX Burst controller update (prompt, release gauge, slow motion)
 constexpr uint32_t CAM_DT = 0x08B3B4FCu;        // battle overlay: a camera's time step
+constexpr uint32_t FACE_STEP = 0x0886E5D0u;     // EBOOT: a model's face texture animation (TexAnm groups: eyes, mouth), a1 = whole ticks to step
 
 uint8_t* g_ram = nullptr;
 bool g_exb_in = false;   // inside a gated EX Burst call (see exb_ctrl_hook)
 double g_exb_t0 = 0;   // play time the current burst began (log only)
 const bool g_exb_log_on = std::getenv("PSPRECOMP_EXB_LOG") != nullptr;
 bool g_exb_poll = false;   // polling the burst's button tests on a held update (exb_poll_held)
-FuncPtr g_orig_ui_param = nullptr, g_orig_steer_move = nullptr, g_orig_pressed = nullptr, g_orig_rootmotion = nullptr, g_orig_slowmo = nullptr, g_orig_frame_end = nullptr, g_orig_pad = nullptr, g_orig_actor_dt = nullptr, g_orig_cam_dt = nullptr, g_orig_exb_ctrl = nullptr, g_orig_exb_pressed = nullptr, g_orig_exb_pressed2 = nullptr, g_orig_exb_prompt = nullptr, g_orig_exb_ui = nullptr;
+FuncPtr g_orig_ui_param = nullptr, g_orig_steer_move = nullptr, g_orig_pressed = nullptr, g_orig_rootmotion = nullptr, g_orig_slowmo = nullptr, g_orig_frame_end = nullptr, g_orig_pad = nullptr, g_orig_actor_dt = nullptr, g_orig_cam_dt = nullptr, g_orig_exb_ctrl = nullptr, g_orig_exb_pressed = nullptr, g_orig_exb_pressed2 = nullptr, g_orig_exb_prompt = nullptr, g_orig_exb_ui = nullptr, g_orig_face_step = nullptr;
 std::atomic<int> g_target{30};     // requested rate (settings / env)
 int g_interval = 2;                // interval written on the last frame end (2 = 30 Hz, 1 = 60 Hz and above)
 int g_rate = 30;                   // logic rate in effect (30, 60, 90, ... one frame per vblank above 30)
@@ -1269,6 +1272,64 @@ void fighter_log_frame() {
 // presses, measured from the first visible frame of the move) open after (a - 2) ticks. At 120 Hz the first update advanced it by 0.5 ticks: every
 // window sat 25 ms (1.5 ticks) later than at 30 Hz, at both edges, for every Jecht chain step (tools/combo_timing.py combos, 11 Nov). The first update
 // after a fighter's script id changed therefore runs with a 30 Hz sized step (the same as at 30 Hz), the rest as before.
+// Face texture animation (FUN_0886E5D0, eyes blinking, mouth shapes, face_texture events 0x0214). Its only caller, the actor update
+// FUN_0883C2E8, passes trunc(actor step) as a whole number of ticks to step: 2 per update at 30 Hz, 1 at 60, but 0 at 90 / 120
+// (step 0.67 / 0.5). So above 60 Hz faces only moved on the rare update with a whole-tick step (a move's first update, see below):
+// a blink that had closed the eyes stayed closed, a pattern switch waited, and a model could keep its first cell (all cells start
+// at -1 and nothing is copied until the first step). Above 30 Hz the fraction is kept per model (a0) and carried over, so the face
+// steps 2 ticks per 33 ms at every rate. At 30 Hz the call is left as it is (PSP behaviour, slow motion included).
+float g_face_dt = 0.f;        // the last actor step actor_dt_hook returned (the caller truncates it for the face step)
+bool g_face_dt_set = false;
+struct FaceAcc { uint32_t obj; float frac; uint64_t seen; double win_ms; int ticks, changes; uint32_t cells[8]; };
+FaceAcc g_face_acc[32];
+bool g_face_log = std::getenv("PSPRECOMP_FACE_LOG") != nullptr;
+bool g_face_fix = true;   // PSPRECOMP_FACE_STEP=0: pass the game's tick count through (A/B); the log still runs
+
+// PSPRECOMP_FACE_LOG: per model and 5 s of play time, the ticks stepped and how many times a group's cell changed (blinks, mouth shapes).
+void face_stats(FaceAcc& s, int ticks) {
+    const uint32_t tab = r32(s.obj + 132u);
+    if (!ok(tab)) return;
+    const uint32_t groups = r32(tab), n = std::min<uint32_t>(r32(tab + 4u), 8u);
+    if (!ok(groups)) return;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t cell = r32(groups + i * 96u + 48u);   // u16 u, u16 v
+        if (cell != s.cells[i]) { if (s.cells[i] != 0xFFFFFFFFu) s.changes++; s.cells[i] = cell; }
+    }
+    s.ticks += ticks;
+    if (s.win_ms < 0) s.win_ms = g_play_ms;
+    if (g_play_ms - s.win_ms >= 5000.0) {
+        std::fprintf(stderr, "[FACESTAT] obj=%08X groups=%u ms=%.0f ticks=%d per_s=%.1f cell_changes=%d fps=%d fix=%d\n", s.obj, n, g_play_ms - s.win_ms, s.ticks,
+                     s.ticks * 1000.0 / (g_play_ms - s.win_ms), s.changes, g_rate, g_face_fix ? 1 : 0);
+        s.win_ms = g_play_ms; s.ticks = 0; s.changes = 0;
+    }
+}
+
+void face_step_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t obj = static_cast<uint32_t>(ctx->r[4]);
+    const int game_ticks = static_cast<int>(ctx->r[5]);
+    const bool have_dt = g_face_dt_set;
+    g_face_dt_set = false;
+    FaceAcc* slot = nullptr;
+    for (auto& a : g_face_acc) if (a.obj == obj) { slot = &a; break; }
+    if (!slot) {   // a free slot, else the one seen longest ago
+        slot = &g_face_acc[0];
+        for (auto& a : g_face_acc) if (!a.obj || a.seen < slot->seen) { slot = &a; if (!a.obj) break; }
+        *slot = {obj, 0.f, 0, -1.0, 0, 0, {}};
+        for (auto& c : slot->cells) c = 0xFFFFFFFFu;
+    }
+    slot->seen = g_tick;
+    if (g_face_fix && g_ticks < 2.0f && have_dt && std::isfinite(g_face_dt) && g_face_dt >= 0.f && g_face_dt < 64.f &&
+        game_ticks == static_cast<int>(g_face_dt)) {
+        const float t = slot->frac + g_face_dt;
+        const int n = static_cast<int>(t);
+        slot->frac = t - static_cast<float>(n);
+        ctx->r[5] = n;
+    }
+    const int stepped = static_cast<int>(ctx->r[5]);
+    g_orig_face_step(rdram, ctx);
+    if (g_face_log) face_stats(*slot, stepped);
+}
+
 int g_actor_log_left = 4000;
 struct CoreSeen { uint32_t actor; uint64_t seen; };
 CoreSeen g_cores[8];   // kind-6 objects (EX cores) and the g_tick they last updated; one that stops updating was picked up
@@ -1304,6 +1365,7 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
         }
     }
     const float before = ctx->f[0];
+    struct NoteDt { recomp_context* c; ~NoteDt() { g_face_dt = c->f[0]; g_face_dt_set = true; } } note_dt{ctx};   // for face_step_hook
     if (g_test_freeze_cpu && g_gt_started && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != test_player()) { ctx->f[0] = 0.f; return; }
     if (g_ticks != 2.0f && ok(actor) && own) ctx->f[0] *= g_ticks * 0.5f;   // own clock: a fixed 2.0 per frame
     if (g_action_start_step && g_ticks < 2.0f && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0) {
@@ -1981,6 +2043,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
     psp_dispatch_register(PAD_SET, pad_set_hook);
     psp_dispatch_register(ACTOR_DT, actor_dt_hook);
     psp_dispatch_register(CAM_DT, cam_dt_hook);
+    if (const char* fs = std::getenv("PSPRECOMP_FACE_STEP"); fs && fs[0] == '0') g_face_fix = false;
+    if ((g_face_fix || g_face_log) && (g_orig_face_step = psp_dispatch_probe_lookup(FACE_STEP))) psp_dispatch_register(FACE_STEP, face_step_hook);
     if ((g_orig_exb_pressed = ovl_battle_lookup(EXB_PRESSED))) psp_dispatch_register(EXB_PRESSED, exb_pressed_hook);
     if ((g_orig_exb_pressed2 = ovl_battle_lookup(EXB_PRESSED2))) psp_dispatch_register(EXB_PRESSED2, exb_pressed2_hook);
     VtReg<kNV - 1>::go();   // sticky presses for every virtual-button test the gated burst code calls (+ counts with PSPRECOMP_EXB_LOG)
