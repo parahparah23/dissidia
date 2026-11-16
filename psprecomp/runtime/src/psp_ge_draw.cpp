@@ -1,4 +1,5 @@
 #include "psp_gl_window.h"
+#include "psp_quit.h"
 #include "hle/psp_savedata_dialog.h"
 #include "psp_ge_draw.h"
 #include "psp_post.h"
@@ -3332,7 +3333,7 @@ static void ge_draw_prim_one(
     // debug socket's I command can snapshot them via ge_draw_get_stats.)
     static bool prim_detail_atexit_installed = false;
     if (!prim_detail_atexit_installed) {
-        std::atexit([]() {
+        static void (*const summary)() = []() {
             std::fprintf(stderr,
                 "[GE_PRIM_DETAIL_SUMMARY] total_observed=%d zero_count=%d\n",
                 g_prim_total_observed, g_prim_type_zero_count);
@@ -3353,7 +3354,8 @@ static void ge_draw_prim_one(
                 "clears=%d => %s\n",
                 real_ns, sprite_nc, clears,
                 real_ns > 0 ? "GRAPHICS" : "NO-GRAPHICS");
-        });
+        };
+        std::atexit(summary); psp_on_quit(summary);
         prim_detail_atexit_installed = true;
     }
 

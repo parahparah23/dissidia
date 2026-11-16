@@ -13,6 +13,7 @@
 // redirect needs no knowledge of the engine's data structures.
 
 #include "package_mods.h"
+#include "psp_quit.h"
 #include "psp_platform.h"
 #include "psp_settings.h"
 #include "hle/psp_hle_io.h"
@@ -364,7 +365,7 @@ void dissidia_package_index_extend(bool on) { g_index_capacity = on ? dissidia::
 
 void dissidia_install_mod_io() {
     if (const char* e = std::getenv("PSPRECOMP_LOAD_TRACE")) g_lt_on = !(e[0] == '0');
-    if (g_lt_on) std::atexit(load_trace_dump);
+    if (g_lt_on) { std::atexit(load_trace_dump); psp_on_quit(load_trace_dump); }
     PspIoPolicy policy{};
     policy.classify_open = classify_open;
     policy.overlay_read = overlay_read;

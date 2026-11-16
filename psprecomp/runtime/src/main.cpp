@@ -2,6 +2,7 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include "recomp.h"
+#include "psp_quit.h"
 #include "funcs.h"
 #include "psp_memory.h"
 #include "psp_android.h"
@@ -486,8 +487,14 @@ int main(int argc, char* argv[]) {
     psp_cloud_glue_shutdown();   // lets a running upload finish
     psp_runtime_shutdown();
 
-    psp_memory_cleanup(rdram);
-
+    // Game threads that did not stop within the scheduler's 2 s join (blocked in a wait that never sees the exit flag: ffst_thread, the
+    // audio mixer) are detached and keep running guest code. Freeing guest memory under them crashed every quit (segfault in recompiled
+    // code right after "Shutdown complete"), and returning would run static destructors under them too. Everything worth keeping is
+    // written by now, so end the process here and let the OS take the memory back.
     std::fprintf(stderr, "[RT] Exit 0\n");
-    return 0;
+    psp_run_quit_hooks();   // the diagnostics summaries (atexit would not run)
+    std::fflush(stdout);
+    std::fflush(stderr);
+    (void)rdram;
+    std::_Exit(0);
 }
