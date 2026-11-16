@@ -534,6 +534,8 @@ static uint64_t g_bound_pack_id = 0;
 uint64_t ge_texture_bound_pack_id() { return g_bound_pack_id; }
 static uint32_t g_bound_avg = 0xFFFFFFFFu;
 uint32_t ge_texture_bound_avg_color() { return g_bound_avg; }
+static uint32_t g_bound_hash = 0;   // content (and palette) hash of the bound texture; 0 = none / a render target
+uint32_t ge_texture_bound_hash() { return g_bound_hash; }
 static float g_bound_refl = 0.f;
 float ge_texture_bound_refl() { return g_bound_refl; }
 // The entry's reflectivity, looked up again when the table changed (reflectivity.txt edited while the game runs).
@@ -561,6 +563,7 @@ extern bool ge_draw_prefilter(GLuint tex, float* bias);   // psp_ge_draw.cpp
 GLuint ge_texture_bind_external(GLuint gl_tex, const GeState& state) {
     g_bound_pack_id = 0;
     g_bound_avg = 0xFF808080u;
+    g_bound_hash = 0;
     g_bound_refl = 0.f;
     bind_tex2d(gl_tex);
     // Render targets are always clamped (REPEAT would bleed the 480x272
@@ -632,6 +635,7 @@ GLuint ge_texture_bind(
 
     g_bound_pack_id = 0;
     g_bound_avg = 0xFFFFFFFFu;
+    g_bound_hash = 0;
     g_bound_refl = 0.f;
     if (g_aniso_seen_epoch != g_aniso_epoch.load()) {   // anisotropic setting changed: reload every texture
         g_aniso_seen_epoch = g_aniso_epoch.load();
@@ -757,6 +761,7 @@ GLuint ge_texture_bind(
     psp_prof::tex_binds++;
     int slot = find_or_evict(key);
     auto& entry = g_tex_cache[slot];
+    g_bound_hash = (content_hash * 0x9E3779B1u) ^ key.clut_hash ^ (uint32_t)key.size_reg;   // stable across runs (unlike the address)
 
     if (movie && psp_prof::enabled) psp_prof::movie_binds++;
     if (key_matches(entry, key)) {
