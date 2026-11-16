@@ -132,9 +132,59 @@ static const StageLight k_builtin_stage1[] = {   // Pandaemonium
     {{3.55f, 2.28f, -28.05f}, {0.40f, 0.37f, 0.50f}, 24.6f, 1.50f},
     {{11.13f, 11.19f, -39.38f}, {1.00f, 0.40f, 0.90f}, 31.4f, 1.50f},
 };
+static const StageLight k_builtin_stage7[] = {
+    {{0.07f, -34.00f, 0.16f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-0.25f, -34.00f, -10.90f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-4.32f, -34.00f, 13.91f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-14.08f, -34.00f, -1.08f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{15.12f, -34.00f, 2.17f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+};
+static const StageLight k_builtin_stage8[] = {
+    {{-1.92f, 27.64f, -0.09f}, {0.40f, 0.37f, 0.50f}, 40.0f, 1.50f},
+    {{-6.20f, -27.65f, 5.32f}, {0.40f, 0.37f, 0.50f}, 20.0f, 1.50f},
+    {{10.16f, -27.67f, -6.74f}, {0.40f, 0.37f, 0.50f}, 20.0f, 1.50f},
+    {{0.36f, -8.52f, -25.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-12.43f, -14.58f, -24.60f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{8.70f, -13.46f, -23.94f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-1.32f, 19.93f, -26.13f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{12.72f, 13.70f, -27.61f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-7.75f, 13.15f, -28.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+};
+static const StageLight k_builtin_stage9[] = {
+    {{0.38f, 13.53f, -40.27f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+};
+static const StageLight k_builtin_stage10[] = {
+    {{-16.32f, 35.87f, 99.65f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+    {{5.31f, -20.38f, 18.80f}, {1.00f, 0.90f, 0.80f}, 400.0f, 1.50f},
+};
+static const StageLight k_builtin_stage15[] = {
+    {{0.08f, 3.98f, -0.18f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+};
+static const StageLight k_builtin_stage18[] = {
+    {{19.98f, 7.62f, -19.23f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.03f, 7.60f, -15.87f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.95f, 7.83f, -12.37f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.02f, 7.89f, -8.88f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.98f, 7.68f, -5.32f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.99f, 7.74f, -1.58f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.97f, 7.87f, 1.61f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.00f, 7.80f, 5.06f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.00f, 7.72f, 8.67f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.93f, 7.79f, 12.15f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.01f, 7.75f, 15.66f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+};
 static const std::vector<StageLight>* builtin_lights(int id) {
-    static const std::vector<StageLight> s1(std::begin(k_builtin_stage1), std::end(k_builtin_stage1));
-    return id == 1 ? &s1 : nullptr;
+    static const std::map<int, std::vector<StageLight>> t = {
+        {1, std::vector<StageLight>(std::begin(k_builtin_stage1), std::end(k_builtin_stage1))},
+        {7, std::vector<StageLight>(std::begin(k_builtin_stage7), std::end(k_builtin_stage7))},
+        {8, std::vector<StageLight>(std::begin(k_builtin_stage8), std::end(k_builtin_stage8))},
+        {9, std::vector<StageLight>(std::begin(k_builtin_stage9), std::end(k_builtin_stage9))},
+        {10, std::vector<StageLight>(std::begin(k_builtin_stage10), std::end(k_builtin_stage10))},
+        {15, std::vector<StageLight>(std::begin(k_builtin_stage15), std::end(k_builtin_stage15))},
+        {18, std::vector<StageLight>(std::begin(k_builtin_stage18), std::end(k_builtin_stage18))},
+    };
+    const auto it = t.find(id);
+    return it == t.end() ? nullptr : &it->second;
 }
 // The stage's lights now (file entries, re-read about once a second when the file changed).
 static const std::vector<StageLight>& stage_lights(int id) {
@@ -243,7 +293,7 @@ static void lights_service(int id, const float* v) {
         const float dr = (float(held(PSP_LIGHT_RAD_UP)) - float(held(PSP_LIGHT_RAD_DOWN))) * 6.f * dt, di = (float(held(PSP_LIGHT_INT_UP)) - float(held(PSP_LIGHT_INT_DOWN))) * 1.5f * dt;
         if (mv[0] != 0.f || mv[1] != 0.f || mv[2] != 0.f || dr != 0.f || di != 0.f) {
             for (int c = 0; c < 3; ++c) l.p[c] += mv[c];
-            l.radius = std::min(80.f, std::max(1.f, l.radius + dr)); l.intensity = std::min(20.f, std::max(0.f, l.intensity + di));
+            l.radius = std::min(1000.f, std::max(1.f, l.radius + dr)); l.intensity = std::min(20.f, std::max(0.f, l.intensity + di));
             g_light_dirty = true; g_light_last_change = now;
         }
     }
