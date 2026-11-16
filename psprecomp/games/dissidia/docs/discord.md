@@ -16,9 +16,13 @@ Squall vs. Kefka                (2 of 2)
 | Start menu (and its Battle Mode / Communications lists) | Main Menu | | since the game started |
 | After choosing a mode | the mode: Story Mode, Quick Battle (1-on-1), Quick Battle (Party), Arcade Mode, Labyrinth, Communications Mode, PP Catalog, Collection, Data Config, Options | | since the game started |
 | In a fight | the mode · the stage | your fighter vs. the opponent (manikins by their own names: Transient Lion, ...) | since the fight started |
-| In a Communications Mode group | as above | as above, plus "(n of n)" players | as above |
+| In a Communications Mode group (lobby, room) | Communications Mode | With Zack (or "With Zack, Cloud and 2 others") plus "(n of n)" | as above |
+| One-on-one against another player | Communications Mode · the stage | Ender (Lightning) vs. Zack (Laguna) | since the fight started |
 
-The large picture is the game's icon; hovering it shows the Dissidia Recomp version. Characters added with `roster.txt` show their
+The large picture is the game's icon; hovering it shows the Dissidia Recomp version, or in a group every player's name ("Players: Ender
+and Zack"). Players are named by the player name of their save (Data Config > Player Name): each copy of the game sends it to the
+others as its ad-hoc nickname (it was "Player" before), so the game's own lists of nearby players show it too. Everyone in one room gets
+the same Discord party, so Discord shows them together. Your Discord name is never sent to other players. Characters added with `roster.txt` show their
 `nm=` name (else their code). Stages without a confirmed name (labyrinth floors, a few story-only arenas) are left out.
 
 ## Turning it off
@@ -56,7 +60,12 @@ and when turned off the activity is cleared.
   type (+8, 5 = manikin), and the brain (actor +0x5C4, +0x54 != 0) tells which one a person drives. charIds follow the EBOOT code
   table at 0x089D6CA8 (one100 .. sev120). The stage is `psp_stage_id()` (the battle setup word, hooks_main.cpp), named from the game's
   own text (`text/en/mess_pk_loading_0.bin` entry 3).
-- **Online.** `psp_adhoc_group_size()` gives the party size while in a Communications Mode group.
+- **Online.** The save's player name is UTF-16 at 0x08BCEB40 (EBOOT BSS; found by changing it in RAM and watching Data Config follow,
+  the copy at 0x08BDC4BC is a stale duplicate). The start menu hands it to `psp_adhoc_set_nickname` (every Communications session starts
+  there; `PSPRECOMP_ADHOC_NICK` still wins). `psp_adhoc_group_size()` / `psp_adhoc_group_nicks()` give the other players, and
+  `psp_adhoc_group_key()` (room + the game's group name) a party id everyone in the room shares. Which fighter is yours: actor +0x5B0
+  bit 0x04 (…35 against …31; found by diffing two copies in one Group Battle, the same in single player). The brain's human mode is set
+  for the other players' fighters too, so it is only the fallback.
 
 Test: `runtime/tests/test_discord.cpp` (ctest `discord`) checks the JSON and runs a whole session against a fake Discord app on a Unix
 socket: handshake, first activity, rate limit, ping, off / on, Discord restarting, clearing on quit.

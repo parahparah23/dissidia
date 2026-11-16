@@ -24,14 +24,19 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <ctime>
 #include <string>
+#include <vector>
 
 int dissidia_live_fighters(uint32_t* out, int max);   // framerate.cpp
 int dissidia_fighter_char_id(uint32_t actor);
 int dissidia_fighter_model_type(uint32_t actor);
 bool dissidia_fighter_human(uint32_t actor);
+uint32_t dissidia_fighter_brain_mode(uint32_t actor);
+bool dissidia_fighter_local(uint32_t actor);
 std::string dissidia_roster_name(int char_id);        // roster.cpp
 std::string psp_release_version();                   // runtime/src/psp_ge_draw.cpp
 
@@ -95,6 +100,54 @@ std::string fighter_name(uint32_t actor) {
     return kChars[id] ? kChars[id] : "";
 }
 
+// ---- the player's name: the save's player name (Data Config > Player Name), UTF-16 at a fixed EBOOT BSS address; found by
+// changing it in RAM and watching Data Config follow (the copy at 0x08BDC4BC is a stale duplicate). Empty before a save is loaded.
+constexpr uint32_t PLAYER_NAME = 0x08BCEB40u;
+constexpr int kNameUnits = 16;
+std::string player_name() {
+    std::string out;
+    for (int i = 0; i < kNameUnits; i++) {
+        uint16_t c;
+        std::memcpy(&c, g_ram + ((PLAYER_NAME + 2u * i) & 0x07FFFFFFu), 2);
+        if (c == 0) break;
+        if (c < 0x20 || (c >= 0xD800 && c <= 0xDFFF) || c == 0xFFFF) return "";   // not text: no save loaded (or not this layout)
+        if (c < 0x80) out += char(c);
+        else if (c < 0x800) { out += char(0xC0 | (c >> 6)); out += char(0x80 | (c & 0x3F)); }
+        else { out += char(0xE0 | (c >> 12)); out += char(0x80 | ((c >> 6) & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+// Other players see this name (the ad-hoc nickname, "Player" until a save is loaded). Called on the game thread from the start menu
+// (every Communications Mode session starts there, and a name changed in Data Config comes back through it).
+void update_nickname() {
+    static std::string last = "\x01";
+    const std::string n = player_name();
+    if (n == last) return;
+    last = n;
+    psp_adhoc_set_nickname(n.c_str());
+}
+
+// "Bob", "Bob and Carl", "Bob, Carl and Dan", ... cut to fit `max` bytes ("and 2 others").
+std::string name_list(const std::vector<std::string>& names, size_t max) {
+    for (size_t shown = names.size(); shown > 0; shown--) {
+        std::string s;
+        for (size_t i = 0; i < shown; i++) {
+            if (i) s += (i + 1 == shown && shown == names.size()) ? " and " : ", ";
+            s += names[i];
+        }
+        if (shown < names.size()) s += " and " + std::to_string(names.size() - shown) + (names.size() - shown == 1 ? " other" : " others");
+        if (s.size() <= max) return s;
+    }
+    return std::to_string(names.size()) + " players";
+}
+
+uint64_t fnv1a(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+
 // ---- where the player is (menu_settings.cpp reports, the presence thread reads) ----
 int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -118,7 +171,7 @@ const char* chosen_mode() {
 }
 
 // The current fight, kept while the battle overlay stays loaded (the fighter list goes stale while the game's pause menu is up).
-struct Fight { bool on = false; int64_t start = 0; std::string a, b; int stage = -1; };
+struct Fight { bool on = false; int64_t start = 0; std::string a, b; int stage = -1; std::string log; };
 Fight g_fight;
 
 bool provide(psp_discord::Activity* out) {
@@ -128,7 +181,18 @@ bool provide(psp_discord::Activity* out) {
     out->large_text = "Dissidia Recomp " + psp_release_version();
     out->buttons = {{"Dissidia Recomp on GitHub", kProjectUrl}};
     const int group = psp_adhoc_group_size();
-    if (group >= 2) { out->party_id = "dissidia-adhoc"; out->party_size = group; out->party_max = group; }
+    std::vector<std::string> others;
+    if (group >= 2) {
+        others = psp_adhoc_group_nicks();
+        char id[32];
+        std::snprintf(id, sizeof id, "dissidia-%016llx", static_cast<unsigned long long>(fnv1a(psp_adhoc_group_key())));
+        out->party_id = id;   // the same for everyone in the room: Discord shows them as one party
+        out->party_size = group; out->party_max = group;
+        std::string me = player_name();
+        std::vector<std::string> all{me.empty() ? std::string("You") : me};
+        all.insert(all.end(), others.begin(), others.end());
+        out->large_text = "Players: " + name_list(all, 118);
+    }
     out->start = g_session_start;
 
     const uint32_t ovl = r32(OVL_BASE);
@@ -143,10 +207,23 @@ bool provide(psp_discord::Activity* out) {
         const int n = dissidia_live_fighters(f, 4);
         if (n >= 2) {
             if (!g_fight.on) { g_fight.on = true; g_fight.start = std::time(nullptr); }
-            // The player's side: the fighter a person drives. Its brain is switched to human mode during the intro, so the names
-            // wait for it (the intro at normal speed takes over 6 s; a CPU-only fight is named after 30 s in list order).
+            // The player's side: the fighter this copy's player drives (online the other players' fighters are pad-driven too), else the
+            // first human-driven one. Both are set during the intro, so the names wait for them (the intro at normal speed takes over 6 s;
+            // a CPU-only fight is named after 30 s in list order).
             int me = -1;
-            for (int i = 0; i < n; i++) if (dissidia_fighter_human(f[i])) { me = i; break; }
+            for (int i = 0; i < n && me < 0; i++) if (dissidia_fighter_local(f[i])) me = i;
+            for (int i = 0; i < n && me < 0; i++) if (dissidia_fighter_human(f[i])) me = i;
+            static const bool log = std::getenv("PSPRECOMP_DISCORD_LOG") != nullptr;
+            if (log) {   // which fighter is whose (online: is the remote player's fighter "human" too?)
+                std::string l;
+                char b[96];
+                for (int i = 0; i < n; i++) {
+                    std::snprintf(b, sizeof b, " [%08X char %d type %d brain %X local %d]", f[i], dissidia_fighter_char_id(f[i]), dissidia_fighter_model_type(f[i]),
+                                  dissidia_fighter_brain_mode(f[i]), dissidia_fighter_local(f[i]) ? 1 : 0);
+                    l += b;
+                }
+                if (l != g_fight.log) { g_fight.log = l; std::fprintf(stderr, "[DISCORD] fighters:%s me %d\n", l.c_str(), me); }
+            }
             if (me < 0 && std::time(nullptr) - g_fight.start >= 30) me = 0;
             if (me >= 0) {
                 const std::string a = fighter_name(f[me]), b = fighter_name(f[me == 0 ? 1 : 0]);
@@ -157,11 +234,19 @@ bool provide(psp_discord::Activity* out) {
         }
         if (g_fight.on) {
             if (const char* st = stage_name(g_fight.stage)) details += (details.empty() ? "" : " \xC2\xB7 ") + std::string(st);   // " · "
-            if (!g_fight.a.empty() && !g_fight.b.empty()) out->state = g_fight.a + " vs. " + g_fight.b;
+            if (!g_fight.a.empty() && !g_fight.b.empty()) {
+                out->state = g_fight.a + " vs. " + g_fight.b;
+                const std::string me = player_name();
+                if (others.size() == 1 && !me.empty()) {   // one on one online: who is who
+                    const std::string named = me + " (" + g_fight.a + ") vs. " + others[0] + " (" + g_fight.b + ")";
+                    if (named.size() <= 128) out->state = named;
+                }
+            }
             out->start = g_fight.start;
         }
     }
     if (details.empty()) details = "In the menus";
+    if (out->state.empty() && !others.empty()) out->state = "With " + name_list(others, 123);
     out->details = details;
     return true;
 }
@@ -173,6 +258,7 @@ void dissidia_presence_title() { g_title_ms.store(now_ms()); }
 void dissidia_presence_main(uint32_t state) {
     if (!g_ram || !state) return;
     g_top.store(int(r32(state + 0xA28u + 4u)));
+    update_nickname();
     g_main_ms.store(now_ms());
 }
 void dissidia_presence_sub(uint32_t state) {

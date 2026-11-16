@@ -2019,6 +2019,14 @@ int dissidia_fighter_model_type(uint32_t a) {
     const uint32_t info = ok(a) ? r32(a + 0x2F8u) : 0u;
     return ok(info) ? g_ram[(info + 8u) & 0x07FFFFFFu] : -1;
 }
+// The fighter this copy's player drives: actor +0x5B0 bit 0x04 (0x...35 vs 0x...31; +0x760 is only set on it too). Unlike the brain's
+// human mode (+0x54, set for every pad-driven fighter, the remote players' too) it tells the local player apart in Communications Mode
+// (found by diffing two copies in one Group Battle; the same in a single-player Quick Battle).
+bool dissidia_fighter_local(uint32_t a) { return ok(a) && (r32(a + 0x5B0u) & 0x4u) != 0; }
+uint32_t dissidia_fighter_brain_mode(uint32_t a) {   // brain +0x54 (0 = CPU), for logs
+    const uint32_t brain = ok(a) ? r32(a + 0x5C4u) : 0u;
+    return ok(brain) ? r32(brain + 0x54u) : 0xFFFFFFFFu;
+}
 bool dissidia_fighter_human(uint32_t a) {
     const uint32_t brain = ok(a) ? r32(a + 0x5C4u) : 0u;
     return ok(brain) && r32(brain + 0x54u) != 0;

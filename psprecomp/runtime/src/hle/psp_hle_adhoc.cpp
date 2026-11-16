@@ -164,6 +164,7 @@ int g_span = 16;   // ports tried / probed: base..base+span-1 (several instances
 uint16_t g_my_port = 0;
 Mac g_mac{};
 char g_nick[32] = {0};
+std::string g_game_nick;   // psp_adhoc_set_nickname (the game's player name); PSPRECOMP_ADHOC_NICK wins over it
 std::thread g_thread;
 std::vector<sockaddr_in> g_extra_peers;
 std::map<Mac, Peer> g_peers;
@@ -895,7 +896,10 @@ bool ensure_net() {
             g_mac = Mac{0x02, (uint8_t)(r1 >> 24), (uint8_t)(r1 >> 16), (uint8_t)(r1 >> 8), (uint8_t)r1, (uint8_t)r2};
         }
         const char* nick = std::getenv("PSPRECOMP_ADHOC_NICK");
-        std::snprintf(g_nick, sizeof g_nick, "%s", nick && *nick ? nick : "Player");
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            std::snprintf(g_nick, sizeof g_nick, "%s", nick && *nick ? nick : (!g_game_nick.empty() ? g_game_nick.c_str() : "Player"));
+        }
         g_cfg_dirty = true;   // the network thread resolves the server / peers
         g_net_ready = true;
         ANOTE("ready: UDP %u, MAC %s, nick \"%s\", %s", g_my_port, mac_str(g_mac).c_str(), g_nick,
@@ -1565,6 +1569,44 @@ bool psp_adhoc_in_session() {
     for (auto& [m, p] : g_peers)
         if (p.in_group && !std::strncmp(p.group, g_group, 8)) return true;
     return false;
+}
+
+// UTF-8 cut to at most `max` bytes on a character boundary (a beacon carries 31 bytes of nickname).
+static std::string utf8_cut(const std::string& s, size_t max) {
+    if (s.size() <= max) return s;
+    size_t n = max;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) n--;
+    return s.substr(0, n);
+}
+
+void psp_adhoc_set_nickname(const char* utf8) {
+    const char* forced = std::getenv("PSPRECOMP_ADHOC_NICK");
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_game_nick = utf8_cut(utf8 ? utf8 : "", 31);
+    if (forced && *forced) return;
+    const std::string n = g_game_nick.empty() ? std::string("Player") : g_game_nick;
+    if (n == g_nick) return;
+    std::snprintf(g_nick, sizeof g_nick, "%s", n.c_str());
+    if (g_net_ready) ANOTE("nickname \"%s\"", g_nick);
+}
+
+std::vector<std::string> psp_adhoc_group_nicks() {
+    std::vector<std::string> out;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return out;
+    for (auto& [m, p] : g_peers)
+        if (p.in_group && !std::strncmp(p.group, g_group, 8)) out.emplace_back(p.nick);
+    return out;
+}
+
+std::string psp_adhoc_group_key() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return "";
+    // the same for every member: where they meet (server + room, or LAN) and the game's group name
+    std::string k = g_relay_mode ? g_cfg_server + "/" + g_cfg_room : std::string("lan");
+    k += '/';
+    k.append(g_group, strnlen(g_group, 8));
+    return k;
 }
 
 int psp_adhoc_group_size() {

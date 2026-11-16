@@ -91,7 +91,7 @@ both run at 30. It returns to the player's own setting when the group ends. A me
 | `PSPRECOMP_ADHOC_PORT=<n>` | LAN mode: first UDP port (default 27312) |
 | `PSPRECOMP_ADHOC_SPAN=<n>` | how many consecutive ports are tried and probed (default 16, up to 64) |
 | `PSPRECOMP_ADHOC_PEERS=a,b` | LAN mode: extra peers to contact directly: `host` or `host:port` (a bare host probes the whole port span) |
-| `PSPRECOMP_ADHOC_NICK=<name>` | nickname other adhocctl clients see (the in-game player name comes from the save) |
+| `PSPRECOMP_ADHOC_NICK=<name>` | nickname other adhocctl clients see (default: the save's player name once a save is loaded, else "Player"; Discord status names players by it) |
 | `PSPRECOMP_ADHOC_MAC=aa:bb:cc:dd:ee:ff` | virtual MAC; default is random per launch (a host-name hash collides: every Steam Deck is called `steamdeck`) |
 | `PSPRECOMP_ADHOC_LOG=1` | log every call and event with arguments, results and the first bytes of each message |
 | `PSPRECOMP_PAD_BACKGROUND=1` | let controllers act while the window is unfocused |
