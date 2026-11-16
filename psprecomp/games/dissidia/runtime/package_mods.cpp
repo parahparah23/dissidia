@@ -67,7 +67,11 @@ void walk(const std::string& root, const std::string& rel, std::vector<std::stri
             if (::stat((root + "/" + r).c_str(), &st) != 0) continue;
             t = S_ISDIR(st.st_mode) ? DT_DIR : S_ISREG(st.st_mode) ? DT_REG : DT_UNKNOWN;
         }
-        if (t == DT_DIR) walk(root, r, out);
+        if (t == DT_DIR) {
+            struct stat ms;   // an installed mod folder (hooks_io.cpp mod_roots): its install/ is a root of its own, when it is on
+            if (::stat((root + "/" + r + "/mod.json").c_str(), &ms) == 0) continue;
+            walk(root, r, out);
+        }
         else if (t == DT_REG) out->push_back(r);
     }
 }

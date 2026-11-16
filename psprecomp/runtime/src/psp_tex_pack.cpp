@@ -22,6 +22,7 @@
 namespace {
 
 PspTexPackDirFn g_provider = nullptr;
+PspTexPackDirsFn g_extra_provider = nullptr;
 
 // ---- xxHash64 (stable across runs/platforms; little-endian word reads) ----
 constexpr uint64_t P1 = 11400714785074694791ull, P2 = 14029467366897019727ull,
@@ -70,7 +71,8 @@ struct State {
     int upscale = 0;               // 2..4
     int repl_filter = 0;
     std::string dir, dump_dir, index_path;
-    std::unordered_set<uint64_t> pack;       // ids with <id>.png in the pack dir
+    std::unordered_set<uint64_t> pack;       // ids with <id>.png in the pack dir (or an extra dir)
+    std::unordered_map<uint64_t, std::string> extra_dir;   // ids found only in an extra dir: that dir
     std::unordered_set<uint64_t> bad;        // replacement files that failed to load
     std::map<uint64_t, Rec> seen;            // sorted -> stable index file
     bool dirty = false;
@@ -194,16 +196,27 @@ void init_once() {
         load_index();
         std::fprintf(stderr, "[TEXPACK] dump on: %s (cap %zu)\n", g.dump_dir.c_str(), g.dump_max);
     }
-    if (want_replace && is_dir(g.dir)) {
-        if (DIR* d = opendir(g.dir.c_str())) {
+    std::vector<std::string> extra = g_extra_provider ? g_extra_provider() : std::vector<std::string>{};
+    if (want_replace && (is_dir(g.dir) || !extra.empty())) {
+        auto scan = [](const std::string& dir, bool main) {
+            DIR* d = opendir(dir.c_str());
+            if (!d) return;
             while (dirent* de = readdir(d)) {
                 size_t n = std::strlen(de->d_name);
                 if (n != 20 || std::strcmp(de->d_name + 16, ".png")) continue;
                 std::string stem(de->d_name, 16);
                 uint64_t id;
-                if (parse_hex16(stem.c_str(), &id)) g.pack.insert(id);
+                if (!parse_hex16(stem.c_str(), &id)) continue;
+                if (main) { g.pack.insert(id); g.extra_dir.erase(id); }
+                else if (g.pack.insert(id).second) g.extra_dir[id] = dir;
             }
             closedir(d);
+        };
+        scan(g.dir, true);
+        for (auto& x : extra) {
+            while (x.size() > 1 && x.back() == '/') x.pop_back();
+            scan(x, false);
+            std::fprintf(stderr, "[TEXPACK] mod folder pack %s\n", x.c_str());
         }
         g.replace = true;
         std::fprintf(stderr, "[TEXPACK] replacement pack %s: %zu texture(s)%s\n", g.dir.c_str(),
@@ -215,6 +228,7 @@ void init_once() {
 }  // namespace
 
 void psp_texpack_set_dir_provider(PspTexPackDirFn fn) { g_provider = fn; }
+void psp_texpack_set_extra_dirs_provider(PspTexPackDirsFn fn) { g_extra_provider = fn; }
 
 bool psp_texpack_active() {
     init_once();
@@ -469,7 +483,8 @@ bool psp_texpack_load_replacement(uint64_t id, std::vector<uint8_t>& rgba, int& 
     if (!g.replace || !g.pack.count(id) || g.bad.count(id)) return false;
     char name[40];
     std::snprintf(name, sizeof name, "/%016llx.png", (unsigned long long)id);
-    const bool ok = load_png_cached(id, g.dir + name, rgba, w, h);
+    auto xd = g.extra_dir.find(id);
+    const bool ok = load_png_cached(id, (xd != g.extra_dir.end() ? xd->second : g.dir) + name, rgba, w, h);
     static const bool log_ids = std::getenv("PSPRECOMP_TEXPACK_LOG_IDS") != nullptr;   // one line per id the first time it is bound
     if (ok && log_ids) {
         static std::set<uint64_t> seen;
