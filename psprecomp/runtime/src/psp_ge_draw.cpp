@@ -3035,6 +3035,8 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters -> %d lights | left out: %d too big (largest %.0f), %d too faint, %d steady draws, %d non-additive draws, %d staying put | first %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n",
                      B.size(), cl.size(), n, n_big, big_ext, n_dim, g_fx_n_steady[cur], g_fx_n_nonadd[cur], g_fx_n_static[cur],
                      n ? out[0][0] : 0.f, n ? out[0][1] : 0.f, n ? out[0][2] : 0.f, n ? out[0][3] : 0.f, n ? out[0][4] : 0.f, n ? out[0][5] : 0.f, n ? out[0][6] : 0.f, n ? out[0][7] : 0.f); }
+    { static int lg2 = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+      if (dbg && n && lg2++ % 5 == 0) { std::fprintf(stderr, "[FXLIGHT]   lights:"); for (int i = 0; i < n; ++i) std::fprintf(stderr, " (%.1f %.1f %.1f r%.1f i%.2f)", out[i][0], out[i][1], out[i][2], out[i][6], out[i][7]); std::fprintf(stderr, "\n"); } }
     g_fx_n_steady[cur] = g_fx_n_nonadd[cur] = g_fx_n_static[cur] = 0;
     return n;
 }
@@ -3128,7 +3130,11 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 if (sn.last == 0 || now - sn.last > 0.3) sn.first = now;
                 sn.last = now;
                 static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 8.0; }();   // longer than any attack
-                if (now - sn.first > k_steady) sn.latched = true;
+                if (now - sn.first > k_steady && !sn.latched) {
+                    sn.latched = true;
+                    static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+                    if (dbg) std::fprintf(stderr, "[FXLIGHT] steady draw: tex %08x vt %08x prim %d n %d world t %.1f %.1f %.1f\n", (unsigned)st.tex_addr[0], (unsigned)st.vertex_type, prim_type, count, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11]);
+                }
                 steady = sn.latched;
                 if (seen.size() > 4096) { std::unordered_map<uint64_t, Seen> keep; for (const auto& kv : seen) if (kv.second.latched) keep.insert(kv); seen.swap(keep); }
             }
