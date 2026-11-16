@@ -16,7 +16,7 @@ Steps:
   4. the Move Studio copies the eight commands from d1bartz into bartz in a headless Chrome (d1_moves_studio.js: the
      Studio's own copy-a-move, so animations go into all four costumes, hits, hitboxes, projectiles, effects, sounds,
      voices and face textures come along);
-  5. names, help texts, CP / AP and learn levels are set, and the battle voice bank gets D1's lines for the slots 012
+  5. names, D1's help texts, CP / AP and learn levels are set, and the battle voice bank gets D1's lines for the slots 012
      left empty (the banks are slot-for-slot the same; only the English bank: D1 has no Japanese voices).
 
 Needs Python 3, Node.js with playwright-core (npm i playwright-core; NODE_PATH or a node_modules next to this file) and
@@ -47,7 +47,7 @@ D1_VOICE_BANK = 0xDD2E4D13      # D1 has no package path list for it: Bartz's ba
 VOICE_012 = 'voice/en/battle/voice_p_fiv100_00.scd'
 VOICE_BASE = 1810000            # voice event ids: bank id * 100 + slot
 
-# D1 command -> (name, type, phase, help, CP, CP mastered, AP, learn level). CP / AP from D1's own ability records;
+# D1 command -> (name, type, phase, fallback help (D1's own is read from the disc), CP, CP mastered, AP, learn level). CP / AP from D1's own ability records;
 # learn levels: D1's for Climbarrel 3, Flood 19, Slidehazzard 28, Paladin Force 38, chosen for the rest.
 MOVES = [
     (0x198, 'Ascendant Lance', 'brave', 'ground', "[Ground] A lance lunge. Press\nagain for a flurry that ends in a\nblow. (Dissidia 2008)", 35, 15, 120, 6),
@@ -59,6 +59,29 @@ MOVES = [
     (0x1A1, 'Wind Shear', 'hp', 'midair', "[Midair] HP attack. A whirlwind\nholds the foe, then blasts it.\n(Dissidia 2008)", 45, 25, 300, 46),
     (0x1A2, 'Paladin Force', 'hp', 'midair', "[Midair] HP attack. Holy blades\ncrash down on the foe.\n(Dissidia 2008)", 45, 25, 180, 38),
 ]
+
+
+D1_HELP_PACK, D1_HELP_ENTRY = 0xAE729F6B, 2   # D1's ability help texts (a mess pak 012 has no path for), by the ablt +4 id
+
+
+def d1_help(d1):
+    """{D1 command: 012 help text} from D1's own help: its description line and its orange effect line, with the
+    record's 012 equip bonus ({bonus}) between them. D1 keeps ability records as {id, name, help, after, ?, command}."""
+    import mess_text as mt
+    import menu_pack as mp
+    texts = mt.records(mp.entry(mp.parse(d1.read_crc(D1_HELP_PACK)), D1_HELP_ENTRY))
+    _, ents = rm.mpk_unpack(d1.read_crc(rm.MAIN_CRC))
+    _, aents = rm.arc_unpack(next(e for e in ents if e[0] == 'system.bin')[2])
+    ab = next(e for e in aents if e[0] == 'ablt')[2]
+    out = {}
+    for i in range(struct.unpack_from('<I', ab, 8)[0]):
+        _id, _nm, hid, _after, _x, cmd = struct.unpack_from('<6H', ab, 16 + 40 * i)
+        if hid < len(texts):
+            lines = texts[hid].split('\n')
+            desc = [ln for ln in lines if '\x10' not in ln]          # D1's bonus and effect lines are coloured
+            eff = [ln for ln in lines if ln.startswith(rm.EFFECT_PREFIX)]
+            out[cmd] = '\n'.join(desc[:2] + ['{bonus}'] + eff[:1])
+    return out
 
 
 class IsoPackage(pe.Package):
@@ -142,10 +165,12 @@ def finish(mod, d1, d12):
     with open(mod + '/mod.json') as f:
         m = json.load(f)
     by_name = {mv[1]: mv for mv in MOVES}
+    helps = d1_help(d1)
     for e in m['move_names'].values():
         if 'copy' not in e:
             continue
         cmd, name, _t, _p, help_, cp, cpm, ap, lv = by_name[e['name']]
+        help_ = helps.get(cmd, help_)            # D1's own text; the one in MOVES if the disc has none
         rm.expand_help(help_, '')
         e.update(help=help_, cp=cp, cp_mastered=cpm, ap=ap, learn=lv)
         e.pop('status', None)
