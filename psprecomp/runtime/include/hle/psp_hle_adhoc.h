@@ -13,11 +13,14 @@
 //   PSPRECOMP_ADHOC_ROOM=<name>  room on the server; players in one room see each other (default: the public room)
 //   PSPRECOMP_ADHOC_PORT=<n>     first UDP port to try (default 27312; tries n..n+7)
 //   PSPRECOMP_ADHOC_PEERS=a,b    LAN mode: extra peers to contact directly: host or host:port, comma separated
-//   PSPRECOMP_ADHOC_NICK=<name>  nickname shown to other players (default "Player")
+//   PSPRECOMP_ADHOC_NICK=<name>  nickname shown to other players (default: what the game module passes to psp_adhoc_set_nickname
+//                                 (Dissidia: the save's player name), else "Player")
 //   PSPRECOMP_ADHOC_MAC=aa:bb:.. override the virtual MAC (default: random per launch)
 //   PSPRECOMP_ADHOC_LOG=1        log every packet-level event
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 struct recomp_context;
 
@@ -37,6 +40,15 @@ int psp_adhoc_group_fps_cap();
 /// True while this instance is in an ad-hoc group with at least one other player.
 bool psp_adhoc_in_session();
 bool psp_adhoc_connected();
+/// Players in this instance's ad-hoc group, itself included; 0 when not in a group (the Discord party size).
+int psp_adhoc_group_size();
+/// The nicknames of the other players in this instance's group (UTF-8, as they sent them).
+std::vector<std::string> psp_adhoc_group_nicks();
+/// A string every member of the group gets the same (room + group name), "" when not in a group (the Discord party id).
+std::string psp_adhoc_group_key();
+/// The nickname other players see: a game module passes the player name of the save (UTF-8, cut to 31 bytes). Empty = "Player".
+/// PSPRECOMP_ADHOC_NICK, when set, wins.
+void psp_adhoc_set_nickname(const char* utf8);
 
 /// Change the network setup at run time (the settings menu). `internet` selects relay-server mode;
 /// `server`/`room` apply to it, `peers` (comma separated) to LAN mode. Takes effect within a few

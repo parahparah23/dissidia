@@ -16,6 +16,7 @@ Everything about the game itself, the native build and the modding tools, in one
 - [multiplayer.md](multiplayer.md): Communications mode over UDP (LAN, one machine, internet), options, how the ad-hoc stack is emulated.
 - [savedata.md](savedata.md): saves between regions: `savemgr` list / import / export.
 - [cloud-sync.md](cloud-sync.md): saves between devices through a folder, WebDAV or Google Drive.
+- [discord.md](discord.md): Discord Rich Presence (mode, fighters, stage, the other players on your Discord profile).
 - [testing.md](testing.md): the battle test harness, frame-rate parity tests, testing on a phone or a Deck.
 
 ## Making characters

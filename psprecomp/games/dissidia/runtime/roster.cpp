@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -5677,4 +5678,17 @@ int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, in
     const uint32_t okv = static_cast<uint32_t>(ctx->r[2]);
     *ctx = after;
     return okv ? 1 : 0;
+}
+
+// Display name of a roster.txt character (its nm= label, else its code in capitals), "" for a charId the roster does not set
+// (discord_presence.cpp names retail characters itself). Read-only after load_config, so any thread may ask.
+std::string dissidia_roster_name(int char_id) {
+    for (const Entry& e : g_entries) {
+        if (e.charId != char_id) continue;
+        if (!e.label.empty()) return e.label;
+        std::string up = e.code;
+        for (char& c : up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return up;
+    }
+    return "";
 }
