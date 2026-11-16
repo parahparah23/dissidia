@@ -59,6 +59,14 @@ away, as abilities 0910..0917 next to his 012 kit.
 tools/d1_moves.py --d1 "Dissidia Final Fantasy (USA).iso" --iso012 "Dissidia 012 (USA).iso"   # writes mods/bartz-dff
 ```
 
+Releases: the wizard's Options page has **Bartz: Dissidia 1 moves**, which asks for the Dissidia 1 disc image and runs
+`d1_moves.py install`. Nothing from either disc ships: `games/dissidia/d1_moves/` holds patches (176 KB, the same
+NPD1 format as the online deltas) whose sources are the player's 012 files, their Dissidia 1 files and D1's moveset
+run through `d1_objx.py` there; every result is checked against `manifest.json` (SHA-256), D1's help texts are read
+from their disc at install. After a change to the mod, regenerate them from a built mods dir:
+`d1_moves.py patches --d1 D1.iso --mods work/mods --disc work/disc0` (and `netpack.py record` for online play). Tested 16
+Nov 2026: an install into an empty game folder rebuilt all files byte for byte as the dev build (3.5 s).
+
 It converts D1's moveset to the 012 layout (`tools/d1_objx.py`: action records 112 -> 116 bytes, the command table,
 hits 60 -> 68 bytes with 012's hit-stop bytes filled in, projectile parameters from floats to the float pool, effect
 placements 248 -> 260 bytes, and the six event ops whose value count grew, learnt from the moves both games share), then

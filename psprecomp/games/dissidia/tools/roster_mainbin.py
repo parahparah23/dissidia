@@ -127,7 +127,24 @@ def mpk_unpack(d):
     return bytes(d[:8]), ents
 
 
-def mpk_pack(head, ents):
+def mpk_offsets(d):
+    """{member name: data offset} of an MPK."""
+    cnt = struct.unpack_from("<I", d, 8)[0]
+    out = {}
+    for i in range(cnt):
+        no, do, _sz, _ex = struct.unpack_from("<4I", d, 0x10 + 16 * i)
+        out[d[no:d.index(b"\0", no)].decode()] = do
+    return out
+
+
+MPK_KEEP_ALIGN = 256   # every member of a rebuilt main.bin starts at its retail offset modulo this
+
+
+def mpk_pack(head, ents, keep=None):
+    """keep: {member name: offset in the original archive}: each such member is placed at an offset congruent to its
+    original one modulo MPK_KEEP_ALIGN. The game uses main.bin's members in place (sound banks snd_common.scd /
+    snd_menu.scd, the resident effect library resident.frr): with system.bin grown by a few records they used to move
+    by 16-byte steps, and battle sound effects played the wrong clips (Bartz's Dissidia 1 moves, 16 Nov 2026)."""
     n = len(ents)
     names = b"".join(e[0].encode() + b"\0" for e in ents)
     name_base = 0x10 + 16 * n
@@ -140,6 +157,8 @@ def mpk_pack(head, ents):
     body = bytearray()
     for e, no in zip(ents, offs):
         out_pos = (out_pos + 15) & ~15
+        if keep and e[0] in keep:
+            out_pos += (keep[e[0]] - out_pos) % MPK_KEEP_ALIGN
         table += struct.pack("<4I", no, out_pos, len(e[2]), e[1])
         body += b"\0" * (out_pos - data_base - len(body))
         body += e[2]
@@ -1069,7 +1088,7 @@ def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, 
     chrp[2] =bytes(chd[:4]) + struct.pack("<I", len(recs)) + b"".join(bytes(r) for r in recs)
     obj[2] = bytes(ohead) + struct.pack("<I", len(orecs)) + b"".join(bytes(r) for r in orecs)
     by["system.bin"][2] = arc_pack(ahead, aents)
-    return mpk_pack(head, ents)
+    return mpk_pack(head, ents, keep=mpk_offsets(data))
 
 
 def main(argv):

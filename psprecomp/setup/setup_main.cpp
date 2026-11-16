@@ -211,7 +211,7 @@ struct Browser {
 // -------------------------------------------------------------------------------------------------------------- app
 enum class Screen { Welcome, PickInfo, PickIso, PickUndub, Waiting, InstallDir, BrowseDir, TypePath, Options, Build, Done, Failed, Checking, UpdateAvail, Message, Permission, AndroidInstall, Download };
 // What a file/folder pick is for.
-enum class Pick { Iso, Undub, Dir };
+enum class Pick { Iso, Undub, D1, Dir };   // D1: the Dissidia 1 disc of the Bartz moves option (browser page shared with Undub)
 
 struct App {
     SDL_Window* win = nullptr;
@@ -257,7 +257,7 @@ struct App {
     Screen before_pick = Screen::Welcome;
 
     // Every page is drawn by the game's Settings screen renderer; the Options page has two categories (sidebar): L / R or a tap on one switch.
-    enum OptRow { OR_UPDATES, OR_HD, OR_PACK, OR_JP, OR_ANDROID, OR_SAVES, OR_STEAM, OR_FOLDER, OR_START, OR_BACK };
+    enum OptRow { OR_UPDATES, OR_HD, OR_PACK, OR_JP, OR_D1, OR_ANDROID, OR_SAVES, OR_STEAM, OR_FOLDER, OR_START, OR_BACK };
     std::string step_note;      // what an optional step (Steam) reported, shown at the end
     bool extras_mode = false;   // the Options page opened from "Change extras" on an installed game: only the extras, applied without a rebuild
     bool extras_run = false;    // the running plan is such an apply
@@ -266,6 +266,7 @@ struct App {
         std::vector<OptRow> r = {OR_HD};
         if (opt.hd_textures && setup::feature_available(layout, "hd_textures")) r.push_back(OR_PACK);   // which pack, only when textures are on
         r.push_back(OR_JP);
+        r.push_back(OR_D1);
 #ifndef __ANDROID__
         r.push_back(OR_ANDROID);
         r.push_back(OR_SAVES);
@@ -405,13 +406,20 @@ struct App {
             break;
         }
         case Screen::PickInfo: {
-            const bool undub = pick == Pick::Undub;
+            const bool undub = pick == Pick::Undub, d1 = pick == Pick::D1;
 #ifdef __ANDROID__
             const std::string how = "Android's own file picker opens next: browse to the file (SD card, Downloads...) and tap it. The app only reads it; nothing is uploaded.";
 #else
             const std::string how = "A file dialog opens next: browse to the file and open it. The program only reads it; nothing is uploaded.";
 #endif
-            if (!undub) {
+            if (d1) {
+                p.title = "DISSIDIA 1 DISC";
+                p.tab = "Bartz's Dissidia 1 moves";
+                p.rows = {row("A Dissidia 1 disc image", "Bartz's eight moves from the first Dissidia (Soul Eater, Flood, Paladin Force...) are rebuilt from your own copy of Dissidia Final Fantasy (2008), as a .iso disc image. It is only read once. The app ships only small patches that need both discs to turn into the moves.", ".iso"),
+                          row("Valid: the US release", "Dissidia Final Fantasy (USA, ULUS-10437) as an uncompressed .iso, together with a US Dissidia 012. Unpack .zip / .7z first. Other releases are refused with a message; the rest of the install is not affected.", "US"),
+                          row("Choose the file", how),
+                          row("Back")};
+            } else if (!undub) {
                 p.title = "YOUR GAME FILE";
                 p.tab = "Step 1";
                 p.rows = {row("A Dissidia 012 disc image", "The game is built from your own copy of the PSP game Dissidia 012 [duodecim] Final Fantasy, as a disc image file: a .iso or a .cso (compressed ISO) of the whole disc. Nothing from the game is downloaded or shipped with this app.", ".iso or .cso"),
@@ -472,7 +480,7 @@ struct App {
             break;
         }
         case Screen::Waiting:
-            p.title = pick == Pick::Dir ? "CHOOSE A FOLDER" : pick == Pick::Undub ? "CHOOSE THE UNDUB FILE" : "CHOOSE YOUR GAME FILE";
+            p.title = pick == Pick::Dir ? "CHOOSE A FOLDER" : pick == Pick::Undub ? "CHOOSE THE UNDUB FILE" : pick == Pick::D1 ? "CHOOSE THE DISSIDIA 1 FILE" : "CHOOSE YOUR GAME FILE";
             p.tab = "Waiting";
 #ifdef __ANDROID__
             p.rows = {row("Choose the game file", "Opens Android's file picker. Pick your Dissidia 012 disc image (.iso or .cso) from the SD card, Download or anywhere else."),
@@ -487,7 +495,7 @@ struct App {
         case Screen::PickUndub:
         case Screen::BrowseDir: {
             bool dirs = screen == Screen::BrowseDir;
-            p.title = dirs ? "CHOOSE A FOLDER" : screen == Screen::PickUndub ? "CHOOSE THE UNDUB FILE" : "CHOOSE YOUR GAME FILE";
+            p.title = dirs ? "CHOOSE A FOLDER" : screen == Screen::PickUndub ? (pick == Pick::D1 ? "CHOOSE THE DISSIDIA 1 FILE" : "CHOOSE THE UNDUB FILE") : "CHOOSE YOUR GAME FILE";
             p.tab = shorten_left(br.cur.string(), 36);
             int total = (int)br.list.size();
             int top = std::max(0, std::min(sel - MENU_ROWS / 2, total - MENU_ROWS));
@@ -516,7 +524,7 @@ struct App {
         }
         case Screen::Options: {
             p.title = "OPTIONS";
-            bool tex = setup::feature_available(layout, "hd_textures"), jp = setup::feature_available(layout, "jp_audio"),
+            bool tex = setup::feature_available(layout, "hd_textures"), jp = setup::feature_available(layout, "jp_audio"), d1 = setup::feature_available(layout, "d1_moves"),
                  an = setup::feature_available(layout, "android");
             if (!save_sources_scanned) {
 #ifdef __ANDROID__
@@ -544,6 +552,9 @@ struct App {
                     break;
                 case OR_JP:
                     p.rows.push_back(toggle_row("Japanese voices (undub)", "Adds the Japanese voices and movies from a second disc image (an undub ISO) that you pick next.", opt.jp_audio, jp));
+                    break;
+                case OR_D1:
+                    p.rows.push_back(toggle_row("Bartz: Dissidia 1 moves", "Gives Bartz back the eight moves he had in the first Dissidia (Soul Eater, Flood, Wind Shear, Paladin Force...), next to his 012 kit. Needs your Dissidia 1 (2008) disc image, which you pick next. In the game, Settings > Mods turns them off and on. Online, players without them receive what they need from you.", opt.d1_moves, d1));
                     break;
                 case OR_ANDROID:
                     p.rows.push_back(toggle_row("Android version", "Also builds the Android version (an APK for phones and handhelds, 64-bit ARM). Needs a one-time download of Google's Android NDK (about 0.7 GB; by turning this on you accept its license, developer.android.com/studio/terms) and some extra minutes. Afterwards you can install it on a connected device from the last page.", opt.android, an));
@@ -806,7 +817,7 @@ struct App {
                 state.workdir = rebuild_only ? state.workdir : workdir;
                 if (!extras_run) state.built_fp = setup::android_payload_fingerprint(layout);
 #endif
-                if (extras_run) { state.options = opt; state.options.undub_iso.clear(); state.options.steam = false; opt.steam = false; }
+                if (extras_run) { state.options = opt; state.options.undub_iso.clear(); state.options.d1_iso.clear(); state.options.steam = false; opt.steam = false; }
                 setup::save_state(state_file, state);
 #ifdef __ANDROID__
                 if (false)
@@ -982,7 +993,7 @@ struct App {
     fs::path pick_start(Pick k) {
         std::error_code ec;
         if (k == Pick::Dir) return fs::path(workdir).parent_path();
-        std::string cur = k == Pick::Undub ? opt.undub_iso : iso;
+        std::string cur = k == Pick::Undub ? opt.undub_iso : k == Pick::D1 ? opt.d1_iso : iso;
         if (!cur.empty() && cur.compare(0, 3, "fd:") != 0) return fs::path(cur).parent_path();
 #ifdef __ANDROID__
         return fs::path("/storage/emulated/0");
@@ -994,9 +1005,9 @@ struct App {
     void begin_pick(Pick k, Screen back, bool explained = false) {
         pick = k;
         before_pick = back;
-        if ((k == Pick::Iso || k == Pick::Undub) && !explained) { go(Screen::PickInfo, 0); return; }   // first say what to pick and what is valid
+        if ((k == Pick::Iso || k == Pick::Undub || k == Pick::D1) && !explained) { go(Screen::PickInfo, 0); return; }   // first say what to pick and what is valid
 #ifdef __ANDROID__
-        if (k == Pick::Iso || k == Pick::Undub) {   // Android's own file picker; the built-in browser stays as the fallback (the Waiting page)
+        if (k == Pick::Iso || k == Pick::Undub || k == Pick::D1) {   // Android's own file picker; the built-in browser stays as the fallback (the Waiting page)
             setup::android::pick_file();
             go(Screen::Waiting);
             return;
@@ -1005,7 +1016,7 @@ struct App {
         if (native_ok()) {
             std::string start = pick_start(k).string();
             if (k == Pick::Dir) dir_dlg = std::make_unique<pfd::select_folder>("Choose the install folder", start);
-            else file_dlg = std::make_unique<pfd::open_file>(k == Pick::Undub ? "Choose the undub disc image" : "Choose your Dissidia 012 disc image",
+            else file_dlg = std::make_unique<pfd::open_file>(k == Pick::Undub ? "Choose the undub disc image" : k == Pick::D1 ? "Choose your Dissidia 1 disc image" : "Choose your Dissidia 012 disc image",
                                                               start, std::vector<std::string>{"PSP disc images", "*.iso *.ISO *.cso *.CSO", "All files", "*"});
             go(Screen::Waiting);
         } else {
@@ -1017,7 +1028,7 @@ struct App {
         file_dlg.reset();
         dir_dlg.reset();
         br.open(pick_start(pick), pick == Pick::Dir);
-        go(pick == Pick::Dir ? Screen::BrowseDir : pick == Pick::Undub ? Screen::PickUndub : Screen::PickIso);
+        go(pick == Pick::Dir ? Screen::BrowseDir : (pick == Pick::Undub || pick == Pick::D1) ? Screen::PickUndub : Screen::PickIso);
     }
 
     void picked(const std::string& path) {   // a chosen file (or folder when pick == Dir)
@@ -1025,8 +1036,8 @@ struct App {
         if (pick == Pick::Dir) {
             workdir = path;
             if (before_pick == Screen::Options) go(Screen::Options, 0); else go(Screen::InstallDir);
-        } else if (pick == Pick::Undub) {
-            opt.undub_iso = path;
+        } else if (pick == Pick::Undub || pick == Pick::D1) {
+            (pick == Pick::Undub ? opt.undub_iso : opt.d1_iso) = path;
             go_options();
             start_install_or_ask();
         } else {
@@ -1053,7 +1064,7 @@ struct App {
                 if (fl >= 0) fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);   // the build tools inherit it (setup_from_iso.py "fd:N")
                 std::string fdpath = "fd:" + std::to_string(fd);
                 setup::android::clear_pick();
-                if (pick == Pick::Undub) { picked(fdpath); return; }   // the second disc image of the undub option
+                if (pick == Pick::Undub || pick == Pick::D1) { picked(fdpath); return; }   // the second disc image of the undub option
                 iso = fdpath;
                 iso_name = c == std::string::npos ? "game" : st.substr(c + 1);
                 picked(iso);
@@ -1086,6 +1097,7 @@ struct App {
         workdir = state.workdir;
         opt = state.options;
         opt.undub_iso.clear();   // a saved path (or Android descriptor) from the install is no longer valid
+        opt.d1_iso.clear();
         go_options(OR_HD);
     }
 
@@ -1105,6 +1117,7 @@ struct App {
         }
         setup::Options o = opt;
         if (prev.jp_audio && o.undub_iso.empty()) o.jp_audio = false;   // already added: nothing to extract
+        if (prev.d1_moves && o.d1_iso.empty()) o.d1_moves = false;
         if (prev.android && setup::android_build_exists(workdir)) o.android = false;   // its APK is already built
 #ifdef __ANDROID__
         plan = setup::plan_extras_android(layout, workdir, o, extras_skip_tex);
@@ -1112,7 +1125,7 @@ struct App {
         plan = setup::plan_extras(layout, workdir, o, extras_skip_tex);
 #endif
         if (plan.empty()) {
-            state.options = opt; state.options.undub_iso.clear();
+            state.options = opt; state.options.undub_iso.clear(); state.options.d1_iso.clear();
             setup::save_state(state_file, state);
             extras_mode = false;
             msg_title = "EXTRAS";
@@ -1126,11 +1139,13 @@ struct App {
     void start_install_or_ask() {
         if (extras_mode) {
             if (opt.jp_audio && !state.options.jp_audio && opt.undub_iso.empty() && setup::feature_available(layout, "jp_audio")) { begin_pick(Pick::Undub, Screen::Options); return; }
+            if (opt.d1_moves && !state.options.d1_moves && opt.d1_iso.empty() && setup::feature_available(layout, "d1_moves")) { begin_pick(Pick::D1, Screen::Options); return; }
             start_extras();
             return;
         }
         // the undub option needs its disc image first
         if (opt.jp_audio && opt.undub_iso.empty() && setup::feature_available(layout, "jp_audio")) { begin_pick(Pick::Undub, Screen::Options); return; }
+        if (opt.d1_moves && opt.d1_iso.empty() && setup::feature_available(layout, "d1_moves")) { begin_pick(Pick::D1, Screen::Options); return; }
         std::error_code ec;
         fs::create_directories(workdir, ec);
         if (ec) { fail("Cannot create " + workdir + ": " + ec.message()); return; }
@@ -1144,6 +1159,9 @@ struct App {
         case OR_PACK: opt.texture_pack = opt.texture_pack == "ai" ? "liink" : "ai"; break;
         case OR_JP:
             if (setup::feature_available(layout, "jp_audio")) { opt.jp_audio = !opt.jp_audio; if (!opt.jp_audio) opt.undub_iso.clear(); }
+            break;
+        case OR_D1:
+            if (setup::feature_available(layout, "d1_moves")) { opt.d1_moves = !opt.d1_moves; if (!opt.d1_moves) opt.d1_iso.clear(); }
             break;
         case OR_ANDROID: if (setup::feature_available(layout, "android")) opt.android = !opt.android; break;
         case OR_STEAM: if (setup::feature_available(layout, "steam")) opt.steam = !opt.steam; break;
@@ -1853,7 +1871,7 @@ int main(int argc, char** argv) {
     if (!shots.empty()) {   // look check without a window
         std::error_code ec;
         fs::create_directories(shots + "/game", ec);
-        if (FILE* f = std::fopen((shots + "/game/features.ini").c_str(), "wb")) { std::fputs("hd_textures=1\njp_audio=1\nandroid=1\nsteam=1\n", f); std::fclose(f); }
+        if (FILE* f = std::fopen((shots + "/game/features.ini").c_str(), "wb")) { std::fputs("hd_textures=1\njp_audio=1\nd1_moves=1\nandroid=1\nsteam=1\n", f); std::fclose(f); }
         app.layout.game_dir = shots + "/game";
         app.workdir = "/home/player/Games/Dissidia012";
         app.iso = "/home/player/Downloads/Dissidia 012 (Europe).iso";
@@ -1867,6 +1885,7 @@ int main(int argc, char** argv) {
         app.go(Screen::PickIso); shot("2b_pick_iso");
         app.pick = Pick::Iso; app.go(Screen::PickInfo, 0); shot("2c_pick_info");
         app.pick = Pick::Undub; app.go(Screen::PickInfo, 0); shot("2d_pick_info_undub");
+        app.pick = Pick::D1; app.go(Screen::PickInfo, 0); shot("2e_pick_info_d1");
         app.pick = Pick::Iso;
         app.go(Screen::InstallDir); shot("3_install_dir");
         app.go(Screen::Options, 0); shot("4_options");

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Bartz's Dissidia (2008) moves for Dissidia 012: build mods/bartz-dff from your two discs.
 
-    d1_moves.py --d1 "Dissidia Final Fantasy (USA).iso" --iso012 "Dissidia 012 (USA).iso" [--out mods/bartz-dff]
+    d1_moves.py --d1 "Dissidia Final Fantasy (USA).iso" --iso012 "Dissidia 012 (USA).iso" [--out mods/bartz-dff]   # dev: the mod folder
+    d1_moves.py patches --d1 D1.iso --mods work/mods --disc work/disc0    # dev: games/dissidia/d1_moves/ for a release
+    d1_moves.py install --d1 D1.iso --work <installed game>              # installer: rebuild the files from the patches
 
 012 dropped eight of the moves Bartz had in the first Dissidia: Ascendant Lance, Climbarrel (ground Bravery), Storm Shot,
 Slidehazzard (air Bravery), Soul Eater, Flood (ground HP), Wind Shear and Paladin Force (air HP). This puts them back as
@@ -103,7 +105,8 @@ class IsoPackage(pe.Package):
     """PACKAGE.BIN / PACKAGE_INFO.BIN read in place from an ISO 9660 image."""
 
     def __init__(self, iso):
-        self.iso = open(iso, 'rb')
+        # "fd:N": a descriptor the Android setup app's file picker handed over (as setup_from_iso.py takes it)
+        self.iso = os.fdopen(os.dup(int(iso[3:].split(':')[0])), 'rb') if iso.startswith('fd:') else open(iso, 'rb')
         info_lba, info_size = self._find('PSP_GAME/USRDIR/DATA/PACKAGE_INFO.BIN')
         self.pkg_lba, _ = self._find('PSP_GAME/USRDIR/DATA/PACKAGE.BIN')
         self.iso.seek(info_lba * 2048)
@@ -224,7 +227,154 @@ def finish(mod, d1, d12):
     print('voice lines from Dissidia (2008) in slots %s' % ', '.join(map(str, filled)))
 
 
+# ---------------------------------------------------------------- patches (what a release ships) and install (the wizard)
+PATCH_DIR = os.path.join(HERE, '..', 'd1_moves')            # games/dissidia/d1_moves: manifest.json + one .npd per file
+DONORS = ('for100', 'six100', 'thr100', 'ten100', 'sev100', 'one100', 'two100')   # the moves' owners in 012 (effects)
+
+
+def sources(spec, d1, d12, cache):
+    """The bytes a patch applies to: 012:<path> (the player's own game), d1:<path> / d1crc:<hex> (their Dissidia 1
+    disc), d1conv:<path> (a D1 moveset in the 012 layout, d1_objx.convert)."""
+    out = []
+    for s_ in spec:
+        if s_ not in cache:
+            kind, arg = s_.split(':', 1)
+            if kind == '012':
+                cache[s_] = d12.read(arg)
+            elif kind == 'd1':
+                cache[s_] = d1.read(arg)
+            elif kind == 'd1crc':
+                cache[s_] = d1.read_crc(int(arg, 16))
+            elif kind == 'd1conv':
+                cache[s_] = d1_objx.convert(d1.read(arg), log=lambda *x: None)
+            else:
+                raise SystemExit('unknown patch source %r' % s_)
+        out.append(cache[s_])
+    return b''.join(out)
+
+
+def file_sources(gp):
+    if gp.endswith('.objx'):
+        return ['012:' + gp, 'd1conv:obj/p_fiv100.objx'] + ['012:obj/p_%s.objx' % c for c in DONORS]
+    if gp.endswith('.gmo'):
+        return ['012:' + gp, 'd1:obj/p_fiv100_1p.gmo']
+    if gp.endswith('.scd'):
+        return ['012:' + gp, 'd1crc:%08x' % D1_VOICE_BANK]
+    raise SystemExit('no patch sources for %s' % gp)
+
+
+def cmd_patches(a):
+    """Dev: patches + manifest from a mods dir with bartz-dff built in (charmod.py build), for the release."""
+    import netpack as npk
+    npk.BLOCK = 8
+    d1, d12 = IsoPackage(a.d1), pe.Package(a.disc)
+    m = json.load(open(os.path.join(REPO, 'mods', 'bartz-dff', 'mod.json')))
+    owner = json.load(open(os.path.join(a.mods, 'readme_charmod_retail.json')))
+    os.makedirs(PATCH_DIR, exist_ok=True)
+    for f in os.listdir(PATCH_DIR):
+        if f.endswith('.npd'):
+            os.remove(os.path.join(PATCH_DIR, f))
+    man = {'_info': 'Bartz\'s Dissidia 1 moves: patches that rebuild the mod\'s files from the player\'s own Dissidia 012 and '
+                    'Dissidia 1 discs (tools/d1_moves.py install). Made by tools/d1_moves.py patches.',
+           'folder': 'bartz-dff', 'code': 'fiv100', 'display': m.get('display', 'Bartz: Dissidia (2008) moves'),
+           'files': [], 'move_names': {}}
+    cache = {}
+    for gp in sorted(g for g, n in owner.items() if n == 'bartz-dff'):
+        new = open(os.path.join(a.mods, gp), 'rb').read()
+        spec = file_sources(gp)
+        src = sources(spec, d1, d12, cache)
+        d = npk.encode(src, new)
+        assert npk.decode(d, src) == new
+        name = os.path.basename(gp) + '.npd'
+        open(os.path.join(PATCH_DIR, name), 'wb').write(d)
+        man['files'].append({'path': gp, 'size': len(new), 'sha256': npk.sha(new), 'patch': name, 'sources': spec,
+                             'sources_sha256': [npk.sha(sources([x], d1, d12, cache)) for x in spec]})
+        print('%-42s patch %7d B' % (gp, len(d)))
+    for k, e in m['move_names'].items():
+        if not k.startswith('_') and 'copy' in e:
+            e = {x: v for x, v in e.items() if x != 'help'}
+            e['help_d1_cmd'] = next(mv[0] for mv in MOVES if mv[1] == e['name'])   # D1's own text, read at install
+            man['move_names'][k] = e
+    with open(os.path.join(PATCH_DIR, 'manifest.json'), 'w') as f:
+        json.dump(man, f, indent=1)
+        f.write('\n')
+    print('wrote', os.path.normpath(PATCH_DIR))
+
+
+def cmd_install(a):
+    """The installer's step: the mod's files into <work>/mods from the shipped patches and the player's discs, checked
+    byte for byte (SHA-256); the new abilities into main.bin (roster_mainbin.py), the Settings switch (retail_moves.txt)
+    and the online deltas (netpack.py)."""
+    import netpack as npk
+    man = json.load(open(os.path.join(PATCH_DIR, 'manifest.json')))
+    d12 = pe.Package(os.path.join(a.work, 'disc0'))
+    d1 = IsoPackage(a.d1)
+    if pe.package_crc('obj/p_fiv100.objx') not in d1.entries:
+        raise SystemExit('%s is not a Dissidia Final Fantasy (2008) disc image' % a.d1)
+    mods = os.path.join(a.work, 'mods')
+    cache = {}
+    print('PROGRESS 5', flush=True)
+    for i, f in enumerate(man['files']):
+        for spec, want in zip(f['sources'], f['sources_sha256']):
+            got = npk.sha(sources([spec], d1, d12, cache))
+            if got != want:
+                raise SystemExit('%s differs from the one the patches were made from (%s): the moves need the USA '
+                                 'releases of both games' % (spec, 'your Dissidia 012' if spec.startswith('012') else 'your Dissidia 1 disc'))
+        out = npk.decode(open(os.path.join(PATCH_DIR, f['patch']), 'rb').read(), sources(f['sources'], d1, d12, cache))
+        if len(out) != f['size'] or npk.sha(out) != f['sha256']:
+            raise SystemExit('%s did not rebuild to the expected file' % f['path'])
+        p = os.path.join(mods, f['path'])
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'wb') as fh:
+            fh.write(out)
+        print('rebuilt %s' % f['path'])
+        print('PROGRESS %d' % (10 + 60 * (i + 1) // len(man['files'])), flush=True)
+    helps = d1_help(d1)
+    names = {}
+    for k, e in man['move_names'].items():
+        e = dict(e)
+        cmd = e.pop('help_d1_cmd')
+        e['help'] = helps.get(cmd, next(mv[4] for mv in MOVES if mv[0] == cmd))
+        rm.expand_help(e['help'], '')
+        names[k] = e
+    ab_p = os.path.join(mods, 'extra_abilities.json')
+    ab = json.load(open(ab_p)) if os.path.exists(ab_p) else {}
+    ab[man['code']] = names
+    with open(ab_p, 'w') as fh:
+        json.dump(ab, fh, indent=2, ensure_ascii=False)
+        fh.write('\n')
+    ids = ','.join('%04X' % ((9 << 8) | int(k, 16)) for k in sorted(names))
+    line = '%s 9 %s nm=%s' % (man['folder'], ids, man['display'].replace(' ', '_'))
+    rt = os.path.join(mods, 'retail_moves.txt')
+    lines = open(rt).read().splitlines() if os.path.exists(rt) else []
+    off = any(l.startswith('#off# ' + man['folder'] + ' ') for l in lines)
+    lines = [l for l in lines if not (l.split() and l.replace('#off# ', '').split()[0] == man['folder'])]
+    lines.append(('#off# ' if off else '') + line)
+    with open(rt, 'w') as fh:
+        fh.write('\n'.join(lines) + '\n')
+    if not os.path.exists(os.path.join(mods, 'roster.txt')):
+        open(os.path.join(mods, 'roster.txt'), 'w').close()       # (roster_mainbin would make up a character without one)
+    print('PROGRESS 75', flush=True)
+    if subprocess.call([sys.executable, os.path.join(HERE, 'roster_mainbin.py'), os.path.join(a.work, 'disc0'), mods]):
+        raise SystemExit('roster_mainbin.py failed')
+    print('PROGRESS 90', flush=True)
+    subprocess.call([sys.executable, os.path.join(HERE, 'netpack.py'), 'deltas', mods, '--disc', os.path.join(a.work, 'disc0')])
+    print('PROGRESS 100', flush=True)
+    print('Bartz\'s Dissidia 1 moves installed (Settings > Mods switches them)')
+
+
 def main(argv):
+    if argv and argv[0] in ('install', 'patches'):
+        ap = argparse.ArgumentParser(prog='d1_moves.py ' + argv[0])
+        ap.add_argument('--d1', required=True, help='Dissidia Final Fantasy (2008) disc image (.iso)')
+        if argv[0] == 'install':
+            ap.add_argument('--work', required=True, help='the installed game folder (disc0/, mods/)')
+            cmd_install(ap.parse_args(argv[1:]))
+        else:
+            ap.add_argument('--mods', required=True, help='a mods dir with bartz-dff built in')
+            ap.add_argument('--disc', required=True, help='its disc0 folder')
+            cmd_patches(ap.parse_args(argv[1:]))
+        return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--d1', required=True, help='Dissidia Final Fantasy (2008) ISO')
     ap.add_argument('--iso012', required=True, help='Dissidia 012 ISO (the one your game was set up from)')
