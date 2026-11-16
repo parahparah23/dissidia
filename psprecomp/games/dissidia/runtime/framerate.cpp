@@ -193,6 +193,7 @@ uint64_t g_fighter_seen[4] = {};   // g_tick when the fighter's step was last as
 //                                               <ms> tap <BUTTONS> [ms]         press, release after ms (default 100)
 //                                               <ms> analog <ax> <ay>           stick only
 //                                               <ms> mark <text>                 [TEST] line in the log
+//                                               <ms> rstick <ax> <ay>           hold the right stick (128 128 = centre; camera tests)
 //                                               <ms> quit                        exit the game
 //                                               <ms> sync [timeout] [scr]        hold the script until the player's action (script id) changes (or becomes `scr`); that update is T0
 //                                               <ms> batch <file>                hold it until <file> exists, then play (and delete) the lines in it: a driver feeds trials into a running battle
@@ -290,6 +291,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "analog") {
             unsigned ax = 128, ay = 128; ss >> ax >> ay;
             ev.push_back({t, 1, 0, (ay & 255u) << 8 | (ax & 255u), ""});
+        } else if (cmd == "rstick") {   // rstick <ax> <ay>: hold the right stick there (128 128 = let go); camera tests
+            unsigned ax = 128, ay = 128; ss >> ax >> ay;
+            ev.push_back({t, 17, 0, (ay & 255u) << 8 | (ax & 255u), ""});
         } else if (cmd == "mark") {
             std::string rest; std::getline(ss, rest);
             ev.push_back({t, 2, 0, 0, rest});
@@ -559,6 +563,11 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             continue;
         }
         if (e.kind == 16) { psp_fx_lights_set(e.a != 0); continue; }
+        if (e.kind == 17) {   // rstick: the debug socket's right-stick injection, held until the next rstick
+            g_injected_ranalog.store(e.b, std::memory_order_relaxed);
+            g_injected_ranalog_deadline_ms.store(e.b == 0x8080u ? 0 : INT64_MAX, std::memory_order_relaxed);
+            continue;
+        }
         if (e.kind == 15) {
             const uint32_t a = test_fighter(e.text == "cpu" ? 1u : 0u);
             if (a) { w32(a + e.a, e.b); std::fprintf(stderr, "[TEST] gt=%.0f poke %s +%X = %d\n", g_gt_ms, e.text.c_str(), e.a, static_cast<int>(e.b)); }

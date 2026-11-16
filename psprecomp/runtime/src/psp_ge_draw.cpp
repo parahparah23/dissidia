@@ -1336,7 +1336,10 @@ static std::atomic<bool> g_fps_counter{false};   // simple transparent fps numbe
 static std::atomic<bool> g_perf_hud{false};   // settings menu Debug page / PSPRECOMP_PERF_HUD=1
 static Stream g_s2d, g_s3d;
 static std::atomic<bool> g_vb_active{false};   // view blocker fade (ge_draw_set_view_blocker)
+static std::atomic<bool> g_vb_linger{false};   // some draw is still (partly) faded: keep evaluating so it fades back in instead of popping
 static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim);
+static std::atomic<bool> g_cc_collect{false};   // camera collision: cache the main view's stage geometry (a battle camera is running)
+static void cc_collect(uint8_t* rdram, const GeState& st, int n, int prim);
 // Ring size in vertices. 3D vertices are 68 bytes, 2D 28: 8.9 MB + 3.6 MB.
 // Sized for several frames of high-poly characters; small enough for an APU
 // (Steam Deck) where it is carved from shared system memory. A single batch
@@ -2148,8 +2151,10 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         const int path = kc.path;
         const KeyBuf& key = kc.key;
         float vb_f = 1.f;
-        if (g_vb_active.load(std::memory_order_relaxed) && path == 1 && state.depth_test_enable && !state.depth_write_disable)
+        if ((g_vb_active.load(std::memory_order_relaxed) || g_vb_linger.load(std::memory_order_relaxed)) && path == 1 && state.depth_test_enable && !state.depth_write_disable)
             vb_f = vb_fade_factor(rdram, state, n, prim_type);
+        if (path == 1 && state.depth_test_enable && !state.depth_write_disable && g_cc_collect.load(std::memory_order_relaxed))
+            cc_collect(rdram, state, n, prim_type);
         GeState vb_state; KeyBuf vb_key;
         const bool vb_on = vb_f < 0.999f;
         if (vb_on) {   // drawn blended with no depth writes (the game's own fade does the same), so the player behind it stays visible
@@ -4953,11 +4958,17 @@ void ge_draw_toast(const char* text, int ms, int y_px) {
 static float g_vb_target[3] = {0, 0, 0};
 static float g_vb_eye[3] = {0, 0, 0};   // the game camera's eye (the draws of the main view have this eye; screen-space effects use another view and are left alone)
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]) {
-    if (active) for (int i = 0; i < 3; i++) { g_vb_target[i] = target[i]; g_vb_eye[i] = eye[i]; }
+    for (int i = 0; i < 3; i++) g_vb_eye[i] = eye[i];   // always: a draw still fading back in must keep being matched to the main view
+    if (active) for (int i = 0; i < 3; i++) g_vb_target[i] = target[i];
     g_vb_active.store(active, std::memory_order_relaxed);
 }
-// Fade factor of a draw (1 = opaque), eased per draw so blocks fade in and out instead of popping. Keyed by the vertex data address and count.
-static std::unordered_map<uint64_t, float> g_vb_fade;
+// Fade state of one drawn instance (1 = opaque), eased in time so blocks fade in and out instead of popping. Keyed by the vertex
+// data address and count AND the instance's world position: one mesh drawn at several places (a row of pillars, repeated wall
+// pieces) used to share one entry, so one hit pillar faded all of them, and the un-hit copies drawn after it pulled it back.
+struct VbFade { float f = 1.f; double t = 0.0; };
+static std::unordered_map<uint64_t, VbFade> g_vb_fade;
+static double g_vb_last_faded_t = 0.0;
+static double vb_now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 static bool vb_main_view(const GeState& st, float eye[3]) {
     const float* V = st.view_matrix;
     eye[0] = -(V[0] * V[9] + V[1] * V[10] + V[2] * V[11]); eye[1] = -(V[3] * V[9] + V[4] * V[10] + V[5] * V[11]); eye[2] = -(V[6] * V[9] + V[7] * V[10] + V[8] * V[11]);
@@ -4968,9 +4979,21 @@ struct VbBox { float lo[3], hi[3]; };
 static std::unordered_map<uint64_t, VbBox> g_vb_box;   // model-space box of a draw's vertices, by vertex address and count (static geometry: decoded once)
 static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) {
     if (n < 3) return 1.f;
+    static const float k_alpha = [] { const char* e = std::getenv("PSPRECOMP_CAM_BLOCKER_ALPHA"); return e ? std::clamp((float)std::atof(e), 0.f, 1.f) : 0.3f; }();
+    const bool want = g_vb_active.load(std::memory_order_relaxed);
     const float* m = st.world_matrix;
     static thread_local std::vector<GeGpuVertex> tmp;
     const uint64_t key = (uint64_t)st.vertex_addr << 20 ^ (uint64_t)n;
+    // the instance: its world position, quantised to 25 cm (static pieces keep their entry; moving ones just do not fade)
+    auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 4.f); };
+    const uint64_t ikey = key * 0x9E3779B97F4A7C15ull ^ (q(m[9]) * 0xC2B2AE3D27D4EB4Full) ^ (q(m[10]) * 0x165667B19E3779F9ull) ^ (q(m[11]) * 0x27D4EB2F165667C5ull);
+    float eye[3];
+    if (!vb_main_view(st, eye)) return 1.f;   // not drawn from the game camera (screen-space effects, shadow maps, reflections, ...)
+    const double now = vb_now();
+    auto fi = g_vb_fade.find(ikey);
+    if (!want && fi == g_vb_fade.end()) return 1.f;   // lingering: only draws that are still faded need work
+    bool hit = false;
+    if (want) {
     auto bi = g_vb_box.find(key);
     if (bi == g_vb_box.end()) {
         VbBox bx{{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}};
@@ -4987,28 +5010,28 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
         const float w[3] = {m[0] * x + m[3] * y + m[6] * z + m[9], m[1] * x + m[4] * y + m[7] * z + m[10], m[2] * x + m[5] * y + m[8] * z + m[11]};
         for (int k = 0; k < 3; ++k) { wlo[k] = std::min(wlo[k], w[k]); whi[k] = std::max(whi[k], w[k]); }
     }
-    float eye[3];
-    if (!vb_main_view(st, eye)) return 1.f;   // not drawn from the game camera (screen-space effects, shadow maps, ...)
     const float* T = g_vb_target;   // the player's chest
-    bool hit = false;
     float hx = T[0] - eye[0], hz = T[2] - eye[2];
     const float hl = std::sqrt(hx * hx + hz * hz);
     if (hl > 1e-3f) { hx /= hl; hz /= hl; } else { hx = 0; hz = 1; }
-    // Rays to the whole body (feet, knee, chest, head, both shoulders), each starting a little behind the eye so a wall the camera touches or sits in
-    // still counts: the fighter has to stay visible, not just his chest.
-    const float aim[6][3] = {{0, -0.9f, 0}, {0, -0.4f, 0}, {0, 0, 0}, {0, 0.8f, 0}, {-hz * 0.5f, 0.2f, hx * 0.5f}, {hz * 0.5f, 0.2f, -hx * 0.5f}};
+    // Rays to the body (knee, chest, head, both shoulders), each starting a little behind the eye so a wall the camera touches
+    // still counts. Not to the feet: a ray grazing the floor at the fighter's feet faded floor pieces and kerbs. Floors and
+    // anything lower than the fighter's knees is never faded (the box top test), and the start is only 35 cm behind the eye
+    // (it was 2 m: a long wall the camera stood beside, out of the picture's way, faded as a whole).
+    const float aim[5][3] = {{0, -0.5f, 0}, {0, 0, 0}, {0, 0.75f, 0}, {-hz * 0.4f, 0.25f, hx * 0.4f}, {hz * 0.4f, 0.25f, -hx * 0.4f}};
     bool decoded = false;
-    if (n <= 1500) {   // (a block or a wall, not the whole stage: a single mesh of the floor or the sky would fade as one; Pandaemonium's walls are long slabs of a few triangles)
-        for (int ri = 0; ri < 6 && !hit; ++ri) {
+    const bool low = whi[1] < T[1] - 0.45f;   // top below the knees (feet are ~1 m below the chest)
+    if (n <= 1500 && !low) {   // (a block or a wall, not the whole stage: a single mesh of the floor or the sky would fade as one; Pandaemonium's walls are long slabs of a few triangles)
+        for (int ri = 0; ri < 5 && !hit; ++ri) {
             const float tg[3] = {T[0] + aim[ri][0], T[1] + aim[ri][1], T[2] + aim[ri][2]};
             float dir[3] = {tg[0] - eye[0], tg[1] - eye[1], tg[2] - eye[2]};
             const float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
             if (dl < 1e-3f) continue;
-            const float back = 2.0f;   // start behind the eye
+            const float back = 0.35f;   // start behind the eye
             const float o[3] = {eye[0] - dir[0] / dl * back, eye[1] - dir[1] / dl * back, eye[2] - dir[2] / dl * back};
             const float d[3] = {tg[0] - o[0], tg[1] - o[1], tg[2] - o[2]};
             const float len = dl + back;
-            const float tmax = std::max(0.f, 1.f - 0.5f / len);   // stop a body's width short of the player: only what he is touching does not fade (a wall a step in front of him must)
+            const float tmax = std::max(0.f, 1.f - 0.6f / len);   // stop a body's width short of the player: only what he is touching does not fade (a wall a step in front of him must)
             float t0 = 0.f, t1 = tmax;
             for (int k = 0; k < 3 && t0 <= t1; ++k) {
                 const bool thin = whi[k] - wlo[k] < 0.3f;   // a wall is often a flat sheet: shrinking it would invert the box, so widen it a little instead
@@ -5023,7 +5046,7 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
                 decoded = true;
             }
             const GeGpuVertex* v = tmp.data();
-            auto W = [&](int i, float out[3]) { const float* q = v[i].pos; for (int r = 0; r < 3; ++r) out[r] = m[r] * q[0] + m[3 + r] * q[1] + m[6 + r] * q[2] + m[9 + r]; };
+            auto W = [&](int i, float out[3]) { const float* qv = v[i].pos; for (int r = 0; r < 3; ++r) out[r] = m[r] * qv[0] + m[3 + r] * qv[1] + m[6 + r] * qv[2] + m[9 + r]; };
             auto tri = [&](int ia, int ib, int ic) {
                 float a[3], b[3], c[3]; W(ia, a); W(ib, b); W(ic, c);
                 const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
@@ -5033,10 +5056,10 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
                 const float inv = 1.f / det, tv[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]};
                 const float u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) * inv;
                 if (u < 0.f || u > 1.f) return false;
-                const float qv[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]};
-                const float w = (d[0] * qv[0] + d[1] * qv[1] + d[2] * qv[2]) * inv;
+                const float qq[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]};
+                const float w = (d[0] * qq[0] + d[1] * qq[1] + d[2] * qq[2]) * inv;
                 if (w < 0.f || u + w > 1.f) return false;
-                const float t = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) * inv;
+                const float t = (e2[0] * qq[0] + e2[1] * qq[1] + e2[2] * qq[2]) * inv;
                 return t > 0.f && t < tmax;
             };
             if (prim == GE_PRIM_TRIANGLES) { for (int i = 0; i + 2 < n && !hit; i += 3) hit = tri(i, i + 1, i + 2); }
@@ -5044,11 +5067,147 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
             else if (prim == GE_PRIM_TRIANGLE_FAN) { for (int i = 1; i + 1 < n && !hit; ++i) hit = tri(0, i, i + 1); }
         }
     }
-    float& f = g_vb_fade.try_emplace(key, 1.f).first->second;
-    const float target = hit ? 0.12f : 1.f;
-    f += (target - f) * (hit ? 0.5f : 0.2f);   // fades out fast (the fighter must not stay hidden), back in gently
-    if (std::fabs(f - target) < 0.01f) f = target;
+    }
+    if (fi == g_vb_fade.end()) {
+        if (!hit) return 1.f;   // only blocking instances get an entry
+        if (g_vb_fade.size() > 4096) g_vb_fade.clear();   // (moving pieces make new keys)
+        fi = g_vb_fade.emplace(ikey, VbFade{1.f, now}).first;
+    }
+    VbFade& e = fi->second;
+    const float dt = (float)std::clamp(now - e.t, 0.0, 0.1);   // per frame, not per draw: an instance drawn twice must not ease twice as fast
+    e.t = now;
+    const float target = hit ? k_alpha : 1.f;
+    const float tc = hit ? 0.08f : 0.3f;   // fades out fast (the fighter must not stay hidden), back in gently
+    e.f += (target - e.f) * (1.f - std::exp(-dt / tc));
+    if (std::fabs(e.f - target) < 0.01f) e.f = target;
+    const float f = e.f;
+    if (f >= 1.f) { g_vb_fade.erase(fi); return 1.f; }
+    g_vb_last_faded_t = now;
     return f;
+}
+// ---- Camera collision (ge_draw_camera_probe_*) ----
+// The stage geometry the main view draws, in world space, one entry per drawn instance (same key as the fade). Static pieces
+// are decoded once; an entry not drawn for 30 s is dropped, and everything is dropped when the total gets large (a new stage).
+// The game's own camera pulls in for walls behind ITS eye; a turned or held view needs its own test, or it ends up outside the
+// room looking at the back of a wall.
+struct CcMesh { float lo[3], hi[3]; std::vector<float> tri; double seen; int frames = 1; };   // frames: how many frames it was drawn in at this spot
+static std::unordered_map<uint64_t, CcMesh> g_cc;
+static size_t g_cc_tris = 0;
+static double g_cc_last_on = 0;
+static std::mutex g_cc_mu;
+static float g_cc_from[3], g_cc_to[3], g_cc_result = 1.f;
+static uint32_t g_cc_req_id = 0, g_cc_res_id = 0;
+static bool g_cc_pending = false;
+void ge_draw_camera_probe_request(const float from[3], const float to[3], uint32_t id) {
+    std::lock_guard<std::mutex> lk(g_cc_mu);
+    for (int i = 0; i < 3; i++) { g_cc_from[i] = from[i]; g_cc_to[i] = to[i]; }
+    g_cc_req_id = id; g_cc_pending = true;
+    g_cc_collect.store(true, std::memory_order_relaxed);
+    g_cc_last_on = vb_now();
+}
+float ge_draw_camera_probe_result(uint32_t* id) {
+    std::lock_guard<std::mutex> lk(g_cc_mu);
+    if (id) *id = g_cc_res_id;
+    return g_cc_result;
+}
+static void cc_collect(uint8_t* rdram, const GeState& st, int n, int prim) {
+    if (n < 3 || n > 12000) return;
+    if (prim != GE_PRIM_TRIANGLES && prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_TRIANGLE_FAN) return;
+    float eye[3];
+    if (!vb_main_view(st, eye)) return;
+    const float* m = st.world_matrix;
+    auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 4.f); };
+    const uint64_t key = (uint64_t)st.vertex_addr << 20 ^ (uint64_t)n;
+    const uint64_t ikey = key * 0x9E3779B97F4A7C15ull ^ (q(m[9]) * 0xC2B2AE3D27D4EB4Full) ^ (q(m[10]) * 0x165667B19E3779F9ull) ^ (q(m[11]) * 0x27D4EB2F165667C5ull);
+    const double now = vb_now();
+    auto it = g_cc.find(ikey);
+    if (it != g_cc.end()) { if (now - it->second.seen > 0.005) it->second.frames++; it->second.seen = now; return; }
+    if (g_cc_tris > 400000) { g_cc.clear(); g_cc_tris = 0; }
+    static thread_local std::vector<GeGpuVertex> tmp;
+    tmp.resize((size_t)n);
+    if (!ge_decode_vertices_gpu(rdram, st, n, tmp.data())) return;
+    CcMesh cm{{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}, {}, now};
+    auto add = [&](int ia, int ib, int ic) {
+        for (int j : {ia, ib, ic}) {
+            const float* p = tmp[j].pos;
+            for (int r = 0; r < 3; ++r) {
+                const float w = m[r] * p[0] + m[3 + r] * p[1] + m[6 + r] * p[2] + m[9 + r];
+                cm.tri.push_back(w); cm.lo[r] = std::min(cm.lo[r], w); cm.hi[r] = std::max(cm.hi[r], w);
+            }
+        }
+    };
+    if (prim == GE_PRIM_TRIANGLES) for (int i = 0; i + 2 < n; i += 3) add(i, i + 1, i + 2);
+    else if (prim == GE_PRIM_TRIANGLE_STRIP) for (int i = 0; i + 2 < n; ++i) add(i, i + 1, i + 2);
+    else for (int i = 1; i + 1 < n; ++i) add(0, i, i + 1);
+    if (!std::isfinite(cm.lo[0]) || cm.lo[0] > cm.hi[0]) return;
+    g_cc_tris += cm.tri.size() / 9;
+    g_cc.emplace(ikey, std::move(cm));
+}
+// First hit of the segment o -> o + d (t in 0..1) against the cached geometry; 1 when clear.
+static float cc_trace(const float o[3], const float d[3]) {
+    float best = 1.f;
+    const double now = vb_now();
+    for (const auto& kv : g_cc) {
+        const CcMesh& cm = kv.second;
+        if (cm.frames < 30 && now - cm.seen > 0.25) continue;   // something that moved (a prop, a weapon): only where it is now
+        float t0 = 0.f, t1 = best;
+        for (int k = 0; k < 3 && t0 <= t1; ++k) {
+            const float a2 = cm.lo[k] - 0.01f, b2 = cm.hi[k] + 0.01f;
+            if (std::fabs(d[k]) < 1e-7f) { if (o[k] < a2 || o[k] > b2) t0 = 2.f; }
+            else { float u0 = (a2 - o[k]) / d[k], u1 = (b2 - o[k]) / d[k]; if (u0 > u1) std::swap(u0, u1); t0 = std::max(t0, u0); t1 = std::min(t1, u1); }
+        }
+        if (t0 > t1) continue;
+        const float* v = cm.tri.data();
+        for (size_t i = 0; i + 8 < cm.tri.size(); i += 9) {
+            const float* a = v + i; const float* b = v + i + 3; const float* c = v + i + 6;
+            const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+            const float pv[3] = {d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]};
+            const float det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2];
+            if (std::fabs(det) < 1e-9f) continue;
+            const float inv = 1.f / det, tv[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]};
+            const float u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) * inv;
+            if (u < 0.f || u > 1.f) continue;
+            const float qq[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]};
+            const float w = (d[0] * qq[0] + d[1] * qq[1] + d[2] * qq[2]) * inv;
+            if (w < 0.f || u + w > 1.f) continue;
+            const float t = (e2[0] * qq[0] + e2[1] * qq[1] + e2[2] * qq[2]) * inv;
+            if (t > 0.f && t < best) best = t;
+        }
+    }
+    return best;
+}
+static void cc_frame_end() {
+    const double now = vb_now();
+    if (g_cc_collect.load(std::memory_order_relaxed) && now - g_cc_last_on > 2.0) {   // no battle camera any more (menus): drop it all
+        g_cc_collect.store(false, std::memory_order_relaxed);
+        g_cc.clear(); g_cc_tris = 0;
+        return;
+    }
+    static double last_sweep = 0;
+    if (now - last_sweep > 5.0) {
+        last_sweep = now;
+        for (auto it = g_cc.begin(); it != g_cc.end();) {
+            if (now - it->second.seen > 30.0) { g_cc_tris -= it->second.tri.size() / 9; it = g_cc.erase(it); } else ++it;
+        }
+    }
+    float o[3], d[3]; uint32_t id;
+    {
+        std::lock_guard<std::mutex> lk(g_cc_mu);
+        if (!g_cc_pending) return;
+        g_cc_pending = false;
+        for (int i = 0; i < 3; i++) { o[i] = g_cc_from[i]; d[i] = g_cc_to[i] - g_cc_from[i]; }
+        id = g_cc_req_id;
+    }
+    const float r = cc_trace(o, d);
+    std::lock_guard<std::mutex> lk(g_cc_mu);
+    g_cc_result = r; g_cc_res_id = id;
+}
+
+// Called once per frame (present): keep evaluating draws after the custom camera is back on the game's while some are still faded.
+static void vb_frame_end() {
+    cc_frame_end();
+    g_vb_linger.store(!g_vb_fade.empty() && vb_now() - g_vb_last_faded_t < 1.0, std::memory_order_relaxed);
+    if (!g_vb_linger.load(std::memory_order_relaxed) && !g_vb_active.load(std::memory_order_relaxed)) g_vb_fade.clear();
 }
 
 
@@ -5454,6 +5613,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
     glBlitFramebuffer(0, 0, spw * srs, h272_of_fbo(fbo) * srs, pr.x0, pr.y0, pr.x1, pr.y1,
                       GL_COLOR_BUFFER_BIT, pf);
     perf_note_present();
+    vb_frame_end();
     if (!std::strcmp(why, "flip")) perf_note_flip();
     if (psp_post_final_active()) {   // copy of the scene for the final pass (grade / HDR), taken before the HUD and overlays
         int sdw = 0, sdh = 0;

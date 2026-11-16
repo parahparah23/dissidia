@@ -98,6 +98,11 @@ void ge_draw_flash(uint32_t rgb, int ms);
 /// player's chest) fades out to a see-through alpha, like the game's own wall fade does for its camera (the game computes that from its
 /// own eye, so a camera we move ourselves needs it done here). Call once per camera update (game thread).
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]);   // eye: the game camera's eye this update; only draws made from that view fade
+// Camera collision against the stage geometry the main view has drawn (static, non-skinned, depth-writing draws, cached in world
+// space per stage): ask for the segment from -> to (game thread); the answer, the fraction of the segment before its first hit
+// (1 = clear), comes from the render thread a frame later. Returns the latest answer and the id of the request it belongs to.
+void ge_draw_camera_probe_request(const float from[3], const float to[3], uint32_t id);
+float ge_draw_camera_probe_result(uint32_t* id);
 
 /// Game layer: a translucent RGBA image (straight alpha, byte order R,G,B,A, row 0 = top) that a game module draws over the game's
 /// picture, covering the PSP's 480x272 area (w x h = 480*s x 272*s), under dialogs, menus and touch controls. Used to add elements to
