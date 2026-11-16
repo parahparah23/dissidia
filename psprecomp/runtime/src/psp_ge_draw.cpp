@@ -2934,12 +2934,12 @@ static bool fx_lights_on() {
     if (v < 0) { v = (std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0') ? 0 : 1; g_fx_lights.store(v); }
     return v != 0;
 }
-// Brightness / reach multipliers of the effect lights (Settings > Debug rows, PSPRECOMP_FX_LIGHT_INTENSITY / _RADIUS at start)
+// Brightness / reach multipliers of the effect lights (Settings > Debug rows, saved as env.FX_LIGHT_INTENSITY / _RADIUS = PSPRECOMP_FX_LIGHT_*)
 static std::atomic<float> g_fx_scale[2] = {{-1.f}, {-1.f}};
 float psp_fx_light_scale(int which) {
     which = which ? 1 : 0;
     float v = g_fx_scale[which].load();
-    if (v < 0.f) { const char* e = std::getenv(which ? "PSPRECOMP_FX_LIGHT_RADIUS" : "PSPRECOMP_FX_LIGHT_INTENSITY"); v = e && e[0] ? std::max(0.f, (float)std::atof(e)) : 1.f; g_fx_scale[which].store(v); }
+    if (v < 0.f) { const char* e = std::getenv(which ? "PSPRECOMP_FX_LIGHT_RADIUS" : "PSPRECOMP_FX_LIGHT_INTENSITY"); v = e && e[0] ? std::max(0.f, (float)std::atof(e)) : (which ? 1.5f : 2.5f); g_fx_scale[which].store(v); }   // defaults picked in game
     return v;
 }
 void psp_fx_light_set_scale(int which, float v) { g_fx_scale[which ? 1 : 0].store(std::max(0.f, v)); }

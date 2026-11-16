@@ -1203,8 +1203,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             std::snprintf(buf, sizeof buf, "x%.2f", v);
             m.value = buf;
             m.can_dec = v > 0.f; m.can_inc = v < 8.f;
-            m.help = w ? "Effect lights (debug)\nHow far the light from glowing attack effects reaches (PSPRECOMP_FX_LIGHT_RADIUS); x1 = default. Needs Ray-Traced Shadows. This session only."
-                       : "Effect lights (debug)\nHow bright the light from glowing attack effects is (PSPRECOMP_FX_LIGHT_INTENSITY); x0 = off, x1 = default. Needs Ray-Traced Shadows. This session only.";
+            m.help = w ? "Effect lights (debug)\nHow far the light from glowing attack effects reaches (PSPRECOMP_FX_LIGHT_RADIUS); default x1.5. Needs Ray-Traced Shadows. Saved."
+                       : "Effect lights (debug)\nHow bright the light from glowing attack effects is (PSPRECOMP_FX_LIGHT_INTENSITY); x0 = off, default x2.5. Needs Ray-Traced Shadows. Saved.";
             break;
         }
         case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
@@ -1728,7 +1728,10 @@ void change(int d) {   // left / right on the selected row
     case ROW_FXL_INT: case ROW_FXL_RAD: {   // steps of 0.25 up to 2, then 0.5 up to 8
         const int w = g_rows[size_t(g_sel)] == ROW_FXL_RAD ? 1 : 0;
         const float v = psp_fx_light_scale(w), st = (d > 0 ? v >= 2.f : v > 2.f) ? 0.5f : 0.25f;
-        psp_fx_light_set_scale(w, std::min(8.f, std::max(0.f, std::round((v + d * st) / 0.25f) * 0.25f)));
+        const float nv = std::min(8.f, std::max(0.f, std::round((v + d * st) / 0.25f) * 0.25f));
+        psp_fx_light_set_scale(w, nv);
+        char b[16]; std::snprintf(b, sizeof b, "%g", nv);
+        save(w ? "env.FX_LIGHT_RADIUS" : "env.FX_LIGHT_INTENSITY", b);   // exported as PSPRECOMP_FX_LIGHT_* at the next start
         break;
     }
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
