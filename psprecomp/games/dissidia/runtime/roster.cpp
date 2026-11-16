@@ -5691,6 +5691,7 @@ void retail_moves_teach(uint8_t* rdram, uint32_t rec, int charId) {
 constexpr uint32_t ABLT_LOAD = 0x088B1CC0u, ABLT_HDR = 0x089D7290u, ABLT_RECS = 0x089D7294u;
 constexpr uint32_t ABLT_ROWS = 0x328u, ABLT_ROW = 0x28u;
 FuncPtr g_orig_ablt_load = nullptr;
+uint32_t g_ablt_host_block = 0, g_ablt_host_rows = 0;   // a table this file moved to host memory, and its room in records
 void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     saverec_block();   // the extra characters' save records: allocated at boot, while the host heap has room
     const uint32_t src = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
@@ -5708,6 +5709,8 @@ void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     std::memcpy(rdram + (buf & 0x07FFFFFFu), rdram + (src & 0x07FFFFFFu), size);
     put_u32(rdram, ABLT_HDR & 0x07FFFFFFu, buf);
     put_u32(rdram, ABLT_RECS & 0x07FFFFFFu, buf + 0x10u);
+    g_ablt_host_block = buf;
+    g_ablt_host_rows = (((size + 0xFFu) & ~0xFFu) - 0x10u) / ABLT_ROW;
     std::fprintf(stderr, "[ROSTER] ablt: %u records (%u bytes, the game's block holds %u) moved to 0x%08X\n",
                  rd32(rdram, buf + 8), size, 0x10u + ABLT_ROWS * ABLT_ROW, buf);
     ctx->r[5] = 0;     // the original now only loads ability.bin (a2 = the archive)
@@ -5715,6 +5718,58 @@ void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     retail_moves_hide(rdram);
 }
 }  // namespace
+
+// ---- for net_packs.cpp (online packs) ----
+// -1 = no retail_moves.txt line for `folder`, 0 = its line is switched off, 1 = on.
+int dissidia_retail_moves_state(const std::string& folder) {
+    for (const RetailMoves& m : g_retail_moves) if (m.folder == folder) return m.on ? 1 : 0;
+    return -1;
+}
+// Make ability `id` a live record of charId `owner` with command `cmd` and kind type / phase, as a pack's build makes
+// it: an existing record (this player's own build of the pack, maybe switched off and hidden) gets its owner, command
+// and kind back; a missing one is added in id order as a copy of `copy` (the record the pack copies: same costs and
+// equip bonus, so both players' games compute the same character). Never taught: this player's own character does
+// not learn it. Game thread.
+bool dissidia_ablt_ensure(uint8_t* rdram, uint16_t id, uint16_t copy, uint16_t cmd, uint8_t type, uint8_t phase, uint8_t owner) {
+    if (uint8_t* a = ablt_record(rdram, id)) {
+        a[kAbltOwnerByte] = owner;
+        a[0x0C] = cmd & 0xFFu; a[0x0D] = cmd >> 8;
+        a[0x16] = type; a[0x17] = phase;
+        return true;
+    }
+    const uint8_t* src = ablt_record(rdram, copy);
+    uint32_t blk = rd32(rdram, kAbltBlockPtr);
+    if (!src || src[kAbltOwnerByte] != owner || blk < 0x08000000u || blk >= 0x0C000000u) return false;
+    uint8_t rec[kAbltRecBytes];
+    std::memcpy(rec, src, kAbltRecBytes);
+    rec[0] = id & 0xFFu; rec[1] = id >> 8;
+    rec[0x0C] = cmd & 0xFFu; rec[0x0D] = cmd >> 8;
+    rec[0x16] = type; rec[0x17] = phase;
+    const uint32_t n = rd32(rdram, blk + 8u);
+    const uint32_t room = blk == g_ablt_host_block ? g_ablt_host_rows : ABLT_ROWS;   // the game's block holds 808 records
+    if (n + 1u > room) {                       // full: a bigger host block, as ablt_load_hook does for big tables
+        const uint32_t rows = n + 32u, bytes = (0x10u + rows * ABLT_ROW + 0xFFu) & ~0xFFu;
+        const uint32_t nb = psp_kmem_bump_alloc_named(bytes, "ROSTER_ABLT_NET");
+        if (!nb) return false;
+        std::memcpy(rdram + (nb & 0x07FFFFFFu), rdram + (blk & 0x07FFFFFFu), 0x10u + n * ABLT_ROW);
+        put_u32(rdram, ABLT_HDR & 0x07FFFFFFu, nb);
+        put_u32(rdram, ABLT_RECS & 0x07FFFFFFu, nb + 0x10u);
+        g_ablt_host_block = nb; g_ablt_host_rows = rows;
+        blk = nb;
+    }
+    const uint32_t recs = rd32(rdram, kAbltRecsPtr);
+    uint32_t at = 0;
+    while (at < n) {
+        const uint8_t* r = rdram + ((recs + ABLT_ROW * at) & 0x07FFFFFFu);
+        if ((r[0] | (r[1] << 8)) > id) break;
+        at++;
+    }
+    uint8_t* base = rdram + (recs & 0x07FFFFFFu);
+    std::memmove(base + ABLT_ROW * (at + 1u), base + ABLT_ROW * at, ABLT_ROW * (n - at));
+    std::memcpy(base + ABLT_ROW * at, rec, kAbltRecBytes);
+    put_u32(rdram, (blk + 8u) & 0x07FFFFFFu, n + 1u);
+    return true;
+}
 
 // Called from dissidia_register_hooks; harmless with retail-sized tables (the originals run unchanged).
 void dissidia_wpnp_install() {

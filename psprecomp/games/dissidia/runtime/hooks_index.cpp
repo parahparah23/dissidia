@@ -165,6 +165,26 @@ void find_hook(uint8_t* rdram, recomp_context* ctx) {
 
 }  // namespace
 
+// The game's own copy of the index (retail buffer or the relocated block): rewrite the entry of `crc` in place (the
+// lookup's one-entry cache holds a pointer to it, so it sees the change too). False when the index is not loaded yet
+// or has no such entry. Game thread only.
+bool dissidia_index_set_entry(uint8_t* rdram, uint32_t crc, uint32_t sector, uint32_t size_flags) {
+    const uint32_t cnt = rd32(rdram, g_base + 8);
+    if (rd32(rdram, g_base) != dissidia::kIndexMagic || cnt == 0 || cnt > 0x10000u) return false;
+    int32_t lo = 0, hi = static_cast<int32_t>(cnt) - 1;
+    while (lo <= hi) {
+        const int32_t mid = (lo + hi) / 2;
+        const uint32_t e = g_base + 16u + 12u * static_cast<uint32_t>(mid), cur = rd32(rdram, e);
+        if (cur == crc) {
+            psp_mem_write<uint32_t>(rdram, e + 4, sector);
+            psp_mem_write<uint32_t>(rdram, e + 8, size_flags);
+            return true;
+        }
+        if (cur < crc) lo = mid + 1; else hi = mid - 1;
+    }
+    return false;
+}
+
 void dissidia_index_install() {
     const char* off = std::getenv("PSPRECOMP_INDEX_EXTENDED");
     if (off && off[0] == '0') { std::fprintf(stderr, "[MODS] package index: extension disabled (PSPRECOMP_INDEX_EXTENDED=0), retail ceiling\n"); return; }

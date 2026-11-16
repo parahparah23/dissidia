@@ -54,6 +54,8 @@ enum { TAG_NONE = 0, TAG_INDEX = 1, TAG_PACKAGE = 2, TAG_OVL_BASE = 10 };   // T
 
 
 dissidia::PackageMods g_mods;
+std::recursive_mutex g_mods_mu;   // g_mods can change while the game runs (net_packs.cpp adds a pack received online)
+bool g_net_possible = false;      // packs may arrive online: keep PACKAGE.BIN tagged even with no mods (dissidia_mods_net_possible)
 bool g_built = false;
 bool g_active = false;
 int g_trace_left = 0;
@@ -272,7 +274,7 @@ void ensure_built(const std::string& host_info_path) {
         if (is_dir(vd)) { extra.push_back(vd); std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
         else std::fprintf(stderr, "[VOICE] Japanese voice selected but %s does not exist (run tools/jp_audio.py): English voices\n", vd.c_str());
     }
-    if (!is_dir(dir) && extra.empty()) {
+    if (!is_dir(dir) && extra.empty() && !g_net_possible) {
         std::fprintf(stderr, "[MODS] no mods directory (%s): loose-file overrides off\n", dir.c_str());
         return;
     }
@@ -333,7 +335,7 @@ int classify_open(const char* psp_path) {
         const size_t slash = host.find_last_of('/');
         if (slash != std::string::npos) g_data_dir = host.substr(0, slash);
     }
-    if (!g_active) return (pkg && !asset_patches().empty()) ? TAG_PACKAGE : TAG_NONE;
+    if (!g_active) return (pkg && (!asset_patches().empty() || g_net_possible)) ? TAG_PACKAGE : TAG_NONE;
     return info ? TAG_INDEX : TAG_PACKAGE;
 }
 
@@ -358,6 +360,7 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
         }
         return got;
     };
+    std::lock_guard<std::recursive_mutex> mods_lock(g_mods_mu);
     if (tag == TAG_PACKAGE && !asset_patches().empty() && !g_active) {   // no loose-file mods: plain read plus the built-in edits
         const int64_t got = base(dest, size, off);
         *nread = (uint32_t)std::max<int64_t>(got, 0);
@@ -389,6 +392,23 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
 
 std::string dissidia_mods_dir() { return mods_dir(); }
 std::vector<std::string> dissidia_mod_roots() { return mod_roots(); }
+// net_packs.cpp, at registration (before the game opens PACKAGE.BIN): packs may arrive online, so PACKAGE.BIN reads go
+// through the override layer even when no mod is installed (it serves nothing until a pack is added).
+void dissidia_mods_net_possible() { g_net_possible = true; }
+// net_packs.cpp, game thread: serve `file` for `asset` from now on (a verified pack received online). The entry moves to
+// fresh virtual sectors past every other override, in the patched index and in the game's in-memory copy.
+extern bool dissidia_index_set_entry(uint8_t* rdram, uint32_t crc, uint32_t sector, uint32_t size_flags);
+bool dissidia_mods_add_override(uint8_t* rdram, const std::string& asset, const std::string& file, uint32_t size) {
+    std::lock_guard<std::recursive_mutex> lk(g_mods_mu);
+    if (!g_built) return false;
+    dissidia::IndexEntry e;
+    if (!g_mods.add_override(asset, file, size, &e)) return false;
+    if (!dissidia_index_set_entry(rdram, e.crc, e.sector, e.size_flags)) return false;
+    g_active = true;
+    { std::lock_guard<std::mutex> l2(g_lt_mu); g_by_sector.clear(); }
+    std::fprintf(stderr, "[MODS] online pack: %s now served from %s (%u B, sector %u)\n", asset.c_str(), file.c_str(), size, e.sector);
+    return true;
+}
 std::string dissidia_package_dir() { return g_data_dir; }
 void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::vector<uint8_t>&)> edit) {
     AssetPatch p;

@@ -1,0 +1,112 @@
+{
+ "_info": "A player who uses such a mod sends the other players what their game needs to show it (the changed moveset, models and\nvoice bank), as deltas against the retail 012 files every player already has. Nothing a peer sends is trusted:",
+ "packs": [
+  {
+   "name": "bartz-dff",
+   "version": 1,
+   "char": 9,
+   "files": [
+    {
+     "path": "obj/p_fiv100.objx",
+     "size": 2053820,
+     "sha256": "3670e10dec7027648f3e839a2e3feb97f1e9b346e474cb6682d628d5ccbd6e43",
+     "base_size": 1559788,
+     "base_sha256": "d71567ebd9fab3a50ab725fb5db44253693e1dafc1cde7a890777953ad4e9a83"
+    },
+    {
+     "path": "obj/p_fiv100_1p.gmo",
+     "size": 2462188,
+     "sha256": "9a17294ec50482f2f1293700a72d3e75f935df673494d9a95c5b7f66716eeafb",
+     "base_size": 2102308,
+     "base_sha256": "1b843a3e44fcc32e5ac6ac86b669cb5a14494f7121528148be3c48d60b5eaab5"
+    },
+    {
+     "path": "obj/p_fiv100_2p.gmo",
+     "size": 2462188,
+     "sha256": "c54dbeb66a6ec284aded5bed724260cc0e7aceb51a0744c6ba0232e085093c0f",
+     "base_size": 2102308,
+     "base_sha256": "592e67b8c6fcac7300e80ca8a32fa5cbbaa756b729782b9b1fe80ef1c4096532"
+    },
+    {
+     "path": "obj/p_fiv100_3p.gmo",
+     "size": 2470132,
+     "sha256": "b86bc46bb92bc4f4a6ad9fa5c4fa583996d4c8db970b5bc8294d14431d49dfc9",
+     "base_size": 2110252,
+     "base_sha256": "43da35210e9dd7e4974400cd194eb22c426f7667f1364779aec71d49057d09c7"
+    },
+    {
+     "path": "obj/p_fiv100_zako.gmo",
+     "size": 2443668,
+     "sha256": "c0dbcc2c5560b87c0b8272f837ec2d800c0605af071438acd8a35e665c239b5c",
+     "base_size": 2083788,
+     "base_sha256": "89422d7152374b0e49c9e5595b1364ebbdf60bbe50d392e9e78a626fbafc8cbf"
+    },
+    {
+     "path": "voice/en/battle/voice_p_fiv100_00.scd",
+     "size": 357600,
+     "sha256": "6b3709f8f3f959495e8672ed5608ecb7bd6bf95572d680b6c6c4e84fdba1a8cc",
+     "base_size": 302368,
+     "base_sha256": "9f67e60176757f67a7f867d35082d0a0c464e3373deb2feb1c036c788caa7946"
+    }
+   ],
+   "abilities": [
+    {
+     "id": "0x0910",
+     "copy": "0x090C",
+     "cmd": "0xB0",
+     "type": 0,
+     "phase": 0
+    },
+    {
+     "id": "0x0911",
+     "copy": "0x090C",
+     "cmd": "0xB1",
+     "type": 0,
+     "phase": 0
+    },
+    {
+     "id": "0x0912",
+     "copy": "0x090D",
+     "cmd": "0xB2",
+     "type": 0,
+     "phase": 1
+    },
+    {
+     "id": "0x0913",
+     "copy": "0x090D",
+     "cmd": "0xB3",
+     "type": 0,
+     "phase": 1
+    },
+    {
+     "id": "0x0914",
+     "copy": "0x090E",
+     "cmd": "0xB4",
+     "type": 1,
+     "phase": 0
+    },
+    {
+     "id": "0x0915",
+     "copy": "0x090E",
+     "cmd": "0xB5",
+     "type": 1,
+     "phase": 0
+    },
+    {
+     "id": "0x0916",
+     "copy": "0x090F",
+     "cmd": "0xB6",
+     "type": 1,
+     "phase": 1
+    },
+    {
+     "id": "0x0917",
+     "copy": "0x090F",
+     "cmd": "0xB7",
+     "type": 1,
+     "phase": 1
+    }
+   ]
+  }
+ ]
+}

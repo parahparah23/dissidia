@@ -862,6 +862,9 @@ def _build(a, added):
         print('  wrote', gp)
     if not changed:
         print('nothing changed')
+    if retail_moves or os.path.isdir(os.path.join(a.mods, '.net')):   # online: deltas of the listed packs this dir has
+        import subprocess                                             # installed byte for byte (netpack.py)
+        subprocess.call([sys.executable, os.path.join(HERE, 'netpack.py'), 'deltas', a.mods, '--disc', a.disc])
     if roster_changed:
         print('roster or move names changed: rebuilding main.bin')
         import subprocess

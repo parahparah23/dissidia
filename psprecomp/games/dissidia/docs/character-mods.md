@@ -68,6 +68,9 @@ both banks). Tested 16 Nov 2026 on the USA discs: every move plays with its anim
 (test driver `action 3024..3039`), the Abilities screen lists them, a pressed Soul Eater plays in Quick Battle, and the
 switch hides and restores them.
 
+Online: players who don't have the mod receive it from the player who uses it, verified against a compiled-in list (see
+[multiplayer.md](multiplayer.md), *Mods that change a character*).
+
 Move Studio changes made for it (help every copy): the source's voices and face textures come along when it is the same
 character (a mod folder whose `character.based_on` is the target's code); an effect placement bound to the animation it
 belongs to (FEPA +0xC8, which the game plays and ends with that animation) is bound to the copied animation instead of

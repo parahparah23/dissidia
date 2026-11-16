@@ -174,6 +174,7 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
                         uint32_t index_capacity, const std::vector<std::string>& extra_dirs) {
     overrides_.clear();
     patched_ = original_index;
+    package_size_ = package_size;
     PackageIndex idx;
     if (!idx.parse(original_index.data(), original_index.size(), err)) return false;
     auto note = [&](const std::string& s) { if (log) { *log += s; *log += '\n'; } };
@@ -293,6 +294,33 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
     }
     std::sort(overrides_.begin(), overrides_.end(),
               [](const Override& a, const Override& b) { return a.start < b.start; });
+    patched_ = idx.serialize();
+    return true;
+}
+
+bool PackageMods::add_override(const std::string& asset, const std::string& file, uint32_t size, IndexEntry* out) {
+    PackageIndex idx;
+    std::string err;
+    if (patched_.empty() || !idx.parse(patched_.data(), patched_.size(), &err) || size == 0 || size > kSizeMask) return false;
+    const std::string norm = normalize_asset_path(asset);
+    const uint32_t crc = package_crc(norm);
+    IndexEntry* e = nullptr;
+    for (auto& x : idx.entries) if (x.crc == crc) e = &x;
+    if (!e) return false;
+    overrides_.erase(std::remove_if(overrides_.begin(), overrides_.end(), [crc](const Override& o) { return o.crc == crc; }),
+                     overrides_.end());
+    uint64_t next = (package_size_ + kSectorSize - 1) / kSectorSize;
+    for (const auto& o : overrides_) next = std::max<uint64_t>(next, (o.start + o.span + kSectorSize - 1) / kSectorSize);
+    for (const auto& x : idx.entries) next = std::max<uint64_t>(next, (uint64_t)x.sector + x.sectors());
+    Override ov;
+    ov.crc = crc; ov.asset = norm; ov.file = file; ov.size = size; ov.relocated = true;
+    ov.start = next * kSectorSize;
+    ov.span = (uint64_t)((size + kSectorSize - 1) / kSectorSize) * kSectorSize;
+    e->sector = (uint32_t)next;
+    e->size_flags = (e->flags() << 28) | size;
+    *out = *e;
+    overrides_.push_back(ov);
+    std::sort(overrides_.begin(), overrides_.end(), [](const Override& a, const Override& b) { return a.start < b.start; });
     patched_ = idx.serialize();
     return true;
 }
