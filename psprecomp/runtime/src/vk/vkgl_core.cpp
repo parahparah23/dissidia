@@ -1689,7 +1689,6 @@ void core_shutdown() {
     G = nullptr;
 }
 
-void core_set_vsync(bool v) { if (G) G->vsync = v; }
 void core_drawable(int* w, int* h) { if (G) { *w = G->fb0_w; *h = G->fb0_h; } }
 
 void core_drawable_query(SDL_Window* window, int* w, int* h) {
@@ -1735,6 +1734,8 @@ static void log_stats() {
 }
 
 static bool g_hdr_dirty = false;
+static bool g_vsync_dirty = false;   // vertical sync switched in the settings: new present mode (psp_present_sync.cpp)
+void core_set_vsync(bool v) { if (G && G->vsync != v) { G->vsync = v; g_vsync_dirty = true; } }
 void core_set_hdr(bool on) { if (!G) return; G->ctx.set_hdr_wanted(on); g_hdr_dirty = true; }
 bool core_hdr_supported() { return G && G->ctx.hdr_supported(); }
 void core_set_profile(bool on) { if (G) G->want_prof.store(on); }
@@ -1783,12 +1784,12 @@ void core_swap() {
     int dw = 0, dh = 0;
     SDL_Vulkan_GetDrawableSize(gl.window, &dw, &dh);
     Frame& f = fr();
-    if (g_hdr_dirty && !gl.no_present && dw > 0 && dh > 0) {   // HDR switched in the settings: new swapchain format, new default framebuffer
-        g_hdr_dirty = false;
+    if ((g_hdr_dirty || g_vsync_dirty) && !gl.no_present && dw > 0 && dh > 0) {   // HDR or vertical sync switched in the settings: new swapchain (format / present mode), new default framebuffer
+        g_hdr_dirty = false; g_vsync_dirty = false;
         vkDeviceWaitIdle(gl.dev);
         std::string herr;
         if (c.create_swapchain(dw, dh, gl.vsync, &herr)) create_fb0(dw, dh);
-        else std::fprintf(stderr, "[VKGL] HDR swapchain switch failed: %s\n", herr.c_str());
+        else std::fprintf(stderr, "[VKGL] swapchain switch (HDR / vertical sync) failed: %s\n", herr.c_str());
         vkDestroySemaphore(gl.dev, f.acquire_sem, nullptr);
         VkSemaphoreCreateInfo hsi{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; vkCreateSemaphore(gl.dev, &hsi, nullptr, &f.acquire_sem);
     }

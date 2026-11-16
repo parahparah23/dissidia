@@ -2,6 +2,7 @@
 // (PSPRECOMP_RENDERER=vulkan, src/vk/) the window has no GL context, so these go through the Vulkan layer.
 #pragma once
 #include <SDL.h>
+#include "psp_present_sync.h"
 #ifdef __ANDROID__
 #include "psp_android.h"
 #endif
@@ -19,8 +20,10 @@ inline void psp_gl_swap(SDL_Window* w) {
 #ifdef __ANDROID__
     psp_android_frame_hint();
 #endif
+    psp_present_before_swap(w);   // vertical sync changed in the settings, display refresh hint (psp_present_sync.cpp)
 #if defined(PSPRECOMP_HAVE_VKGL)
-    if (vkgl::active()) { vkgl::swap(); return; }
+    if (vkgl::active()) { vkgl::swap(); psp_present_after_swap(); return; }
 #endif
     SDL_GL_SwapWindow(w);
+    psp_present_after_swap();
 }

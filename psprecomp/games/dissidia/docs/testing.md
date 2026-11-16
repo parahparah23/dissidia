@@ -306,3 +306,15 @@ Added with `psp_settings_add_debug_toggle` (runtime/include/psp_settings.h: a ga
 - The game's own pressed test (`FUN_08AB399C`, the press latch's hook) returned no edges for the scripted Jecht chain presses at 30 or 120 Hz in test runs (`press latch: ... 0 edges` in the `[FPS]` line), so the press latch may not be doing anything for these inputs; not investigated.
 
 - Jecht's Circle / Square are handed to the game on a 30 Hz grid above 30 fps (`jecht_grid_filter`, `PSPRECOMP_JECHT_GRID=0` to turn it off): the Jecht Combo Timing helper above therefore sees each press on a grid update, and a press can reach the game up to one 30 Hz frame after you pressed it. Details and measurements: docs/frame-rate.md "Jecht timed windows on the 30 Hz grid".
+
+## Frame pacing and vertical sync (issue #67)
+
+`PSPRECOMP_PRESENT_STATS=1` logs `[PRESENT_STATS]` every 5 s: present-to-present mean, standard deviation, median, p99, max and
+"uneven" (frames shown for more than 1.5x the median). The test-script command `vsync <0|1>` switches vertical sync in the middle of a
+run (A/B of the same fight); `BT_DISPLAY_MODE=fullscreen` makes `battle_test.py` run fullscreen, the way players do. Measure on a real,
+lit display: with the screen locked or powered off the compositor throttles a waiting (FIFO) swap to 60 Hz, which looks like a pacing
+bug and is not. Measured on a 3440x1440 175 Hz VRR monitor (GNOME 50 Wayland, VRR mode on, AMD, Vulkan), 150 fps fight
+(`~/dissidia/vrr_run.sh` on the desktop), per 5 s window: vertical sync off (MAILBOX) 6.67 ms, standard deviation 0.14-0.75; on
+(FIFO) 6.67 ms, standard deviation 0.14-0.63, at most 2 uneven frames. On a fixed 175 Hz refresh FIFO would put 150 fps frames on a
+5.71 ms grid (5.7 / 11.4 ms); even 6.67 ms frames mean the refresh followed the game. Both modes show a single 20-26 ms frame every
+few seconds: that comes from the game side, not from presenting.
