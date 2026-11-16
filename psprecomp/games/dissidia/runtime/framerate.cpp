@@ -106,7 +106,22 @@ int g_interval = 2;                // interval written on the last frame end (2 
 int g_rate = 30;                   // logic rate in effect (30, 60, 90, ... one frame per vblank above 30)
 double g_play_ms = 0;              // wall-independent play time: advances by the frame's ticks (every frame, menus and battle)
 bool g_input_dbg = false;          // PSPRECOMP_INPUT_DEBUG=1: pressed buttons on screen and in the log
-float g_ticks = 2.0f;              // 1/60 s ticks one frame advances: 60 / g_rate
+float g_ticks = 2.0f;              // 1/60 s ticks one frame advances: 60 / g_rate (the step the update that just ran used)
+// Exact steps (PSPRECOMP_EXACT_STEP=0 turns it off). At 90 / 150 / 180 / 210 fps the step 60 / rate (2/3, 0.4, 1/3, 2/7 ticks) is not exact in
+// floating point: every clock the game sums it into (motion time, timeline keys, countdowns such as the rehit timer, Jecht's chain windows)
+// lands a hair short of a whole tick, so an event keyed at tick 70 fired one update late (Exdeath's multi-hit every 177.8 ms at 90 fps
+// instead of 166.7; Jecht's Rush chain window 41 ms late at 90 / 150; tools/fps_parity.py, combo_timing.py). Instead each update gets the
+// next value of a fixed cycle of rate / 30 multiples of 1/256 tick that add up to exactly 2.0 (spread evenly, within 0.3 % of 60 / rate):
+// any rate / 30 consecutive updates are exactly one 30 Hz frame, and every sum is exact. 60 / 120 / 240 fps (1, 0.5, 0.25) are exact already.
+bool g_exact_step = true;
+uint64_t g_step_idx = 0;           // index of the step the next update uses
+float step_for(int rate, uint64_t i) {
+    const int n = rate / 30;
+    if (n <= 1 || !g_exact_step || (n & (n - 1)) == 0) return 60.0f / static_cast<float>(rate);   // 30, 60, 120, 240: exact
+    const uint64_t j = i % static_cast<uint64_t>(n);
+    const uint64_t a = (j + 1) * 512u / static_cast<uint64_t>(n), b = j * 512u / static_cast<uint64_t>(n);   // 512 = 2 ticks in 1/256 units
+    return static_cast<float>(a - b) / 256.0f;
+}
 int g_fx_period = 1;               // updates per effect-component step at 30 Hz pacing: g_rate / 30
 bool g_scope_all = false, g_log = false;
 int g_switch_logs = 0;
@@ -972,6 +987,7 @@ void testdrive_install() {
     if (const char* pp = std::getenv("PSPRECOMP_TEST_PARITY"); pp && pp[0] && pp[0] != '0') g_parity = true;
     if (const char* id = std::getenv("PSPRECOMP_TEST_INPUT_DELAY"); id && id[0]) g_par_input_delay = std::atof(id);
     if (const char* ms = std::getenv("PSPRECOMP_MT_SNAP"); ms && ms[0] == '1') g_mt_snap = true;
+    if (const char* es = std::getenv("PSPRECOMP_EXACT_STEP"); es && es[0] == '0') g_exact_step = false;
     g_test_go = std::getenv("PSPRECOMP_TEST_GO");
     if (g_test_go && !g_test_go[0]) g_test_go = nullptr;
     const char* e = std::getenv("PSPRECOMP_TEST_SCRIPT");
@@ -1027,8 +1043,9 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
             }
         }
         g_interval = interval;
+        if (g_rate != rate) g_step_idx = 0;
         g_rate = rate;
-        g_ticks = 60.0f / static_cast<float>(rate);
+        g_ticks = rate > 60 ? step_for(rate, g_step_idx) : 60.0f / static_cast<float>(rate);   // the step the update that just ran was given
         g_fx_period = rate / 30;
     }
     g_orig_frame_end(rdram, ctx);
@@ -1052,7 +1069,7 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         if (scr != g_prev_scr[i] && g_fighters[i] && human_jecht(g_fighters[i])) g_grid_anchor = g_tick;   // the next update is the first read of the new move's grid
         g_prev_scr[i] = scr;
     }
-    if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, g_ticks);   // the frame waited for one (short) vblank: dt = 60 / rate
+    if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
     if (g_log && ok(timer)) {
         const int64_t t = now_ms();
         if (!g_win_t0) g_win_t0 = t;

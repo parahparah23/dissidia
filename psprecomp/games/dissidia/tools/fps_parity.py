@@ -166,7 +166,7 @@ def run_one(a, cid, rate, out, tag=None):
     if cid == WALK_CPU:
         swap = '%d=%d,%d=%d' % (WALK_PLAYER, WALK_CPU, WALK_CPU, WALK_PLAYER)   # Lightning under test: the dummy becomes Squall
     env = {'PSPRECOMP_TEST_PLAYER_CHAR': str(cid), 'PSPRECOMP_TEST_PARITY': '1', 'PSPRECOMP_TEST_DIRECT_BATTLE': os.path.abspath(WALK),
-           'PSPRECOMP_FIGHTER_LOG': '0',
+           'PSPRECOMP_FIGHTER_LOG': '1' if a.fighter_log else '0',   # debugging only: [FIGHTER] / [MOTION] lines every update (big logs)
            'PSPRECOMP_TEST_NO_AI': '1',         # the CPU's brain stopped (a running brain still starts moves even with its presses blocked)
            'PSPRECOMP_TEST_AI_OFF': '1',        # its pad setters blocked and its pad cleared every update (framerate.cpp: nothing stays held)
            'PSPRECOMP_TEST_FREEZE_CPU': '0',    # the dummy runs at the normal time step and reacts to hits
@@ -609,6 +609,7 @@ def main(argv):
     p.add_argument('--jecht-combos', dest='jecht_combos', action='store_true',
                    help='also run the Jecht combo window test (tools/combo_timing.py combos) after the parity games; off by default')
     p.add_argument('--combo-rates', dest='combo_rates', default='', help='rates for --jecht-combos (default: --rates, i.e. every rate 30..240)')
+    p.add_argument('--fighter-log', dest='fighter_log', action='store_true', help='debugging: the runtime\'s per-update fighter / object logs (big; use with --actions)')
     p.add_argument('--moves-only', dest='moves_only', action='store_true', help='only the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--no-moves', dest='no_moves', action='store_true', help='leave out the movement trials (jump, dodge, dash, block, run)')
     p.add_argument('--variants', default='plain,mash')
