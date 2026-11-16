@@ -3033,8 +3033,35 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         cand.swap(keep);
     }
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;   // what each glow scored (the cut-off is in score units)
+      if (dbg && !cand.empty() && lg++ % 5 == 0) { std::fprintf(stderr, "[FXLIGHT]   scores:"); for (size_t i = 0; i < cand.size() && i < 8; ++i) std::fprintf(stderr, " %.2f@(%.1f %.1f %.1f)", cand[i].score, cand[i].l[0], cand[i].l[1], cand[i].l[2]); std::fprintf(stderr, "\n"); } }
+    // Lights live a little across frames: matched to last frame's by position, a light takes a new, brighter value at once but fades out over
+    // ~0.15 s when its glow drops for a frame or two (Knight's Lance's light flickered as its pieces regrouped from frame to frame).
     int n = 0;
-    for (const Cand& d : cand) { if (n >= max) break; std::memcpy(out[n++], d.l, sizeof d.l); }
+    {
+        struct Live { float l[9]; float I; bool seen; };
+        static std::vector<Live> live[GE_MAX_TARGETS];
+        static double last_t[GE_MAX_TARGETS];
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float dt = last_t[cur] > 0 ? float(std::min(0.2, now - last_t[cur])) : 0.f;
+        last_t[cur] = now;
+        std::vector<Live>& lv = live[cur];
+        for (Live& x : lv) x.seen = false;
+        for (size_t i = 0; i < cand.size() && i < 16; ++i) {
+            const Cand& d = cand[i];
+            Live* m = nullptr; float best = 2.5f * 2.5f;
+            for (Live& x : lv) { if (x.seen) continue; const float dx = x.l[0] - d.l[0], dy = x.l[1] - d.l[1], dz = x.l[2] - d.l[2], q = dx * dx + dy * dy + dz * dz; if (q < best) { best = q; m = &x; } }
+            if (!m) { lv.push_back({{}, 0.f, true}); m = &lv.back(); std::memcpy(m->l, d.l, sizeof d.l); m->I = d.l[7]; continue; }
+            const float I = m->I;
+            std::memcpy(m->l, d.l, sizeof d.l);
+            m->I = d.l[7] >= I ? d.l[7] : I + (d.l[7] - I) * std::min(1.f, dt * 7.f);
+            m->seen = true;
+        }
+        for (Live& x : lv) if (!x.seen) x.I -= x.I * std::min(1.f, dt * 7.f);
+        lv.erase(std::remove_if(lv.begin(), lv.end(), [](const Live& x) { return x.I < 0.02f; }), lv.end());
+        std::sort(lv.begin(), lv.end(), [](const Live& a, const Live& b) { return a.I > b.I; });
+        for (const Live& x : lv) { if (n >= max) break; std::memcpy(out[n], x.l, sizeof x.l); out[n][7] = x.I; ++n; }
+    }
     {   // all effect lights together at most one full light's brightness: many small glows must not add up to a flood
         float sum = 0.f;
         for (int i = 0; i < n; ++i) sum += out[i][7];
