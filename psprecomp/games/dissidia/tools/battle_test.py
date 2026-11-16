@@ -293,6 +293,8 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
     g.step('cross')
     g.step('cross')                                    # YES
     lap('char chosen')
+    for _ in range(int(os.environ.get('BT_CPU_RIGHT', '0'))):   # another opponent: cursor steps right from Lightning (1 = Vaan)
+        g.step('right', settle=False)
     g.step('cross')                                    # CPU Select: Lightning
     g.step('cross')                                    # YES
     time.sleep(2.0)

@@ -118,7 +118,11 @@ function cpMagiJson(u8) {                        // a retail 'magi' section as p
 const CP_LINKS = ['link_emit', 'link_terrain', 'link_terrain_1', 'link_terrain_2', 'link_terrain_4', 'link_hit', 'link_fall', 'link_clash'];
 
 /* ---------------------------------------------------------------- the copy */
-async function cpCopyMove(srcSpec, cmdId) {
+/* opts.effectDonors: [FxePackage] searched for an effect of the same name (after the character prefix and leaf
+   number, e.g. HOLLY_SWORD_BODY) before the source's own is copied: the move's original owner in this game (Bartz's
+   Dissidia 1 Paladin Force takes Cecil's 012 holy swords). An effect this character already has under that name is
+   reused, not copied. */
+async function cpCopyMove(srcSpec, cmdId, opts = {}) {
   if (!mvCanEdit()) { toast(mvWhyNot() || 'This character can\'t get new moves here.'); return; }
   const assist = /_a$/.test(S.msDir);
   let src; try { src = await cpSource(srcSpec, assist); } catch (e) { toast('Could not read that character: ' + e.message, 'bad'); return; }
@@ -194,9 +198,17 @@ async function cpCopyMove(srcSpec, cmdId) {
   if (rigGmos.some((g) => g.motions.length !== nMot)) { toast(`The models of this moveset have different motion counts (${rigGmos.map((g) => g.motions.length).join(', ')}): they must match to add animations.`); return; }
 
   // the copied animations' names in this rig (source name + source code); an effect placement that names the source
-  // animation it belongs to (FEPA +0xC8: the game ends the effect with that animation) names the copy instead
+  // animation it belongs to (FEPA +0xC8: the game plays it when that animation starts and ends it with the animation)
+  // names the copy instead. A placement of another source animation gets the name that animation has when it is copied
+  // (same rule), so it stays tied to an animation (an untied one is never ended: a looping hand effect outlived its move).
   const motName = new Map(motions.map((mo) => [mo, ((srcGmo.motions[mo] || {}).name || '_' + mo) + '_' + src.code.slice(0, 3)]));
   const motOfName = new Map(motions.map((mo) => [(srcGmo.motions[mo] || {}).name, motName.get(mo)]).filter(([k]) => k));
+  const boundName = (mo) => motOfName.get(mo) || (mo ? mo + '_' + src.code.slice(0, 3) : '');
+  // effects the copied animations play by themselves (placements bound to them, no event names them): Wind Shear's whirlwind
+  if (sPkg) for (const r of sPkg.fepa.records) {
+    const id = fxeU32(r, 0x24), mo = new TextDecoder().decode(r.subarray(0xC8, 0xE8)).replace(/\0.*$/, '');
+    if (id !== 9999 && id !== 8888 && motOfName.has(mo) && !(fxeU32(r, 0x7C) & 0x80)) fepas.add(id);
+  }
 
   /* 3. effects first (their own undo snapshot, merged with the rest below) */
   const fepaMap = new Map(), niMap = new Map(), pgMap = new Map(); let effeUndo = null;
@@ -215,7 +227,7 @@ async function cpCopyMove(srcSpec, cmdId) {
         for (const rec of srcRecs) {
           const sni = fxeU32(rec, 0x28);
           try {
-            if (!niMap.has(sni)) { const nm = (sPkg.fep.names()[sni] || {}).name || 'EFFECT'; niMap.set(sni, fxeCopyEffect(pkg, sPkg, fxeEffectOfName(sPkg.fep, sni), nm.replace(/_LEAF_\d+$/, '').slice(0, 40) + '_' + src.code.toUpperCase() + '_LEAF_0')); }
+            if (!niMap.has(sni)) niMap.set(sni, cpEffectFor(pkg, sPkg, sni, src, opts, rep));
             const ri = fxeAddFepa(pkg, niMap.get(sni), rec), r = pkg.fepa.records[ri];
             fxeSetU32(r, 0x3C, nb < 32 ? (1 << nb) >>> 0 : 0); fxeSetU32(r, 0x40, nb >= 32 ? (1 << (nb - 32)) >>> 0 : 0);
             fxeSetStr(r, 0xC8, '');
@@ -232,15 +244,12 @@ async function cpCopyMove(srcSpec, cmdId) {
           let newId = -1;
           for (const rec of recs) {
             const sni = fxeU32(rec, 0x28);
-            if (!niMap.has(sni)) {
-              const nm = (sPkg.fep.names()[sni] || {}).name || 'EFFECT';
-              niMap.set(sni, fxeCopyEffect(pkg, sPkg, fxeEffectOfName(sPkg.fep, sni), nm.replace(/_LEAF_\d+$/, '').slice(0, 40) + '_' + src.code.toUpperCase() + '_LEAF_0'));
-            }
+            if (!niMap.has(sni)) niMap.set(sni, cpEffectFor(pkg, sPkg, sni, src, opts, rep));
             const ri = fxeAddFepa(pkg, niMap.get(sni), rec), r = pkg.fepa.records[ri];
             if (newId < 0) newId = fxeU32(r, 0x24); else fxeSetU32(r, 0x24, newId);
             const bone = new TextDecoder().decode(r.subarray(0xA8, 0xC8)).replace(/\0.*$/, '');
             if (bone && bone !== 'root' && !S.boneNames.includes(bone)) { fxeSetStr(r, 0xA8, 'root'); rep.approx.push(`effect ${id} sits on ${bone}, which this rig lacks: put on the root`); }
-            fxeSetStr(r, 0xC8, motOfName.get(moOf(r)) || '');   // bound to the copied animation, or to none (never a stranger's)
+            fxeSetStr(r, 0xC8, boundName(moOf(r)));
             if (new TextDecoder().decode(r.subarray(0x88, 0xA8)).replace(/\0.*$/, '')) fxeSetStr(r, 0x88, S.rig.label.replace(/_(2p|3p|zako)/, '_1p'));
           }
           fepaMap.set(id, newId);
@@ -428,7 +437,8 @@ async function cpCopyMove(srcSpec, cmdId) {
     rep.copied.unshift(`${srcCmd.steps.length} press${srcCmd.steps.length > 1 ? 'es' : ''}${actList.length > srcCmd.steps.length ? ` (+${actList.length - srcCmd.steps.length} follow-up action${actList.length - srcCmd.steps.length > 1 ? 's' : ''})` : ''}`);
   });
   if (effeUndo) S.undo[S.undo.length - 1] = [...effeUndo, ...S.undo[S.undo.length - 1]];
-  if (fepaMap.size) rep.copied.push(`${niMap.size} effect${niMap.size > 1 ? 's' : ''}`);
+  if (fepaMap.size) rep.copied.push(`${niMap.size} effect${niMap.size > 1 ? 's' : ''}` + (rep.fxOwn ? ` (${rep.fxOwn.size} this character's own: ${[...rep.fxOwn].join(', ')})` : '') + (rep.fxDonor ? ` (${rep.fxDonor.size} from this game's version of the move: ${[...rep.fxDonor].join(', ')})` : ''));
+  delete rep.fxOwn; delete rep.fxDonor;
   S.tlPaths.push(...newTL);
   markDirty(newTL);
   cpRigChanged();
@@ -438,6 +448,23 @@ async function cpCopyMove(srcSpec, cmdId) {
   S.newMove = null; S.step = { move: mi, i: 0 }; S.moveOnly = true; setMotion(S.moves[mi].steps[0].motion);
   runChecks(); renderAll();
   toast(`${moveName} copied from ${src.label}: ${rep.copied.join(', ')}.${rep.left.length ? ' Left out: ' + rep.left.join('; ') + '.' : ''}`);
+}
+
+/* the effect a copied placement plays, as a name index in this package: the same-named effect this character already
+   has, else a donor's (opts.effectDonors: the move's owner in this game), else a copy of the source's */
+const cpEffectCore = (n) => (n || '').replace(/_LEAF_\d+$/, '').replace(/^P\d{4}_/, '').replace(/_D1B$/, '');
+function cpEffectFor(pkg, sPkg, sni, src, opts, rep) {
+  const nm = (sPkg.fep.names()[sni] || {}).name || 'EFFECT', core = cpEffectCore(nm);
+  const own = pkg.fep.names().findIndex((x) => x && cpEffectCore(x.name) === core);
+  if (own >= 0 && fxeEffectOfName(pkg.fep, own) >= 0) { (rep.fxOwn = rep.fxOwn || new Set()).add(core); return own; }
+  for (const d of opts.effectDonors || []) {
+    const di = d.fep.names().findIndex((x) => x && cpEffectCore(x.name) === core);
+    if (di >= 0 && fxeEffectOfName(d.fep, di) >= 0) {
+      (rep.fxDonor = rep.fxDonor || new Set()).add(core);
+      return fxeCopyEffect(pkg, d, fxeEffectOfName(d.fep, di), nm.replace(/_LEAF_\d+$/, '').slice(0, 40) + '_' + src.code.toUpperCase() + '_LEAF_0');
+    }
+  }
+  return fxeCopyEffect(pkg, sPkg, fxeEffectOfName(sPkg.fep, sni), nm.replace(/_LEAF_\d+$/, '').slice(0, 40) + '_' + src.code.toUpperCase() + '_LEAF_0');
 }
 
 /* the frame-0 part hides most of this character's timelines carry (its weapons, ghosts …), for the new ones */

@@ -51,9 +51,16 @@ function walk(d, base = d, out = {}) {
     S.mod.kind = 'extra';
     S.mod.character.based_on = S.mod.character.code;
     S.mod.character.based_on_id = 9;
+    // the moves' owners in 012 (Cecil: Soul Eater, Paladin Force; Terra: Flood; Onion Knight: Wind Shear; Cloud, Warrior of
+    // Light, Firion: the blends): their 012 effects stand in for the Dissidia 1 copies of the same name
+    const effectDonors = [];
+    for (const code of ['for100', 'six100', 'thr100', 'sev100', 'one100', 'two100']) {
+      const e = arcRead(await isoGet(`obj/p_${code}.objx`)).find((x) => x.tag === 'effe');
+      if (e) effectDonors.push(new FxePackage(e.data.slice()));
+    }
     for (const c of cmds) {
       const before = Object.keys(S.mod.move_names).length;
-      await cpCopyMove({ mod: 'd1bartz' }, c);
+      await cpCopyMove({ mod: 'd1bartz' }, c, { effectDonors });
       const keys = Object.keys(S.mod.move_names);
       out.push({ cmd: c, added: keys.length - before, last: S.mod.move_names[keys[keys.length - 1]], notes: CP.notes[Math.max(...Object.keys(CP.notes).map(Number))] });
     }
