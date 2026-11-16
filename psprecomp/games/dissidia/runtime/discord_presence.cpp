@@ -144,10 +144,10 @@ bool provide(psp_discord::Activity* out) {
         if (n >= 2) {
             if (!g_fight.on) { g_fight.on = true; g_fight.start = std::time(nullptr); }
             // The player's side: the fighter a person drives. Its brain is switched to human mode during the intro, so the names
-            // wait for it (a CPU-only fight, e.g. a demo, is named after 6 s in list order).
+            // wait for it (the intro at normal speed takes over 6 s; a CPU-only fight is named after 30 s in list order).
             int me = -1;
             for (int i = 0; i < n; i++) if (dissidia_fighter_human(f[i])) { me = i; break; }
-            if (me < 0 && std::time(nullptr) - g_fight.start >= 6) me = 0;
+            if (me < 0 && std::time(nullptr) - g_fight.start >= 30) me = 0;
             if (me >= 0) {
                 const std::string a = fighter_name(f[me]), b = fighter_name(f[me == 0 ? 1 : 0]);
                 if (!a.empty()) g_fight.a = a;
