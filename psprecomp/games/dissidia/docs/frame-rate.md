@@ -58,6 +58,30 @@ update run one update in `rate / 30` with dt 2. **Not yet tested in play**: expe
 fades that truncate at a small dt. There is no vsync, so a rate above the monitor's refresh tears or drops frames.
 In multiplayer the lowest rate any player asked for wins, whatever the values.
 
+## 30 Hz logic (`PSPRECOMP_LOGIC30=1`, Debug > Developer options > Timing)
+
+Above 30 fps the battle can run its gameplay at the PSP's 30 updates a second instead of `rate` updates with a smaller step: every
+`rate / 30`-th frame is a gameplay frame (timer step 2); the frames between are drawn-only (step 0). Native high-rate play can never
+match 30 fps exactly, because a keyed event at 30 fps acts for a whole 33 ms frame; with 30 Hz logic every move plays as at 30 fps
+(docs/testing.md "30 Hz logic" for the parity results).
+
+- **Task tree** (framerate.cpp `task_run_hook` on the runner FUN_0888245C): on drawn-only frames the battle scene list runs with the
+  pause filter (flags mask/value 4/4 instead of 1/1), so the scene is still built and drawn, minus 11 tasks that change gameplay when
+  run that way (the skip list in framerate.cpp; `PSPRECOMP_L30_KEEP` keeps them, for checks).
+- **Clocks**: the timer's dt (`*(0x089D69E0)+0x18`, read directly by ~85 battle sites) is the current frame's step; the global step
+  (0x089D5EAC, copied a frame late by FUN_08864DD8) is made to show the step of the frame it will be used in (`global_step_hook`), and
+  the slow-motion clock only advances before gameplay frames.
+- **Input**: the pad changes only on gameplay frames; a press that comes and goes between two of them is latched and shown once.
+- **Compensations for native high rates** (press latch, Jecht grid, EX Burst gating, gauges, UI step, steered moves, action start step,
+  exact steps, FX60) all stand down: they test for a step below 2 or for 30 Hz logic.
+- **Drawing the frames between** (runtime/src/psp_ge_draw.cpp, `PSPRECOMP_INTERP`): the game module tags each display list with
+  (gameplay generation, phase) via `ge_interp_set_frame`; the render queue hands the tag to the renderer per list. On gameplay frames the
+  world / view / projection / bone matrices, texture-gen matrix and texture scale / offset of every 3D draw are recorded, keyed by the
+  draw's identity and occurrence (with a looser key without the vertex / index addresses for double-buffered vertices such as weapons).
+  Drawn-only frames draw with those values blended between the last two gameplay frames by phase (1, default: smooth, up to one 30 Hz
+  frame behind) or extrapolated from them (2); 0 draws the last gameplay frame as is. 2D (through-mode) draws, moves over 3 m and camera
+  cuts (the eye jumps over 3 m) are not blended. Effects whose vertices the CPU writes each update still move at 30 Hz.
+
 ## What 60 fps means here
 
 It is **native**: the battle simulation runs 60 updates a second. Nothing is interpolated, and there's no extra

@@ -449,3 +449,21 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
   peak height 570, hit count / timing ~600. All 31 characters fail jump, double jump and dodge, 30 air dodge; where the jump height
   differs it is LOWER at 120 fps for every character (30 of 30, e.g. Warrior of Light 3.55 vs 3.77 m). Two 30 fps runs differ on 1-15 %
   of a character's trials (Kefka 27 of 67, Squall 18 of 80, Onion Knight 15 of 48 are the noisiest; Prishe 1 of 136, Kain 1 of 52).
+
+### 30 Hz logic (`PSPRECOMP_LOGIC30=1`, 16 Nov)
+
+The native findings above come from one cause: at 30 fps a keyed event (a hit frame, a jump impulse, a pad edge) acts on the game for a
+whole 33 ms frame, and smaller steps cannot reproduce that exactly. With 30 Hz logic the fight itself runs at the PSP's rate whatever the
+frame rate, and the frames between are only drawn (docs/frame-rate.md "30 Hz logic"). The parity tests run it with `PSPRECOMP_LOGIC30=1`
+in the environment (the tool passes the environment on).
+
+- Squall and Exdeath at 30 / 60 / 120 / 240 (v30): 0-3 failing trials of 80-90 per rate, against 75-81 % natively. What was left:
+  Squall's air moves 2247 / 3026 (mash) took extra hits from a lingering hitbox at 60 and 120 fps: the FX60 effect-component
+  compensation still ran (it steps the components one update in rate / 30, with no regard for which frames are gameplay frames). It is
+  off under 30 Hz logic now. After that those trials differ between two 30 fps runs as well (juggles: chaotic, reported NONDETERMINISTIC).
+- **Comparator fix**: the action start is logged in whole ms (`gt=410867` for 410866.67), and samples were taken from `>= start`, so a start
+  that rounded up lost its first sample. That showed as a one-frame lead ("the player ran ahead") and, for air actions, a lower peak
+  (Exdeath 1685 / 1687: 3.38 vs 3.88 m, with logs identical to the digit). Samples and hits within 1 ms of the start now count; the
+  "ran ahead" counts went to 0 at every rate under 30 Hz logic. Natively judged runs are affected the same way (part of the phase lead
+  reported there is this).
+- `waitidle` timeouts on long stances (Squall 1259, script 8000) happen at 30 fps too; they are not a rate problem.
