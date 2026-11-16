@@ -61,7 +61,17 @@ void stats_report(Clock::time_point now) {
 // ANativeWindow_setFrameRate is API 30; the APK's minSdk is lower, so look it up at run time.
 using SetFrameRateFn = int32_t (*)(ANativeWindow*, float, int8_t);
 SetFrameRateFn set_frame_rate_fn() {
-    static SetFrameRateFn fn = reinterpret_cast<SetFrameRateFn>(dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"));
+    // The NDK puts it in libnativewindow (libandroid only re-exports it on some builds); RTLD_DEFAULT does not search either
+    // from the app's linker namespace (both found on the Android 15 emulator).
+    static SetFrameRateFn fn = [] {
+        for (const char* lib : {"libnativewindow.so", "libandroid.so"}) {
+            void* h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+            if (void* f = h ? dlsym(h, "ANativeWindow_setFrameRate") : nullptr) return reinterpret_cast<SetFrameRateFn>(f);
+            const char* e = dlerror();
+            std::fprintf(stderr, "[PRESENT] %s: %s\n", lib, e ? e : "no ANativeWindow_setFrameRate");
+        }
+        return static_cast<SetFrameRateFn>(nullptr);
+    }();
     return fn;
 }
 void android_frame_rate(SDL_Window* w) {
@@ -79,7 +89,7 @@ void android_frame_rate(SDL_Window* w) {
         const int32_t r = fn(nw, float(fps), 0 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT */);
         std::fprintf(stderr, "[PRESENT] asked the display for %d Hz (ANativeWindow_setFrameRate -> %d)\n", fps, r);
     } else {
-        std::fprintf(stderr, "[PRESENT] ANativeWindow_setFrameRate not available (Android < 11): display refresh left to the system\n");
+        std::fprintf(stderr, "[PRESENT] ANativeWindow_setFrameRate not found (it needs Android 11): display refresh left to the system\n");
     }
 }
 #endif
