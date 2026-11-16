@@ -160,7 +160,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_WIDE, ROW
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
-           ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS,   // Debug page
+           ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
            ROW_DBG0, ROW_DBG1, ROW_DBG2, ROW_DBG3, ROW_DBG4, ROW_DBG5,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
            ROW_GPU, ROW_GPU_GET, ROW_GPU_DEL,   // custom GPU drivers (Android, Adreno): Drivers page
            ROW_SUB_HDR, ROW_SUB_RT,             // rows that open a sub-menu
@@ -1196,6 +1196,17 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "Ghost test (PSPRECOMP_GE_FEEDBACK)\nOff skips the passes that read the picture they draw into (the glow). If the ghost goes, it comes from there. This session only.";
             break;
         }
+        case ROW_FXL_INT: case ROW_FXL_RAD: {
+            const int w = r == ROW_FXL_RAD ? 1 : 0;
+            const float v = psp_fx_light_scale(w);
+            m.label = w ? "Effect Light Reach" : "Effect Light Brightness";
+            std::snprintf(buf, sizeof buf, "x%.2f", v);
+            m.value = buf;
+            m.can_dec = v > 0.f; m.can_inc = v < 8.f;
+            m.help = w ? "Effect lights (debug)\nHow far the light from glowing attack effects reaches (PSPRECOMP_FX_LIGHT_RADIUS); x1 = default. Needs Ray-Traced Shadows. This session only."
+                       : "Effect lights (debug)\nHow bright the light from glowing attack effects is (PSPRECOMP_FX_LIGHT_INTENSITY); x0 = off, x1 = default. Needs Ray-Traced Shadows. This session only.";
+            break;
+        }
         case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
             const size_t i = size_t(r - ROW_DBG0);
             if (i >= g_dbg_toggles.size()) break;
@@ -1264,6 +1275,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
+    case ROW_FXL_INT: case ROW_FXL_RAD: return K::Choice;
     case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: return K::Action;
     case ROW_QUIT: return K::Danger;
     case ROW_SUB_HDR: case ROW_SUB_RT: return K::Submenu;
@@ -1713,6 +1725,12 @@ void change(int d) {   // left / right on the selected row
     }
     case ROW_GLOWSOFT: ge_draw_set_fb_prefilter(d > 0); break;
     case ROW_GLOWPASS: ge_draw_set_fb_snapshot(d > 0); break;
+    case ROW_FXL_INT: case ROW_FXL_RAD: {   // steps of 0.25 up to 2, then 0.5 up to 8
+        const int w = g_rows[size_t(g_sel)] == ROW_FXL_RAD ? 1 : 0;
+        const float v = psp_fx_light_scale(w), st = (d > 0 ? v >= 2.f : v > 2.f) ? 0.5f : 0.25f;
+        psp_fx_light_set_scale(w, std::min(8.f, std::max(0.f, std::round((v + d * st) / 0.25f) * 0.25f)));
+        break;
+    }
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
         const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
         if (i < g_dbg_toggles.size() && g_dbg_toggles[i].get() != (d > 0)) g_dbg_toggles[i].set(d > 0);
@@ -1799,7 +1817,7 @@ void build_rows() {
         for (size_t i = 0; i < g_mods.size(); i++) g_rows.push_back(Row(ROW_MOD0 + int(i)));
         break;
     case PAGE_DEBUG:
-        add(ROW_PERF); add(ROW_FX); add(ROW_SYNC); add(ROW_RING); add(ROW_GLOWSOFT); add(ROW_GLOWPASS);
+        add(ROW_PERF); add(ROW_FX); add(ROW_SYNC); add(ROW_RING); add(ROW_GLOWSOFT); add(ROW_GLOWPASS); add(ROW_FXL_INT); add(ROW_FXL_RAD);
         for (size_t i = 0; i < g_dbg_toggles.size(); i++) g_rows.push_back(Row(ROW_DBG0 + int(i)));
         add(ROW_SEC_DEV);
         for (int c = 0; c < EC_COUNT; c++) g_rows.push_back(Row(ROW_SUB_ENV0 + c));
@@ -2102,6 +2120,7 @@ void confirm_row() {
     case ROW_UPSCALE: change(psp_post_upscale() >= 2 ? -2 : 1); return;
     case ROW_GLOWSOFT: change(ge_draw_fb_prefilter() ? -1 : 1); return;
     case ROW_GLOWPASS: change(ge_draw_fb_snapshot() ? -1 : 1); return;
+    case ROW_FXL_INT: case ROW_FXL_RAD: change(1); return;
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
         const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
         if (i < g_dbg_toggles.size()) change(g_dbg_toggles[i].get() ? -1 : 1);

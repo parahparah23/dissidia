@@ -2934,6 +2934,15 @@ static bool fx_lights_on() {
     if (v < 0) { v = (std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0') ? 0 : 1; g_fx_lights.store(v); }
     return v != 0;
 }
+// Brightness / reach multipliers of the effect lights (Settings > Debug rows, PSPRECOMP_FX_LIGHT_INTENSITY / _RADIUS at start)
+static std::atomic<float> g_fx_scale[2] = {{-1.f}, {-1.f}};
+float psp_fx_light_scale(int which) {
+    which = which ? 1 : 0;
+    float v = g_fx_scale[which].load();
+    if (v < 0.f) { const char* e = std::getenv(which ? "PSPRECOMP_FX_LIGHT_RADIUS" : "PSPRECOMP_FX_LIGHT_INTENSITY"); v = e && e[0] ? std::max(0.f, (float)std::atof(e)) : 1.f; g_fx_scale[which].store(v); }
+    return v;
+}
+void psp_fx_light_set_scale(int which, float v) { g_fx_scale[which ? 1 : 0].store(std::max(0.f, v)); }
 void psp_fx_lights_set(bool on) { g_fx_lights.store(on ? 1 : 0); std::fprintf(stderr, "[FXLIGHT] effect lights %s\n", on ? "on" : "off"); }
 static bool fx_additive(const GeState& st) {   // src x As (or 1) + dst x FIX with a bright FIX: the GE's additive glow
     const int dst = (st.blend_mode >> 4) & 0xF, op = (st.blend_mode >> 8) & 0x7;
@@ -2978,8 +2987,7 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         for (int a = 0; a < 3; ++a) { hit->lo[a] = std::min(hit->lo[a], b.lo[a]); hit->hi[a] = std::max(hit->hi[a], b.hi[a]); hit->rgb[a] += b.rgb[a] * b.area; }
         hit->area += b.area;
     }
-    static const float k_rad = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_RADIUS"); return e ? (float)std::atof(e) : 1.f; }();
-    static const float k_int = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_INTENSITY"); return e ? (float)std::atof(e) : 1.f; }();
+    const float k_rad = psp_fx_light_scale(1), k_int = psp_fx_light_scale(0);
     struct Cand { float score; float l[9]; };
     std::vector<Cand> cand;
     for (const Cl& c : cl) {
