@@ -302,6 +302,13 @@ Neutral 2 / Up 2 (317..408 vs 267..358 ms) for the ones before it. Checked in th
 (a single probe delay: the narrowest window). One fight ended during the run (time limit) and its batch was replayed in the next one.
 The sweep is adaptive: a 1/30 s grid, then 1/120 s only between neighbouring probes whose outcome differs (same windows as the full
 1/120 s grid on all four saved 11 Nov runs, with 40-50% of the trials).
+**All eight rates (15 Nov, `--jobs 3`, 1 h 53 min next to the roster run): FAIL, one real finding.** Rush > Neutral 2 and Rush > Up 2 are
+accepted 308..400 ms after the Rush at 90 and 150 fps against 267..358 ms at 30, 60, 120, 180, 210 and 240 fps (41 ms late: a press timed
+for 30 fps can miss the chain). Neutral 2 > Neutral 3 / Up 3 are within 34 ms everywhere; Neutral 3 > HP 575..733 ms at every rate
+(30 fps: 600..733). 90 and 150 fps are also the rates where Exdeath's multi-hit lands late (see the parity findings); not fixed.
+Harness lesson from the first all-rate run: the HP finisher sweep KO'd the dummy (only parity runs cleared its live HP damage), after
+which every trial timed out and the HP step silently shrank. Now the dummy's HP damage is cleared in every AI-off run, trials start with
+`home`, and the verdict reports a step where over a quarter of the trials could not be played as a harness problem.
 
 Built 2026-11-11 for Jecht (his chain inputs have 3 to 5 frame windows at 30 fps; the wiki list is
 https://dissidia.wiki/Jecht_(Dissidia_012)/Combos). One battle per frame rate runs in parallel (own display / port / memory stick); the CPU
