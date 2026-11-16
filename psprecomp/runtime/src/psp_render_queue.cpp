@@ -112,6 +112,8 @@ int render_queue_enqueue_ge_list(
     entry.stalled = false;
     entry.begun = false;
     entry.ip_tag = ge_interp_current_tag();
+    static const bool iptrace2 = [] { const char* e = std::getenv("PSPRECOMP_INTERP_TRACE"); return e && std::atoi(e) >= 2; }();
+    if (iptrace2 && entry.ip_tag.seq) std::fprintf(stderr, "[IPQ] enqueue uid %d list %08X stall %08X tag seq %u rec %d\n", uid, list_addr, stall_addr, entry.ip_tag.seq, entry.ip_tag.record ? 1 : 0);
 
     g_ge_queue.push_back(entry);
 

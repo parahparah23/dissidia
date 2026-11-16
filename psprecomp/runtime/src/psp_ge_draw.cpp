@@ -2627,10 +2627,18 @@ bool ip_cut(const float* a, const float* b) {   // the camera moved more than 3 
 
 void ge_interp_set_frame(const GeInterpTag& tag) { std::lock_guard<std::mutex> lk(g_ip_set_mu); g_ip_set = tag; }
 GeInterpTag ge_interp_current_tag() { std::lock_guard<std::mutex> lk(g_ip_set_mu); return g_ip_set; }
-void ge_interp_list_tag(const GeInterpTag& tag) { g_ip_gen = tag.gen; g_ip_phase = tag.phase; g_ip_seq = tag.seq; g_ip_rec = tag.record; }
+static int ip_trace_level() {   // PSPRECOMP_INTERP_TRACE: 1 = per frame the drawn (blended) position of the biggest skinned draw and the camera; 2 = also the lists' tags and one stage draw's live / previous / blended view
+    static const int l = [] { const char* e = std::getenv("PSPRECOMP_INTERP_TRACE"); return e && e[0] ? std::max(1, std::atoi(e)) : 0; }();
+    return l;
+}
+void ge_interp_list_tag(const GeInterpTag& tag) {
+    if (ip_trace_level() >= 2) std::fprintf(stderr, "[IPL] list tag seq %u gen %u rec %d phase %.3f\n", tag.seq, tag.gen, tag.record ? 1 : 0, tag.phase);
+    g_ip_gen = tag.gen; g_ip_phase = tag.phase; g_ip_seq = tag.seq; g_ip_rec = tag.record;
+}
 
 // Swap the draw's matrices for interpolated ones (restored by the caller); false = drawn as issued.
-struct IpStat { float pw[3] = {}, eye[3] = {}; int pcount = -1; uint32_t gen = 0, seq = ~0u; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0, skinned = 0, matmove = 0, vtxonly = 0, vtxprims = 0; };
+struct IpStat { float pw[3] = {}, eye[3] = {}; int pcount = -1; uint32_t gen = 0, seq = ~0u; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0, skinned = 0, matmove = 0, vtxonly = 0, vtxprims = 0;
+    int scount = -1; float s_live[3] = {}, s_prev[3] = {}, s_blend[3] = {}; uint32_t s_key = 0; int s_how = 0; bool s_rec = false; };   // trace 2: the biggest unskinned 3D draw (stage): eye of its live / previous / blended view
 std::unordered_map<uint64_t, uint64_t> g_ip_vhash_prev, g_ip_vhash_cur;   // diagnostic (PSPRECOMP_INTERP_LOG): vertex bytes per draw key on gameplay frames
 uint8_t* g_ip_rdram = nullptr;
 static IpStat g_ip_stat;
@@ -2641,6 +2649,9 @@ static void ip_stat_flush() {
     static const bool trace = std::getenv("PSPRECOMP_INTERP_TRACE") != nullptr;   // per frame: where the biggest skinned draw (a fighter) and the camera are drawn
     if (trace && g_ip_stat.pcount >= 0) std::fprintf(stderr, "[IPTRACE] seq %u gen %u phase %.3f rec %d model %.4f %.4f %.4f eye %.4f %.4f %.4f\n", g_ip_stat.seq, g_ip_stat.gen, g_ip_stat.phase,
         0, g_ip_stat.pw[0], g_ip_stat.pw[1], g_ip_stat.pw[2], g_ip_stat.eye[0], g_ip_stat.eye[1], g_ip_stat.eye[2]);
+    if (ip_trace_level() >= 2 && g_ip_stat.scount >= 0) std::fprintf(stderr, "[IPSTAGE] seq %u gen %u phase %.3f rec %d key %08X n %d how %d live %.4f %.4f %.4f prev %.4f %.4f %.4f blend %.4f %.4f %.4f; %d draws %d blended %d nomatch\n",
+        g_ip_stat.seq, g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.s_rec ? 1 : 0, g_ip_stat.s_key, g_ip_stat.scount, g_ip_stat.s_how, g_ip_stat.s_live[0], g_ip_stat.s_live[1], g_ip_stat.s_live[2],
+        g_ip_stat.s_prev[0], g_ip_stat.s_prev[1], g_ip_stat.s_prev[2], g_ip_stat.s_blend[0], g_ip_stat.s_blend[1], g_ip_stat.s_blend[2], g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch);
     g_ip_stat = IpStat{}; g_ip_stat.gen = g_ip_gen; g_ip_stat.phase = g_ip_phase; g_ip_stat.seq = g_ip_seq;
 }
 static bool ip_apply(int prim_type, int count, IpMats* saved) {
@@ -2676,11 +2687,17 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
             if (mat) g_ip_stat.matmove++; else if (ph->second != vh) { g_ip_stat.vtxonly++; g_ip_stat.vtxprims += count; }
         }
     }
+    const bool stage_tr = ip_trace_level() >= 2 && !(st.vertex_type & 0x1C000u) && !st.depth_write_disable && st.depth_test_enable && count > g_ip_stat.scount;
+    if (stage_tr) {   // trace 2: this (so far biggest unskinned, depth-writing) draw's live view, drawn as issued unless replaced below
+        g_ip_stat.scount = count; g_ip_stat.s_key = static_cast<uint32_t>(base); g_ip_stat.s_how = 0; g_ip_stat.s_rec = g_ip_rec;
+        ip_eye(cur.v, g_ip_stat.s_live); ip_eye(cur.v, g_ip_stat.s_blend); std::memset(g_ip_stat.s_prev, 0, sizeof g_ip_stat.s_prev);
+    }
     if (!g_ip_have) { g_ip_stat.noprev++; return false; }
     auto it = g_ip_prev.find(key);
     if (it == g_ip_prev.end()) it = g_ip_prev.find(lkey);   // the same draw from the other of two vertex buffers
     if (it == g_ip_prev.end()) { g_ip_stat.nomatch++; return false; }
     const IpMats& pv = it->second;
+    if (stage_tr) { g_ip_stat.s_how = it->first == key ? 1 : 2; ip_eye(pv.v, g_ip_stat.s_prev); }
     if (ip_far(pv.w, cur.w) || ip_cut(pv.v, cur.v)) {
         static int lg = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? 12 : 0; }();
         if (lg > 0) { lg--; float ea[3], eb[3]; ip_eye(pv.v, ea); ip_eye(cur.v, eb);
@@ -2697,6 +2714,7 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
     float uv[4]; ip_lerp(uv, pv.uv, cur.uv, t, 4);
     for (int i = 0; i < 4; i++) if (std::fabs(cur.uv[i] - pv.uv[i]) > 0.5f) uv[i] = cur.uv[i];   // a scrolling offset that wrapped: no blend
     st.tex_scale_u = uv[0]; st.tex_scale_v = uv[1]; st.tex_offset_u = uv[2]; st.tex_offset_v = uv[3];
+    if (stage_tr) ip_eye(st.view_matrix, g_ip_stat.s_blend);
     if ((st.vertex_type & 0x1C000u) && count > g_ip_stat.pcount) {   // trace: the drawn (blended) position of the biggest skinned draw = world x bone 0 translation
         g_ip_stat.pcount = count;
         const float* w = st.world_matrix; const float* b = st.bone_matrix;

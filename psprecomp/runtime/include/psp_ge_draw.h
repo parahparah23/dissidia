@@ -47,7 +47,9 @@ void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n);
 void ge_draw_request_no_raster(int mode);
 
 /// Frame interpolation (a game that runs its logic at 30 Hz and re-issues its frame on the frames in between).
-/// Game thread, before each frame's lists are enqueued: gen = number of the gameplay frame whose state the frame shows,
+/// Game thread, before each frame's lists are enqueued (a list takes the tag current when it is enqueued, so the game module must publish
+/// the tag of the frame whose list is about to be submitted: Dissidia submits a frame's list after its frame-end hook, see framerate.cpp):
+/// gen = number of the gameplay frame whose state the frame shows,
 /// phase = how far the frame is shown past that gameplay frame, in gameplay frames (0..1; k/n for the k-th of n-1 drawn-only frames
 /// when paced by frame count, measured time when paced by the clock; down to -0.5 for a gameplay frame shown early); -1 turns it off. record = this is the gameplay frame
 /// itself (its draws become the current table); seq numbers the frames.

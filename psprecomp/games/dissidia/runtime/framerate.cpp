@@ -1065,6 +1065,7 @@ bool g_l30_next_logic = true;
 float g_l30_next_phase = 0.0f;
 double g_l30_due_ms = 0, g_l30_last_ms = 0;   // when the next gameplay frame is due / the last one was (real time, ms)
 double g_l30_end_ms = 0;                      // when the last frame ended (frame_end_hook, after the frame's wait: a steady point)
+GeInterpTag g_l30_list_tag;                   // the interpolation tag of the frame that just ended: its display list is submitted after frame_end_hook (see there)
 double l30_now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 bool l30_clock_paced() {
     static const int m = [] {
@@ -1223,15 +1224,25 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         g_l30_frame++;
         g_l30_logic_now = next_logic;
         wrf(timer + 0x18u, g_l30_logic_now ? 2.0f : 0.0f);   // the coming frame's step (read directly by 85 battle sites); the global step follows via global_step_hook
-        // the renderer blends the coming frame's draws between the last two gameplay frames (psp_ge_draw.h ge_interp_set_frame)
+        // The renderer blends each frame's draws between the last two gameplay frames (psp_ge_draw.h ge_interp_set_frame). A frame's
+        // display list is built during the frame and submitted (sceGeListEnQueue, where the render queue captures the tag) right after
+        // this hook returns, i.e. after the frame's end: so the tag published here is the one computed at the previous frame end, the
+        // one describing the frame that just ran; the coming frame's tag waits until that frame has ended. Publishing the coming frame's
+        // tag at once tagged every list with the following frame's step: the gameplay frame's new matrices arrived in a list marked
+        // drawn-only (blended against a table one gameplay frame too old) and the list marked "record" re-emitted the old scene, so the
+        // camera and stage stepped 1.1 steps then -0.1 at 60 fps (frame dumps: neighbouring frame differences 1.0 / 6.6 / 1.3 / 6.9).
         static uint32_t gen = 0;
         if (g_l30_logic_now) gen++;
         static uint32_t seq = 0;
         GeInterpTag tag; tag.gen = gen; tag.seq = ++seq; tag.phase = next_phase; tag.record = g_l30_logic_now;
-        ge_interp_set_frame(tag);
+        ge_interp_set_frame(g_l30_list_tag);
+        static const bool iptrace2 = [] { const char* e = std::getenv("PSPRECOMP_INTERP_TRACE"); return e && std::atoi(e) >= 2; }();   // where the frame end falls among the lists (psp_ge_draw.cpp [IPL])
+        if (iptrace2 && g_battle_age > 600.f) std::fprintf(stderr, "[IPF] frame end tick %llu: list tag seq %u rec %d; next frame seq %u gen %u rec %d phase %.3f\n", (unsigned long long)g_tick,
+                                                             g_l30_list_tag.seq, g_l30_list_tag.record ? 1 : 0, tag.seq, tag.gen, tag.record ? 1 : 0, tag.phase);
+        g_l30_list_tag = tag;
         if (rng_keep && !g_l30_logic_now) { for (int i = 0; i < 2; i++) rng_saved[i] = r32(RNG_WORDS[i]); rng_have = true; }   // the coming frame is drawn-only
     } else if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
-    if (!l30_active()) ge_interp_set_frame(GeInterpTag{});
+    if (!l30_active()) { ge_interp_set_frame(GeInterpTag{}); g_l30_list_tag = GeInterpTag{}; }
 
     if (g_log && ok(timer)) {
         const int64_t t = now_ms();
