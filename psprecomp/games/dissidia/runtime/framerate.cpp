@@ -41,8 +41,11 @@
 #include "hle/psp_hle_adhoc.h"
 #include "psp_ge_draw.h"
 #include <algorithm>
+#if defined(__GLIBC__) || defined(__APPLE__)   // PSPRECOMP_TASK_TRACE's backtraces (not on Android API < 33 or Windows)
+#define PSPRECOMP_HAVE_BACKTRACE 1
 #include <dlfcn.h>
 #include <execinfo.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -1494,9 +1497,13 @@ void task_note(const char* what, recomp_context* ctx) {
     for (int i = 0; i < n; i++) if (seen[i] == ra) return;
     if (n < 32) seen[n++] = ra;
     std::fprintf(stderr, "[TASKTRACE] %s called from ra=%08X a0=%08X tick=%llu bt:", what, ra, static_cast<uint32_t>(ctx->r[4]), (unsigned long long)g_tick);
+#ifdef PSPRECOMP_HAVE_BACKTRACE
     void* bt[24]; const int k = backtrace(bt, 24);
     Dl_info di{}; dladdr(reinterpret_cast<void*>(&task_note), &di);
     for (int i = 0; i < k; i++) std::fprintf(stderr, " %lx", static_cast<unsigned long>(reinterpret_cast<uintptr_t>(bt[i]) - reinterpret_cast<uintptr_t>(di.dli_fbase)));
+#else
+    std::fprintf(stderr, " (not available on this platform)");
+#endif
     std::fprintf(stderr, "\n");
 }
 // PSPRECOMP_TASK_DUMP=<battle ticks> (diagnostic): once the battle has run that long, list the root task list (sys = *(0x089D69A8): list
