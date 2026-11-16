@@ -2928,6 +2928,7 @@ static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int co
 // the effect's and whose reach / brightness follow its size (psp_screenfx.cpp adds them next to the stage lights). PSPRECOMP_FX_LIGHTS=0 turns them off.
 struct FxBlob { float lo[3], hi[3], rgb[3], area; };
 static std::vector<FxBlob> g_fx_blobs[GE_MAX_TARGETS];
+static int g_fx_n_steady[GE_MAX_TARGETS], g_fx_n_nonadd[GE_MAX_TARGETS], g_fx_n_static[GE_MAX_TARGETS];   // this scene: draws left out (the effect-light log)
 static std::atomic<int> g_fx_lights{-1};   // -1: from PSPRECOMP_FX_LIGHTS (on unless 0); psp_fx_lights_set overrides (test scripts: A/B in one run)
 static bool fx_lights_on() {
     int v = g_fx_lights.load();
@@ -2973,7 +2974,7 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     struct Cl { float lo[3], hi[3], rgb[3], area; };
     std::vector<Cl> cl;
     static const float max_ext = 40.f;
-    int n_big = 0; float big_ext = 0.f;
+    int n_big = 0, n_dim = 0; float big_ext = 0.f;
     for (const FxBlob& b : B) {
         const float ext = 0.5f * std::sqrt((b.hi[0] - b.lo[0]) * (b.hi[0] - b.lo[0]) + (b.hi[1] - b.lo[1]) * (b.hi[1] - b.lo[1]) + (b.hi[2] - b.lo[2]) * (b.hi[2] - b.lo[2]));
         if (ext > max_ext) { ++n_big; big_ext = std::max(big_ext, ext); continue; }   // a screen-sized haze / flash card, not a light
@@ -2993,11 +2994,11 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     for (const Cl& c : cl) {
         float rgb[3] = {c.rgb[0] / c.area, c.rgb[1] / c.area, c.rgb[2] / c.area};
         const float mx = std::max(rgb[0], std::max(rgb[1], rgb[2]));
-        if (mx < 0.03f) continue;
+        if (mx < 0.03f) { ++n_dim; continue; }
         const float ext = 0.5f * std::sqrt((c.hi[0] - c.lo[0]) * (c.hi[0] - c.lo[0]) + (c.hi[1] - c.lo[1]) * (c.hi[1] - c.lo[1]) + (c.hi[2] - c.lo[2]) * (c.hi[2] - c.lo[2]));
         const float size = std::max(ext, std::sqrt(c.area) * 0.5f);   // a flat card's extent, a cloud of sparks' spread
         const float score = mx * std::sqrt(c.area);
-        if (score < 0.05f) continue;
+        if (score < 0.05f) { ++n_dim; continue; }
         Cand d;
         d.score = score;
         for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
@@ -3022,14 +3023,19 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
             for (Track& x : tr) { const float dx = x.p[0] - d.l[0], dy = x.p[1] - d.l[1], dz = x.p[2] - d.l[2]; if (dx * dx + dy * dy + dz * dz < 1.5f * 1.5f) { t = &x; break; } }
             if (!t) { tr.push_back({{d.l[0], d.l[1], d.l[2]}, now, now}); keep.push_back(d); continue; }
             t->last = now;
-            if (now - t->first < k_static) keep.push_back(d);
+            if (now - t->first < k_static) keep.push_back(d); else ++g_fx_n_static[cur];
         }
         cand.swap(keep);
     }
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
     int n = 0;
     for (const Cand& d : cand) { if (n >= max) break; std::memcpy(out[n++], d.l, sizeof d.l); }
-    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr; if (dbg && (n || n_big) && lg++ % 10 == 0) std::fprintf(stderr, "[FXLIGHT] %zu blobs (%d too big, largest %.0f), %zu clusters, %d lights; first at %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n", B.size(), n_big, big_ext, cl.size(), n, n ? out[0][0] : 0.f, n ? out[0][1] : 0.f, n ? out[0][2] : 0.f, n ? out[0][3] : 0.f, n ? out[0][4] : 0.f, n ? out[0][5] : 0.f, n ? out[0][6] : 0.f, n ? out[0][7] : 0.f); }
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+      if (dbg && (n || n_big || n_dim || g_fx_n_steady[cur] || g_fx_n_nonadd[cur] || g_fx_n_static[cur]) && lg++ % 5 == 0)
+        std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters -> %d lights | left out: %d too big (largest %.0f), %d too faint, %d steady draws, %d non-additive draws, %d staying put | first %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n",
+                     B.size(), cl.size(), n, n_big, big_ext, n_dim, g_fx_n_steady[cur], g_fx_n_nonadd[cur], g_fx_n_static[cur],
+                     n ? out[0][0] : 0.f, n ? out[0][1] : 0.f, n ? out[0][2] : 0.f, n ? out[0][3] : 0.f, n ? out[0][4] : 0.f, n ? out[0][5] : 0.f, n ? out[0][6] : 0.f, n ? out[0][7] : 0.f); }
+    g_fx_n_steady[cur] = g_fx_n_nonadd[cur] = g_fx_n_static[cur] = 0;
     return n;
 }
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
@@ -3066,6 +3072,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             if (will) { /* reason is filled in by rt_capture below; log after */ }
             else rtdump_printf("[RTDUMP] draw prim %d n %d  skip: depth_test %d depth_write_off %d blend %d atest %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, st.depth_test_enable, st.depth_write_disable, st.alpha_blend_enable, st.alpha_test_enable, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
         }
+        if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && !fx_additive(st)) ++g_fx_n_nonadd[cur];
         if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && std::getenv("PSPRECOMP_FX_LIGHT_LOG")) {   // which blends the effects use
             static std::map<uint64_t, int> seen; const uint64_t key = (uint64_t(st.blend_mode & 0xFFF) << 32) | (st.blend_fix_b & 0xFFFFFFu) | (uint64_t(st.blend_fix_a & 0xFFFFFFu) << 44);
             if (seen[key]++ == 0) std::fprintf(stderr, "[FXLIGHT] blend %03x fixa %06x fixb %06x zwrite %d additive %d rt %d\n", (unsigned)(st.blend_mode & 0xFFF), (unsigned)(st.blend_fix_a & 0xFFFFFFu), (unsigned)(st.blend_fix_b & 0xFFFFFFu), st.depth_write_disable ? 0 : 1, (int)fx_additive(st), (int)psp_rt_active());
@@ -3125,6 +3132,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 steady = sn.latched;
                 if (seen.size() > 4096) { std::unordered_map<uint64_t, Seen> keep; for (const auto& kv : seen) if (kv.second.latched) keep.insert(kv); seen.swap(keep); }
             }
+            if (light_fx && steady) ++g_fx_n_steady[cur];
             if (light_fx && !steady && g_rt_fx_tris[cur].size() > t0) {
                 fx_blob_note(cur, t0, c0);
                 static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
