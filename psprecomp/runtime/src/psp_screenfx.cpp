@@ -482,7 +482,7 @@ void main() {
     o_fx = vec4(ao, sh, 0.0, 1.0);
     if (u_fx_dbg == 2 && u_have_fx != 0) {   // debug: the effects layer itself, wherever the layer holds something
         vec4 fc = texture(u_fxc, v_uv);
-        if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, v_uv).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
+        if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, snap_uv(v_uv)).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
     }
 
     // How reflective this surface is (issue #2): the material's reflectivity from the mask, in any orientation (walls too). Without a
@@ -522,7 +522,7 @@ void main() {
                 // fragment's own depth; an effect later covered by opaque geometry (its depth behind the scene's) is not there.
                 vec4 fc = texture(u_fxc, uv2);
                 if (fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) {
-                    float efd = texture(u_fxd, uv2).r;
+                    float efd = texture(u_fxd, snap_uv(uv2)).r;
                     if ((is_far(wd2) || fx_floats(uv2, wd2, efd))) {
                         float de = length(vpos(uv2, efd)), ds = length(S);
                         if (ds > de - 0.02 * lp && ds < de + stepl * 2.5 + u_fx_thick) { fx_hit = true; fx_t = t; fx_c = fc; fx_uv = uv2; }
@@ -626,9 +626,9 @@ void main() {
     float r = 0.0;
     float wd = wd_at(v_uv);
     if (u_have != 0 && !is_far(wd)) {
-        float m = texture(u_mask, v_uv).a;
+        float m = texture(u_mask, snap_uv(v_uv)).a;
         if (m > 0.0) {
-            float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, v_uv).r));
+            float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, snap_uv(v_uv)).r));
             if (abs(a - b) < 0.002 * a + 0.01) r = m;
         }
     }
