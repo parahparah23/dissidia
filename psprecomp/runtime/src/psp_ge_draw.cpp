@@ -2964,9 +2964,10 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     struct Cl { float lo[3], hi[3], rgb[3], area; };
     std::vector<Cl> cl;
     static const float max_ext = 40.f;
+    int n_big = 0; float big_ext = 0.f;
     for (const FxBlob& b : B) {
         const float ext = 0.5f * std::sqrt((b.hi[0] - b.lo[0]) * (b.hi[0] - b.lo[0]) + (b.hi[1] - b.lo[1]) * (b.hi[1] - b.lo[1]) + (b.hi[2] - b.lo[2]) * (b.hi[2] - b.lo[2]));
-        if (ext > max_ext) continue;   // a screen-sized haze / flash card, not a light
+        if (ext > max_ext) { ++n_big; big_ext = std::max(big_ext, ext); continue; }   // a screen-sized haze / flash card, not a light
         Cl* hit = nullptr;
         for (Cl& c : cl) {   // overlapping boxes (grown by 1 unit) are the same effect
             bool ov = true;
@@ -3020,7 +3021,7 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
     int n = 0;
     for (const Cand& d : cand) { if (n >= max) break; std::memcpy(out[n++], d.l, sizeof d.l); }
-    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr; if (dbg && n && lg++ % 30 == 0) std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters, %d lights; first at %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n", B.size(), cl.size(), n, out[0][0], out[0][1], out[0][2], out[0][3], out[0][4], out[0][5], out[0][6], out[0][7]); }
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr; if (dbg && (n || n_big) && lg++ % 10 == 0) std::fprintf(stderr, "[FXLIGHT] %zu blobs (%d too big, largest %.0f), %zu clusters, %d lights; first at %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n", B.size(), n_big, big_ext, cl.size(), n, n ? out[0][0] : 0.f, n ? out[0][1] : 0.f, n ? out[0][2] : 0.f, n ? out[0][3] : 0.f, n ? out[0][4] : 0.f, n ? out[0][5] : 0.f, n ? out[0][6] : 0.f, n ? out[0][7] : 0.f); }
     return n;
 }
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
