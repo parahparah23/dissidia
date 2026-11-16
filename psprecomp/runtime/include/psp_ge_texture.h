@@ -81,6 +81,8 @@ uint64_t ge_texture_bound_pack_id();
 /// Average colour (RGBA8, R in the low byte, alpha = mean texel alpha) of the texture the last ge_texture_bind / ge_texture_bind_external bound;
 /// 0xFFFFFFFF (white) when texturing is off, and 0xFF808080 (grey) for a render target / movie. Used by the ray-traced reflections.
 uint32_t ge_texture_bound_avg_color();
+/// Content hash of the bound texture (with its palette and size), the same in every run; 0 for none or a render target.
+uint32_t ge_texture_bound_hash();
 
 /// Mask value of the texture the last bind bound: its material's psp_refl_encode byte / 255 (psp_refl_table.h); 0 = does not
 /// reflect (also for none, render targets and movies).

@@ -23,7 +23,7 @@ enum {
     PSP_LIGHT_LEFT = 0, PSP_LIGHT_RIGHT, PSP_LIGHT_FWD, PSP_LIGHT_BACK, PSP_LIGHT_DOWN, PSP_LIGHT_UP,   // held: move the selected light (camera relative)
     PSP_LIGHT_RAD_DOWN, PSP_LIGHT_RAD_UP, PSP_LIGHT_INT_DOWN, PSP_LIGHT_INT_UP,                       // held: radius / intensity
     PSP_LIGHT_FAST,                                                                                  // held: 4x speed (not an action itself)
-    PSP_LIGHT_NEAREST, PSP_LIGHT_COPY_COLOR,
+    PSP_LIGHT_NEAREST, PSP_LIGHT_COPY_COLOR, PSP_LIGHT_GLOW,
     PSP_LIGHT_DROP, PSP_LIGHT_REMOVE, PSP_LIGHT_TOGGLE_EDIT, PSP_LIGHT_PREV, PSP_LIGHT_NEXT, PSP_LIGHT_DIST_UP, PSP_LIGHT_DIST_DOWN,
 };
 bool psp_stage_light_input(int what, bool down);
@@ -41,6 +41,13 @@ void psp_fx_lights_set(bool on);
 float psp_fx_light_scale(int which);
 void psp_fx_light_set_scale(int which, float v);
 bool psp_player_pos(float* xyz);   // the provider below, false without one
+/// Glowing stage pieces (a texture + vertex format marked in the light editor, `glow` lines in stage_lights.txt), render thread.
+/// find: the current stage's glow for that texture, spec = r g b radius intensity. has: the stage has any.
+bool psp_stage_glow_find(uint32_t tex_hash, uint32_t vtype, float* spec);
+bool psp_stage_has_glow();
+/// G key: while a pick is pending, the light's position (p may be null to just ask); the capture answers with the nearest drawn piece.
+bool psp_stage_glow_pick_point(float* p);
+void psp_stage_glow_pick_result(uint32_t tex_hash, uint32_t vtype, float dist);
 void psp_set_player_pos_provider(bool (*fn)(float* xyz));   // world position of the human fighter (for "select the nearest light")
 
 /// What the scene was drawn with (the last 3D draw of the buffer).
@@ -56,6 +63,8 @@ struct ScreenFxScene {
     bool refl_table = false;   // psp_refl_table.h is active: only surfaces in the reflectivity mask reflect (none without triangles)
     const float* refl_tris = nullptr;   // the reflective draws' triangles (psp_ge_draw.cpp g_rml_tris): per vertex clip x y z w + material byte
     int refl_nverts = 0;
+    int n_glow_lights = 0;     // lights from glowing stage pieces (psp_ge_draw.cpp glow_draw): same layout as fx_lights
+    float glow_lights[12][9];
     int n_fx_lights = 0;       // lights from glowing effects (psp_ge_draw.cpp fx_blob_lights): x y z, r g b, radius, intensity, clear
     float fx_lights[8][9];
 };

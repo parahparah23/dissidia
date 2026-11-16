@@ -27,6 +27,7 @@
 #include <cstring>
 #include <vector>
 #include "psp_settings.h"
+#include <array>
 #include <atomic>
 #include <unordered_map>
 #include <cstdarg>
@@ -3082,6 +3083,68 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     g_fx_n_steady[cur] = g_fx_n_nonadd[cur] = g_fx_n_static[cur] = 0;
     return n;
 }
+// Glowing stage pieces (issue #4: Crystal World's and Empyreal Paradox's breakable crystals). The light editor marks a texture (+ vertex
+// format) of a stage as glowing (psp_screenfx.cpp, G key, `glow` lines in stage_lights.txt); every drawn piece with it gets a light per
+// connected part of its mesh (one per crystal), so a crystal that breaks and is no longer drawn stops lighting. Up to 12 per scene.
+static std::vector<std::array<float, 9>> g_glow_lights[GE_MAX_TARGETS];
+static float pt_tri_dist2(const float* p, const float* a, const float* b, const float* c) {   // squared distance, point to triangle (Ericson)
+    const float ab[3] = {b[0]-a[0], b[1]-a[1], b[2]-a[2]}, ac[3] = {c[0]-a[0], c[1]-a[1], c[2]-a[2]}, ap[3] = {p[0]-a[0], p[1]-a[1], p[2]-a[2]};
+    auto dot = [](const float* u, const float* v) { return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]; };
+    float q[3];
+    auto set = [&](float s_, float t_) { for (int k = 0; k < 3; ++k) q[k] = a[k] + ab[k]*s_ + ac[k]*t_; };
+    const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    const float bp[3] = {p[0]-b[0], p[1]-b[1], p[2]-b[2]}; const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    const float cp[3] = {p[0]-c[0], p[1]-c[1], p[2]-c[2]}; const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    const float vc = d1*d4 - d3*d2, vb = d5*d2 - d1*d6, va = d3*d6 - d5*d4;
+    if (d1 <= 0 && d2 <= 0) set(0, 0);
+    else if (d3 >= 0 && d4 <= d3) set(1, 0);
+    else if (vc <= 0 && d1 >= 0 && d3 <= 0) set(d1 / (d1 - d3), 0);
+    else if (d6 >= 0 && d5 <= d6) set(0, 1);
+    else if (vb <= 0 && d2 >= 0 && d6 <= 0) set(0, d2 / (d2 - d6));
+    else if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); set(1 - w, w); }
+    else { const float den = 1.f / (va + vb + vc); set(vb * den, vc * den); }
+    const float dx = q[0]-p[0], dy = q[1]-p[1], dz = q[2]-p[2];
+    return dx*dx + dy*dy + dz*dz;
+}
+struct GlowPick { float d2 = 1e30f; uint32_t hash = 0, vt = 0; };
+static GlowPick g_glow_pick[GE_MAX_TARGETS];
+// A drawn stage piece: its world triangles (9 floats each). Lights for a marked texture, and the G-key pick.
+static void glow_draw(int cur, const GeState& st, const float* T, size_t nf) {
+    if (nf < 9 || !st.texture_enable) return;
+    const uint32_t th = ge_texture_bound_hash();
+    if (!th) return;
+    float pp[3];
+    if (psp_stage_glow_pick_point(pp)) {
+        GlowPick& gp = g_glow_pick[cur];
+        for (size_t k = 0; k + 9 <= nf; k += 9) { const float d = pt_tri_dist2(pp, T + k, T + k + 3, T + k + 6); if (d < gp.d2) { gp.d2 = d; gp.hash = th; gp.vt = st.vertex_type; } }
+    }
+    float spec[5];
+    if (!psp_stage_glow_find(th, st.vertex_type, spec) || g_glow_lights[cur].size() >= 12) return;
+    // connected parts: triangles sharing a vertex (positions rounded to 1 cm)
+    const size_t nt = nf / 9;
+    std::vector<int> par(nt);
+    for (size_t i = 0; i < nt; ++i) par[i] = int(i);
+    auto find = [&](int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    std::unordered_map<uint64_t, int> at;
+    for (size_t i = 0; i < nt; ++i) for (int v = 0; v < 3; ++v) {
+        const float* q = T + i * 9 + v * 3;
+        const uint64_t key = (uint64_t(int64_t(std::lround(q[0] * 100.f)) & 0x1FFFFF) << 42) ^ (uint64_t(int64_t(std::lround(q[1] * 100.f)) & 0x1FFFFF) << 21) ^ (uint64_t(int64_t(std::lround(q[2] * 100.f)) & 0x1FFFFF));
+        auto it = at.find(key);
+        if (it == at.end()) at.emplace(key, int(i)); else { const int a = find(int(i)), b = find(it->second); if (a != b) par[a] = b; }
+    }
+    std::unordered_map<int, std::array<float, 7>> box;   // lo xyz, hi xyz, triangle count
+    for (size_t i = 0; i < nt; ++i) {
+        auto& bx = box.try_emplace(find(int(i)), std::array<float, 7>{1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f, 0.f}).first->second;
+        for (int v = 0; v < 3; ++v) for (int a = 0; a < 3; ++a) { const float x = T[i * 9 + v * 3 + a]; bx[a] = std::min(bx[a], x); bx[3 + a] = std::max(bx[3 + a], x); }
+        bx[6] += 1.f;
+    }
+    for (const auto& kv : box) {
+        if (g_glow_lights[cur].size() >= 12) break;
+        const auto& bx = kv.second;
+        const float ext = 0.5f * std::sqrt((bx[3]-bx[0])*(bx[3]-bx[0]) + (bx[4]-bx[1])*(bx[4]-bx[1]) + (bx[5]-bx[2])*(bx[5]-bx[2]));
+        g_glow_lights[cur].push_back({0.5f * (bx[0] + bx[3]), 0.5f * (bx[1] + bx[4]), 0.5f * (bx[2] + bx[5]), spec[0], spec[1], spec[2], spec[3], spec[4], ext});   // clear = its own size: the crystal does not shadow its light
+    }
+}
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
     {   // effects draws (blended, depth tested, not depth writing) are also drawn into the SSR effects layer (fxl_*)
         // PSPRECOMP_SSR_FX_OFF=1: no effects layer at all (each effects draw is drawn twice, into another framebuffer: on a tiled mobile
@@ -3124,7 +3187,8 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         if (st.depth_test_enable && !st.depth_write_disable) {
             g_fx_n[cur]++;
             const size_t dump_t0 = g_rt_tris[cur].size();
-            if (psp_rt_scene_wanted()) { const size_t t0 = g_rt_tris[cur].size(), c0 = g_rt_cols[cur].size(); const bool fixed = g_fx_vote[cur].n > 0 && !g_rt_nofix && std::memcmp(st.view_matrix, g_fx_vote[cur].view, 12 * sizeof(float)) != 0; const bool stage = st.vertex_type == 0x11au; const uint64_t pkey = stage ? rt_persist_key(st, rdram, prim_type, count, fixed) : 0; if (!(stage && rt_persist_reuse(cur, pkey))) { rt_capture(st, rdram, prim_type, count, cur); if (fixed) rt_fix_view(g_rt_tris[cur], t0, st.view_matrix, g_fx_vote[cur].view); if (stage) rt_persist_note(cur, t0, c0, pkey); } }
+            if (psp_rt_scene_wanted()) { const size_t t0 = g_rt_tris[cur].size(), c0 = g_rt_cols[cur].size(); const bool fixed = g_fx_vote[cur].n > 0 && !g_rt_nofix && std::memcmp(st.view_matrix, g_fx_vote[cur].view, 12 * sizeof(float)) != 0; const bool stage = st.vertex_type == 0x11au; const uint64_t pkey = stage ? rt_persist_key(st, rdram, prim_type, count, fixed) : 0; if (!(stage && rt_persist_reuse(cur, pkey))) { rt_capture(st, rdram, prim_type, count, cur); if (fixed) rt_fix_view(g_rt_tris[cur], t0, st.view_matrix, g_fx_vote[cur].view); if (stage) rt_persist_note(cur, t0, c0, pkey); if (g_rt_tris[cur].size() > t0) glow_draw(cur, st, g_rt_tris[cur].data() + t0, g_rt_tris[cur].size() - t0); }
+                else if (psp_stage_has_glow() || psp_stage_glow_pick_point(nullptr)) { auto it = g_rt_persist[cur].find(pkey); if (it != g_rt_persist[cur].end()) glow_draw(cur, st, it->second.tris.data(), it->second.tris.size()); } }
             if (g_rtdump.load() == 2) rtdump_printf("[RTDUMP] draw prim %d n %d  %s: blend %d atest %d tex %d texalpha %u rgba %d lit %d mask %06x/%02x bm %03x fa %06x fb %06x zw %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, g_rt_why, st.alpha_blend_enable, st.alpha_test_enable, st.texture_enable, (unsigned)(st.texture_enable ? ge_texture_bound_avg_color() >> 24 : 255u), st.tex_func_rgba, st.lighting_enable, (unsigned)st.mask_rgb, (unsigned)(st.mask_alpha & 0xFF), (unsigned)st.blend_mode, (unsigned)st.blend_fix_a & 0xFFFFFFu, (unsigned)st.blend_fix_b & 0xFFFFFFu, st.depth_write_disable ? 0 : 1, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
             if (g_rtdump.load() == 2 && g_rt_tris[cur].size() > dump_t0) { float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f}; const std::vector<float>& tv = g_rt_tris[cur];
                 for (size_t q = dump_t0; q + 2 < tv.size(); q += 3) for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], tv[q + k]); hi[k] = std::max(hi[k], tv[q + k]); }
@@ -3260,6 +3324,10 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         }
         s.rt_fx = s.rt_ready && !g_rt_fx_cols[i].empty();
         s.n_fx_lights = s.rt_ready ? fx_blob_lights(i, s.fx_lights, 8) : 0;
+        s.n_glow_lights = 0;
+        if (s.rt_ready) for (const auto& g : g_glow_lights[i]) { if (s.n_glow_lights >= 12) break; std::memcpy(s.glow_lights[s.n_glow_lights++], g.data(), sizeof s.glow_lights[0]); }
+        g_glow_lights[i].clear();
+        if (g_glow_pick[i].hash) { psp_stage_glow_pick_result(g_glow_pick[i].hash, g_glow_pick[i].vt, std::sqrt(g_glow_pick[i].d2)); g_glow_pick[i] = GlowPick{}; }
         g_fx_blobs[i].clear();
         { static int n = 0; if (std::getenv("PSPRECOMP_SSR_FX_LOG") && n++ % 120 == 0) std::fprintf(stderr, "[SSR] effects layer used=%d fbo=%u draws=%d\n", (int)g_fxl[i].used, g_fxl[i].fbo, g_fxl_draws); }
         if (g_fxl[i].used && g_fxl[i].fbo) { s.fx_color = g_fxl[i].color; s.fx_depth = g_fxl[i].depth; }
