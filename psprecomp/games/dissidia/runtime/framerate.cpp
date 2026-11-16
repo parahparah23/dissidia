@@ -91,6 +91,7 @@ constexpr uint32_t CPU_AI = 0x08A75D38u;        // battle overlay: CPU AI action
 constexpr uint32_t STEER_MOVE = 0x08A2C960u;   // battle overlay: ground steered move controller (Squall's Revolver Drive rush): a0 = out vector (metres to move this update)
 constexpr uint32_t UI_PARAM_STEP = 0x088DA520u; // EBOOT: UI animation parameter stepper (value += rate x UI step toward a target)
 constexpr uint32_t UI_MGR_PTR = 0x089D7830u;    // EBOOT: pointer to the UI manager (+33: use the frame dt as the UI step, +34: paused)
+constexpr uint32_t UI_UPDATE = 0x088CF550u;     // EBOOT: the UI update (sets the UI step, runs the HUD / banner animations and their state)
 constexpr uint32_t UI_STEP = 0x089D7834u;       // EBOOT: the UI step FUN_088CF550 sets every update (0 paused, 1.0 fixed, or the frame dt)
 constexpr uint32_t OWN_MASK0 = 0x089C7FD8u, OWN_MASK1 = 0x089C7FDCu;
 constexpr uint32_t EXB_PRESSED = 0x08B326C4u;
@@ -1287,6 +1288,16 @@ void slowmo_frame_hook(uint8_t* rdram, recomp_context* ctx) {
 // the fixed step is scaled by ticks / 2 for the call and put back. The dt-driven ones already follow the frame time.
 // PSPRECOMP_UI_STEP=0 turns it off (A/B).
 bool g_ui_step = true;
+// 30 Hz logic: the UI update runs on gameplay frames only, as on the PSP (once per 30 Hz frame, its own fixed steps). Run on every frame
+// (even with its steps scaled) the HUD sequences that count updates or wait on gameplay ran 2-4x as often: the 'VS <name>' banner could
+// stay on screen, the AP Chance prompt / HP bars misbehaved now and then. The HUD is still drawn every frame (by its draw tasks).
+// PSPRECOMP_L30_UI=every runs it on every frame (with scaled steps) for A/B.
+FuncPtr g_orig_ui_update = nullptr;
+bool l30_ui_every() { static const bool e = [] { const char* v = std::getenv("PSPRECOMP_L30_UI"); return v && !std::strcmp(v, "every"); }(); return e; }
+void ui_update_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (l30_active() && !g_l30_logic_now && !l30_ui_every()) return;
+    g_orig_ui_update(rdram, ctx);
+}
 void ui_param_hook(uint8_t* rdram, recomp_context* ctx) {
     if (l30_active()) g_l30_calls[0][g_l30_logic_now ? 0 : 1]++;
     // 30 Hz logic: the UI update still runs on every frame (counted: as often on drawn-only frames as on gameplay ones), so its fixed
@@ -1294,7 +1305,7 @@ void ui_param_hook(uint8_t* rdram, recomp_context* ctx) {
     // (exact 1/256-tick steps, step_for: 30 / rate is not exact at 90, 150, 180, 210 fps, and a HUD animation that waits to land on its end
     // value could then miss it)
     static uint64_t ui_idx = 0;
-    const float k = l30_active() ? step_for(g_rate, ui_idx++) * 0.5f : g_ticks * 0.5f;
+    const float k = l30_active() ? (l30_ui_every() ? step_for(g_rate, ui_idx++) * 0.5f : 1.0f) : g_ticks * 0.5f;
     const uint32_t mgr = r32(UI_MGR_PTR);
     if (!g_ui_step || k == 1.0f || overlay_id() != 1 || !ok(mgr) || g_ram[(mgr + 33u) & 0x07FFFFFFu] != 0 || g_ram[(mgr + 34u) & 0x07FFFFFFu] != 0) { g_orig_ui_param(rdram, ctx); return; }
     const float was = rdf(UI_STEP);
@@ -2439,6 +2450,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* us = std::getenv("PSPRECOMP_UI_STEP"); us && us[0] == '0') g_ui_step = false;
     if ((g_orig_ui_param = psp_dispatch_probe_lookup(UI_PARAM_STEP))) psp_dispatch_register(UI_PARAM_STEP, ui_param_hook);
     else std::fprintf(stderr, "[FPS] UI step hook NOT installed (no function at %08X)\n", UI_PARAM_STEP);
+    if ((g_orig_ui_update = psp_dispatch_probe_lookup(UI_UPDATE))) psp_dispatch_register(UI_UPDATE, ui_update_hook);
+    else std::fprintf(stderr, "[FPS] UI update hook NOT installed (no function at %08X)\n", UI_UPDATE);
     if ((g_orig_slowmo = psp_dispatch_probe_lookup(SLOWMO_FRAME))) {
         psp_dispatch_register(SLOWMO_FRAME, global_step_hook);   // global_step_hook -> slowmo_frame_hook -> the game's FUN_08864DD8
         g_orig_global_step = slowmo_frame_hook;
