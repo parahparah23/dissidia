@@ -134,6 +134,19 @@ static const StageLight k_builtin_stage1[] = {   // Pandaemonium
     {{11.13f, 11.19f, -39.38f}, {1.00f, 0.40f, 0.90f}, 31.4f, 1.50f},
     {{-35.60f, 15.58f, -24.77f}, {1.00f, 0.40f, 0.90f}, 80.0f, 1.50f},
 };
+static const StageLight k_builtin_stage6[] = {
+    {{-14.06f, 32.84f, 27.00f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-27.17f, 32.80f, -6.11f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-5.98f, 32.84f, -27.06f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-4.01f, 33.02f, -4.01f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{22.00f, 33.29f, -18.92f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{26.99f, 33.06f, 6.05f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{3.91f, 33.02f, 11.04f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-10.23f, 20.00f, 15.83f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{-7.83f, 12.26f, 6.04f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{-18.10f, 33.48f, -23.64f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{22.13f, 33.51f, 15.79f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+};
 static const StageLight k_builtin_stage7[] = {
     {{0.07f, -34.00f, 0.16f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
     {{-0.25f, -34.00f, -10.90f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
@@ -178,6 +191,7 @@ static const StageLight k_builtin_stage18[] = {
 static const std::vector<StageLight>* builtin_lights(int id) {
     static const std::map<int, std::vector<StageLight>> t = {
         {1, std::vector<StageLight>(std::begin(k_builtin_stage1), std::end(k_builtin_stage1))},
+        {6, std::vector<StageLight>(std::begin(k_builtin_stage6), std::end(k_builtin_stage6))},
         {7, std::vector<StageLight>(std::begin(k_builtin_stage7), std::end(k_builtin_stage7))},
         {8, std::vector<StageLight>(std::begin(k_builtin_stage8), std::end(k_builtin_stage8))},
         {9, std::vector<StageLight>(std::begin(k_builtin_stage9), std::end(k_builtin_stage9))},
@@ -881,7 +895,8 @@ uniform vec4 u_lc[24];
 uniform vec4 u_lvp[24];     // the same lights in view space (markers)
 uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
-uniform ivec2 u_mark;       // markers for lights [x, y) (the stage's own, not EX cores / effects)
+uniform int u_mark0;        // markers for lights [u_mark0, u_mark1) (the stage's own, not EX cores / effects)
+uniform int u_mark1;
 //@SKY_DECL
 uniform int u_env_on;
 // The sky seen in world direction d. A direction never on screen yet (overhead, behind the camera) falls back to the same
@@ -1039,7 +1054,7 @@ const char* const k_rt_mark = R"GLSL(
         vec4 q = u_inv * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
         vec3 dir = normalize(q.xyz / q.w);
         float surf = is_far(wd) ? 1e9 : length(vpos(v_uv, wd));
-        for (int li = u_mark.x; li < min(u_mark.y, u_n_lights); ++li) {
+        for (int li = u_mark0; li < min(u_mark1, u_n_lights); ++li) {
             vec3 Lv = u_lvp[li].xyz;
             float t = dot(Lv, dir);
             if (t <= 0.0) continue;
@@ -1689,7 +1704,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         if (n_lights) { glUniform4fv(loc(mp.id, "u_lp"), n_lights, lp4); glUniform4fv(loc(mp.id, "u_lc"), n_lights, lc4); glUniform4fv(loc(mp.id, "u_lvp"), n_lights, lv4); }
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
         glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() ? 1 : 0);
-        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform2i(loc(mp.id, "u_mark"), g_light_first, g_light_end);
+        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), g_light_first); glUniform1i(loc(mp.id, "u_mark1"), g_light_end);   // (the Vulkan GL layer has no glUniform2i)
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ts_mark(2);
