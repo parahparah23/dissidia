@@ -6,7 +6,8 @@
 The app (running as that user, with no game files yet) connects to 127.0.0.1:<port> on the phone, which `adb reverse` forwards to this script, and
 writes what it receives into its own folder. Steps: this script sets up the reverse + the property debug.psprecomp.import_port, listens, and prints
 "READY"; then start the app as the target user. Files come from a work folder on this machine (--dir) or are streamed from another connected
-device's copy (--source-device, no local disk needed). Python 3 standard library only.
+device's copy (--source-device, no local disk needed). It also works on a phone that has the game already: the files sent are
+added or replaced (e.g. --dir STAGE --parts mods with only the changed mod files in STAGE/mods). Python 3 standard library only.
 """
 import argparse
 import os
