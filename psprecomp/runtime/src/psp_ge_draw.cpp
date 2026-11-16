@@ -34,6 +34,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <array>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -356,6 +357,10 @@ static std::atomic<bool> g_draw_ready{false};
 // PSPRECOMP_NO_RASTER=1: GL_RASTERIZER_DISCARD (draws submitted, nothing
 // rasterised); =2: skip glDrawArrays entirely. Measures CPU-side cost only.
 static int g_no_raster = 0;
+static std::atomic<int> g_no_raster_request{-1};
+// Test harnesses (games/dissidia frame-rate parity runs): stop drawing once the fight's HUD has been seen. 0 draw, 1 rasterizer discard,
+// 2 no draw calls (the GE lists are still processed). Taken over by the render thread at the next present.
+void ge_draw_request_no_raster(int mode) { g_no_raster_request.store(mode); }
 static int g_no_raster_mode = 0;       // requested mode (PSPRECOMP_NO_RASTER)
 static double g_no_raster_after = 0.0; // PSPRECOMP_NO_RASTER_AFTER=<s>: enable only after s seconds
 static std::chrono::steady_clock::time_point g_t_start = std::chrono::steady_clock::now();
@@ -2702,7 +2707,201 @@ void ge_draw_end_list() {
 
 static void ge_draw_prim_one(uint8_t* rdram, int prim_type, int count);
 
+// ---- Frame interpolation (ge_interp_set_frame, psp_ge_draw.h) ----
+namespace {
+struct IpMats { float w[12], v[12], p[16], b[96], tg[12], uv[4]; };   // uv: texture scale u/v, offset u/v (scrolling textures)
+std::mutex g_ip_set_mu;
+GeInterpTag g_ip_set;                  // the tag the game thread set for the frame it is building
+uint32_t g_ip_gen = 0;                 // tag of the list being processed (render thread)
+float g_ip_phase = -1.0f;
+uint32_t g_ip_seq = 0;
+bool g_ip_rec = false;
+uint32_t g_ip_tab_gen = 0;             // gameplay frame recorded in g_ip_cur
+bool g_ip_have = false;
+std::unordered_map<uint64_t, IpMats> g_ip_prev, g_ip_cur;
+std::unordered_map<uint64_t, uint32_t> g_ip_occ;   // occurrences of each draw key in the frame being drawn
+uint32_t g_ip_occ_seq = ~0u;
+int ip_mode() {
+    static const int m = [] { const char* e = std::getenv("PSPRECOMP_INTERP"); return e && e[0] ? std::atoi(e) : 1; }();
+    return m;
+}
+uint64_t ip_key(const GeState& st, int prim_type, int count, bool loose = false) {
+    uint64_t h = loose ? 0x5bd1e9955bd1e995ull : 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    if (!loose) { mix(st.vertex_addr); mix(st.index_addr); }   // loose: without the addresses (the game double-buffers some vertex data, e.g. weapons)
+    mix(st.vertex_type); mix(static_cast<uint64_t>(prim_type)); mix(static_cast<uint64_t>(count));
+    mix(st.tex_addr[0]);   // not the render target: the game alternates two framebuffers every frame
+    return h;
+}
+void ip_lerp(float* dst, const float* a, const float* b, float t, int n) { for (int i = 0; i < n; i++) dst[i] = a[i] + (b[i] - a[i]) * t; }
+bool ip_far(const float* a, const float* b) {   // world positions more than 3 m apart: a teleport, do not blend
+    const float dx = a[9] - b[9], dy = a[10] - b[10], dz = a[11] - b[11];
+    return dx * dx + dy * dy + dz * dz > 9.0f;
+}
+void ip_eye(const float* m, float* e) {   // camera position of a GE view matrix (rows 0..2 the basis, row 3 = m[9..11] the translation): e = -t R^T
+    for (int j = 0; j < 3; j++) e[j] = -(m[9] * m[j * 3 + 0] + m[10] * m[j * 3 + 1] + m[11] * m[j * 3 + 2]);
+}
+bool ip_cut(const float* a, const float* b) {   // the camera moved more than 3 m between two gameplay frames: a cut, do not blend
+    float ea[3], eb[3]; ip_eye(a, ea); ip_eye(b, eb);
+    const float dx = ea[0] - eb[0], dy = ea[1] - eb[1], dz = ea[2] - eb[2];
+    return dx * dx + dy * dy + dz * dz > 9.0f;
+}
+}  // namespace
+
+void ge_interp_set_frame(const GeInterpTag& tag) { std::lock_guard<std::mutex> lk(g_ip_set_mu); g_ip_set = tag; }
+GeInterpTag ge_interp_current_tag() { std::lock_guard<std::mutex> lk(g_ip_set_mu); return g_ip_set; }
+static int ip_trace_level() {   // PSPRECOMP_INTERP_TRACE: 1 = per frame the drawn (blended) position of the biggest skinned draw and the camera; 2 = also the lists' tags and one stage draw's live / previous / blended view
+    static const int l = [] { const char* e = std::getenv("PSPRECOMP_INTERP_TRACE"); return e && e[0] ? std::max(1, std::atoi(e)) : 0; }();
+    return l;
+}
+void ge_interp_list_tag(const GeInterpTag& tag) {
+    if (ip_trace_level() >= 2) std::fprintf(stderr, "[IPL] list tag seq %u gen %u rec %d phase %.3f\n", tag.seq, tag.gen, tag.record ? 1 : 0, tag.phase);
+    g_ip_gen = tag.gen; g_ip_phase = tag.phase; g_ip_seq = tag.seq; g_ip_rec = tag.record;
+}
+
+// Swap the draw's matrices for interpolated ones (restored by the caller); false = drawn as issued.
+struct IpStat { float pw[3] = {}, eye[3] = {}; int pcount = -1; uint32_t gen = 0, seq = ~0u; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, cut_n = 0, noprev = 0, flat = 0, skinned = 0, matmove = 0, vtxonly = 0, vtxprims = 0;
+    int scount = -1; float s_live[3] = {}, s_prev[3] = {}, s_blend[3] = {}; uint32_t s_key = 0; int s_how = 0; bool s_rec = false; };   // trace 2: the biggest unskinned 3D draw (stage): eye of its live / previous / blended view
+std::unordered_map<uint64_t, uint64_t> g_ip_vhash_prev, g_ip_vhash_cur;   // diagnostic (PSPRECOMP_INTERP_LOG): vertex bytes per draw key on gameplay frames
+uint8_t* g_ip_rdram = nullptr;
+// 2D draws that follow a fighter (lock-on ring, target pointer): the game aims them at the newest gameplay state, the 3D scene is drawn
+// blended. Per frame, every skinned draw's root on screen (PSP pixels) with the newest and with the blended matrices; a following 2D draw
+// moves by the difference of the nearest one.
+struct IpAnchor { float live[2], drawn[2]; };
+std::vector<IpAnchor> g_ip_anchors;
+uint32_t g_ip_anchor_seq = ~0u;
+bool g_ip2d_on = false;   // the draw being decoded is such a draw (set by ip_apply, cleared after the draw)
+bool ip_screen(const float* w, const float* v, const float* p, const float* b, float* out) {   // root (bone 0 origin) -> PSP screen pixels
+    float o[3] = {b[9], b[10], b[11]}, wp[3], vp[3], c[4];
+    for (int j = 0; j < 3; j++) wp[j] = o[0] * w[j] + o[1] * w[3 + j] + o[2] * w[6 + j] + w[9 + j];
+    for (int j = 0; j < 3; j++) vp[j] = wp[0] * v[j] + wp[1] * v[3 + j] + wp[2] * v[6 + j] + v[9 + j];
+    for (int j = 0; j < 4; j++) c[j] = vp[0] * p[j] + vp[1] * p[4 + j] + vp[2] * p[8 + j] + p[12 + j];
+    if (c[3] <= 0.01f) return false;
+    out[0] = (c[0] / c[3] + 1.0f) * 240.0f; out[1] = (1.0f - c[1] / c[3]) * 136.0f;
+    return true;
+}
+static IpStat g_ip_stat;
+static void ip_stat_flush() {
+    static int left = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? std::atoi(e) : 0; }();
+    if (left > 0 && g_ip_stat.draws > 0) { left--; std::fprintf(stderr, "[INTERP] gen %u phase %.2f: %d 3D draws, %d blended, %d no match, %d far, %d no previous frame, %d 2D; %d skinned, %d moved by matrix, %d moved by vertices only (%d prims)\n",
+        g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch, g_ip_stat.cut_n, g_ip_stat.noprev, g_ip_stat.flat, g_ip_stat.skinned, g_ip_stat.matmove, g_ip_stat.vtxonly, g_ip_stat.vtxprims); }
+    static const bool trace = std::getenv("PSPRECOMP_INTERP_TRACE") != nullptr;   // per frame: where the biggest skinned draw (a fighter) and the camera are drawn
+    if (trace && g_ip_stat.pcount >= 0) std::fprintf(stderr, "[IPTRACE] seq %u gen %u phase %.3f rec %d model %.4f %.4f %.4f eye %.4f %.4f %.4f\n", g_ip_stat.seq, g_ip_stat.gen, g_ip_stat.phase,
+        0, g_ip_stat.pw[0], g_ip_stat.pw[1], g_ip_stat.pw[2], g_ip_stat.eye[0], g_ip_stat.eye[1], g_ip_stat.eye[2]);
+    if (ip_trace_level() >= 2 && g_ip_stat.scount >= 0) std::fprintf(stderr, "[IPSTAGE] seq %u gen %u phase %.3f rec %d key %08X n %d how %d live %.4f %.4f %.4f prev %.4f %.4f %.4f blend %.4f %.4f %.4f; %d draws %d blended %d nomatch\n",
+        g_ip_stat.seq, g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.s_rec ? 1 : 0, g_ip_stat.s_key, g_ip_stat.scount, g_ip_stat.s_how, g_ip_stat.s_live[0], g_ip_stat.s_live[1], g_ip_stat.s_live[2],
+        g_ip_stat.s_prev[0], g_ip_stat.s_prev[1], g_ip_stat.s_prev[2], g_ip_stat.s_blend[0], g_ip_stat.s_blend[1], g_ip_stat.s_blend[2], g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch);
+    g_ip_stat = IpStat{}; g_ip_stat.gen = g_ip_gen; g_ip_stat.phase = g_ip_phase; g_ip_stat.seq = g_ip_seq;
+}
+static bool ip_apply(int prim_type, int count, IpMats* saved) {
+    if (g_ip_phase <= -1.0f || ip_mode() == 0) return false;   // -1 = off; a gameplay frame shown a bit early has a small negative phase
+    if (g_ip_stat.seq != g_ip_seq) ip_stat_flush();
+    GeState& st = ge_get_state_mut();
+    if (st.clear_mode) { g_ip_stat.flat++; return false; }
+    if (g_ip_rec && (!g_ip_have || g_ip_gen != g_ip_tab_gen)) {   // a new gameplay frame: its draws become the current table
+        g_ip_prev.swap(g_ip_cur); g_ip_cur.clear();
+        g_ip_have = g_ip_tab_gen + 1 == g_ip_gen;                       // the previous table is the gameplay frame just before
+        g_ip_tab_gen = g_ip_gen;
+    }
+    if (g_ip_seq != g_ip_occ_seq) { g_ip_occ.clear(); g_ip_occ_seq = g_ip_seq; }
+    if (ge_vtype_through(st.vertex_type)) {   // 2D (HUD, screen copies): no matrices. The HUD that follows a fighter (lock-on ring, target
+        g_ip_stat.flat++;                     // pointer: hud_fixed_tex) is placed by the game on gameplay frames only: its screen position is
+        if (hud_fixed_tex(st)) g_ip2d_on = true;   // moved with the blended fighter it is on (ge_draw_through_ip, called by the vertex decoder)
+        return false;
+    }
+    g_ip_stat.draws++;
+    const uint64_t base = ip_key(st, prim_type, count), lbase = ip_key(st, prim_type, count, true);
+    const uint64_t key = base ^ (static_cast<uint64_t>(g_ip_occ[base]++) * 0x9E3779B97F4A7C15ull);
+    const uint64_t lkey = lbase ^ (static_cast<uint64_t>(g_ip_occ[lbase]++) * 0x9E3779B97F4A7C15ull);
+    IpMats cur;
+    std::memcpy(cur.w, st.world_matrix, sizeof cur.w); std::memcpy(cur.v, st.view_matrix, sizeof cur.v);
+    std::memcpy(cur.p, st.proj_matrix, sizeof cur.p); std::memcpy(cur.b, st.bone_matrix, sizeof cur.b);
+    std::memcpy(cur.tg, st.tgen_matrix, sizeof cur.tg);
+    cur.uv[0] = st.tex_scale_u; cur.uv[1] = st.tex_scale_v; cur.uv[2] = st.tex_offset_u; cur.uv[3] = st.tex_offset_v;
+    if (g_ip_rec && g_ip_gen == g_ip_tab_gen) { g_ip_cur[key] = cur; g_ip_cur[lkey] = cur; }
+    static const bool diag = std::getenv("PSPRECOMP_INTERP_LOG") != nullptr;
+    if (diag && g_ip_rec && g_ip_rdram) {   // what moves this draw between gameplay frames: its matrices or its vertex bytes
+        if (st.vertex_type & 0x1C000u) g_ip_stat.skinned++;   // weight count bits: GE skinning
+        uint64_t vh = 1469598103934665603ull; const uint32_t va = st.vertex_addr & 0x07FFFFFFu;
+        for (uint32_t i = 0; i < 256 && va + i < 0x08000000u; i += 4) { uint32_t w; std::memcpy(&w, g_ip_rdram + va + i, 4); vh = (vh ^ w) * 1099511628211ull; }
+        if (g_ip_gen == g_ip_tab_gen) { if (g_ip_vhash_cur.empty() || g_ip_vhash_cur.count(~0ull) == 0 || g_ip_vhash_cur[~0ull] != g_ip_gen) { g_ip_vhash_prev.swap(g_ip_vhash_cur); g_ip_vhash_cur.clear(); g_ip_vhash_cur[~0ull] = g_ip_gen; } g_ip_vhash_cur[key] = vh; }
+        auto pm = g_ip_prev.find(key); auto ph = g_ip_vhash_prev.find(key);
+        if (pm != g_ip_prev.end() && ph != g_ip_vhash_prev.end()) {
+            const bool mat = std::memcmp(pm->second.w, cur.w, sizeof cur.w) || std::memcmp(pm->second.v, cur.v, sizeof cur.v) || std::memcmp(pm->second.b, cur.b, sizeof cur.b);
+            if (mat) g_ip_stat.matmove++; else if (ph->second != vh) { g_ip_stat.vtxonly++; g_ip_stat.vtxprims += count; }
+        }
+    }
+    const bool stage_tr = ip_trace_level() >= 2 && !(st.vertex_type & 0x1C000u) && !st.depth_write_disable && st.depth_test_enable && count > g_ip_stat.scount;
+    if (stage_tr) {   // trace 2: this (so far biggest unskinned, depth-writing) draw's live view, drawn as issued unless replaced below
+        g_ip_stat.scount = count; g_ip_stat.s_key = static_cast<uint32_t>(base); g_ip_stat.s_how = 0; g_ip_stat.s_rec = g_ip_rec;
+        ip_eye(cur.v, g_ip_stat.s_live); ip_eye(cur.v, g_ip_stat.s_blend); std::memset(g_ip_stat.s_prev, 0, sizeof g_ip_stat.s_prev);
+    }
+    if (!g_ip_have) { g_ip_stat.noprev++; return false; }
+    auto it = g_ip_prev.find(key);
+    if (it == g_ip_prev.end()) it = g_ip_prev.find(lkey);   // the same draw from the other of two vertex buffers
+    if (it == g_ip_prev.end()) { g_ip_stat.nomatch++; return false; }
+    const IpMats& pv = it->second;
+    if (stage_tr) { g_ip_stat.s_how = it->first == key ? 1 : 2; ip_eye(pv.v, g_ip_stat.s_prev); }
+    if (ip_far(pv.w, cur.w) || ip_cut(pv.v, cur.v)) {
+        static int lg = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? 12 : 0; }();
+        if (lg > 0) { lg--; float ea[3], eb[3]; ip_eye(pv.v, ea); ip_eye(cur.v, eb);
+            std::fprintf(stderr, "[INTERPFAR] phase %.2f w %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f  v %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f  eye %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f\n", g_ip_phase,
+                pv.w[9], pv.w[10], pv.w[11], cur.w[9], cur.w[10], cur.w[11], pv.v[9], pv.v[10], pv.v[11], cur.v[9], cur.v[10], cur.v[11], ea[0], ea[1], ea[2], eb[0], eb[1], eb[2]); }
+        g_ip_stat.cut_n++; return false; }
+    g_ip_stat.applied++;
+    *saved = cur;
+    if (st.vertex_type & 0x1C000u) {   // a skinned draw (fighter): its root on screen, newest and blended (for following 2D draws)
+        if (g_ip_anchor_seq != g_ip_seq) { g_ip_anchors.clear(); g_ip_anchor_seq = g_ip_seq; }
+        float bw[12], bv[12], bp[16], bb[12];
+        ip_lerp(bw, pv.w, cur.w, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 12); ip_lerp(bv, pv.v, cur.v, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 12);
+        ip_lerp(bp, pv.p, cur.p, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 16); ip_lerp(bb, pv.b, cur.b, ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase, 12);
+        IpAnchor a;
+        if (g_ip_anchors.size() < 64 && ip_screen(cur.w, cur.v, cur.p, cur.b, a.live) && ip_screen(bw, bv, bp, bb, a.drawn)) g_ip_anchors.push_back(a);
+    }
+    g_ge_state_gen++;   // the draw-key cache (keyed by this) must not reuse matrices built for another draw: the blend changes them without a GE command
+    const float t = ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase;   // 1: prev -> cur (one frame behind); 2: cur projected ahead
+    ip_lerp(st.world_matrix, pv.w, cur.w, t, 12); ip_lerp(st.view_matrix, pv.v, cur.v, t, 12);
+    ip_lerp(st.proj_matrix, pv.p, cur.p, t, 16); ip_lerp(st.bone_matrix, pv.b, cur.b, t, 96);
+    ip_lerp(st.tgen_matrix, pv.tg, cur.tg, t, 12);
+    float uv[4]; ip_lerp(uv, pv.uv, cur.uv, t, 4);
+    for (int i = 0; i < 4; i++) if (std::fabs(cur.uv[i] - pv.uv[i]) > 0.5f) uv[i] = cur.uv[i];   // a scrolling offset that wrapped: no blend
+    st.tex_scale_u = uv[0]; st.tex_scale_v = uv[1]; st.tex_offset_u = uv[2]; st.tex_offset_v = uv[3];
+    if (stage_tr) ip_eye(st.view_matrix, g_ip_stat.s_blend);
+    if ((st.vertex_type & 0x1C000u) && count > g_ip_stat.pcount) {   // trace: the drawn (blended) position of the biggest skinned draw = world x bone 0 translation
+        g_ip_stat.pcount = count;
+        const float* w = st.world_matrix; const float* b = st.bone_matrix;
+        for (int j = 0; j < 3; j++) g_ip_stat.pw[j] = b[9] * w[j] + b[10] * w[3 + j] + b[11] * w[6 + j] + w[9 + j];
+        ip_eye(st.view_matrix, g_ip_stat.eye);
+    }
+    return true;
+}
+
+// Vertex decoder (through mode, PSP pixels): the offset that moves this 2D draw from where the game put it (centre cx, cy) to the blend of
+// where it was on the last two gameplay frames. false = leave it.
+bool ge_draw_through_ip(float cx, float cy, float* dx, float* dy) {
+    if (!g_ip2d_on || g_ip_anchor_seq != g_ip_seq || g_ip_anchors.empty()) return false;
+    const IpAnchor* best = nullptr; float bd = 90.0f * 90.0f;   // the fighter whose newest root is nearest (within 90 px)
+    for (const auto& a : g_ip_anchors) {
+        const float d = (a.live[0] - cx) * (a.live[0] - cx) + (a.live[1] - cy) * (a.live[1] - cy);
+        if (d < bd) { bd = d; best = &a; }
+    }
+    if (!best) return false;
+    *dx = best->drawn[0] - best->live[0]; *dy = best->drawn[1] - best->live[1];
+    if (*dx * *dx + *dy * *dy > 60.0f * 60.0f) return false;   // a cut: leave it
+    if (ip_trace_level() >= 3) std::fprintf(stderr, "[IP2D] seq %u phase %.2f centre %.1f,%.1f anchor live %.1f,%.1f drawn %.1f,%.1f -> %+.1f,%+.1f\n", g_ip_seq, g_ip_phase,
+                                            cx, cy, best->live[0], best->live[1], best->drawn[0], best->drawn[1], *dx, *dy);
+    return true;
+}
+
 void ge_draw_prim(uint8_t* rdram, int prim_type, int count) {
+    g_ip_rdram = rdram;
+    struct Ip2dOff { ~Ip2dOff() { g_ip2d_on = false; } } ip2d_off;
+    IpMats ip_saved;
+    struct IpRestore { IpMats* m; bool on; ~IpRestore() { if (!on) return; GeState& st = ge_get_state_mut();
+        std::memcpy(st.world_matrix, m->w, sizeof m->w); std::memcpy(st.view_matrix, m->v, sizeof m->v);
+        std::memcpy(st.proj_matrix, m->p, sizeof m->p); std::memcpy(st.bone_matrix, m->b, sizeof m->b);
+        std::memcpy(st.tgen_matrix, m->tg, sizeof m->tg);
+        st.tex_scale_u = m->uv[0]; st.tex_scale_v = m->uv[1]; st.tex_offset_u = m->uv[2]; st.tex_offset_v = m->uv[3]; g_ge_state_gen++; } } ip_restore{&ip_saved, count > 0 && ip_apply(prim_type, count, &ip_saved)};
     psp_perf::Scope perf_scope_(psp_perf::PRIM);
     if (!g_ab || !g_fast_enabled || g_current_target < 0 || !g_targets[g_current_target].ab_fbo) {
         ge_draw_prim_one(rdram, prim_type, count);
@@ -5892,6 +6091,12 @@ void ge_present_frame(
         }
     }
     psp_prof::Scope prof_present(psp_prof::S_PRESENT);
+    if (const int req = g_no_raster_request.exchange(-1); req >= 0 && req != g_no_raster) {   // ge_draw_request_no_raster (render thread applies it)
+        if (g_no_raster == 1) glDisable(GL_RASTERIZER_DISCARD);
+        g_no_raster = req;
+        if (g_no_raster == 1) glEnable(GL_RASTERIZER_DISCARD);
+        std::fprintf(stderr, "[DRAW] raster mode %d (requested)\n", g_no_raster);
+    }
     if (g_no_raster_mode && g_no_raster == 0 && g_no_raster_after > 0.0
         && std::chrono::duration<double>(std::chrono::steady_clock::now() - g_t_start).count()
                >= g_no_raster_after) {

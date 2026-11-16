@@ -75,6 +75,8 @@ const EnvOpt k_env_opts[] = {
 
     // ---- Timing ----
     {"FPS_SCOPE", EC_TIMING, 'c', "battle|all", "Where the chosen frame rate applies. Battle (default): only in fights. All: everywhere, so menus run fast too (testing)."},
+    {"LOGIC30", EC_TIMING, 'k', "", "30 Hz battle logic (default on): above 30 fps the fight itself runs at the PSP's 30 updates a second and the frames between are drawn by interpolating models and camera, so every move plays exactly as at 30 fps."},
+    {"INTERP", EC_TIMING, 'c', "0|1|2", "With 30 Hz battle logic: how the frames between two updates are drawn. 1 (default): blend the last two updates (smooth, up to one update late). 2: extrapolate ahead (less lag, can overshoot). 0: show each update as it is (30 fps motion)."},
     {"FX60", EC_TIMING, 'k', "", "Slow the effect components that run too fast above 30 fps. Off: leave them as they are (A/B check)."},
     {"GAUGE30", EC_TIMING, 'k', "", "Keep the assist and EX gauges draining at the 30 fps rate. Off: they drain faster at high frame rates."},
     {"UI_STEP", EC_TIMING, 'k', "", "Menu and HUD animations that count frames run in real time at any rate. Off: they speed up above 30 fps."},
