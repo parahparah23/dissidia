@@ -20,6 +20,8 @@ mods/<name>/
   skins/<skin>/       bodies and weapons that replace the default ones
 ```
 
+**Bartz's moves from the first Dissidia:** `psprecomp/games/dissidia/tools/d1_moves.py --d1 <Dissidia (2008) ISO> --iso012 <012 ISO>` makes `mods/bartz-dff` from your own two discs: eight moves 012 dropped come back as new abilities. Settings > Mods switches them on and off (next start). Details: [docs/character-mods.md](../psprecomp/games/dissidia/docs/character-mods.md) (*New moves for a retail character*).
+
 A folder with `"kind": "retail"` in its `mod.json` changes one of the game's own characters instead of adding one (the Move Studio's *Save as mod* makes those); its body can be swapped for your own model, and `"skin": "retail"` puts the game's back. A folder whose name starts with `_`, or whose `mod.json` has `"enabled": false`, is never built. `_template/` is the template.
 
 ## By hand

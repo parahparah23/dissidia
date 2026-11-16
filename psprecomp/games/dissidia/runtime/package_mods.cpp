@@ -216,7 +216,7 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
             if (!parse_hex8(stem, &crc)) { note("[MODS] skip (bad by_crc name): " + rel); continue; }
         } else {
             if (norm.find('/') == std::string::npos &&
-                (norm.compare(0, 6, "readme") == 0 || norm == "roster.txt")) continue;   // roster.txt: roster.cpp config
+                (norm.compare(0, 6, "readme") == 0 || norm == "roster.txt" || norm == "retail_moves.txt")) continue;   // roster.cpp config
             // textures/… is the texture-pack tree (psp_tex_pack.cpp serves it by xxhash id); the game never
             // requests those paths, and a dump of 1,000+ PNGs would otherwise flood the package index below.
             if (norm.compare(0, 9, "textures/") == 0) continue;

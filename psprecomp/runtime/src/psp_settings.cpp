@@ -444,7 +444,7 @@ void edit_move(int dr, int dc, const psp_sddialog::SetGeom* geom) {
 // A mod folder has a mod.json; "enabled": false in it keeps the mod out of the game. Folders are looked for in the mods source
 // (PSPRECOMP_MODS_SRC, set by run.sh: mods/ in the repository) and in the game's mods directory (PSPRECOMP_MODS, else <work>/mods).
 // The mods are built into the game when it starts, so a change applies at the next start.
-struct ModEntry { std::string dir, name, where; bool on = true; int roster_line = -1; };   // roster_line >= 0: a character line of <mods>/roster.txt (dir = that file)
+struct ModEntry { std::string dir, name, where; bool on = true; int roster_line = -1; };   // roster_line >= 0: a line of <mods>/roster.txt or retail_moves.txt (dir = that file)
 std::vector<ModEntry> g_mods;
 bool g_restart_pending = false;        // something was changed that only applies at the next start
 std::string read_text_file(const std::string& p) { std::ifstream f(p, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); return ss.str(); }
@@ -511,10 +511,42 @@ void mods_scan_roster(const std::string& root) {
         g_mods.push_back(std::move(m));
     }
 }
+// New moves for retail characters (e.g. Bartz's Dissidia (2008) moves) are lines of retail_moves.txt
+// ("[#off# ]<folder> <charId> <ids> nm=<label>", written by the game module's mod build); "#off# " hides them at the next start.
+std::vector<std::string> g_moves_folders;    // folders with such a line: their own mod.json row would be a second switch
+void mods_scan_moves(const std::string& root) {
+    g_moves_folders.clear();
+    std::ifstream f(root + "/retail_moves.txt");
+    std::string line;
+    for (int n = 0; std::getline(f, line); ++n) {
+        if (g_mods.size() >= size_t(ROW_MOD_END - ROW_MOD0 + 1)) return;
+        bool on = true;
+        std::string spec = line;
+        if (spec.compare(0, 6, "#off# ") == 0) { on = false; spec = spec.substr(6); }
+        else if (spec.empty() || spec[0] == '#') continue;
+        std::istringstream is(spec);
+        std::string folder, tok, nm;
+        if (!(is >> folder)) continue;
+        while (is >> tok) if (tok.compare(0, 3, "nm=") == 0) nm = tok.substr(3);
+        for (char& ch : nm) if (ch == '_') ch = ' ';
+        ModEntry m;
+        m.dir = root + "/retail_moves.txt"; m.roster_line = n; m.on = on;
+        m.name = nm.empty() ? folder : nm;
+        m.where = "moves";
+        g_moves_folders.push_back(folder);
+        g_mods.push_back(std::move(m));
+    }
+}
 void mods_load() {
     g_mods.clear();
+    mods_scan_moves(mods_dir_path());
+    const size_t moves = g_mods.size();
     if (const char* src = std::getenv("PSPRECOMP_MODS_SRC")) mods_scan(src, "mods");
     mods_scan(mods_dir_path(), "the game's mods folder");
+    g_mods.erase(std::remove_if(g_mods.begin() + std::ptrdiff_t(moves), g_mods.end(), [](const ModEntry& m) {
+        const std::string folder = m.dir.substr(m.dir.find_last_of('/') + 1);
+        return std::find(g_moves_folders.begin(), g_moves_folders.end(), folder) != g_moves_folders.end();
+    }), g_mods.end());
     mods_scan_roster(mods_dir_path());
 }
 bool mod_set_enabled(size_t i, bool on) {
@@ -532,7 +564,7 @@ bool mod_set_enabled(size_t i, bool on) {
         for (const std::string& x : lines) o << x << "\n";
         g_mods[i].on = on;
         g_restart_pending = true;
-        std::fprintf(stderr, "[SETTINGS] character %s %s (next start)\n", g_mods[i].name.c_str(), on ? "enabled" : "disabled");
+        std::fprintf(stderr, "[SETTINGS] %s %s %s (next start)\n", g_mods[i].where == "moves" ? "moves" : "character", g_mods[i].name.c_str(), on ? "enabled" : "disabled");
         return true;
     }
     const std::string p = g_mods[i].dir + "/mod.json";
@@ -613,7 +645,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             if (i < g_mods.size()) {
                 m.label = g_mods[i].name;
                 m.value = g_mods[i].on ? "On" : "Off";
-                m.help = g_mods[i].name + (g_mods[i].roster_line >= 0 ? "\nTurn this extra character on or off (its line in roster.txt). Its files stay in the mods folder. Takes effect the next time the game starts."
+                m.help = g_mods[i].name + (g_mods[i].where == "moves" ? "\nNew moves for a character. On: the character knows them and you can equip them in the Abilities menu. Off: they are hidden and do nothing (a save that has them equipped shows an empty slot). Takes effect the next time the game starts."
+                                          : g_mods[i].roster_line >= 0 ? "\nTurn this extra character on or off (its line in roster.txt). Its files stay in the mods folder. Takes effect the next time the game starts."
                                                                : "\nTurn this mod on or off. Folder: " + g_mods[i].dir + ". Takes effect the next time the game starts.");
             }
             out.push_back(std::move(m));

@@ -36,6 +36,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <array>
 #include <vector>
@@ -951,9 +952,15 @@ void learn_all_own(uint8_t* rdram, uint8_t* rec, const Entry& e) {
         }
     }
 }
+void retail_moves_teach(uint8_t* rdram, uint32_t rec, int charId);
 void saverec_hook(uint8_t* rdram, recomp_context* ctx) {
     const Entry* e = extra_of(static_cast<uint32_t>(ctx->r[5]));
-    if (!e) { g_orig_saverec(rdram, ctx); return; }
+    if (!e) {
+        const int charId = static_cast<int>(ctx->r[5]);
+        g_orig_saverec(rdram, ctx);
+        retail_moves_teach(rdram, static_cast<uint32_t>(ctx->r[2]), charId);
+        return;
+    }
     ctx->r[5] = e->like;
     g_orig_saverec(rdram, ctx);
     const uint32_t src = static_cast<uint32_t>(ctx->r[2]);
@@ -5469,7 +5476,7 @@ void dissidia_roster_grid_install() {
     g_orig_textcreate = psp_dispatch_probe_lookup(0x0887B3ECu);
     g_orig_textlit = psp_dispatch_probe_lookup(0x0887D868u);
     if (g_orig_textcreate && g_orig_textlit && !std::getenv("PSPRECOMP_ROSTER_TRACE")) psp_dispatch_register(0x0887B3ECu, oppinfo_name_hook);
-    g_orig_saverec = psp_dispatch_probe_lookup(0x088CB164u);
+    if (!g_orig_saverec) g_orig_saverec = psp_dispatch_probe_lookup(0x088CB164u);   // (already hooked for retail moves)
     if (g_orig_saverec) psp_dispatch_register(0x088CB164u, saverec_hook);
     {   // the extras' own records in a sidecar of each save (savedata import stubs, bound by psp_hle_init before this)
         const uint32_t init = psp_hle_stub_addr_for_nid(NID_SD_INIT), status = psp_hle_stub_addr_for_nid(NID_SD_STATUS),
@@ -5593,6 +5600,88 @@ void objentry_load_hook(uint8_t* rdram, recomp_context* ctx) {
         g_orig_obj_load(rdram, ctx);
 }
 
+// ---- Retail moves: new abilities a "kind": "retail" mod gives a retail character (Bartz's Dissidia (2008) moves,
+// mods/bartz-dff). tools/charmod.py builds their 'ablt' records into main.bin like an added character's and lists them in
+// <mods>/retail_moves.txt, one line per mod: "[#off# ]<folder> <charId> <id>,<id>,... nm=<label>". The Settings menu's
+// Mods page switches a line on and off (the "#off# " prefix); it applies at the next start:
+//  * on: the character knows them at once (taught into the learned list of its save record whenever the game fetches the
+//    record, FUN_088CB164, as learn_all_own does for the extras), and they are equipped like any ability;
+//  * off: their records are hidden and inert, as roster_mainbin.py's "disabled" makes them (owner 0xFE: the Abilities
+//    screen does not list them, command -2: battle finds no comb command), so a save that learnt or equipped them stays
+//    valid (the game reads the record of every learnt and equipped id without a null check, see disable_abilities).
+// The mod's files (moveset, models, voice bank) stay installed when it is off: only the new commands use their additions.
+struct RetailMoves { std::string folder; int charId = -1; bool on = true; std::vector<uint16_t> ids; };
+std::vector<RetailMoves> g_retail_moves;
+constexpr uint8_t kRetailOffOwner = 0xFEu;      // = roster_mainbin.DISABLED_OWNER
+constexpr uint16_t kRetailOffCmd = 0xFFFEu;     // = roster_mainbin.DISABLED_CMD
+void load_retail_moves() {
+    g_retail_moves.clear();
+    std::ifstream f(dissidia_mods_dir() + "/retail_moves.txt");
+    std::string line;
+    while (std::getline(f, line)) {
+        RetailMoves m;
+        if (line.compare(0, 6, "#off# ") == 0) { m.on = false; line = line.substr(6); }
+        else if (line.empty() || line[0] == '#') continue;
+        std::istringstream is(line);
+        std::string ids;
+        if (!(is >> m.folder >> m.charId >> ids) || m.charId <= 0 || m.charId >= DISSIDIA_RETAIL_SLOTS) continue;
+        for (size_t p = 0; p < ids.size();) {
+            size_t q = ids.find(',', p);
+            if (q == std::string::npos) q = ids.size();
+            const unsigned long v = std::strtoul(ids.substr(p, q - p).c_str(), nullptr, 16);
+            if (v >> 8 == static_cast<unsigned long>(m.charId)) m.ids.push_back(static_cast<uint16_t>(v));
+            p = q + 1;
+        }
+        if (m.ids.empty()) continue;
+        std::fprintf(stderr, "[ROSTER] retail moves %s: charId %d, %zu abilities, %s\n", m.folder.c_str(), m.charId, m.ids.size(),
+                     m.on ? "on (taught to the save record)" : "OFF (hidden, inert)");
+        g_retail_moves.push_back(std::move(m));
+    }
+}
+uint8_t* ablt_record(uint8_t* rdram, uint16_t id) {             // the loaded 'ablt' record of an ability id, or null
+    const uint32_t blk = rd32(rdram, kAbltBlockPtr), recs = rd32(rdram, kAbltRecsPtr);
+    if (blk < 0x08000000u || blk >= 0x0C000000u || recs < 0x08000000u || recs >= 0x0C000000u) return nullptr;
+    const uint32_t n = rd32(rdram, blk + 8u);
+    for (uint32_t r = 0; r < n && r < 0x1000u; r++) {
+        uint8_t* a = rdram + ((recs + kAbltRecBytes * r) & 0x07FFFFFFu);
+        if (a[0] == (id & 0xFFu) && a[1] == (id >> 8)) return a;
+    }
+    return nullptr;
+}
+void retail_moves_hide(uint8_t* rdram) {                        // after the table is loaded: the lines switched off
+    for (const RetailMoves& m : g_retail_moves) {
+        if (m.on) continue;
+        int n = 0;
+        for (uint16_t id : m.ids)
+            if (uint8_t* a = ablt_record(rdram, id); a && a[kAbltOwnerByte] == static_cast<uint8_t>(m.charId)) {
+                a[kAbltOwnerByte] = kRetailOffOwner;
+                a[0x0C] = kRetailOffCmd & 0xFFu; a[0x0D] = kRetailOffCmd >> 8;
+                n++;
+            }
+        std::fprintf(stderr, "[ROSTER] retail moves %s off: %d of %zu abilities hidden\n", m.folder.c_str(), n, m.ids.size());
+    }
+}
+void retail_moves_teach(uint8_t* rdram, uint32_t rec, int charId) {
+    if (rec < 0x08000000u || rec >= 0x0C000000u) return;
+    uint8_t* learned = rdram + ((rec + kRecAbil + kAbilLearned) & 0x07FFFFFFu);
+    for (const RetailMoves& m : g_retail_moves) {
+        if (!m.on || m.charId != charId) continue;
+        for (uint16_t id : m.ids) {
+            const uint8_t* a = ablt_record(rdram, id);
+            if (!a || a[kAbltOwnerByte] != static_cast<uint8_t>(charId)) continue;   // not in this main.bin
+            for (uint32_t i = 0; i < kAbilLearnedRows; i++) {
+                uint8_t* row = learned + kAbilLearnedRow * i;
+                if (row[0] == (id & 0xFFu) && row[1] == (id >> 8)) break;                                   // already known
+                if (row[0] == 0xFFu && row[1] == 0xFFu) {                                                   // first free row
+                    row[0] = id & 0xFFu; row[1] = id >> 8;
+                    std::fprintf(stderr, "[ROSTER] retail moves %s: charId %d learns %04X (record 0x%08X)\n", m.folder.c_str(), charId, id, rec);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // FUN_088B1CC0(table, size, mpk): system.bin 'ablt' (abilities: 16-byte header {'ABI ', version, count, 0}, 40-byte
 // records sorted by id). It copies the table into a heap block of size + (808 - count) * 40 bytes (room for 808
 // records), stores the block at 0x089D7290 and the records at 0x089D7294, then loads ability.bin from the archive (with
@@ -5605,7 +5694,11 @@ FuncPtr g_orig_ablt_load = nullptr;
 void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     saverec_block();   // the extra characters' save records: allocated at boot, while the host heap has room
     const uint32_t src = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
-    if (src == 0 || size < 16u || rd32(rdram, src + 8) <= ABLT_ROWS) { g_orig_ablt_load(rdram, ctx); return; }
+    if (src == 0 || size < 16u || rd32(rdram, src + 8) <= ABLT_ROWS) {
+        g_orig_ablt_load(rdram, ctx);
+        if (size >= 16u) retail_moves_hide(rdram);
+        return;
+    }
     const uint32_t buf = psp_kmem_bump_alloc_named((size + 0xFFu) & ~0xFFu, "ROSTER_ABLT");
     if (buf == 0) {
         std::fprintf(stderr, "[ROSTER] ablt: no host memory for a %u-byte table: the game's block will overflow\n", size);
@@ -5619,6 +5712,7 @@ void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
                  rd32(rdram, buf + 8), size, 0x10u + ABLT_ROWS * ABLT_ROW, buf);
     ctx->r[5] = 0;     // the original now only loads ability.bin (a2 = the archive)
     g_orig_ablt_load(rdram, ctx);
+    retail_moves_hide(rdram);
 }
 }  // namespace
 
@@ -5640,6 +5734,12 @@ void dissidia_wpnp_install() {
     g_orig_ablt_load = psp_dispatch_probe_lookup(ABLT_LOAD);
     if (!g_orig_ablt_load) std::fprintf(stderr, "[ROSTER] ablt buffer hook NOT installed\n");
     else psp_dispatch_register(ABLT_LOAD, ablt_load_hook);
+    load_retail_moves();                 // retail characters' new moves: taught through the save-record hook
+    if (!g_retail_moves.empty() && !g_orig_saverec) {
+        g_orig_saverec = psp_dispatch_probe_lookup(0x088CB164u);
+        if (g_orig_saverec) psp_dispatch_register(0x088CB164u, saverec_hook);
+        else std::fprintf(stderr, "[ROSTER] retail moves: save-record hook NOT installed (the moves are not taught)\n");
+    }
 }
 
 

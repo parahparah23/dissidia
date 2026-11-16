@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 
@@ -71,6 +72,41 @@ def strip_help(o):
 def rj(p):
     with open(p) as f:
         return json.load(f)
+
+
+RETAIL_MOVES = 'retail_moves.txt'   # in the game mods dir: the new moves retail mods give, one line per mod (runtime + Settings)
+RETAIL_CODES = ('one100 one200 two100 two200 thr100 thr200 for100 for110 for200 fiv100 fiv200 fiv210 six100 six200 sev100 '
+                'sev110 sev120 sev200 eht100 eht110 eht200 nin100 nin200 ten100 ten110 ten200 gst100 gst110 gst120 gst130 '
+                'gst200 org200 org210').split()
+
+
+def retail_moves_txt(mods, disc, retail_moves):
+    """<mods>/retail_moves.txt: "<folder> <charId> <ability id>,... nm=<display>" for each retail mod that adds moves
+    (the game's own abilities of the character are not listed). The runtime (roster.cpp, retail moves) teaches them to
+    the character's save record, or, for a line the Settings menu switched off ("#off# " in front), hides them and makes
+    them inert the way roster_mainbin's "disabled" does, so a save that holds them stays valid. A rebuild keeps the
+    "#off# " of a folder's line."""
+    import roster_mainbin as RM
+    off = set()
+    p = os.path.join(mods, RETAIL_MOVES)
+    if os.path.exists(p):
+        for line in read(p).decode().splitlines():
+            if line.startswith('#off# ') and line[6:].split():
+                off.add(line[6:].split()[0])
+    lines = []
+    if retail_moves:
+        _, ents = RM.mpk_unpack(disc.pkg.read_crc(RM.MAIN_CRC))
+        _, aents = RM.arc_unpack(next(e for e in ents if e[0] == 'system.bin')[2])
+        chrp = next(e for e in aents if e[0] == 'chrp')[2]
+        cid = {chrp[8 + RM.CHRP_REC * i + 0x74:8 + RM.CHRP_REC * i + 0x7C].rstrip(b'\0').decode('latin1').lower()[2:]:
+               chrp[8 + RM.CHRP_REC * i] for i in range(struct.unpack_from('<I', chrp, 4)[0])}
+        for n, m in sorted(retail_moves, key=lambda x: x[0]):
+            c = cid[ch(m)['code']]
+            ids = ','.join('%04X' % ((c << 8) | int(k, 16)) for k, v in sorted(m['move_names'].items())
+                           if not k.startswith('_') and 'copy' in v)
+            nm = (m.get('display') or '%s: new moves' % ch(m)['name']).replace(' ', '_')
+            lines.append('%s%s %d %s nm=%s' % ('#off# ' if n in off else '', n, c, ids, nm))
+    return ''.join(l + '\n' for l in lines)
 
 
 def read_abilities(mods):
@@ -686,7 +722,7 @@ def _build(a, added):
             m = load_mod(n)
             if not is_retail(m) and ch(m).get('based_on_id') is not None:
                 refresh_avatars(n, a.disc)
-    files, mod_list, entries, retail, extras, fx_retail = {}, [], [], {}, [], []
+    files, mod_list, entries, retail, extras, fx_retail, retail_moves = {}, [], [], {}, [], [], []
     for n in names:
         m, f, e = build_files(n, disc, a.skin, a.mods)
         c = ch(m)
@@ -703,6 +739,8 @@ def _build(a, added):
         if is_retail(m):
             if m.get('fx_shaders'):
                 fx_retail.append(m)
+            if any('copy' in v for k, v in (m.get('move_names') or {}).items() if not k.startswith('_')):
+                retail_moves.append((n, m))
             for gp in f:
                 if gp in retail:
                     sys.exit('%s and %s both change %s: keep one of them' % (retail[gp], n, gp))
@@ -756,6 +794,16 @@ def _build(a, added):
     for m in mod_list:
         if m.get('move_names'):
             abil[ch(m)['code']] = {k: v for k, v in m['move_names'].items() if not k.startswith('_')}
+    old_abil = read_abilities(a.mods)
+    for _, m in retail_moves:   # a retail character's NEW moves only: its retail abilities keep their names (renaming
+        # them is not supported yet), so only the "copy" entries go to main.bin (roster_mainbin.retail_named)
+        abil[ch(m)['code']] = {k: v for k, v in m['move_names'].items() if not k.startswith('_') and 'copy' in v}
+    for code, tab in old_abil.items():   # new moves of a retail character whose mod is gone or disabled: saves may have
+        if code.startswith('_') or code in abil or code not in RETAIL_CODES:   # learnt or equipped them, and the game reads
+            continue                     # the record of every such id without a check, so they stay, hidden and inert
+        abil[code] = {k: dict(v, disabled=True) for k, v in tab.items() if 'copy' in v}
+        print('%-10s new moves of retail %s kept as disabled abilities (saves may hold them)' % ('', code))
+    files[RETAIL_MOVES] = retail_moves_txt(a.mods, disc, retail_moves).encode()
     abil_bytes = (json.dumps(abil, indent=2, ensure_ascii=False) + '\n').encode()
 
     if a.check:
@@ -785,7 +833,7 @@ def _build(a, added):
     stale = []
     for gp, d in sorted(files.items()):
         p = os.path.join(a.mods, gp)
-        if gp in ('roster.txt', FX_MANIFEST, AV.G3_PATH, AV.CUST_PATH) or not os.path.exists(p) or same(p, d):
+        if gp in ('roster.txt', RETAIL_MOVES, FX_MANIFEST, AV.G3_PATH, AV.CUST_PATH) or not os.path.exists(p) or same(p, d):
             continue
         if state.get(gp) != hashlib.md5(read(p)).hexdigest():
             stale.append(gp)

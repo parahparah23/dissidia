@@ -48,8 +48,8 @@ BTN = {'select': 0x1, 'start': 0x8, 'up': 0x10, 'right': 0x20, 'down': 0x40, 'le
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Player Select grid: (row, column) of each character with the cursor starting on (0, 0); read off the screen
-GRID = {'lightning': (0, 0), 'vaan': (0, 1), 'squall': (1, 5), 'kain': (0, 4), 'terra': (1, 3), 'jecht': (2, 7)}   # (down presses, right presses; negative = left)
-CHAR_ID = {'lightning': 31, 'squall': 15, 'kain': 24, 'terra': 11, 'jecht': 20}      # the game's charId (the fighter the tests drive; the other one is the dummy)
+GRID = {'lightning': (0, 0), 'vaan': (0, 1), 'bartz': (1, 2), 'squall': (1, 5), 'kain': (0, 4), 'terra': (1, 3), 'jecht': (2, 7)}   # (down presses, right presses; negative = left)
+CHAR_ID = {'lightning': 31, 'bartz': 9, 'squall': 15, 'kain': 24, 'terra': 11, 'jecht': 20}      # the game's charId (the fighter the tests drive; the other one is the dummy)
 
 
 class Game:

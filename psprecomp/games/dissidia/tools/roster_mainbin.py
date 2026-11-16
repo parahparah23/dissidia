@@ -931,6 +931,24 @@ def disable_abilities(aents, chars, names, log=print):
     return sorted(i for ids in off.values() for i in ids)
 
 
+def retail_named(recs, chars, names, log=print):
+    """[(charId, code, charId)] of the retail characters the name map lists (a "kind": "retail" mod's new or disabled
+    moves, e.g. Bartz's Dissidia 1 moves, mods/bartz-dff): their own records get the same treatment as an added
+    character's (add_new_abilities ... disable_abilities); the chrp / objentry records stay retail. Found by the code in
+    the chrp record (+0x74 'P_FIV100')."""
+    if not names:
+        return []
+    have = {(c or "").lower() for _, c, _ in chars}
+    by_code = {bytes(r[0x74:0x7C]).rstrip(b"\0").decode("latin1").lower()[2:]: r[0] for r in recs}
+    out = []
+    for code in sorted(names):
+        if code in have or code not in by_code or by_code[code] >= FIRST_NEW:
+            continue
+        out.append((by_code[code], code, by_code[code]))
+        log("ablt names: retail %s (charId %d): %d entries" % (code, by_code[code], len(names[code])))
+    return out
+
+
 def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, objs_char=None, rowmap_out=None,
           names=None, texts=None):
     """data: original main.bin; chars: [(charId, code or None, like)]. Returns the new main.bin.
@@ -1029,8 +1047,9 @@ def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, 
         assert [struct.unpack_from("<H", r, 0)[0] for r in orecs] == sorted(struct.unpack_from("<H", r, 0)[0] for r in orecs)
         add_abilities(aents, char, like, log)
 
+    named = chars + retail_named(recs, chars, names, log)   # retail characters a "kind": "retail" mod adds moves to
     if names:
-        add_new_abilities(aents, chars, names, log)
+        add_new_abilities(aents, named, names, log)
     ablt = next(e for e in aents if e[0] == "ablt")[2]
     if struct.unpack_from("<I", ablt, 8)[0] > ABLT_GAME_ROWS:
         log("ablt: %d records > %d: needs the runtime's ablt hook (roster.cpp, ROSTER_ABLT), or the game's copy overflows"
@@ -1040,13 +1059,13 @@ def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, 
         if rowmap_out is not None:
             rowmap_out.update(rowmap)
     if names and texts is not None:
-        apply_ability_names(aents, chars, names, texts, log)
+        apply_ability_names(aents, named, names, texts, log)
     if names:
-        set_learn_levels(aents, chars, names, log)
+        set_learn_levels(aents, named, names, log)
     if names:                                    # after the kinds ("after") are set, before disabling drops entries
-        sync_followup_unlocks(aents, chars, names, log)
+        sync_followup_unlocks(aents, named, names, log)
     if names:                                    # last: the naming above looks records up by owner and command
-        disable_abilities(aents, chars, names, log)
+        disable_abilities(aents, named, names, log)
     chrp[2] =bytes(chd[:4]) + struct.pack("<I", len(recs)) + b"".join(bytes(r) for r in recs)
     obj[2] = bytes(ohead) + struct.pack("<I", len(orecs)) + b"".join(bytes(r) for r in orecs)
     by["system.bin"][2] = arc_pack(ahead, aents)
