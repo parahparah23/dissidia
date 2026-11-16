@@ -50,14 +50,14 @@ VOICE_BASE = 1810000            # voice event ids: bank id * 100 + slot
 # D1 command -> (name, type, phase, fallback help (D1's own is read from the disc), CP, CP mastered, AP, learn level). CP / AP from D1's own ability records;
 # learn levels: D1's for Climbarrel 3, Flood 19, Slidehazzard 28, Paladin Force 38, chosen for the rest.
 MOVES = [
-    (0x198, 'Ascendant Lance', 'brave', 'ground', "[Ground] A lance lunge. Press\nagain for a flurry that ends in a\nblow. (Dissidia 2008)", 35, 15, 120, 6),
-    (0x19A, 'Climbarrel', 'brave', 'ground', "[Ground] Rising strikes into a\ncombo that blows the foe away.\n(Dissidia 2008)", 35, 20, 120, 3),
-    (0x19E, 'Storm Shot', 'brave', 'midair', "[Midair] A gust of strikes. Press\nagain to blow the foe away.\n(Dissidia 2008)", 35, 15, 180, 12),
-    (0x19F, 'Slidehazzard', 'brave', 'midair', "[Midair] A four-part combo that\ncarries the foe down to the ground.\n(Dissidia 2008)", 35, 15, 180, 28),
-    (0x19C, 'Soul Eater', 'hp', 'ground', "[Ground] HP attack. A strike, then\ndark slashes and the HP blow.\n(Dissidia 2008)", 45, 25, 180, 24),
-    (0x19D, 'Flood', 'hp', 'ground', "[Ground] HP attack. A torrent of\nwater sweeps the foe away.\n(Dissidia 2008)", 45, 25, 180, 19),
-    (0x1A1, 'Wind Shear', 'hp', 'midair', "[Midair] HP attack. A whirlwind\nholds the foe, then blasts it.\n(Dissidia 2008)", 45, 25, 300, 46),
-    (0x1A2, 'Paladin Force', 'hp', 'midair', "[Midair] HP attack. Holy blades\ncrash down on the foe.\n(Dissidia 2008)", 45, 25, 180, 38),
+    (0x198, 'Ascendant Lance', 'brave', 'ground', "[Ground] A lance lunge. Press\nagain for a flurry that ends in a\nblow. (Dissidia 1)", 35, 15, 120, 6),
+    (0x19A, 'Climbarrel', 'brave', 'ground', "[Ground] Rising strikes into a\ncombo that blows the foe away.\n(Dissidia 1)", 35, 20, 120, 3),
+    (0x19E, 'Storm Shot', 'brave', 'midair', "[Midair] A gust of strikes. Press\nagain to blow the foe away.\n(Dissidia 1)", 35, 15, 180, 12),
+    (0x19F, 'Slidehazzard', 'brave', 'midair', "[Midair] A four-part combo that\ncarries the foe down to the ground.\n(Dissidia 1)", 35, 15, 180, 28),
+    (0x19C, 'Soul Eater', 'hp', 'ground', "[Ground] HP attack. A strike, then\ndark slashes and the HP blow.\n(Dissidia 1)", 45, 25, 180, 24),
+    (0x19D, 'Flood', 'hp', 'ground', "[Ground] HP attack. A torrent of\nwater sweeps the foe away.\n(Dissidia 1)", 45, 25, 180, 19),
+    (0x1A1, 'Wind Shear', 'hp', 'midair', "[Midair] HP attack. A whirlwind\nholds the foe, then blasts it.\n(Dissidia 1)", 45, 25, 300, 46),
+    (0x1A2, 'Paladin Force', 'hp', 'midair', "[Midair] HP attack. Holy blades\ncrash down on the foe.\n(Dissidia 1)", 45, 25, 180, 38),
 ]
 
 
@@ -80,8 +80,23 @@ def d1_help(d1):
             lines = texts[hid].split('\n')
             desc = [ln for ln in lines if '\x10' not in ln]          # D1's bonus and effect lines are coloured
             eff = [ln for ln in lines if ln.startswith(rm.EFFECT_PREFIX)]
-            out[cmd] = '\n'.join(desc[:2] + ['{bonus}'] + eff[:1])
+            out[cmd] = '\n'.join(mark_d1(desc[:2]) + ['{bonus}'] + eff[:1])
     return out
+
+
+D1_MARKS = (' (D1)',)      # one form for all eight (longer ones fit only some lines)
+
+
+def mark_d1(desc):
+    """The description lines with a note that the move comes from the first Dissidia, in the longest form that fits the
+    help panel's width (the panel's 3 lines are already taken by description, bonus and effect)."""
+    desc = list(desc) or ['']
+    for m in D1_MARKS:
+        if len(rm._shown(desc[-1] + m)) <= rm.HELP_WIDTH:
+            desc[-1] += m
+            return desc
+    desc[-1] = desc[-1][:rm.HELP_WIDTH - len(D1_MARKS[-1])].rstrip() + D1_MARKS[-1]
+    return desc
 
 
 class IsoPackage(pe.Package):
