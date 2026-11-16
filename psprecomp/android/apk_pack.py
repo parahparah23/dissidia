@@ -91,6 +91,39 @@ def sign_apk_bytes(data, key):
     return entries + block + cd + bytes(eocd)
 
 
+PAGE_16K = 16384
+
+
+def elf_load_align(path):
+    """The smallest p_align of the PT_LOAD segments of a 64-bit little-endian ELF, or None when the file is not one (a zip payload
+    shipped as lib*.so)."""
+    with open(path, "rb") as f:
+        h = f.read(64)
+        if len(h) < 64 or h[:4] != b"\x7fELF" or h[4] != 2 or h[5] != 1:
+            return None
+        phoff, = struct.unpack_from("<Q", h, 0x20)
+        phentsize, phnum = struct.unpack_from("<HH", h, 0x36)
+        f.seek(phoff)
+        ph = f.read(phentsize * phnum)
+    aligns = [struct.unpack_from("<Q", ph, i * phentsize + 0x30)[0] for i in range(phnum)
+              if struct.unpack_from("<I", ph, i * phentsize)[0] == 1]   # PT_LOAD
+    return min(aligns) if aligns else None
+
+
+def check_page_size(libs):
+    """Warn about native libraries whose LOAD segments are aligned below 16 KB: a device running a 16 KB-page kernel (Android 15+, and
+    a developer option on Pixels) refuses to load them, and debuggable APKs show an "isn't 16 KB compatible" dialog (issue #41)."""
+    bad = []
+    for name, path in libs:
+        if name.startswith("lib/") and name.endswith(".so"):
+            al = elf_load_align(path)
+            if al is not None and al < PAGE_16K:
+                bad.append("%s (LOAD aligned to %d)" % (name, al))
+    for b in bad:
+        print("warning: not 16 KB page aligned: %s; link with -z max-page-size=16384" % b, file=sys.stderr)
+    return not bad
+
+
 def build(skeleton, libs, out, key):
     tmp = out + ".unsigned"
     shutil.copyfile(skeleton, tmp)
@@ -117,6 +150,7 @@ def main():
         if not path or not os.path.isfile(path):
             sys.exit("--lib %s: file not found" % l)
         libs.append((name, path))
+    check_page_size(libs)
     build(a.skeleton, libs, a.output, json.load(open(a.key)))
     print("built %s (%.1f MB)" % (a.output, os.path.getsize(a.output) / 1e6))
 

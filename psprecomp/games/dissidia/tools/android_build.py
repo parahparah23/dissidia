@@ -131,7 +131,7 @@ def write_toolchain(adir, work):
     tc = os.path.join(bd, "toolchain.cmake")
     ndk = os.path.join(adir, "ndk").replace("\\", "/")
     with open(tc, "w") as f:
-        f.write('set(ANDROID_ABI %s)\nset(ANDROID_PLATFORM android-%d)\ninclude("%s/build/cmake/android.toolchain.cmake")\n'
+        f.write('set(ANDROID_ABI %s)\nset(ANDROID_PLATFORM android-%d)\nset(ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES ON)\ninclude("%s/build/cmake/android.toolchain.cmake")\n'
                 'set(PSPRECOMP_DEPS_CMAKE "%s/deps/deps.cmake")\n' % (v["abi"], v["api"], ndk, adir.replace("\\", "/")))
     return bd, tc
 
