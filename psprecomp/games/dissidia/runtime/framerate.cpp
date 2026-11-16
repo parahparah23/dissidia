@@ -1280,34 +1280,54 @@ void fighter_log_frame() {
 // steps 2 ticks per 33 ms at every rate. At 30 Hz the call is left as it is (PSP behaviour, slow motion included).
 float g_face_dt = 0.f;        // the last actor step actor_dt_hook returned (the caller truncates it for the face step)
 bool g_face_dt_set = false;
-struct FaceAcc { uint32_t obj; float frac; uint64_t seen; };
+struct FaceAcc { uint32_t obj; float frac; uint64_t seen; double win_ms; int ticks, changes; uint32_t cells[8]; };
 FaceAcc g_face_acc[32];
 bool g_face_log = std::getenv("PSPRECOMP_FACE_LOG") != nullptr;
+bool g_face_fix = true;   // PSPRECOMP_FACE_STEP=0: pass the game's tick count through (A/B); the log still runs
+
+// PSPRECOMP_FACE_LOG: per model and 5 s of play time, the ticks stepped and how many times a group's cell changed (blinks, mouth shapes).
+void face_stats(FaceAcc& s, int ticks) {
+    const uint32_t tab = r32(s.obj + 132u);
+    if (!ok(tab)) return;
+    const uint32_t groups = r32(tab), n = std::min<uint32_t>(r32(tab + 4u), 8u);
+    if (!ok(groups)) return;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t cell = r32(groups + i * 96u + 48u);   // u16 u, u16 v
+        if (cell != s.cells[i]) { if (s.cells[i] != 0xFFFFFFFFu) s.changes++; s.cells[i] = cell; }
+    }
+    s.ticks += ticks;
+    if (s.win_ms < 0) s.win_ms = g_play_ms;
+    if (g_play_ms - s.win_ms >= 5000.0) {
+        std::fprintf(stderr, "[FACESTAT] obj=%08X groups=%u ms=%.0f ticks=%d per_s=%.1f cell_changes=%d fps=%d fix=%d\n", s.obj, n, g_play_ms - s.win_ms, s.ticks,
+                     s.ticks * 1000.0 / (g_play_ms - s.win_ms), s.changes, g_rate, g_face_fix ? 1 : 0);
+        s.win_ms = g_play_ms; s.ticks = 0; s.changes = 0;
+    }
+}
 
 void face_step_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t obj = static_cast<uint32_t>(ctx->r[4]);
     const int game_ticks = static_cast<int>(ctx->r[5]);
     const bool have_dt = g_face_dt_set;
     g_face_dt_set = false;
-    if (g_ticks < 2.0f && have_dt && std::isfinite(g_face_dt) && g_face_dt >= 0.f && g_face_dt < 64.f &&
+    FaceAcc* slot = nullptr;
+    for (auto& a : g_face_acc) if (a.obj == obj) { slot = &a; break; }
+    if (!slot) {   // a free slot, else the one seen longest ago
+        slot = &g_face_acc[0];
+        for (auto& a : g_face_acc) if (!a.obj || a.seen < slot->seen) { slot = &a; if (!a.obj) break; }
+        *slot = {obj, 0.f, 0, -1.0, 0, 0, {}};
+        for (auto& c : slot->cells) c = 0xFFFFFFFFu;
+    }
+    slot->seen = g_tick;
+    if (g_face_fix && g_ticks < 2.0f && have_dt && std::isfinite(g_face_dt) && g_face_dt >= 0.f && g_face_dt < 64.f &&
         game_ticks == static_cast<int>(g_face_dt)) {
-        FaceAcc* slot = nullptr;
-        for (auto& a : g_face_acc) if (a.obj == obj) { slot = &a; break; }
-        if (!slot) {   // a free slot, else the one seen longest ago
-            slot = &g_face_acc[0];
-            for (auto& a : g_face_acc) if (!a.obj || a.seen < slot->seen) { slot = &a; if (!a.obj) break; }
-            *slot = {obj, 0.f, 0};
-        }
-        slot->seen = g_tick;
         const float t = slot->frac + g_face_dt;
         const int n = static_cast<int>(t);
         slot->frac = t - static_cast<float>(n);
         ctx->r[5] = n;
-        if (g_face_log && n != game_ticks)
-            std::fprintf(stderr, "[FACE] obj=%08X dt=%.3f game=%d ours=%d frac=%.3f t=%llu\n", obj, g_face_dt, game_ticks, n, slot->frac,
-                         (unsigned long long)g_tick);
     }
+    const int stepped = static_cast<int>(ctx->r[5]);
     g_orig_face_step(rdram, ctx);
+    if (g_face_log) face_stats(*slot, stepped);
 }
 
 int g_actor_log_left = 4000;
@@ -2023,8 +2043,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
     psp_dispatch_register(PAD_SET, pad_set_hook);
     psp_dispatch_register(ACTOR_DT, actor_dt_hook);
     psp_dispatch_register(CAM_DT, cam_dt_hook);
-    if (const char* fs = std::getenv("PSPRECOMP_FACE_STEP"); !(fs && fs[0] == '0') && (g_orig_face_step = psp_dispatch_probe_lookup(FACE_STEP)))
-        psp_dispatch_register(FACE_STEP, face_step_hook);
+    if (const char* fs = std::getenv("PSPRECOMP_FACE_STEP"); fs && fs[0] == '0') g_face_fix = false;
+    if ((g_face_fix || g_face_log) && (g_orig_face_step = psp_dispatch_probe_lookup(FACE_STEP))) psp_dispatch_register(FACE_STEP, face_step_hook);
     if ((g_orig_exb_pressed = ovl_battle_lookup(EXB_PRESSED))) psp_dispatch_register(EXB_PRESSED, exb_pressed_hook);
     if ((g_orig_exb_pressed2 = ovl_battle_lookup(EXB_PRESSED2))) psp_dispatch_register(EXB_PRESSED2, exb_pressed2_hook);
     VtReg<kNV - 1>::go();   // sticky presses for every virtual-button test the gated burst code calls (+ counts with PSPRECOMP_EXB_LOG)
