@@ -88,6 +88,13 @@ struct GeGpuVertex {
 };
 static_assert(sizeof(GeGpuVertex) == 68, "GeGpuVertex layout is shared with the VAO setup");
 
+/// The decode cache's own copy of a draw's decoded vertices (decoding and storing them on a miss): nullptr when the draw
+/// is not cached (fewer than 512 vertices, PSPRECOMP_DECODE_CACHE=0, memory out of range). *id is the entry's serial
+/// (stable while the entry lives); ge_decode_cache_generation() changes whenever entries are dropped, so a caller keeping
+/// per-entry data (GPU buffers) drops it too. The pointer is valid until the next call.
+const struct GeGpuVertex* ge_decode_vertices_gpu_cached(uint8_t* rdram, const struct GeState& state, int count, uint64_t* id);
+uint64_t ge_decode_cache_generation();
+
 /// Decode `count` NON-through vertices (honouring the index buffer) into
 /// model-space GeGpuVertex records with no CPU skinning / lighting /
 /// transform. Weights are written only for weighted vertex types. Returns false

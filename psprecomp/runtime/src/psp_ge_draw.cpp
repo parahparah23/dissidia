@@ -1559,6 +1559,8 @@ struct Batch {
     bool fx_timed = false;   // FX shader override batch, GPU-timed (PSPRECOMP_FX_SHADER_LOG=2)
     bool fxl = false;        // an effects draw: also drawn into the screen-space effects layer (fxl_*)
     float refl = 0.f;        // > 0: a reflective surface (material byte / 255): its triangles go to the reflectivity mask (g_rml_tris)
+    GLuint persist_vao = 0;  // != 0: one draw from a resident vertex buffer (gpu_vcache): no staging, no upload
+    size_t persist_n = 0;
 };
 static Batch g_batch;
 static GLuint g_copy_buf_bound = 0;
@@ -1731,10 +1733,13 @@ static void flush_batch() {
     const bool fxl_draw = g_batch.fxl;
     g_batch.fxl = false;
     g_batch.refl = 0.f;
-    const size_t n = s.stage_n;
+    const size_t persist_n = g_batch.persist_n;
+    const GLuint persist_vao = g_batch.persist_vao;
+    g_batch.persist_n = 0; g_batch.persist_vao = 0;
+    const size_t n = persist_n ? persist_n : s.stage_n;
     if (n == 0) { g_batch.firsts.clear(); g_batch.counts.clear(); return; }
 
-    {
+    if (!persist_n) {
         psp_prof::Scope ps(psp_prof::S_UPLOAD);
         if (g_copy_buf_bound != s.vbo) {
             glBindBuffer(GL_COPY_WRITE_BUFFER, s.vbo);
@@ -1776,12 +1781,12 @@ static void flush_batch() {
             glBufferSubData(GL_COPY_WRITE_BUFFER, (GLintptr)(s.write * s.stride),
                             (GLsizeiptr)(n * s.stride), s.stage.data());
     }
-    const GLint first = static_cast<GLint>(s.write);
-    s.write += n;
+    const GLint first = persist_n ? 0 : static_cast<GLint>(s.write);
+    if (!persist_n) s.write += n;
 
     {
         psp_prof::Scope ps(psp_prof::S_DRAW);
-        gl_bind_vao(g_batch.vao);
+        gl_bind_vao(persist_n ? persist_vao : g_batch.vao);
         if (fx_timed) psp_fx_timer_begin();
         if (g_no_raster != 2) {
             const size_t nseg = g_batch.firsts.size();
@@ -1796,7 +1801,7 @@ static void flush_batch() {
                 if (g_no_raster != 1) glDisable(GL_RASTERIZER_DISCARD);
                 verify_compare(g_expect.size());
             } else {
-                const bool single = nseg == 1 || m == GL_TRIANGLES || m == GL_LINES || m == GL_POINTS;
+                const bool single = persist_n || nseg == 1 || m == GL_TRIANGLES || m == GL_LINES || m == GL_POINTS;
                 if (!single) for (size_t i = 0; i < nseg; i++) g_batch.firsts[i] += first;
                 auto issue = [&]() {
                     if (single) glDrawArrays(m, first, static_cast<GLsizei>(n));
@@ -1864,6 +1869,66 @@ void ge_draw_set_perf_overlay(bool on) {
     g_perf_hud = on;
     perf_overlay_apply(on);
     std::fprintf(stderr, "[DRAW] performance overlay %s\n", on ? "on" : "off");
+}
+
+// ---- Resident vertex buffers for cached decodes (PSPRECOMP_GPU_VCACHE=0 turns them off) ----
+// One static VBO + the two 3D layouts per decode-cache entry (psp_ge_vertex.cpp), made on first use and dropped when the
+// cache drops its entries (its generation changes). Same attribute layout as the 3D stream (setup_stream).
+struct GpuVBuf { GLuint vbo = 0, vao = 0, vao_plain = 0; };
+static std::unordered_map<uint64_t, GpuVBuf> g_vcache;
+static uint64_t g_vcache_gen = 0;
+static bool gpu_vcache_on() {
+    static const bool on = [] { const char* e = std::getenv("PSPRECOMP_GPU_VCACHE"); return !(e && e[0] == '0'); }();
+    return on;
+}
+static void vcache_layout(bool weights) {
+    const GLsizei st = static_cast<GLsizei>(sizeof(GeGpuVertex));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(12));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(24));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, reinterpret_cast<void*>(32));
+    glEnableVertexAttribArray(2);
+    if (weights) {
+        glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(36));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(52));
+        glEnableVertexAttribArray(5);
+    }
+}
+static void gpu_vcache_drop_all() {
+    for (auto& kv : g_vcache) {
+        GLuint vaos[2] = {kv.second.vao, kv.second.vao_plain};
+        glDeleteVertexArrays(2, vaos);
+        glDeleteBuffers(1, &kv.second.vbo);
+    }
+    g_vcache.clear();
+    glc::vao = ~0u;                                       // a deleted array may be the cached binding: bind afresh next time
+}
+static const GpuVBuf& gpu_vcache_get(uint64_t id, const GeGpuVertex* v, size_t n) {
+    const uint64_t gen = ge_decode_cache_generation();
+    if (gen != g_vcache_gen) { flush_batch(); gpu_vcache_drop_all(); g_vcache_gen = gen; }
+    auto it = g_vcache.find(id);
+    if (it != g_vcache.end()) return it->second;
+    flush_batch();                                        // the buffer and layout bindings below change GL state
+    GpuVBuf b;
+    glGenBuffers(1, &b.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, b.vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * sizeof(GeGpuVertex)), v, GL_STATIC_DRAW);
+    glGenVertexArrays(1, &b.vao);
+    glBindVertexArray(b.vao);
+    vcache_layout(true);
+    glGenVertexArrays(1, &b.vao_plain);
+    glBindVertexArray(b.vao_plain);
+    vcache_layout(false);
+    glBindVertexArray(0);
+    glc::vao = 0;                                         // the raw binds above bypassed gl_bind_vao's cache
+    static int made = 0;
+    if (++made <= 40 || made % 100 == 0)
+        std::fprintf(stderr, "[GPU_VCACHE] resident buffer %d: %zu vertices (%.1f MB)\n", made, n, n * sizeof(GeGpuVertex) / 1048576.0);
+    return g_vcache.emplace(id, b).first->second;
 }
 
 static void setup_stream(Stream& s, size_t stride, bool is3d) {
@@ -2173,6 +2238,28 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         if (fep_log) psp_fep_log_draw(rdram, state, prim_type, n, ge_texture_bound_pack_id());
         if (g_batch.refl > 0.f && !vb_on && path == 1) rml_capture(state, rdram, prim_type, n, g_batch.refl);   // reflectivity mask
         if (path == 2 && fighter_mask_wanted(state)) fighter_capture(state, rdram, prim_type, n);   // the fighter mask (no self-shadowing)
+        if (!g_verify && n >= 512 && gpu_vcache_on()) {
+            // a big draw whose decoded vertices the decode cache holds (characters: the same every frame): drawn from a
+            // resident buffer made once, instead of copying ~70 bytes a vertex into the frame's ring and uploading it
+            uint64_t id = 0;
+            const GeGpuVertex* cv;
+            {
+                psp_prof::Scope ps(psp_prof::S_DECODE);
+                cv = ge_decode_vertices_gpu_cached(rdram, state, n, &id);
+            }
+            if (cv) {
+                const GpuVBuf& vb = gpu_vcache_get(id, cv, (size_t)n);
+                flush_batch();                                   // its own batch: the one before it is drawn first
+                ensure_batch(vb_on ? vb_key : key, g_s3d, path == 2 ? vb.vao : vb.vao_plain, mode, 0,
+                             rdram, vb_on ? vb_state : state, prim_type, fbo_tex, &xf);
+                g_batch.persist_vao = path == 2 ? vb.vao : vb.vao_plain;
+                g_batch.persist_n = (size_t)n;
+                flush_batch();
+                psp_prof::verts += (uint64_t)n;
+                g_has_drawn_prims = true;
+                return;
+            }
+        }
         uint8_t* dst = stage_reserve(g_s3d, (size_t)n);
         bool ok;
         {

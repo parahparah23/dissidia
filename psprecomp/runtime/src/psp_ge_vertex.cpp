@@ -1,4 +1,7 @@
 #include "psp_ge_vertex.h"
+#include <cstdlib>
+#include <unordered_map>
+#include <mutex>
 #include "psp_ge.h"
 #include "psp_ge_constants.h"
 #include "recomp.h"
@@ -904,7 +907,128 @@ static inline T ld(const uint8_t* p) {
     return v;
 }
 
+static bool decode_vertices_gpu_uncached(uint8_t* rdram, const GeState& state, int count, GeGpuVertex* out);
+
+// ---- Decode cache --------------------------------------------------------------------------------------------------------
+// Characters are skinned on the GPU, so the vertex data a model's draws read stays the same from frame to frame, and the
+// decode above (3 index reads, 5 attribute conversions per vertex) was redone for every one of them every frame: on a
+// phone the largest single item of a battle frame (13 % with a 40k-triangle mod body). Draws of kDecodeCacheMin+ vertices
+// keep their decoded vertices, keyed by what the decode reads (addresses, count, vertex type, the material colour that
+// colourless vertices take) and a hash of the source bytes, so any change to the indices or vertices decodes afresh.
+// PSPRECOMP_DECODE_CACHE=0 turns it off.
+namespace {
+constexpr int kDecodeCacheMin = 512;
+constexpr size_t kDecodeCacheBudget = size_t(64) << 20;   // bytes of decoded vertices; cleared when over
+struct DecodeKey {
+    uint32_t vaddr, iaddr, vtype, amb, alpha;
+    int count;
+    uint64_t h;
+    bool operator==(const DecodeKey& o) const {
+        return vaddr == o.vaddr && iaddr == o.iaddr && vtype == o.vtype && amb == o.amb && alpha == o.alpha && count == o.count && h == o.h;
+    }
+};
+struct DecodeKeyHash {
+    size_t operator()(const DecodeKey& k) const {
+        uint64_t x = k.h ^ (uint64_t(k.vaddr) << 32) ^ k.iaddr ^ (uint64_t(k.vtype) << 17) ^ uint64_t(k.count) * 0x9E3779B97F4A7C15ull;
+        return size_t(x ^ (x >> 31));
+    }
+};
+struct DecodeEntry { std::vector<GeGpuVertex> v; uint64_t serial = 0; };
+struct DecodeCache {
+    std::mutex mu;
+    std::unordered_map<DecodeKey, DecodeEntry, DecodeKeyHash> map;
+    size_t bytes = 0;
+    uint64_t hits = 0, misses = 0, serial = 0, generation = 1;
+};
+DecodeCache& decode_cache() { static DecodeCache c; return c; }
+bool decode_cache_on() {
+    static const bool on = [] { const char* e = std::getenv("PSPRECOMP_DECODE_CACHE"); return !(e && e[0] == '0'); }();
+    return on;
+}
+inline uint64_t hash_bytes(const uint8_t* p, size_t n, uint64_t h) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t w; std::memcpy(&w, p + i, 8); h = (h ^ w) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
+    for (; i < n; i++) { h = (h ^ p[i]) * 0x100000001B3ull; }
+    return h;
+}
+}  // namespace
+
+// The cache entry for this draw (decoded and stored on a miss), nullptr when the draw is not cached. Holds c.mu while it
+// works; the returned pointer is valid until the next call (an insert may clear the map).
+static const DecodeEntry* decode_cache_entry(uint8_t* rdram, const GeState& state, int count) {
+    if (count < kDecodeCacheMin || !decode_cache_on()) return nullptr;
+    const uint32_t vtype = state.vertex_type;
+    const int stride = vtx_layout(vtype).stride;
+    const int idx_type = ge_vtype_idx(vtype);
+    if (stride <= 0) return nullptr;
+    auto in_ram = [](uint32_t addr, uint64_t bytes) { return addr >= 0x00010000U && (uint64_t)(addr & 0x07FFFFFFU) + bytes <= 0x08000000ULL; };
+    uint64_t h = 0xCBF29CE484222325ull;
+    uint32_t nverts = (uint32_t)count;
+    if (idx_type != GE_VTYPE_IDX_NONE) {
+        const uint32_t isz = idx_type == GE_VTYPE_IDX_8BIT ? 1u : idx_type == GE_VTYPE_IDX_16BIT ? 2u : 4u;
+        if (!in_ram(state.index_addr, (uint64_t)count * isz)) return nullptr;
+        const uint8_t* ip = rdram + (state.index_addr & 0x07FFFFFFU);
+        h = hash_bytes(ip, (size_t)count * isz, h);
+        uint32_t mx = 0;
+        if (isz == 2) { for (int i = 0; i < count; i++) { uint16_t v; std::memcpy(&v, ip + i * 2, 2); mx = std::max<uint32_t>(mx, v); } }
+        else if (isz == 1) { for (int i = 0; i < count; i++) mx = std::max<uint32_t>(mx, ip[i]); }
+        else { for (int i = 0; i < count; i++) { uint32_t v; std::memcpy(&v, ip + i * 4, 4); mx = std::max(mx, v); } }
+        nverts = mx + 1;
+    }
+    if (!in_ram(state.vertex_addr, (uint64_t)nverts * stride)) return nullptr;
+    h = hash_bytes(rdram + (state.vertex_addr & 0x07FFFFFFU), (size_t)nverts * stride, h);
+    const DecodeKey key{state.vertex_addr, idx_type != GE_VTYPE_IDX_NONE ? state.index_addr : 0u, vtype,
+                        state.material_ambient, state.material_alpha, count, h};
+    DecodeCache& c = decode_cache();
+    auto report = [&] {
+        if (((c.hits + c.misses) & 0xFFF) == 0)
+            std::fprintf(stderr, "[DECODE_CACHE] %llu hits, %llu misses, %zu entries, %.1f MB\n", (unsigned long long)c.hits,
+                         (unsigned long long)c.misses, c.map.size(), c.bytes / 1048576.0);
+    };
+    auto it = c.map.find(key);
+    if (it != c.map.end()) { c.hits++; report(); return &it->second; }
+    DecodeEntry e;
+    e.v.resize((size_t)count);
+    if (!decode_vertices_gpu_uncached(rdram, state, count, e.v.data())) return nullptr;
+    c.misses++; report();
+    const size_t b = (size_t)count * sizeof(GeGpuVertex);
+    if (c.bytes + b > kDecodeCacheBudget) { c.map.clear(); c.bytes = 0; c.generation++; }
+    e.serial = ++c.serial;
+    c.bytes += b;
+    return &c.map.emplace(key, std::move(e)).first->second;
+}
+
 bool ge_decode_vertices_gpu(
+    uint8_t* rdram, const GeState& state, int count, GeGpuVertex* out
+) {
+    if (count >= kDecodeCacheMin && decode_cache_on()) {
+        DecodeCache& c = decode_cache();
+        std::lock_guard<std::mutex> lk(c.mu);
+        if (const DecodeEntry* e = decode_cache_entry(rdram, state, count)) {
+            std::memcpy(out, e->v.data(), (size_t)count * sizeof(GeGpuVertex));
+            return true;
+        }
+    }
+    return decode_vertices_gpu_uncached(rdram, state, count, out);
+}
+
+const GeGpuVertex* ge_decode_vertices_gpu_cached(uint8_t* rdram, const GeState& state, int count, uint64_t* id) {
+    if (count < kDecodeCacheMin || !decode_cache_on()) return nullptr;
+    DecodeCache& c = decode_cache();
+    std::lock_guard<std::mutex> lk(c.mu);
+    const DecodeEntry* e = decode_cache_entry(rdram, state, count);
+    if (!e) return nullptr;
+    *id = e->serial;
+    return e->v.data();
+}
+
+uint64_t ge_decode_cache_generation() {
+    DecodeCache& c = decode_cache();
+    std::lock_guard<std::mutex> lk(c.mu);
+    return c.generation;
+}
+
+static bool decode_vertices_gpu_uncached(
     uint8_t* rdram, const GeState& state, int count, GeGpuVertex* out
 ) {
     const uint32_t vtype = state.vertex_type;
