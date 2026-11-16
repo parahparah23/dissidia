@@ -35,6 +35,7 @@ bool psp_stage_light_pick_request(float* p);
 void psp_stage_light_pick_result(const float* rgb, float dist);
 /// Pickups that emit light (Dissidia: EX cores): fills up to `max` world positions, returns how many are in the world right now.
 void psp_set_pickup_lights_provider(int (*fn)(float (*xyz)[3], int max));
+bool psp_player_pos(float* xyz);   // the provider below, false without one
 void psp_set_player_pos_provider(bool (*fn)(float* xyz));   // world position of the human fighter (for "select the nearest light")
 
 /// What the scene was drawn with (the last 3D draw of the buffer).

@@ -220,6 +220,7 @@ static bool (*g_player_pos_fn)(float*) = nullptr;
 static int (*g_pickup_fn)(float (*)[3], int) = nullptr;
 void psp_set_pickup_lights_provider(int (*fn)(float (*)[3], int)) { g_pickup_fn = fn; }
 void psp_set_player_pos_provider(bool (*fn)(float*)) { g_player_pos_fn = fn; }
+bool psp_player_pos(float* p) { return g_player_pos_fn && g_player_pos_fn(p); }
 bool psp_stage_light_edit_get() { return g_light_edit.load(); }
 void psp_stage_light_edit_set(bool on) { g_light_edit.store(on); std::fprintf(stderr, "[LIGHT] edit mode %s\n", on ? "ON" : "off"); }
 static std::atomic<bool> g_light_nearest{false}, g_light_pickcol{false};
@@ -1703,8 +1704,9 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);
         if (n_lights) { glUniform4fv(loc(mp.id, "u_lp"), n_lights, lp4); glUniform4fv(loc(mp.id, "u_lc"), n_lights, lc4); glUniform4fv(loc(mp.id, "u_lvp"), n_lights, lv4); }
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
-        glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() ? 1 : 0);
-        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), g_light_first); glUniform1i(loc(mp.id, "u_mark1"), g_light_end);   // (the Vulkan GL layer has no glUniform2i)
+        static const bool mark_all = std::getenv("PSPRECOMP_FX_LIGHT_MARK") != nullptr;   // debug: markers on every light (EX cores, effects too)
+        glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() || mark_all ? 1 : 0);
+        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), mark_all ? 0 : g_light_first); glUniform1i(loc(mp.id, "u_mark1"), mark_all ? 64 : g_light_end);   // (the Vulkan GL layer has no glUniform2i)
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ts_mark(2);

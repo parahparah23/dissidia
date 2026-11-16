@@ -2987,9 +2987,29 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         d.score = score;
         for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
         d.l[6] = std::min(40.f, std::max(4.f, 4.f + 3.f * size)) * k_rad;                       // reach grows with the effect's size
-        d.l[7] = std::min(3.f, mx * (0.8f + 0.6f * std::min(size, 3.f))) * k_int;               // brightness: the effect's own x a little for size
+        // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
+        d.l[7] = (1.2f + 0.4f * std::min(size, 3.f)) * std::min(1.f, std::max(0.3f, mx * 3.f)) * k_int;
         d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
         cand.push_back(d);
+    }
+    // A glow that stays in one place for seconds is part of the stage (a torch, a crystal, the EX core's own halo), not an attack: those are
+    // left to the hand-placed stage lights. Tracks: where a glow was, since when, last seen.
+    {
+        struct Track { float p[3]; double first, last; };
+        static std::vector<Track> tracks[GE_MAX_TARGETS];
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::vector<Track>& tr = tracks[cur];
+        tr.erase(std::remove_if(tr.begin(), tr.end(), [&](const Track& t) { return now - t.last > 0.5; }), tr.end());
+        static const double k_static = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STATIC_S"); return e ? std::atof(e) : 3.0; }();
+        std::vector<Cand> keep;
+        for (const Cand& d : cand) {
+            Track* t = nullptr;
+            for (Track& x : tr) { const float dx = x.p[0] - d.l[0], dy = x.p[1] - d.l[1], dz = x.p[2] - d.l[2]; if (dx * dx + dy * dy + dz * dz < 1.5f * 1.5f) { t = &x; break; } }
+            if (!t) { tr.push_back({{d.l[0], d.l[1], d.l[2]}, now, now}); keep.push_back(d); continue; }
+            t->last = now;
+            if (now - t->first < k_static) keep.push_back(d);
+        }
+        cand.swap(keep);
     }
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
     int n = 0;
@@ -3064,9 +3084,9 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && ((psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) || (psp_rt_active() && fx_lights_on() && fx_additive(st)))) {
+        else if (st.depth_test_enable && st.alpha_blend_enable && ((psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) || (psp_rt_active() && fx_lights_on() && fx_additive(st) && st.vertex_type != 0x11au))) {
             const bool refl_fx = psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled();
-            const bool light_fx = psp_rt_active() && fx_lights_on() && fx_additive(st);
+            const bool light_fx = psp_rt_active() && fx_lights_on() && fx_additive(st) && st.vertex_type != 0x11au;   // 0x11a: the stage's own glow layers (stage lights cover those)
             const size_t c0 = g_rt_fx_cols[cur].size();
             // Effects drawn with their own view matrix (some with an identity view: the world matrix then holds view-space positions) are
             // re-expressed in the main view's world, as the opaque draws are. Most effects come after the 3D run, when this scene's vote is
@@ -3075,7 +3095,20 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             rt_capture(st, rdram, prim_type, count, cur, true);
             const float* mv = g_fx_vote[cur].n > 0 ? g_fx_vote[cur].view : g_rt_main_view_ok[cur] ? g_rt_main_view[cur] : nullptr;
             if (mv && !g_rt_nofix && g_rt_fx_tris[cur].size() > t0) rt_fix_view(g_rt_fx_tris[cur], t0, st.view_matrix, mv);
-            if (light_fx && g_rt_fx_tris[cur].size() > t0) fx_blob_note(cur, t0, c0);
+            if (light_fx && g_rt_fx_tris[cur].size() > t0) {
+                fx_blob_note(cur, t0, c0);
+                static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+                if (dbg && !g_fx_blobs[cur].empty()) {   // which vertex formats / matrices the effects come with (blobs at the origin = a transform not applied)
+                    const FxBlob& b = g_fx_blobs[cur].back();
+                    static std::map<uint32_t, int> seen;
+                    const bool origin = std::fabs(0.5f * (b.lo[0] + b.hi[0])) < 0.3f && std::fabs(0.5f * (b.lo[2] + b.hi[2])) < 0.3f;
+                    if (seen[st.vertex_type * 2u + (origin ? 1u : 0u)]++ < 2)
+                        { float pp[3] = {0, 0, 0}; psp_player_pos(pp); std::fprintf(stderr, "[FXLIGHT] player %.1f %.1f %.1f\n", pp[0], pp[1], pp[2]); }
+                        std::fprintf(stderr, "[FXLIGHT] draw vt %08x prim %d n %d centre %.1f %.1f %.1f %s world t %.1f %.1f %.1f view t %.1f %.1f %.1f bone0 t %.1f %.1f %.1f\n", (unsigned)st.vertex_type, prim_type, count,
+                                     0.5f * (b.lo[0] + b.hi[0]), 0.5f * (b.lo[1] + b.hi[1]), 0.5f * (b.lo[2] + b.hi[2]), origin ? "ORIGIN" : "", st.world_matrix[9], st.world_matrix[10], st.world_matrix[11],
+                                     st.view_matrix[9], st.view_matrix[10], st.view_matrix[11], st.bone_matrix[9], st.bone_matrix[10], st.bone_matrix[11]);
+                }
+            }
             if (!refl_fx) { g_rt_fx_tris[cur].resize(t0); g_rt_fx_cols[cur].resize(c0); }   // only wanted for the light
         }   // the effects layer is only traced from Medium up
         return;
