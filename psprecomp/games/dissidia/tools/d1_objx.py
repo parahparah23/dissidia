@@ -16,7 +16,7 @@ read the result like any 012 moveset:
                    0xFF/0x00), and 012 added the hit-stop / shake bytes (+0x14) that D1 does not have. Those are
                    filled the way 012 fills the same kind of hit (HP hits 0a 14 4b 4b, launchers / finishers
                    00 0a 0f 0f, others 0). kb_bone (+0x2C) is 0xFFFF for the stagger / knock reactions, as in 012.
-  magi (projectiles) D1 stores each of the 46 parameters as three floats (lo, hi, step) in a 616-byte record;
+  magi (projectiles) origin / target modes renumbered (ORIGIN_MAP, TARGET_MAP). D1 stores each of the 46 parameters as three floats (lo, hi, step) in a 616-byte record;
                    012 stores byte indices into a float pool (204-byte records). The first 0x40 bytes are the same.
 
 Everything else (timelines, motion map, hit volumes, effects, sounds, text) has the same layout and is copied.
@@ -102,6 +102,13 @@ def atkp(d):
     return bytes(out)
 
 
+# 012 added spawn-origin and target modes, so D1's numbers moved. Learnt from the 790 projectile records both games share
+# (same id and hit, every character): D1 origin 5 (at an effect placement, arg = its id; Paladin Force's light) is 012's
+# 6, 4 (the emitter) is 5, 2 / 3 are 11 / 12, 7 is 8, 8 is 12; target 2 is 3. Direction, motion, kind and flags are unchanged.
+ORIGIN_MAP = {0: 0, 1: 1, 2: 11, 3: 12, 4: 5, 5: 6, 6: 7, 7: 8, 8: 12}
+TARGET_MAP = {0: 0, 1: 1, 2: 3}
+
+
 def magi_conv(d, only=None):
     tag, ver, n, nf = struct.unpack_from('<4sIII', d, 0)
     if tag != b'MAGI' or nf != 0 or len(d) != 16 + n * D1_MAGI:
@@ -113,6 +120,8 @@ def magi_conv(d, only=None):
         if only is not None and rid not in only:
             continue
         rec = magi.Record(bytes(r[:0x40]) + bytes(magi.REC_SIZE - 0x40))
+        rec.origin = ORIGIN_MAP.get(rec.origin, rec.origin)
+        rec.target = TARGET_MAP.get(rec.target, rec.target)
         vals = struct.unpack_from('<138f', r, 0x40)
         for p in range(magi.NPARAM):
             lo, hi, st = vals[3 * p: 3 * p + 3]

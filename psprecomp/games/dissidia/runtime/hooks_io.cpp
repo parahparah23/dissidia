@@ -13,6 +13,7 @@
 // redirect needs no knowledge of the engine's data structures.
 
 #include "package_mods.h"
+#include "voice_merge.h"
 #include "psp_quit.h"
 #include "psp_platform.h"
 #include "psp_settings.h"
@@ -30,6 +31,7 @@
 #include <utility>
 #include <vector>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -289,7 +291,37 @@ void ensure_built(const std::string& host_info_path) {
     std::ifstream f(host_info_path, std::ios::binary);
     std::vector<uint8_t> orig((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     std::string log, err;
-    if (!g_mods.build(orig, (uint64_t)pst.st_size, dir, &log, &err, g_index_capacity, extra)) {
+    // Japanese voices + a mod that changes a battle voice bank: the Japanese bank with the mod's added clips, served
+    // ahead of both (voice_merge.h); without this the mod's English-based bank would win over voice_jp/
+    std::string first = dir;
+    std::vector<std::string> rest = extra;
+    if (voice_jp_on() && !extra.empty() && is_dir(dir + "/voice")) {
+        namespace fs = std::filesystem;
+        const std::string merged = dir + "/.voice_jp_merged";
+        int banks = 0;
+        std::error_code ec;
+        for (auto it = fs::recursive_directory_iterator(dir + "/voice", ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().extension() != ".scd") continue;
+            const std::string rel = fs::relative(it->path(), dir, ec).generic_string();
+            std::vector<uint8_t> mod, jp, out;
+            int added = 0;
+            auto rd = [](const std::string& p, std::vector<uint8_t>* b) {
+                std::ifstream in(p, std::ios::binary);
+                if (!in) return false;
+                b->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                return true;
+            };
+            if (!rd(extra[0] + "/" + rel, &jp) || !rd(it->path().string(), &mod)) continue;
+            if (!dissidia::merge_voice_bank(jp, mod, &out, &added)) continue;
+            fs::create_directories(fs::path(merged + "/" + rel).parent_path(), ec);
+            std::ofstream o(merged + "/" + rel, std::ios::binary | std::ios::trunc);
+            o.write(reinterpret_cast<const char*>(out.data()), (std::streamsize)out.size());
+            banks++;
+            std::fprintf(stderr, "[VOICE] %s: Japanese bank + %d clip(s) the mod adds (no Japanese recording of them)\n", rel.c_str(), added);
+        }
+        if (banks) { first = merged; rest.insert(rest.begin(), dir); }
+    }
+    if (!g_mods.build(orig, (uint64_t)pst.st_size, first, &log, &err, g_index_capacity, rest)) {
         std::fprintf(stderr, "[MODS] cannot parse %s: %s (overrides off)\n", host_info_path.c_str(), err.c_str());
         return;
     }
@@ -392,6 +424,9 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
 
 std::string dissidia_mods_dir() { return mods_dir(); }
 std::vector<std::string> dissidia_mod_roots() { return mod_roots(); }
+// the Japanese voice pack folder when Japanese voices are on and the pack exists, else "" (net_packs.cpp merges a
+// received voice bank into it, as ensure_built does for installed ones)
+std::string dissidia_voice_jp_dir() { const std::string vd = work_parent() + "/voice_jp"; return voice_jp_on() && is_dir(vd) ? vd : std::string(); }
 // net_packs.cpp, at registration (before the game opens PACKAGE.BIN): packs may arrive online, so PACKAGE.BIN reads go
 // through the override layer even when no mod is installed (it serves nothing until a pack is added).
 void dissidia_mods_net_possible() { g_net_possible = true; }

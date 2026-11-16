@@ -23,6 +23,7 @@
 #include "hle/psp_hle_adhoc.h"
 #include "package_mods.h"
 #include "net_delta.h"
+#include "voice_merge.h"
 #include "recomp.h"
 
 #include <zlib.h>
@@ -48,6 +49,7 @@
 namespace psp_cloud { std::string sha256_hex(const std::vector<uint8_t>& data); }
 std::string dissidia_mods_dir();
 std::string dissidia_package_dir();
+std::string dissidia_voice_jp_dir();
 void dissidia_mods_net_possible();
 bool dissidia_mods_add_override(uint8_t* rdram, const std::string& asset, const std::string& file, uint32_t size);
 int dissidia_retail_moves_state(const std::string& folder);
@@ -451,7 +453,22 @@ void on_pump(uint8_t* rdram) {
         for (size_t f = 0; f < p.files.size() && ok; f++) {
             int src;
             { std::lock_guard<std::mutex> lk(g_mu); src = g_file_ok[file_slot(i, (int)f)]; }
-            if (src == 2) ok = dissidia_mods_add_override(rdram, p.files[f].path, cache_path(p.files[f]), p.files[f].size);
+            if (src == 2) {
+                std::string file = cache_path(p.files[f]);
+                uint32_t size = p.files[f].size;
+                const std::string jp = dissidia_voice_jp_dir();
+                std::vector<uint8_t> jb, mb, out;
+                int added = 0;
+                if (!jp.empty() && std::strncmp(p.files[f].path, "voice/", 6) == 0 &&   // Japanese voices: their bank + the pack's added clips
+                    read_file(jp + "/" + p.files[f].path, &jb, 64u << 20) && read_file(file, &mb, 64u << 20) &&
+                    dissidia::merge_voice_bank(jb, mb, &out, &added)) {
+                    const std::string mf = file + ".jp";
+                    std::ofstream o(mf, std::ios::binary | std::ios::trunc);
+                    o.write(reinterpret_cast<const char*>(out.data()), (std::streamsize)out.size());
+                    if (o) { file = mf; size = (uint32_t)out.size(); }
+                }
+                ok = dissidia_mods_add_override(rdram, p.files[f].path, file, size);
+            }
             // src 1: this player's own install of the pack, served since boot
         }
         for (const NetAbil& a : p.abilities)
