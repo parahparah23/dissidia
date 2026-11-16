@@ -646,8 +646,16 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
                         if (!ok(st)) continue;
                         uint8_t* p = g_ram + (st & 0x07FFFFFFu);
                         if (!have_stats) std::memcpy(first[w], p, sizeof first[w]); else std::memcpy(p, first[w], sizeof first[w]);
+                        // +0x14 holds <initial bravery u16 hi><current u16 lo>; the first home's snapshot catches whatever the current bravery was then
+                        // (0 right after a break in one run, the initial in another: a steady HP damage offset over a whole run). Every trial starts
+                        // with the initial bravery.
+                        const uint32_t bv = r32(st + 0x14u);
+                        w32(st + 0x14u, (bv & 0xFFFF0000u) | (bv >> 16));
                     }
                     have_stats = true;
+                    if (const uint32_t st = r32(me + 0x52Cu); ok(st))   // what every trial starts with (bravery = +0x14)
+                        std::fprintf(stderr, "[TEST] gt=%.0f home status me %d %d %d %d %d %d %d %d\n", g_gt_ms, (int)r32(st), (int)r32(st + 4u), (int)r32(st + 8u),
+                                     (int)r32(st + 0xCu), (int)r32(st + 0x10u), (int)r32(st + 0x14u), (int)r32(st + 0x18u), (int)r32(st + 0x1Cu));
                     // face each other (FUN_08835BA4(actor, &dir): yaw from the direction's x / z)
                     static FuncPtr turn = psp_dispatch_probe_lookup(0x08835BA4u);
                     if (!g_par_scratch) g_par_scratch = psp_kmem_bump_alloc_named(16, "TEST_FACE_VEC");
@@ -1126,6 +1134,18 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         g_prev_scr[i] = scr;
     }
     if (l30_active() && ok(timer)) {   // 30 Hz logic: the next frame is a gameplay frame (step 2) or a drawn-only one (step 0)
+        // The game's random sequences (the rand() LCG word 0x09AF84D0 and the effect LCG 0x09AFB89C) are shared by gameplay and effects; a
+        // drawn-only frame that drew from them would shift what gameplay draws next (HP damage, projectile spreads) away from 30 fps.
+        // They are put back after every drawn-only frame. PSPRECOMP_L30_RNG=0 leaves them alone (A/B).
+        static const bool rng_keep = [] { const char* e = std::getenv("PSPRECOMP_L30_RNG"); return !(e && e[0] == '0'); }();
+        static uint32_t rng_saved[2] = {}; static bool rng_have = false; static uint64_t rng_moved = 0, rng_frames = 0;
+        constexpr uint32_t RNG_WORDS[2] = {0x09AF84D0u, 0x09AFB89Cu};
+        if (rng_keep && rng_have && !g_l30_logic_now) {   // the frame that just ended was drawn-only
+            rng_frames++;
+            for (int i = 0; i < 2; i++) if (r32(RNG_WORDS[i]) != rng_saved[i]) { rng_moved++; w32(RNG_WORDS[i], rng_saved[i]); }
+            if (rng_frames % 3600 == 0) std::fprintf(stderr, "[FPS] 30 Hz logic: random sequence drawn from in %llu of %llu drawn-only frames (put back)\n",
+                                                     (unsigned long long)rng_moved, (unsigned long long)rng_frames);
+        }
         g_l30_frame++;
         const uint64_t n = static_cast<uint64_t>(g_rate / 30);
         g_l30_logic_now = g_l30_frame % n == 0;
@@ -1134,6 +1154,7 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         static uint32_t gen = 0;
         if (g_l30_logic_now) gen++;
         ge_interp_set_frame(gen, static_cast<float>(g_l30_frame % n) / static_cast<float>(n));
+        if (rng_keep && !g_l30_logic_now) { for (int i = 0; i < 2; i++) rng_saved[i] = r32(RNG_WORDS[i]); rng_have = true; }   // the coming frame is drawn-only
     } else if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
     if (!l30_active()) ge_interp_set_frame(0, -1.0f);
 
