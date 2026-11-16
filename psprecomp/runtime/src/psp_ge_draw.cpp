@@ -3015,7 +3015,7 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         std::vector<Track>& tr = tracks[cur];
         tr.erase(std::remove_if(tr.begin(), tr.end(), [&](const Track& t) { return now - t.last > 0.5; }), tr.end());
-        static const double k_static = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STATIC_S"); return e ? std::atof(e) : 3.0; }();
+        static const double k_static = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STATIC_S"); return e ? std::atof(e) : 8.0; }();   // longer than any attack (Hell's Judgment ran past 3 s)
         std::vector<Cand> keep;
         for (const Cand& d : cand) {
             Track* t = nullptr;
@@ -3113,16 +3113,17 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             // the same glow drawn every frame for seconds (the lock-on reticle, a stage glow) is not an attack: keyed by texture, format, size
             bool steady = false;
             if (light_fx) {
-                struct Seen { double first, last; };
+                struct Seen { double first, last; bool latched; };   // latched: drawn for k_steady seconds in a row once; stays out (the reticle comes and goes)
                 static std::unordered_map<uint64_t, Seen> seen;
                 const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
                 const uint64_t key = (uint64_t(st.tex_addr[0]) << 32) ^ (uint64_t(st.vertex_type) << 12) ^ uint64_t(count) ^ (uint64_t(prim_type) << 28);
                 Seen& sn = seen[key];
                 if (sn.last == 0 || now - sn.last > 0.3) sn.first = now;
                 sn.last = now;
-                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 2.5; }();
-                steady = now - sn.first > k_steady;
-                if (seen.size() > 4096) seen.clear();
+                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 8.0; }();   // longer than any attack
+                if (now - sn.first > k_steady) sn.latched = true;
+                steady = sn.latched;
+                if (seen.size() > 4096) { std::unordered_map<uint64_t, Seen> keep; for (const auto& kv : seen) if (kv.second.latched) keep.insert(kv); seen.swap(keep); }
             }
             if (light_fx && !steady && g_rt_fx_tris[cur].size() > t0) {
                 fx_blob_note(cur, t0, c0);
