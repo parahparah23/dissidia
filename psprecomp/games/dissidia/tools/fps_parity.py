@@ -198,6 +198,9 @@ def run_one(a, cid, rate, out, tag=None):
                     pass
                 last_ff = time.time()
             if not wrote:
+                with open(log, errors='replace') as f:
+                    if 'action -1 on 00000000' in f.read():  # the character under test is not in the fight (the swap did not take): nothing to wait for
+                        raise RuntimeError('charId %d is not in the fight (character swap failed)' % cid)
                 acts, want = read_listing(log)                 # from the file: the harness's stream reader may have passed the lines already
                 if want is not None and len(acts) >= want:
                     only = set(int(x) for x in a.actions.split(',')) if a.actions else None

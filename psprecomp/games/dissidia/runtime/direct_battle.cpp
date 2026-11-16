@@ -21,7 +21,7 @@
 //                                     (save records: *(0x089D712C) + 0xF58 + 0x778 x the charId's index in the 31-entry id list at 0x089CBC98)
 //                                     and its team charId; the CPU side's generated record only gets the charId. What the loading
 //                                     screen (FUN_0888C4C8) loads is the record's +0xF3A halfword: the object table id of the fighter's
-//                                     model entry (P_<code>_1P: byte 6 charId, byte 7 costume 1, byte 8 type 0; table *(0x089D4968));
+//                                     model entry (P_<code>_1P: byte 6 charId, byte 7 costume 1, byte 8 type 0 (Prishe: 16); table *(0x089D4968));
 //                                     it is set to <to>'s entry on every poll. The assist (+0xF3E) stays as the menu picked it.
 // All are off by default; with none set the filter returns the pad state unchanged.
 #include "psp_game_module.h"
@@ -76,7 +76,7 @@ int model_id(int charId) {   // object table id of a character's first-costume p
     const uint32_t n = g_w32(h + 4u);
     for (uint32_t i = 0; i < n && i < 4000u; i++) {
         const uint8_t* r = g_at(h + 8u + 0x44u * i);
-        if (r[6] != charId || r[7] != 1 || r[8] != 0) continue;
+        if (r[6] != charId || r[7] != 1 || r[8] == 5 || r[8] == 8 || r[8] == 13) continue;   // costume 1, not an assist (8 / 13) or manikin (5): Prishe's is type 16
         const char* name = reinterpret_cast<const char*>(r + 36);
         const size_t len = strnlen(name, 16);
         if (len < 4 || std::strncmp(name, "P_", 2) != 0 || std::strncmp(name + len - 3, "_1P", 3) != 0) continue;
