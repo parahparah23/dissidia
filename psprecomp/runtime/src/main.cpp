@@ -19,6 +19,7 @@
 #include "psp_debug_socket.h"
 #include "psp_game_module.h"
 #include "psp_settings.h"
+#include "psp_discord.h"
 #include "hle/psp_cloud_boot.h"
 #include "psp_vfpu.h"  // vfpu_init_context — VFPU prefix reset default
 
@@ -485,6 +486,7 @@ int main(int argc, char* argv[]) {
     ge_texture_shutdown();
     ge_shutdown();
     psp_cloud_glue_shutdown();   // lets a running upload finish
+    psp_discord::stop();         // takes the Discord activity down
     psp_runtime_shutdown();
 
     // Game threads that did not stop within the scheduler's 2 s join (blocked in a wait that never sees the exit flag: ffst_thread, the

@@ -1567,6 +1567,15 @@ bool psp_adhoc_in_session() {
     return false;
 }
 
+int psp_adhoc_group_size() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return 0;
+    int n = 1;
+    for (auto& [m, p] : g_peers)
+        if (p.in_group && !std::strncmp(p.group, g_group, 8)) n++;
+    return n;
+}
+
 void psp_adhoc_pump(uint8_t* rdram, recomp_context* ctx) {
     if (!g_net_ready) return;
     if (g_pumping.exchange(true)) return;

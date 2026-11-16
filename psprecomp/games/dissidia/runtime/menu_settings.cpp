@@ -38,6 +38,9 @@ std::string dissidia_package_dir();   // hooks_io.cpp
 std::string dissidia_mods_dir();
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
+void dissidia_presence_title();            // discord_presence.cpp: where the player is
+void dissidia_presence_main(uint32_t state);
+void dissidia_presence_sub(uint32_t state);
 
 namespace {
 
@@ -294,6 +297,7 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     g_main_state = state;
     g_main_seen_frames = 0;
+    dissidia_presence_main(state);
     if (state && r32(cur + 4) == 7 && r32(cur + 36) == 7 && !psp_settings_menu_open() && confirm_pressed(rdram, ctx)) {
         call(g_play_se, rdram, ctx, {2});
         std::fprintf(stderr, "[MENUSET] Settings chosen in the start menu\n");
@@ -312,6 +316,18 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         if (std::isfinite(ox) && std::isfinite(oy) && ox > 100.f && ox < 400.f && oy > 0.f && oy < 260.f)
             draw_settings_row(ox + float(kRowX[7] - kRowX[6]), oy + float(kRowPitch), r32(st + 0xA28 + 4) == 7, 1.f);
     }
+}
+
+
+// The start menu's sub-lists (group at state + 0xA88: 1 Battle Mode, 2 Communications Mode; cursor helper at state + 0xA58, +4 index)
+// are updated by ovl_menu FUN_089E4A60; the row the cursor is on is reported for Discord (discord_presence.cpp).
+constexpr uint32_t SUB_TICK = 0x089E4A60u;
+FuncPtr g_orig_sub_tick = nullptr;
+void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(SUB_TICK)) f(rdram, ctx); return; }
+    const uint32_t menu = static_cast<uint32_t>(ctx->r[4]);
+    dissidia_presence_sub(r32(menu + 320));
+    g_orig_sub_tick(rdram, ctx);
 }
 
 
@@ -435,6 +451,7 @@ void draw_title_row(float nx, float ny, float srcx, float srcy) {
 
 void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(TITLE_TICK)) f(rdram, ctx); return; }
+    dissidia_presence_title();
     const uint32_t title = static_cast<uint32_t>(ctx->r[4]);
     const uint32_t st = r32(title + 476);
     const bool menu_up = st && r32(st + 12) == 0 && r32(st + 0x3FAA8) == 3 && r32(st + 64) != 0;
@@ -533,6 +550,8 @@ void dissidia_menu_settings_install(uint8_t* rdram) {
     if (g_orig_main_tick && g_pad_obj && g_play_se) {
         dissidia_add_asset_patch(kStartSeq, edit_start_seq);
         psp_dispatch_register(MAIN_TICK, main_tick_hook);
+        g_orig_sub_tick = ovl_menu_lookup(SUB_TICK);
+        if (g_orig_sub_tick) psp_dispatch_register(SUB_TICK, sub_tick_hook);
     } else {
         std::fprintf(stderr, "[MENUSET] start menu hooks not installed (a function is missing)\n");
     }

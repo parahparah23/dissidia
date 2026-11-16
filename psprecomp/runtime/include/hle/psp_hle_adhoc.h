@@ -37,6 +37,8 @@ int psp_adhoc_group_fps_cap();
 /// True while this instance is in an ad-hoc group with at least one other player.
 bool psp_adhoc_in_session();
 bool psp_adhoc_connected();
+/// Players in this instance's ad-hoc group, itself included; 0 when not in a group (the Discord party size).
+int psp_adhoc_group_size();
 
 /// Change the network setup at run time (the settings menu). `internet` selects relay-server mode;
 /// `server`/`room` apply to it, `peers` (comma separated) to LAN mode. Takes effect within a few

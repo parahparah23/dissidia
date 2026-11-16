@@ -258,6 +258,7 @@ set(RUNTIME_SOURCES
     src/psp_screenfx.cpp
     src/psp_refl_table.cpp
     src/psp_debug_socket.cpp
+    src/psp_discord.cpp      # Discord Rich Presence (local IPC; no-op on Android)
     src/psp_gl_stats.cpp
     src/psp_gpu_driver.cpp   # custom Vulkan drivers (Android/Adreno); the list + zip parts build everywhere
     ${PSP_VKGL_SOURCES}
@@ -472,6 +473,10 @@ add_test(NAME tex_pack_ppsspp COMMAND test_tex_pack_ppsspp)
 add_executable(test_refl_table tests/test_refl_table.cpp src/psp_refl_table.cpp)
 target_include_directories(test_refl_table PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME refl_table COMMAND test_refl_table)
+add_executable(test_discord tests/test_discord.cpp src/psp_discord.cpp)
+target_include_directories(test_discord PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_discord PRIVATE $<$<NOT:$<PLATFORM_ID:Windows>>:pthread>)
+add_test(NAME discord COMMAND test_discord)
 add_executable(test_savedata_dialog tests/test_savedata_dialog.cpp src/hle/psp_savedata_dialog.cpp ${PSP_UI_FONTS_CPP})
 target_include_directories(test_savedata_dialog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(test_savedata_dialog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

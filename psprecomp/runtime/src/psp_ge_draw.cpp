@@ -4727,7 +4727,7 @@ static int perf_rss_mb() {
 #ifndef PSPRECOMP_RELEASE_VERSION
 #define PSPRECOMP_RELEASE_VERSION "dev"
 #endif
-static std::string psp_release_version() { return PSPRECOMP_RELEASE_VERSION; }
+std::string psp_release_version() { return PSPRECOMP_RELEASE_VERSION; }   // also read by games/dissidia/runtime/discord_presence.cpp
 
 // ---- system information for the performance overlay (Linux; elsewhere the fields read "n/a") ----
 struct SysInfo {

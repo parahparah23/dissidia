@@ -32,6 +32,9 @@ Changes marked **Next start** ask "Restart now / Later" when the menu is closed.
 The **Mods** category lists mod folders with a `mod.json` (the repo's `mods/`, `PSPRECOMP_MODS_SRC`, and the game's mods folder) and extra
 characters from the mods folder's `roster.txt`. A switch writes `"enabled"` into `mod.json`, or puts `#off# ` in front of the roster line.
 
+The **Network** category also has a **Discord** section (not on Android): **Discord Status** On / Off (applies at once, saved) and a
+connection line; see [discord.md](discord.md).
+
 The screen is drawn by up to 8 threads in horizontal bands (`PSPRECOMP_SETTINGS_THREADS=N` to change, 1 = one thread);
 `PSPRECOMP_SETTINGS_PROFILE=1` logs the drawing time per part.
 

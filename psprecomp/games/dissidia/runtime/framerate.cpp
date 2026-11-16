@@ -2000,6 +2000,30 @@ uint32_t dissidia_player_actor() {
     return last && ok(last) && g_ram[(last + 0x542u) & 0x07FFFFFFu] == 0 ? last : 0u;
 }
 
+// The fighters on stage now (updated within the last 2 s), for discord_presence.cpp: fills up to `max` actors, returns the count.
+// Safe to call from another thread (it only reads words that the game thread writes whole).
+int dissidia_live_fighters(uint32_t* out, int max) {
+    int n = 0;
+    if (overlay_id() != 1) return 0;
+    for (int i = 0; i < 4 && n < max; i++) {
+        const uint32_t a = g_fighters[i];
+        if (!a || !ok(a) || g_tick - g_fighter_seen[i] > 120 || g_ram[(a + 0x542u) & 0x07FFFFFFu] != 0) continue;
+        out[n++] = a;
+    }
+    return n;
+}
+// charId of a fighter (-99 = unknown) and the object-table type of its model (actor +0x2F8 -> its object record: +6 charId,
+// +8 type: 0 player, 5 manikin), and whether a person drives it (brain +0x54 != 0, as dissidia_player_actor).
+int dissidia_fighter_char_id(uint32_t a) { return ok(a) ? fighter_char(a) : -99; }
+int dissidia_fighter_model_type(uint32_t a) {
+    const uint32_t info = ok(a) ? r32(a + 0x2F8u) : 0u;
+    return ok(info) ? g_ram[(info + 8u) & 0x07FFFFFFu] : -1;
+}
+bool dissidia_fighter_human(uint32_t a) {
+    const uint32_t brain = ok(a) ? r32(a + 0x5C4u) : 0u;
+    return ok(brain) && r32(brain + 0x54u) != 0;
+}
+
 // Ticks (1/60 s) one game frame advances: 2 at 30 Hz, 1 at 60 Hz, 2/3 at 90 Hz, 0.5 at 120 Hz.
 float dissidia_frame_ticks() { return g_ticks; }
 // Factor for a value the game keeps as "ticks per 30 Hz frame" (the actor own clock): 1 at 30 Hz, 0.5 at 60 Hz.
