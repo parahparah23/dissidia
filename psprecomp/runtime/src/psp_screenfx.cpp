@@ -65,7 +65,7 @@ static float stage_dark() {
 //   light <x> <y> <z> <r> <g> <b> <radius> <intensity>
 // In game: F6 drops a light at the camera + forward * distance (PageUp / PageDown change the distance), F7 removes the stage's last light.
 struct StageLight { float p[3], c[3], radius, intensity; float clear = 0.f; };   // clear: the shadow ray stops this far short of the light (a pickup must not shadow itself)
-static const int kMaxLights = 16;
+static const int kMaxLights = 24;
 static std::map<int, std::vector<StageLight>> g_light_file;   // from the file (overrides the built-in table of a stage)
 static std::atomic<int> g_light_req{0};                       // 1 drop, 2 remove the selected light (set by the event loop)
 static std::atomic<int> g_light_dist10{80};                   // placement distance x10
@@ -73,6 +73,7 @@ static std::atomic<bool> g_light_edit{std::getenv("PSPRECOMP_LIGHT_EDIT") != nul
 static std::atomic<unsigned> g_light_keys{0};                 // held keys, bit = PSP_LIGHT_LEFT..INT_UP, FAST
 static std::atomic<int> g_light_nav{0};                       // pending select prev (-1) / next (+1)
 static int g_light_sel = 0;
+static int g_light_first = 0, g_light_end = 0;   // this frame: the stage's own lights are [first, end) of the lights sent to the shader
 static bool g_light_dirty = false;
 static double g_light_last_change = 0;
 static long g_light_mtime = -1;
@@ -875,11 +876,12 @@ uniform int u_refl_split;   // debug (PSPRECOMP_RT_REFL_SPLIT=1): the left half 
 uniform float u_rt_refl_len; // reflection ray length, world units
 uniform vec3 u_rt_sky;      // what a reflection ray that hits nothing shows when the sky is off screen
 uniform int u_n_lights;     // stage point lights (world space xyz + radius; colour x intensity)
-uniform vec4 u_lp[16];
-uniform vec4 u_lc[16];
-uniform vec4 u_lvp[16];     // the same lights in view space (markers)
+uniform vec4 u_lp[24];
+uniform vec4 u_lc[24];
+uniform vec4 u_lvp[24];     // the same lights in view space (markers)
 uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
+uniform ivec2 u_mark;       // markers for lights [x, y) (the stage's own, not EX cores / effects)
 //@SKY_DECL
 uniform int u_env_on;
 // The sky seen in world direction d. A direction never on screen yet (overhead, behind the camera) falls back to the same
@@ -1037,7 +1039,7 @@ const char* const k_rt_mark = R"GLSL(
         vec4 q = u_inv * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
         vec3 dir = normalize(q.xyz / q.w);
         float surf = is_far(wd) ? 1e9 : length(vpos(v_uv, wd));
-        for (int li = 0; li < u_n_lights; ++li) {
+        for (int li = u_mark.x; li < min(u_mark.y, u_n_lights); ++li) {
             vec3 Lv = u_lvp[li].xyz;
             float t = dot(Lv, dir);
             if (t <= 0.0) continue;
@@ -1454,7 +1456,13 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
             float P[4][3]; const int n = g_pickup_fn(P, 4);
             for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4], env_float("PSPRECOMP_PICKUP_CLEAR", 2.5f)});
         }
+        g_light_first = (int)all.size();   // the editor's markers / selection start at the stage's own lights
         for (const StageLight& l : stage_lights(sid)) all.push_back(l);
+        g_light_end = (int)all.size();
+        for (int i = 0; i < sc.n_fx_lights; ++i) {   // glowing effects (attacks) fill the slots left: their colour, reach / brightness from their size
+            const float* f = sc.fx_lights[i];
+            all.push_back({{f[0], f[1], f[2]}, {f[3], f[4], f[5]}, f[6], f[7], f[8]});
+        }
         for (const StageLight& l : all) {
             if (n_lights >= kMaxLights) break;
             for (int k = 0; k < 3; ++k) { lp4[n_lights * 4 + k] = l.p[k]; lc4[n_lights * 4 + k] = l.c[k] * l.intensity; }
@@ -1681,7 +1689,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         if (n_lights) { glUniform4fv(loc(mp.id, "u_lp"), n_lights, lp4); glUniform4fv(loc(mp.id, "u_lc"), n_lights, lc4); glUniform4fv(loc(mp.id, "u_lvp"), n_lights, lv4); }
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
         glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() ? 1 : 0);
-        glUniform1i(loc(mp.id, "u_sel"), g_light_sel);
+        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform2i(loc(mp.id, "u_mark"), g_light_first, g_light_end);
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ts_mark(2);

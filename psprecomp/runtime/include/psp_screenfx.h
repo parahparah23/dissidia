@@ -50,6 +50,8 @@ struct ScreenFxScene {
     bool refl_table = false;   // psp_refl_table.h is active: only surfaces in the reflectivity mask reflect (none without triangles)
     const float* refl_tris = nullptr;   // the reflective draws' triangles (psp_ge_draw.cpp g_rml_tris): per vertex clip x y z w + material byte
     int refl_nverts = 0;
+    int n_fx_lights = 0;       // lights from glowing effects (psp_ge_draw.cpp fx_blob_lights): x y z, r g b, radius, intensity, clear
+    float fx_lights[8][9];
 };
 
 /// Apply the effects to the colour of `fbo` (w x h texels, colour texture `color_tex`, depth renderbuffer attached).

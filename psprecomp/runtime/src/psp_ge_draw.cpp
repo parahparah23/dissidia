@@ -2923,6 +2923,80 @@ static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int co
     }
 }
 
+// Effect lights (issue #4): glowing (additive) effect draws light the scene. Each such draw is summarised as a blob (world bbox,
+// area-weighted colour x coverage); at the end of the scene nearby blobs are merged and the brightest become point lights whose colour is
+// the effect's and whose reach / brightness follow its size (psp_screenfx.cpp adds them next to the stage lights). PSPRECOMP_FX_LIGHTS=0 turns them off.
+struct FxBlob { float lo[3], hi[3], rgb[3], area; };
+static std::vector<FxBlob> g_fx_blobs[GE_MAX_TARGETS];
+static bool fx_lights_on() { static const bool on = !(std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0'); return on; }
+static bool fx_additive(const GeState& st) {   // src x As (or 1) + dst x FIX with a bright FIX: the GE's additive glow
+    const int dst = (st.blend_mode >> 4) & 0xF, op = (st.blend_mode >> 8) & 0x7;
+    if (op != 0 || dst != 10) return false;
+    const uint32_t fb = st.blend_fix_b & 0xFFFFFFu;
+    return (fb & 0xFF) >= 0x80 && ((fb >> 8) & 0xFF) >= 0x80 && ((fb >> 16) & 0xFF) >= 0x80;
+}
+static void fx_blob_note(int cur, size_t t0, size_t c0) {
+    const std::vector<float>& T = g_rt_fx_tris[cur]; const std::vector<uint32_t>& C = g_rt_fx_cols[cur];
+    FxBlob b = {{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}, {0, 0, 0}, 0};
+    for (size_t k = t0, ci = c0; k + 9 <= T.size() && ci < C.size(); k += 9, ++ci) {
+        const float* v = &T[k];
+        for (int q = 0; q < 3; ++q) for (int a = 0; a < 3; ++a) { b.lo[a] = std::min(b.lo[a], v[q * 3 + a]); b.hi[a] = std::max(b.hi[a], v[q * 3 + a]); }
+        const float e1[3] = {v[3] - v[0], v[4] - v[1], v[5] - v[2]}, e2[3] = {v[6] - v[0], v[7] - v[1], v[8] - v[2]};
+        const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+        const float ar = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+        const uint32_t c = C[ci]; const float al = float(c >> 24) / 255.f;
+        for (int a = 0; a < 3; ++a) b.rgb[a] += float((c >> (8 * a)) & 255) / 255.f * al * ar;
+        b.area += ar;
+    }
+    if (b.area <= 1e-6f) return;
+    for (float& x : b.rgb) x /= b.area;
+    g_fx_blobs[cur].push_back(b);
+}
+// Merge the scene's blobs (overlapping / near ones are one effect) and turn the brightest into lights: {x y z r g b radius intensity clear}.
+static int fx_blob_lights(int cur, float (*out)[9], int max) {
+    std::vector<FxBlob>& B = g_fx_blobs[cur];
+    struct Cl { float lo[3], hi[3], rgb[3], area; };
+    std::vector<Cl> cl;
+    static const float max_ext = 40.f;
+    for (const FxBlob& b : B) {
+        const float ext = 0.5f * std::sqrt((b.hi[0] - b.lo[0]) * (b.hi[0] - b.lo[0]) + (b.hi[1] - b.lo[1]) * (b.hi[1] - b.lo[1]) + (b.hi[2] - b.lo[2]) * (b.hi[2] - b.lo[2]));
+        if (ext > max_ext) continue;   // a screen-sized haze / flash card, not a light
+        Cl* hit = nullptr;
+        for (Cl& c : cl) {   // overlapping boxes (grown by 1 unit) are the same effect
+            bool ov = true;
+            for (int a = 0; a < 3; ++a) ov = ov && b.lo[a] <= c.hi[a] + 1.f && b.hi[a] >= c.lo[a] - 1.f;
+            if (ov) { hit = &c; break; }
+        }
+        if (!hit) { cl.push_back({{b.lo[0], b.lo[1], b.lo[2]}, {b.hi[0], b.hi[1], b.hi[2]}, {b.rgb[0] * b.area, b.rgb[1] * b.area, b.rgb[2] * b.area}, b.area}); continue; }
+        for (int a = 0; a < 3; ++a) { hit->lo[a] = std::min(hit->lo[a], b.lo[a]); hit->hi[a] = std::max(hit->hi[a], b.hi[a]); hit->rgb[a] += b.rgb[a] * b.area; }
+        hit->area += b.area;
+    }
+    static const float k_rad = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_RADIUS"); return e ? (float)std::atof(e) : 1.f; }();
+    static const float k_int = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_INTENSITY"); return e ? (float)std::atof(e) : 1.f; }();
+    struct Cand { float score; float l[9]; };
+    std::vector<Cand> cand;
+    for (const Cl& c : cl) {
+        float rgb[3] = {c.rgb[0] / c.area, c.rgb[1] / c.area, c.rgb[2] / c.area};
+        const float mx = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+        if (mx < 0.03f) continue;
+        const float ext = 0.5f * std::sqrt((c.hi[0] - c.lo[0]) * (c.hi[0] - c.lo[0]) + (c.hi[1] - c.lo[1]) * (c.hi[1] - c.lo[1]) + (c.hi[2] - c.lo[2]) * (c.hi[2] - c.lo[2]));
+        const float size = std::max(ext, std::sqrt(c.area) * 0.5f);   // a flat card's extent, a cloud of sparks' spread
+        const float score = mx * std::sqrt(c.area);
+        if (score < 0.05f) continue;
+        Cand d;
+        d.score = score;
+        for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
+        d.l[6] = std::min(40.f, std::max(4.f, 4.f + 3.f * size)) * k_rad;                       // reach grows with the effect's size
+        d.l[7] = std::min(3.f, mx * (0.8f + 0.6f * std::min(size, 3.f))) * k_int;               // brightness: the effect's own x a little for size
+        d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
+        cand.push_back(d);
+    }
+    std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+    int n = 0;
+    for (const Cand& d : cand) { if (n >= max) break; std::memcpy(out[n++], d.l, sizeof d.l); }
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr; if (dbg && n && lg++ % 30 == 0) std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters, %d lights; first at %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n", B.size(), cl.size(), n, out[0][0], out[0][1], out[0][2], out[0][3], out[0][4], out[0][5], out[0][6], out[0][7]); }
+    return n;
+}
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
     {   // effects draws (blended, depth tested, not depth writing) are also drawn into the SSR effects layer (fxl_*)
         // PSPRECOMP_SSR_FX_OFF=1: no effects layer at all (each effects draw is drawn twice, into another framebuffer: on a tiled mobile
@@ -2957,6 +3031,10 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             if (will) { /* reason is filled in by rt_capture below; log after */ }
             else rtdump_printf("[RTDUMP] draw prim %d n %d  skip: depth_test %d depth_write_off %d blend %d atest %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, st.depth_test_enable, st.depth_write_disable, st.alpha_blend_enable, st.alpha_test_enable, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
         }
+        if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && std::getenv("PSPRECOMP_FX_LIGHT_LOG")) {   // which blends the effects use
+            static std::map<uint64_t, int> seen; const uint64_t key = (uint64_t(st.blend_mode & 0xFFF) << 32) | (st.blend_fix_b & 0xFFFFFFu) | (uint64_t(st.blend_fix_a & 0xFFFFFFu) << 44);
+            if (seen[key]++ == 0) std::fprintf(stderr, "[FXLIGHT] blend %03x fixa %06x fixb %06x zwrite %d additive %d rt %d\n", (unsigned)(st.blend_mode & 0xFFF), (unsigned)(st.blend_fix_a & 0xFFFFFFu), (unsigned)(st.blend_fix_b & 0xFFFFFFu), st.depth_write_disable ? 0 : 1, (int)fx_additive(st), (int)psp_rt_active());
+        }
         if (st.depth_test_enable && !st.depth_write_disable) {
             g_fx_n[cur]++;
             const size_t dump_t0 = g_rt_tris[cur].size();
@@ -2986,7 +3064,10 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) {
+        else if (st.depth_test_enable && st.alpha_blend_enable && ((psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) || (psp_rt_active() && fx_lights_on() && fx_additive(st)))) {
+            const bool refl_fx = psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled();
+            const bool light_fx = psp_rt_active() && fx_lights_on() && fx_additive(st);
+            const size_t c0 = g_rt_fx_cols[cur].size();
             // Effects drawn with their own view matrix (some with an identity view: the world matrix then holds view-space positions) are
             // re-expressed in the main view's world, as the opaque draws are. Most effects come after the 3D run, when this scene's vote is
             // already reset: the last completed scene's main view is used then.
@@ -2994,6 +3075,8 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             rt_capture(st, rdram, prim_type, count, cur, true);
             const float* mv = g_fx_vote[cur].n > 0 ? g_fx_vote[cur].view : g_rt_main_view_ok[cur] ? g_rt_main_view[cur] : nullptr;
             if (mv && !g_rt_nofix && g_rt_fx_tris[cur].size() > t0) rt_fix_view(g_rt_fx_tris[cur], t0, st.view_matrix, mv);
+            if (light_fx && g_rt_fx_tris[cur].size() > t0) fx_blob_note(cur, t0, c0);
+            if (!refl_fx) { g_rt_fx_tris[cur].resize(t0); g_rt_fx_cols[cur].resize(c0); }   // only wanted for the light
         }   // the effects layer is only traced from Medium up
         return;
     }
@@ -3057,6 +3140,8 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             g_rt_cpu = RtCpu{};
         }
         s.rt_fx = s.rt_ready && !g_rt_fx_cols[i].empty();
+        s.n_fx_lights = s.rt_ready ? fx_blob_lights(i, s.fx_lights, 8) : 0;
+        g_fx_blobs[i].clear();
         { static int n = 0; if (std::getenv("PSPRECOMP_SSR_FX_LOG") && n++ % 120 == 0) std::fprintf(stderr, "[SSR] effects layer used=%d fbo=%u draws=%d\n", (int)g_fxl[i].used, g_fxl[i].fbo, g_fxl_draws); }
         if (g_fxl[i].used && g_fxl[i].fbo) { s.fx_color = g_fxl[i].color; s.fx_depth = g_fxl[i].depth; }
         g_fxl[i].dirty = true; g_fxl[i].used = false; g_fxl_draws = 0;
