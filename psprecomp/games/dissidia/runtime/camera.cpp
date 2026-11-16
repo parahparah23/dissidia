@@ -88,6 +88,27 @@ bool g_game_valid = false;
 float g_turn = 0.f, g_relock_w = 0.f;
 int g_lock_logs = 0;
 constexpr uint32_t ACT_POS = 0x80u, ACT_TARGET = 0x2FCu;    // actor position (vec3), its target actor (roster.cpp)
+// Smoothing (all frame-rate independent, time constants in seconds):
+//  * the stick drives an angular velocity that eases towards the stick (g_stick_tc), so turns start and stop softly;
+//  * the orbit pivot (the player's chest) follows the fighter with a short lag (g_pivot_tc): with the view turned, eye =
+//    pivot + R(game eye - pivot), so every jitter of a raw pivot (steps, landing, dashes) was multiplied on screen;
+//  * the orbit radius follows the game's own distance with a lag (g_dist_tc): the game zooms and pulls in for ITS view
+//    direction (collision behind its own eye, lock-on framing), which pumped the turned view in and out;
+//  * the held rig (no lock-on) follows the fighter with a lag, more vertically (jumps no longer bob the view 1:1);
+//  * re-centring ramps in after the idle delay instead of starting at full speed.
+float g_dt = 0.f;
+float g_stick_tc = 0.07f, g_pivot_tc = 0.12f, g_dist_tc = 0.35f, g_hold_tc = 0.15f, g_hold_tc_y = 0.4f;
+float g_vyaw = 0.f, g_vpitch = 0.f;           // angular velocity (rad/s)
+float g_piv[3] = {0, 0, 0}; bool g_piv_ok = false;
+float g_rad = 0.f; bool g_rad_ok = false;
+float g_off_s[3] = {0, 0, 0}; bool g_off_ok = false;
+float ease_k(float tc) { return tc > 0.f ? 1.f - std::exp(-g_dt / tc) : 1.f; }
+// Collision of our own view (turned or held) with the stage (ge_draw_camera_probe_*): the game pulls its camera in for walls
+// behind ITS eye only. The allowed distance pulls in fast and lets out slowly. PSPRECOMP_CAM_COLLIDE=0 turns it off.
+bool g_cc_on = true;
+float g_col = 0.f; bool g_col_ok = false;
+uint32_t g_cc_id = 0;
+bool g_cc_done = false;   // once per update (the game sets the eye a second time with the shake added)
 
 double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -179,9 +200,10 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
     }
     const double t = now_s();
     double dt = t - g_last_t;
-    if (g_last_t == 0 || dt > 1.0) { g_yaw = g_pitch = 0.f; dt = 0; g_ever_locked = g_held_valid = false; g_locked = true; }   // new battle / long pause: reset
+    if (g_last_t == 0 || dt > 1.0) { g_yaw = g_pitch = g_vyaw = g_vpitch = 0.f; dt = 0; g_ever_locked = g_held_valid = false; g_locked = true; g_piv_ok = g_rad_ok = g_off_ok = false; }   // new battle / long pause: reset
     g_last_t = t;
     if (dt > 0.1) dt = 0.1;
+    g_dt = static_cast<float>(dt);
     g_mgr = static_cast<uint32_t>(ctx->r[4]);
     // Widescreen: the camera object keeps its aspect ratio at +0xCC (+0xC0 = {fov, near, far, aspect}, 480/272 on the PSP). The game
     // culls its objects / shadow casters with it, so a wider aspect makes it draw everything the wider picture shows (no pop-in at the
@@ -227,22 +249,32 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
         g_holding = known && !locked && g_held_valid;
         if (known && locked && g_relock_w <= 0.f) g_held_valid = false;
     }
-    if (psp_ctrl_take_camera_recenter()) { g_yaw = g_pitch = 0.f; g_idle = 0.f; }   // R3 / C: back to the game's camera now
+    if (psp_ctrl_take_camera_recenter()) { g_yaw = g_pitch = g_vyaw = g_vpitch = 0.f; g_idle = 0.f; }   // R3 / C: back to the game's camera now
     g_rstick_consumed_until_ms.store(now_ms() + 400, std::memory_order_relaxed);
     constexpr float kRate = 2.6f;   // rad/s at full deflection and sens 1.0
-    if (active) {
-        g_idle = 0.f;
-        g_yaw   -= (g_invert_x ? -sx : sx) * g_sens * kRate * static_cast<float>(dt);   // stick right: the view turns right
-        g_pitch += (g_invert ? sy : -sy) * g_sens * kRate * 0.6f * static_cast<float>(dt);   // stick up: the view tilts up
-    } else {
+    {   // response curve (fine aim near the centre, full speed at the rim), then ease the angular velocity towards it
+        const float m = std::sqrt(sx * sx + sy * sy);
+        const float c = m > 1e-4f ? std::pow(std::fmin(m, 1.f), 1.6f) / m : 0.f;
+        const float wy = active ? -(g_invert_x ? -sx : sx) * c * g_sens * kRate : 0.f;          // stick right: the view turns right
+        const float wp = active ? (g_invert ? sy : -sy) * c * g_sens * kRate * 0.6f : 0.f;      // stick up: the view tilts up
+        const float k = ease_k(g_stick_tc);
+        g_vyaw += (wy - g_vyaw) * k; g_vpitch += (wp - g_vpitch) * k;
+        if (!active && std::fabs(g_vyaw) < 1e-3f) g_vyaw = 0.f;
+        if (!active && std::fabs(g_vpitch) < 1e-3f) g_vpitch = 0.f;
+        g_yaw += g_vyaw * g_dt; g_pitch += g_vpitch * g_dt;
+    }
+    if (active) g_idle = 0.f;
+    else {
         g_idle += static_cast<float>(dt);
         // Let go of the stick: after a short pause (a brief release while adjusting must not snap back) the offset
-        // eases back to the game's own camera, so a big turn cannot leave the fighter out of sight.
+        // eases back to the game's own camera, so a big turn cannot leave the fighter out of sight. The pull ramps in
+        // over half a second instead of starting at full speed.
         if (g_recenter > 0.f && g_idle > g_recenter_delay && dt > 0 && !(g_lock_known && !g_locked)) {
-            float k = std::exp(-static_cast<float>(dt) / g_recenter);
+            const float ramp = smooth01((g_idle - g_recenter_delay) / 0.5f);
+            float k = std::exp(-static_cast<float>(dt) * ramp / g_recenter);
             g_yaw *= k; g_pitch *= k;
-            if (std::fabs(g_yaw) < 0.002f) g_yaw = 0.f;
-            if (std::fabs(g_pitch) < 0.002f) g_pitch = 0.f;
+            if (std::fabs(g_yaw) < 0.002f && g_vyaw == 0.f) g_yaw = 0.f;
+            if (std::fabs(g_pitch) < 0.002f && g_vpitch == 0.f) g_pitch = 0.f;
         }
     }
     // Yaw is unbounded but kept in (-pi, pi].
@@ -252,9 +284,18 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
         g_cine_seen = g_dissidia_cine_seq;
         g_cine_actor = g_dissidia_cine_actor; g_cine_t0 = t; g_cine_len = g_dissidia_cine_ticks / 60.0; g_cine_side = 0.f;
     }
-    g_in_update = true; g_eye_calls = 0;
+    g_in_update = true; g_eye_calls = 0; g_cc_done = false;
     g_orig_update(rdram, ctx);
     g_in_update = false;
+    {   // PSPRECOMP_CAMF_LOG=<n>: one line per update for n updates (camera tests: smoothness of the final eye)
+        static int left = [] { const char* e = std::getenv("PSPRECOMP_CAMF_LOG"); return e ? std::atoi(e) : 0; }();
+        float P[3] = {0, 0, 0};
+        if (left > 0 && pl_pos(P)) {
+            left--;
+            std::fprintf(stderr, "[CAMF] t=%.4f yaw=%.4f pitch=%.4f hold=%d eye=%.4f,%.4f,%.4f game=%.4f,%.4f,%.4f pl=%.4f,%.4f,%.4f\n", t, g_yaw, g_pitch, (int)g_holding,
+                         g_final_eye[0], g_final_eye[1], g_final_eye[2], g_game_e[0], g_game_e[1], g_game_e[2], P[0], P[1], P[2]);
+        }
+    }
     {   // our own camera (turned view or hold): the game's wall fade used its eye, so fade what blocks ours
         float P[3];
         const bool ours = (g_yaw != 0.f || g_pitch != 0.f || g_holding) && g_blocker_on && pl_pos(P);
@@ -277,14 +318,20 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
         {   // the held rig keeps its orientation and distance but moves with the player's fighter
             float P[3];
             if (g_held_valid && pl_pos(P)) {
-                if (!g_held_p_set) { std::memcpy(g_held_p, P, sizeof P); g_held_p_set = true; }
-                for (int i = 0; i < 3; i++) g_off[i] = P[i] - g_held_p[i];
-            } else g_off[0] = g_off[1] = g_off[2] = 0.f;
+                if (!g_held_p_set) { std::memcpy(g_held_p, P, sizeof P); g_held_p_set = true; g_off_ok = false; }
+                float want[3];
+                for (int i = 0; i < 3; i++) want[i] = P[i] - g_held_p[i];
+                const float d2 = (want[0] - g_off_s[0]) * (want[0] - g_off_s[0]) + (want[1] - g_off_s[1]) * (want[1] - g_off_s[1]) + (want[2] - g_off_s[2]) * (want[2] - g_off_s[2]);
+                if (!g_off_ok || d2 > 15.f * 15.f) { std::memcpy(g_off_s, want, sizeof want); g_off_ok = true; }   // first frame / teleport: no swoop
+                const float kh = ease_k(g_hold_tc), kv = ease_k(g_hold_tc_y);
+                for (int i = 0; i < 3; i++) g_off_s[i] += (want[i] - g_off_s[i]) * (i == 1 ? kv : kh);
+                std::memcpy(g_off, g_off_s, sizeof g_off);
+            } else { g_off[0] = g_off[1] = g_off[2] = 0.f; g_off_ok = false; }
         }
         float he[3], ht[3];
         for (int i = 0; i < 3; i++) { he[i] = g_held_e[i] + g_off[i]; ht[i] = g_held_t[i] + g_off[i]; }
         if (g_relock_w > 0.f && !g_holding && g_held_valid) {   // easing back to the game's camera after a lock
-            g_relock_w -= 0.05f;
+            g_relock_w -= g_dt / 0.6f;   // 0.6 s at any frame rate (was 20 updates)
             const float k = smooth01(g_relock_w < 0.f ? 0.f : g_relock_w);
             if (g_relock_w <= 0.f) g_held_valid = false;
             for (int i = 0; i < 3; i++) { wrf(eye + 4 * i, ge[i] + (he[i] - ge[i]) * k); wrf(eye + 0x10 + 4 * i, gt[i] + (ht[i] - gt[i]) * k); }
@@ -304,15 +351,35 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
         }
     }
     float pivot[3];
+    if (g_in_update && cam == g_mgr && g_eye_calls == 0 && g_yaw == 0.f && g_pitch == 0.f) g_piv_ok = g_rad_ok = false;   // back on the game's camera: start fresh next time
     if (g_in_update && cam == g_mgr && g_eye_calls == 0 && (g_yaw != 0.f || g_pitch != 0.f) && g_pivot_on) {
         // Orbit the fighter, not the game's look-at point (which sits in front of him): the whole rig, eye and look-at,
         // turns about a vertical axis through the fighter, and tilts about a horizontal one, so he keeps his place on the
         // screen and can't be lost behind the lens. The pivot is the fighter nearest to the game's own eye.
         const float ev[3] = {rdf(eye), rdf(eye + 4), rdf(eye + 8)};
-        if (held_now ? pl_pos(pivot) : dissidia_nearest_fighter(ev, pivot)) {
+        // The player's own fighter (the nearest fighter to the lens could switch to the opponent when he came close and
+        // throw the view across the stage), the nearest fighter only when the player is not known.
+        if (pl_pos(pivot) || (!held_now && dissidia_nearest_fighter(ev, pivot))) {
             g_eye_calls++;
             pivot[1] += 1.0f;   // about the chest
+            {
+                const float d2 = (pivot[0] - g_piv[0]) * (pivot[0] - g_piv[0]) + (pivot[1] - g_piv[1]) * (pivot[1] - g_piv[1]) + (pivot[2] - g_piv[2]) * (pivot[2] - g_piv[2]);
+                if (!g_piv_ok || d2 > 15.f * 15.f) { std::memcpy(g_piv, pivot, sizeof pivot); g_piv_ok = true; }   // first use / teleport
+                const float k = ease_k(g_pivot_tc);
+                for (int i = 0; i < 3; i++) { g_piv[i] += (pivot[i] - g_piv[i]) * k; pivot[i] = g_piv[i]; }
+            }
             float E[3] = {ev[0] - pivot[0], ev[1] - pivot[1], ev[2] - pivot[2]};
+            if (!held_now) {   // the orbit radius eases after the game's distance instead of jumping with it
+                const float L = std::sqrt(E[0] * E[0] + E[1] * E[1] + E[2] * E[2]);
+                if (L > 1e-3f) {
+                    if (!g_rad_ok) { g_rad = L; g_rad_ok = true; }
+                    g_rad += (L - g_rad) * ease_k(g_dist_tc);
+                    // full effect once the view is turned a little, none at zero offset (no pop when the offset reaches 0)
+                    const float w = smooth01(std::sqrt(g_yaw * g_yaw + g_pitch * g_pitch) / 0.15f);
+                    const float s = 1.f + (g_rad / L - 1.f) * w;
+                    for (int i = 0; i < 3; i++) E[i] *= s;
+                }
+            }
             float T[3] = {rdf(eye + 0x10) - pivot[0], rdf(eye + 0x14) - pivot[1], rdf(eye + 0x18) - pivot[2]};
             const float horiz = std::sqrt(E[0] * E[0] + E[2] * E[2]);
             if (horiz > 1e-3f) {
@@ -363,6 +430,30 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
             wrf(eye + 8, tz + std::cos(naz) * ch);
         }
     }
+    if (g_in_update && cam == g_mgr && g_cc_on && !g_cc_done) {
+        g_cc_done = true;
+        const float wgt = held_now ? 1.f : smooth01(std::sqrt(g_yaw * g_yaw + g_pitch * g_pitch) / 0.15f);
+        float P[3];
+        if (wgt > 0.f && pl_pos(P)) {
+            P[1] += 1.0f;   // chest
+            const float e[3] = {rdf(eye), rdf(eye + 4), rdf(eye + 8)};
+            const float dir[3] = {e[0] - P[0], e[1] - P[1], e[2] - P[2]};
+            const float L = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+            if (L > 1.2f) {
+                constexpr float kStart = 0.6f, kMargin = 0.35f, kMin = 1.2f;   // the test starts off the body; the eye stays this far off the wall
+                const float s0[3] = {P[0] + dir[0] / L * kStart, P[1] + dir[1] / L * kStart, P[2] + dir[2] / L * kStart};
+                ge_draw_camera_probe_request(s0, e, ++g_cc_id);
+                uint32_t rid = 0;
+                const float r = ge_draw_camera_probe_result(&rid);
+                float want = L;
+                if (rid && g_cc_id - rid < 8 && r < 1.f) want = std::fmax(kMin, kStart + r * (L - kStart) - kMargin);
+                if (!g_col_ok) { g_col = L; g_col_ok = true; }
+                g_col += (want - g_col) * ease_k(want < g_col ? 0.06f : 0.5f);
+                const float dist = L + (std::fmin(L, g_col) - L) * wgt;
+                if (dist < L - 1e-3f) for (int i = 0; i < 3; i++) wrf(eye + 4 * i, P[i] + dir[i] / L * dist);
+            }
+        } else g_col_ok = false;
+    }
     if (held_now) {   // the stick is read in the game's own frame: turn it by how far this view is from the game's
         float d = std::atan2(rdf(eye) - rdf(eye + 0x10), rdf(eye + 8) - rdf(eye + 0x18)) - game_az;
         const float PI = 3.14159265f;
@@ -402,6 +493,11 @@ void dissidia_camera_install(uint8_t* rdram) {
     if ((e = std::getenv("PSPRECOMP_CAM_RECENTER"))) g_recenter = static_cast<float>(std::atof(e));
     if ((e = std::getenv("PSPRECOMP_CAM_RECENTER_DELAY"))) g_recenter_delay = static_cast<float>(std::atof(e));
     if ((e = std::getenv("PSPRECOMP_CAMX_LOG"))) g_log_left = std::atoi(e);
+    if ((e = std::getenv("PSPRECOMP_CAM_COLLIDE"))) g_cc_on = e[0] != '0';
+    if ((e = std::getenv("PSPRECOMP_CAM_STICK_TC"))) g_stick_tc = static_cast<float>(std::atof(e));
+    if ((e = std::getenv("PSPRECOMP_CAM_PIVOT_TC"))) g_pivot_tc = static_cast<float>(std::atof(e));
+    if ((e = std::getenv("PSPRECOMP_CAM_DIST_TC"))) g_dist_tc = static_cast<float>(std::atof(e));
+    if ((e = std::getenv("PSPRECOMP_CAM_HOLD_TC"))) { g_hold_tc = static_cast<float>(std::atof(e)); g_hold_tc_y = g_hold_tc * 2.6f; }
     g_hold_on = !((e = std::getenv("PSPRECOMP_CAM_UNLOCK_HOLD")) && e[0] == '0');
     if ((e = std::getenv("PSPRECOMP_CAMLOCK_LOG"))) g_lock_logs = std::atoi(e);
     if ((e = std::getenv("PSPRECOMP_CAM_HOLD_ARM"))) g_arm_ticks = static_cast<float>(std::atof(e));
