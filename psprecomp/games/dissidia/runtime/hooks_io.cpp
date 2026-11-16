@@ -34,6 +34,7 @@
 #include <iterator>
 #include <string>
 #include <unistd.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 // roster.cpp: in-flight data patches of the overlay blobs (extra roster slots).
@@ -43,6 +44,7 @@ extern bool dissidia_roster_enabled();
 extern int dissidia_roster_overlay_of(const char* lower_path);
 extern void dissidia_roster_patch_overlay(int mod, int64_t off, uint32_t size, uint8_t* dest);
 std::string dissidia_mods_dir();
+std::vector<std::string> dissidia_mod_roots();
 extern uint32_t dissidia_model_budget_request(uint32_t bytes);
 extern uint32_t dissidia_model_budget();
 
@@ -189,6 +191,48 @@ std::string mods_dir() {
     return parent + "/mods";
 }
 
+// Installed mod folders: <mods>/<folder>/mod.json + <folder>/install/ holding files at their game paths (obj/..., textures/...,
+// by_crc/...). While the mod.json does not say "enabled": false, install/ is one more mods root: its files override the game's
+// like loose files in <mods> do, its textures/ joins the texture pack. The settings menu's Mods page lists these folders and
+// turns them on and off (applies at the next start). Loose files in <mods> itself win over a folder's.
+bool mod_json_off(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    const std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const size_t k = js.find("\"enabled\"");
+    if (k == std::string::npos) return false;
+    size_t v = js.find(':', k);
+    if (v == std::string::npos) return false;
+    ++v;
+    while (v < js.size() && std::isspace((unsigned char)js[v])) ++v;
+    return js.compare(v, 5, "false") == 0;
+}
+std::vector<std::string> mod_roots() {
+    static bool logged = false;            // asked from several places at start: say which folders are off once
+    const bool say = !logged;
+    logged = true;
+    std::vector<std::string> out;
+    const std::string dir = mods_dir();
+    DIR* d = ::opendir(dir.c_str());
+    if (!d) return out;
+    std::vector<std::string> names;
+    while (dirent* e = ::readdir(d)) {
+        const std::string n = e->d_name;
+        if (n.empty() || n[0] == '.' || n[0] == '_') continue;
+        names.push_back(n);
+    }
+    ::closedir(d);
+    std::sort(names.begin(), names.end());
+    struct stat st;
+    for (const std::string& n : names) {
+        const std::string root = dir + "/" + n;
+        if (::stat((root + "/mod.json").c_str(), &st) != 0 || ::stat((root + "/install").c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (mod_json_off(root + "/mod.json")) { if (say) std::fprintf(stderr, "[MODS] mod folder %s: off\n", n.c_str()); continue; }
+        out.push_back(root + "/install");
+    }
+    return out;
+}
+
 // Voice language (settings "Voice", PSPRECOMP_VOICE=en|jp). `jp` serves the Japanese voice pack that
 // tools/jp_audio.py extracted from an undub / Japanese disc: archive entries from <workdir>/voice_jp (loose
 // files, scanned after the mods) and movies from <workdir>/movie_jp.
@@ -221,7 +265,8 @@ void ensure_built(const std::string& host_info_path) {
     if (g_built) return;
     g_built = true;
     std::string dir = mods_dir();
-    std::vector<std::string> extra;
+    std::vector<std::string> extra = mod_roots();   // installed mod folders that are on, then the voice pack
+    for (const std::string& r : extra) std::fprintf(stderr, "[MODS] mod folder on: %s\n", r.c_str());
     if (voice_jp_on()) {
         const std::string vd = work_parent() + "/voice_jp";
         if (is_dir(vd)) { extra.push_back(vd); std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
@@ -343,6 +388,7 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
 }  // namespace
 
 std::string dissidia_mods_dir() { return mods_dir(); }
+std::vector<std::string> dissidia_mod_roots() { return mod_roots(); }
 std::string dissidia_package_dir() { return g_data_dir; }
 void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::vector<uint8_t>&)> edit) {
     AssetPatch p;
@@ -373,9 +419,18 @@ void dissidia_install_mod_io() {
     psp_io_set_policy(policy);
     // The settings menu offers a Voice row once a Japanese voice pack has been extracted (tools/jp_audio.py).
     psp_settings_set_voice_hook({+[]() { return is_dir(work_parent() + "/voice_jp"); }});
-    psp_settings_set_texpack_hook({+[]() { return is_dir(mods_dir() + "/textures"); }});
-    // Texture packs (runtime/include/psp_tex_pack.h) live under <mods>/textures.
+    psp_settings_set_texpack_hook({+[]() {
+        if (is_dir(mods_dir() + "/textures")) return true;
+        for (const std::string& r : mod_roots()) if (is_dir(r + "/textures")) return true;
+        return false;
+    }});
+    // Texture packs (runtime/include/psp_tex_pack.h) live under <mods>/textures, and the textures/ of each installed mod folder that is on.
     psp_texpack_set_dir_provider([]() -> std::string { return mods_dir() + "/textures"; });
+    psp_texpack_set_extra_dirs_provider([]() -> std::vector<std::string> {
+        std::vector<std::string> v;
+        for (const std::string& r : mod_roots()) if (is_dir(r + "/textures")) v.push_back(r + "/textures");
+        return v;
+    });
     // FX shader overrides (runtime/include/psp_fx_shader.h, FX_SHADERS.md) live under <mods>/fx_shaders.
     psp_fx_set_dir_provider([]() -> std::string { return mods_dir() + "/fx_shaders"; });
 }

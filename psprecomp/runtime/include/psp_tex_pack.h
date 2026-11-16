@@ -24,6 +24,11 @@ using PspTexPackDirFn = std::string (*)();
 /// after psp_io_init). Without a provider the default is <ms0 parent>/mods/textures.
 void psp_texpack_set_dir_provider(PspTexPackDirFn fn);
 
+/// More replacement folders (installed mod folders' textures/): their <id>.png join the pack; the main pack wins on the same id.
+/// Called once with the pack. Replacements only (dumps and textures.ini stay in the main pack).
+using PspTexPackDirsFn = std::vector<std::string> (*)();
+void psp_texpack_set_extra_dirs_provider(PspTexPackDirsFn fn);
+
 /// True when any of dump / replacement (non-empty pack) / upscale is on.
 /// Cheap after the first call; when false ge_texture_bind computes no ids.
 bool psp_texpack_active();

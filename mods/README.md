@@ -43,6 +43,11 @@ tools/charmod.py hits noctis             # every hit of every move
 
 A mod folder is data only: JSON, models, skins, pictures, sounds. The build refuses a folder with a script or program in it, so a shared mod can't carry code. Zip `mods/<name>/` and send it. Don't share `.blend` files to install (Blender can run scripts saved in them), and never run a script that came with a mod; nothing here needs one.
 
+**A finished mod on a game with no build step (Android, a release install):** put it in the game's mods folder as
+`<mods>/<name>/mod.json` plus `install/` holding the built files at their game paths (`install/obj/...`,
+`install/textures/...`). It shows up in *Settings > Mods* and turns on and off from there (next start). Details:
+[docs/loose-file-mods.md](../psprecomp/games/dissidia/docs/loose-file-mods.md), "Installed mod folders".
+
 ## Everything else
 
 Field by field: `mod.json`, the moveset files, every avatar, bodies, weapons (the model and weapons a character wants), every timeline event and how a move fits together: [docs/character-mods.md](../psprecomp/games/dissidia/docs/character-mods.md). What every event does in the game: [docs/moves-and-events.md](../psprecomp/games/dissidia/docs/moves-and-events.md).
