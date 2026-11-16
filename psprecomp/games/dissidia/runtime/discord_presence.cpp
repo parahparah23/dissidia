@@ -39,7 +39,7 @@ namespace {
 
 // The Discord application ("Dissidia 012 Duodecim", developer portal). Its name is the first line Discord shows.
 // PSPRECOMP_DISCORD_APP_ID overrides it.
-constexpr const char* kAppId = "";
+constexpr const char* kAppId = "1571969529272213605";
 constexpr const char* kIcon = "https://raw.githubusercontent.com/schindlershadow/dissidia/main/psprecomp/games/dissidia/icon/icon.png";
 constexpr const char* kProjectUrl = "https://github.com/schindlershadow/dissidia";
 
