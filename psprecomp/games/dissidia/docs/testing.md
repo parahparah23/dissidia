@@ -456,7 +456,7 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
   differs it is LOWER at 120 fps for every character (30 of 30, e.g. Warrior of Light 3.55 vs 3.77 m). Two 30 fps runs differ on 1-15 %
   of a character's trials (Kefka 27 of 67, Squall 18 of 80, Onion Knight 15 of 48 are the noisiest; Prishe 1 of 136, Kain 1 of 52).
 
-### 30 Hz logic (`PSPRECOMP_LOGIC30=1`, 16 Nov)
+### 30 Hz logic (default since 16 Nov; `PSPRECOMP_LOGIC30=0` for the native behaviour)
 
 The native findings above come from one cause: at 30 fps a keyed event (a hit frame, a jump impulse, a pad edge) acts on the game for a
 whole 33 ms frame, and smaller steps cannot reproduce that exactly. With 30 Hz logic the fight itself runs at the PSP's rate whatever the

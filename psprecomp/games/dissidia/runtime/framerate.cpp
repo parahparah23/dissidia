@@ -125,11 +125,11 @@ float g_ticks = 2.0f;              // 1/60 s ticks one frame advances: 60 / g_ra
 // next value of a fixed cycle of rate / 30 multiples of 1/256 tick that add up to exactly 2.0 (spread evenly, within 0.3 % of 60 / rate):
 // any rate / 30 consecutive updates are exactly one 30 Hz frame, and every sum is exact. 60 / 120 / 240 fps (1, 0.5, 0.25) are exact already.
 bool g_exact_step = true;
-// 30 Hz logic (PSPRECOMP_LOGIC30=1, experiment): above 30 fps only every rate/30-th frame runs the battle's gameplay, with the PSP's 2-tick
+// 30 Hz logic (on by default; PSPRECOMP_LOGIC30=0 turns it off): above 30 fps only every rate/30-th frame runs the battle's gameplay, with the PSP's 2-tick
 // step; the frames in between run the battle scene's task list with the pause filter (mask / value 4: what the game runs while paused,
 // every gameplay task skipped) and a zero step, so the game still draws but nothing advances. Gameplay is then the 30 fps game's by
 // construction; smoothing the frames in between is the renderer's job. The game's own frame-rate hooks see 30 fps (g_ticks 2).
-bool g_logic30 = false;
+bool g_logic30 = true;
 bool l30_active();                 // 30 Hz logic is on and the fight is past its intro
 uint64_t g_l30_frame = 0;
 bool g_l30_logic_now = true;       // the frame being run is a gameplay frame
@@ -2563,7 +2563,7 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* d = std::getenv("PSPRECOMP_DBG_NOAI"); d && d[0] && d[0] != '0') g_dbg_no_ai = true;
     if (const char* na = std::getenv("PSPRECOMP_TEST_NO_AI"); na && na[0] && na[0] != '0') g_env_no_ai = true;
     if ((g_orig_cpu_tick = ovl_battle_lookup(CPU_TICK))) psp_dispatch_register(CPU_TICK, cpu_tick_noai_hook);
-    if (const char* l3 = std::getenv("PSPRECOMP_LOGIC30"); l3 && l3[0] == '1') g_logic30 = true;
+    if (const char* l3 = std::getenv("PSPRECOMP_LOGIC30"); l3 && l3[0] == '0') g_logic30 = false;   // default on (16 Nov: checked on the RP6 and the desktop)
     if (const char* rl = std::getenv("PSPRECOMP_TASK_RUNLOG"))
         for (const char* q = rl; *q;) { g_runlog_ticks.push_back(std::strtoull(q, nullptr, 10)); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; }
     if ((g_logic30 || !g_runlog_ticks.empty()) && (g_orig_task_run = psp_dispatch_probe_lookup(0x0888245Cu))) psp_dispatch_register(0x0888245Cu, task_run_hook);

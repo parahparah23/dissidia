@@ -58,7 +58,7 @@ update run one update in `rate / 30` with dt 2. **Not yet tested in play**: expe
 fades that truncate at a small dt. There is no vsync, so a rate above the monitor's refresh tears or drops frames.
 In multiplayer the lowest rate any player asked for wins, whatever the values.
 
-## 30 Hz logic (`PSPRECOMP_LOGIC30=1`, Debug > Developer options > Timing)
+## 30 Hz logic (on by default; `PSPRECOMP_LOGIC30=0` or Debug > Developer options > Timing turns it off)
 
 Above 30 fps the battle can run its gameplay at the PSP's 30 updates a second instead of `rate` updates with a smaller step: every
 `rate / 30`-th frame is a gameplay frame (timer step 2); the frames between are drawn-only (step 0). Native high-rate play can never
