@@ -3001,13 +3001,13 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         for (float& x : rgb) x *= mx / avg;
         if (mx < 0.03f) { ++n_dim; continue; }
         const float ext = 0.5f * std::sqrt((c.hi[0] - c.lo[0]) * (c.hi[0] - c.lo[0]) + (c.hi[1] - c.lo[1]) * (c.hi[1] - c.lo[1]) + (c.hi[2] - c.lo[2]) * (c.hi[2] - c.lo[2]));
-        const float size = std::max(ext, std::sqrt(c.area) * 0.5f);   // a flat card's extent, a cloud of sparks' spread
+        const float size = std::sqrt(c.area) * 0.5f;   // from the glowing area itself: touching pieces chain into a wide box (a trail, scattered sparks), which made small attacks huge lights
         const float score = mx * std::sqrt(c.area);
         if (score < 0.05f) { ++n_dim; continue; }
         Cand d;
         d.score = score;
         for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
-        d.l[6] = std::min(20.f, std::max(3.f, 3.f + 2.5f * size)) * k_rad;                       // reach grows with the effect's size
+        d.l[6] = std::min(14.f, std::max(3.f, 3.f + 2.5f * size)) * k_rad;                       // reach grows with the effect's size
         // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
         d.l[7] = std::min(1.2f, 0.35f * score) * k_int;   // score = brightness x sqrt(area): sparkles and markers stay faint, a big blast reaches 1.2
         d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
@@ -3035,6 +3035,12 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
     int n = 0;
     for (const Cand& d : cand) { if (n >= max) break; std::memcpy(out[n++], d.l, sizeof d.l); }
+    {   // all effect lights together at most one full light's brightness: many small glows must not add up to a flood
+        float sum = 0.f;
+        for (int i = 0; i < n; ++i) sum += out[i][7];
+        const float cap = 1.2f * k_int;
+        if (sum > cap) for (int i = 0; i < n; ++i) out[i][7] *= cap / sum;
+    }
     { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
       if (dbg && (n || n_big || n_dim || g_fx_n_steady[cur] || g_fx_n_nonadd[cur] || g_fx_n_static[cur]) && lg++ % 5 == 0)
         std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters -> %d lights | left out: %d too big (largest %.0f), %d too faint, %d steady draws, %d non-additive draws, %d staying put | first %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n",

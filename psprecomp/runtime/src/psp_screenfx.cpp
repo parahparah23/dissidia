@@ -1083,6 +1083,7 @@ const char* const k_rt_lights = R"GLSL(
             float ndl = max(dot(nw, L), 0.0);
             if (li >= u_fx0 && u_fx_split != 0 && v_uv.x > 0.5) continue;
             float x = 1.0 - dist / rad, att = li >= u_fx0 ? x : x * x;   // an attack's flash carries further than a lamp's pool
+            if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
             rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
