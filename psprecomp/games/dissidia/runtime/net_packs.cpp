@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -357,8 +358,10 @@ int finish(Download& dl) {   // g_mu NOT held (reads files)
                      packs()[dl.pack].name, f.path, mac_str(dl.from).c_str());
         return -1;
     }
-    ::mkdir(dissidia_mods_dir().c_str(), 0755);
-    ::mkdir(cache_dir().c_str(), 0755);
+    {
+        std::error_code ec;                 // std::filesystem: Windows has no two-argument mkdir
+        std::filesystem::create_directories(cache_dir(), ec);
+    }
     const std::string tmp = cache_path(f) + ".tmp";
     {
         std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
