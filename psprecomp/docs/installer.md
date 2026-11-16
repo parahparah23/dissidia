@@ -99,6 +99,11 @@ of the fork.
    - `.github/workflows/release.yml`: on a `v*` tag (or by hand for artifacts only) a Windows job builds the recompiler, an Ubuntu
      job installs SDL2's build headers, builds both platforms with `build_release.py`, writes `manifest.json`
      (`release/make_manifest.py`) and a `publish` job runs `gh release create` with the archives and the manifest.
+   - **Release notes** (`release/make_notes.py`, run by the `publish` job): the install table, then what changed since the last
+     *published* release (a tag whose build failed has no release, so its changes roll into the next). If `release/notes/<tag>.md`
+     exists it is used as written; otherwise each merged PR gives the bullets of its `## Release notes` section (the PR template asks
+     for one, in players' words; "none" leaves the PR out) or its title, CI / tooling / docs / test PRs and the `no-release-notes`
+     label are skipped, and "Fix..." items go under Fixes. Preview: `python3 release/make_notes.py --tag vX.Y.Z --to origin/main`.
    - **Release contents** (`assemble.py`): the wizard, `bin/psprecomp`, the trimmed bundle, the SDK, `game/` (whitelist: analysis
      metadata, game.toml, overlay tomls, features.ini, fx_shaders, `tools/*.py|json|txt` without tests), embedded Python on Windows
      (pinned in `toolchain/versions.json`; its `._pth` gets `..\game\tools` added), `licenses/`, `release.json` (version,
