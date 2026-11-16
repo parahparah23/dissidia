@@ -13,9 +13,13 @@ from .dfx.chunks import Chunk, GmoFile, BONE, PART, MESH, ARRAYS, MATERIAL, TEXT
 from .dfx.gmo import (Character, VertexArray, DrawCall, Motion, FCurveData, Binding,
                       make_ref, parse_bones)
 from .dfx import gim
+from .dfx.strips import list_to_strip
 from . import common
 
 MAX_SUBSET = 8          # PSP GE skinning matrix limit per draw
+# a draw's vertex count is 16 bits on the GE (PRIM count; the GMO DrawCall's verts_per_prim feeds it) and its indices are
+# 16 bits: past 65,535 the count wraps and most of the draw is lost (a 41k-triangle body drew its head as a few scraps)
+MAX_DRAW_TRIS = 65535 // 3
 
 
 class ExportError(Exception):
@@ -81,13 +85,13 @@ def _limit_weights(w, limit=4):
     return {k: v / s for k, v in items}
 
 
-def _batch_triangles(tri_bones, limit=MAX_SUBSET):
-    """Greedy grouping of triangles so each batch references <= limit bones."""
+def _batch_triangles(tri_bones, limit=MAX_SUBSET, max_tris=MAX_DRAW_TRIS):
+    """Greedy grouping of triangles so each batch references <= limit bones and holds <= max_tris triangles."""
     batches = []
     for ti, bs in enumerate(tri_bones):
         for b in batches:
             u = b['bones'] | bs
-            if len(u) <= limit:
+            if len(u) <= limit and len(b['tris']) < max_tris:
                 b['bones'] = u
                 b['tris'].append(ti)
                 break
@@ -145,7 +149,8 @@ def encode_part(ob, part_chunk, owner_chunk, part_index, ch, bone_names, worlds,
             mc.name = f'16mesh-{part_index}-{len(meshes):04d}'
             mc.children.append(Chunk(0x8061, payload=struct.pack('<I', make_ref(MATERIAL, gm, scope=2))))
             mc.children.append(Chunk(0x8062, payload=struct.pack(f'<I{len(subset)}I', len(subset), *[pal_pos[b] for b in subset])))
-            dc = DrawCall(make_ref(ARRAYS, ai), 3, len(idx), 1, idx)
+            strip = list_to_strip(idx)          # the runtime decodes every index: a strip is ~1 per triangle, a list 3
+            dc = DrawCall(make_ref(ARRAYS, ai), 4, len(strip), 1, strip) if strip else DrawCall(make_ref(ARRAYS, ai), 3, len(idx), 1, idx)
             mc.children.append(Chunk(0x8066, payload=dc.to_payload()))
             meshes.append(mc)
 

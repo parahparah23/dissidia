@@ -1,0 +1,212 @@
+{
+ "_info": "Bartz's Dissidia 1 moves: patches that rebuild the mod's files from the player's own Dissidia 012 and Dissidia 1 discs (tools/d1_moves.py install). Made by tools/d1_moves.py patches.",
+ "folder": "bartz-dff",
+ "code": "fiv100",
+ "display": "Bartz: Dissidia (2008) moves",
+ "files": [
+  {
+   "path": "obj/p_fiv100.objx",
+   "size": 1983820,
+   "sha256": "a7a67dd29f5067ac5a9b707b5b428a652a1e53427d52e884f28414f68bdd7a15",
+   "patch": "p_fiv100.objx.npd",
+   "sources": [
+    "012:obj/p_fiv100.objx",
+    "d1conv:obj/p_fiv100.objx",
+    "012:obj/p_for100.objx",
+    "012:obj/p_six100.objx",
+    "012:obj/p_thr100.objx",
+    "012:obj/p_ten100.objx",
+    "012:obj/p_sev100.objx",
+    "012:obj/p_one100.objx",
+    "012:obj/p_two100.objx"
+   ],
+   "sources_sha256": [
+    "d71567ebd9fab3a50ab725fb5db44253693e1dafc1cde7a890777953ad4e9a83",
+    "481a7820bcd041e3b95008e271b64e67522f8b769765195101e1cc4597242340",
+    "e8ed7ea7d07a526ca6ebad4f0ddc43894f8566799158e56bb34e27046ebbae0e",
+    "8096f57850b01f1e49d37a28655236ad238f9f6bb2784559474d38e098dccde4",
+    "92048f758e9b739c5ca146c6526aa5a19dcb4d8e4be58ff47f2015a35ed338a3",
+    "44565392e6beba42a64b27f7c4e0187068672890bdc5ad26cad0b1c4f0180dfc",
+    "9c296086238b09bac54d7800e24c11013146412417ae01544cc19cf244193ca1",
+    "3a81bfb308d32d0c3a93a07495ca9ca90d800bfaf633955e0813e974d8d668e1",
+    "b314530d34aac80f9e4320f0dde57997e2175e51b3db2e27cc61dfa1daef8777"
+   ]
+  },
+  {
+   "path": "obj/p_fiv100_1p.gmo",
+   "size": 2462188,
+   "sha256": "9a17294ec50482f2f1293700a72d3e75f935df673494d9a95c5b7f66716eeafb",
+   "patch": "p_fiv100_1p.gmo.npd",
+   "sources": [
+    "012:obj/p_fiv100_1p.gmo",
+    "d1:obj/p_fiv100_1p.gmo"
+   ],
+   "sources_sha256": [
+    "1b843a3e44fcc32e5ac6ac86b669cb5a14494f7121528148be3c48d60b5eaab5",
+    "bb524d5b68740f781df294358e3eaa7c48355747dad9ba38ebd44d851ec51ed1"
+   ]
+  },
+  {
+   "path": "obj/p_fiv100_2p.gmo",
+   "size": 2462188,
+   "sha256": "c54dbeb66a6ec284aded5bed724260cc0e7aceb51a0744c6ba0232e085093c0f",
+   "patch": "p_fiv100_2p.gmo.npd",
+   "sources": [
+    "012:obj/p_fiv100_2p.gmo",
+    "d1:obj/p_fiv100_1p.gmo"
+   ],
+   "sources_sha256": [
+    "592e67b8c6fcac7300e80ca8a32fa5cbbaa756b729782b9b1fe80ef1c4096532",
+    "bb524d5b68740f781df294358e3eaa7c48355747dad9ba38ebd44d851ec51ed1"
+   ]
+  },
+  {
+   "path": "obj/p_fiv100_3p.gmo",
+   "size": 2470132,
+   "sha256": "b86bc46bb92bc4f4a6ad9fa5c4fa583996d4c8db970b5bc8294d14431d49dfc9",
+   "patch": "p_fiv100_3p.gmo.npd",
+   "sources": [
+    "012:obj/p_fiv100_3p.gmo",
+    "d1:obj/p_fiv100_1p.gmo"
+   ],
+   "sources_sha256": [
+    "43da35210e9dd7e4974400cd194eb22c426f7667f1364779aec71d49057d09c7",
+    "bb524d5b68740f781df294358e3eaa7c48355747dad9ba38ebd44d851ec51ed1"
+   ]
+  },
+  {
+   "path": "obj/p_fiv100_zako.gmo",
+   "size": 2443668,
+   "sha256": "c0dbcc2c5560b87c0b8272f837ec2d800c0605af071438acd8a35e665c239b5c",
+   "patch": "p_fiv100_zako.gmo.npd",
+   "sources": [
+    "012:obj/p_fiv100_zako.gmo",
+    "d1:obj/p_fiv100_1p.gmo"
+   ],
+   "sources_sha256": [
+    "89422d7152374b0e49c9e5595b1364ebbdf60bbe50d392e9e78a626fbafc8cbf",
+    "bb524d5b68740f781df294358e3eaa7c48355747dad9ba38ebd44d851ec51ed1"
+   ]
+  },
+  {
+   "path": "voice/en/battle/voice_p_fiv100_00.scd",
+   "size": 357600,
+   "sha256": "6b3709f8f3f959495e8672ed5608ecb7bd6bf95572d680b6c6c4e84fdba1a8cc",
+   "patch": "voice_p_fiv100_00.scd.npd",
+   "sources": [
+    "012:voice/en/battle/voice_p_fiv100_00.scd",
+    "d1crc:dd2e4d13"
+   ],
+   "sources_sha256": [
+    "9f67e60176757f67a7f867d35082d0a0c464e3373deb2feb1c036c788caa7946",
+    "06fdeeb7c0acde5bfeb82508fb5e842f7045741a71dd7ff344da282c28ce2eec"
+   ]
+  }
+ ],
+ "move_names": {
+  "10": {
+   "copy": "0C",
+   "cmd": "0xB0",
+   "type": "brave",
+   "phase": "ground",
+   "learn": 6,
+   "name": "Ascendant Lance",
+   "_note": "Dissidia (2008) Bartz move, command 0x198 there (tools/d1_moves.py)",
+   "cp": 35,
+   "cp_mastered": 15,
+   "ap": 120,
+   "help_d1_cmd": 408
+  },
+  "11": {
+   "copy": "0C",
+   "cmd": "0xB1",
+   "type": "brave",
+   "phase": "ground",
+   "learn": 3,
+   "name": "Climbarrel",
+   "_note": "Dissidia (2008) Bartz move, command 0x19A there (tools/d1_moves.py)",
+   "cp": 35,
+   "cp_mastered": 20,
+   "ap": 120,
+   "help_d1_cmd": 410
+  },
+  "12": {
+   "copy": "0D",
+   "cmd": "0xB2",
+   "type": "brave",
+   "phase": "midair",
+   "learn": 12,
+   "name": "Storm Shot",
+   "_note": "Dissidia (2008) Bartz move, command 0x19E there (tools/d1_moves.py)",
+   "cp": 35,
+   "cp_mastered": 15,
+   "ap": 180,
+   "help_d1_cmd": 414
+  },
+  "13": {
+   "copy": "0D",
+   "cmd": "0xB3",
+   "type": "brave",
+   "phase": "midair",
+   "learn": 28,
+   "name": "Slidehazzard",
+   "_note": "Dissidia (2008) Bartz move, command 0x19F there (tools/d1_moves.py)",
+   "cp": 35,
+   "cp_mastered": 15,
+   "ap": 180,
+   "help_d1_cmd": 415
+  },
+  "14": {
+   "copy": "0E",
+   "cmd": "0xB4",
+   "type": "hp",
+   "phase": "ground",
+   "learn": 24,
+   "name": "Soul Eater",
+   "_note": "Dissidia (2008) Bartz move, command 0x19C there (tools/d1_moves.py)",
+   "cp": 45,
+   "cp_mastered": 25,
+   "ap": 180,
+   "help_d1_cmd": 412
+  },
+  "15": {
+   "copy": "0E",
+   "cmd": "0xB5",
+   "type": "hp",
+   "phase": "ground",
+   "learn": 19,
+   "name": "Flood",
+   "_note": "Dissidia (2008) Bartz move, command 0x19D there (tools/d1_moves.py)",
+   "cp": 45,
+   "cp_mastered": 25,
+   "ap": 180,
+   "help_d1_cmd": 413
+  },
+  "16": {
+   "copy": "0F",
+   "cmd": "0xB6",
+   "type": "hp",
+   "phase": "midair",
+   "learn": 46,
+   "name": "Wind Shear",
+   "_note": "Dissidia (2008) Bartz move, command 0x1A1 there (tools/d1_moves.py)",
+   "cp": 45,
+   "cp_mastered": 25,
+   "ap": 300,
+   "help_d1_cmd": 417
+  },
+  "17": {
+   "copy": "0F",
+   "cmd": "0xB7",
+   "type": "hp",
+   "phase": "midair",
+   "learn": 38,
+   "name": "Paladin Force",
+   "_note": "Dissidia (2008) Bartz move, command 0x1A2 there (tools/d1_moves.py)",
+   "cp": 45,
+   "cp_mastered": 25,
+   "ap": 180,
+   "help_d1_cmd": 418
+  }
+ }
+}

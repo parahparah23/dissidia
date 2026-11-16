@@ -67,7 +67,11 @@ void walk(const std::string& root, const std::string& rel, std::vector<std::stri
             if (::stat((root + "/" + r).c_str(), &st) != 0) continue;
             t = S_ISDIR(st.st_mode) ? DT_DIR : S_ISREG(st.st_mode) ? DT_REG : DT_UNKNOWN;
         }
-        if (t == DT_DIR) walk(root, r, out);
+        if (t == DT_DIR) {
+            struct stat ms;   // an installed mod folder (hooks_io.cpp mod_roots): its install/ is a root of its own, when it is on
+            if (::stat((root + "/" + r + "/mod.json").c_str(), &ms) == 0) continue;
+            walk(root, r, out);
+        }
         else if (t == DT_REG) out->push_back(r);
     }
 }
@@ -170,6 +174,7 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
                         uint32_t index_capacity, const std::vector<std::string>& extra_dirs) {
     overrides_.clear();
     patched_ = original_index;
+    package_size_ = package_size;
     PackageIndex idx;
     if (!idx.parse(original_index.data(), original_index.size(), err)) return false;
     auto note = [&](const std::string& s) { if (log) { *log += s; *log += '\n'; } };
@@ -212,7 +217,7 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
             if (!parse_hex8(stem, &crc)) { note("[MODS] skip (bad by_crc name): " + rel); continue; }
         } else {
             if (norm.find('/') == std::string::npos &&
-                (norm.compare(0, 6, "readme") == 0 || norm == "roster.txt")) continue;   // roster.txt: roster.cpp config
+                (norm.compare(0, 6, "readme") == 0 || norm == "roster.txt" || norm == "retail_moves.txt")) continue;   // roster.cpp config
             // textures/… is the texture-pack tree (psp_tex_pack.cpp serves it by xxhash id); the game never
             // requests those paths, and a dump of 1,000+ PNGs would otherwise flood the package index below.
             if (norm.compare(0, 9, "textures/") == 0) continue;
@@ -293,6 +298,33 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
     return true;
 }
 
+bool PackageMods::add_override(const std::string& asset, const std::string& file, uint32_t size, IndexEntry* out) {
+    PackageIndex idx;
+    std::string err;
+    if (patched_.empty() || !idx.parse(patched_.data(), patched_.size(), &err) || size == 0 || size > kSizeMask) return false;
+    const std::string norm = normalize_asset_path(asset);
+    const uint32_t crc = package_crc(norm);
+    IndexEntry* e = nullptr;
+    for (auto& x : idx.entries) if (x.crc == crc) e = &x;
+    if (!e) return false;
+    overrides_.erase(std::remove_if(overrides_.begin(), overrides_.end(), [crc](const Override& o) { return o.crc == crc; }),
+                     overrides_.end());
+    uint64_t next = (package_size_ + kSectorSize - 1) / kSectorSize;
+    for (const auto& o : overrides_) next = std::max<uint64_t>(next, (o.start + o.span + kSectorSize - 1) / kSectorSize);
+    for (const auto& x : idx.entries) next = std::max<uint64_t>(next, (uint64_t)x.sector + x.sectors());
+    Override ov;
+    ov.crc = crc; ov.asset = norm; ov.file = file; ov.size = size; ov.relocated = true;
+    ov.start = next * kSectorSize;
+    ov.span = (uint64_t)((size + kSectorSize - 1) / kSectorSize) * kSectorSize;
+    e->sector = (uint32_t)next;
+    e->size_flags = (e->flags() << 28) | size;
+    *out = *e;
+    overrides_.push_back(ov);
+    std::sort(overrides_.begin(), overrides_.end(), [](const Override& a, const Override& b) { return a.start < b.start; });
+    patched_ = idx.serialize();
+    return true;
+}
+
 bool PackageMods::read_index(int64_t off, uint32_t size, uint8_t* dest, uint32_t* nread) const {
     if (off < 0 || (uint64_t)off >= patched_.size()) { *nread = 0; return true; }
     uint32_t n = (uint32_t)std::min<uint64_t>(size, patched_.size() - (uint64_t)off);
@@ -363,6 +395,20 @@ bool first_existing(const std::string& dir, const char* a, const char* b, std::s
 }
 
 }  // namespace
+
+bool asset_location(const std::string& data_dir, const std::string& asset, uint64_t* off, uint32_t* size) {
+    std::string info;
+    if (!first_existing(data_dir, "PACKAGE_INFO.BIN", "package_info.bin", &info)) return false;
+    std::vector<uint8_t> raw;
+    std::string err;
+    PackageIndex idx;
+    if (!read_whole_file(info, &raw) || !idx.parse(raw.data(), raw.size(), &err)) return false;
+    const IndexEntry* e = idx.find(package_crc(normalize_asset_path(asset)));
+    if (!e || e->size() == 0) return false;
+    *off = uint64_t(e->sector) * kSectorSize;
+    *size = e->size();
+    return true;
+}
 
 bool read_asset(const std::string& data_dir, const std::string& mods_dir, const std::string& asset,
                 std::vector<uint8_t>* out) {

@@ -24,6 +24,8 @@
 //   * Effect components that step once per update instead of x dt (docs/archive/open-questions/fx.md item 7): the
 //     ch61 envelope, the ch95/100/102/103 point and line emitters, the ch68/70 trail paths, the ch105 locus UV scroll
 //     and the ch106 locus history (weapon trails). See "Effect components" below.
+//   * The face texture animation (FUN_0886E5D0: blinking, mouth shapes) steps trunc(actor step) whole ticks per call, 0 above
+//     60 Hz: the fraction is carried per model (face_step_hook).
 // Mod code that counts per call rather than per tick uses dissidia_frame_ticks() (roster.cpp warp-dash link).
 //
 // Scope: the battle overlay only by default. Menus mostly count frames (4 dt reads in the menu overlay), so they
@@ -40,6 +42,8 @@
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
 #include "psp_ge_draw.h"
+#include "psp_screenfx.h"
+#include "psp_present_sync.h"
 #include <algorithm>
 #if defined(__GLIBC__) || defined(__APPLE__)   // PSPRECOMP_TASK_TRACE's backtraces (not on Android API < 33 or Windows)
 #define PSPRECOMP_HAVE_BACKTRACE 1
@@ -100,13 +104,14 @@ constexpr uint32_t EXB_PROMPT = 0x08A3D1C4u;    // battle overlay: EX Burst butt
 constexpr uint32_t EXB_UI = 0x08A40E60u;        // battle overlay: EX Burst quicktime UI update (calls the 08A41558 / 08A41774 states)
 constexpr uint32_t EXB_CTRL = 0x08A3FE10u;      // battle overlay: EX Burst controller update (prompt, release gauge, slow motion)
 constexpr uint32_t CAM_DT = 0x08B3B4FCu;        // battle overlay: a camera's time step
+constexpr uint32_t FACE_STEP = 0x0886E5D0u;     // EBOOT: a model's face texture animation (TexAnm groups: eyes, mouth), a1 = whole ticks to step
 
 uint8_t* g_ram = nullptr;
 bool g_exb_in = false;   // inside a gated EX Burst call (see exb_ctrl_hook)
 double g_exb_t0 = 0;   // play time the current burst began (log only)
 const bool g_exb_log_on = std::getenv("PSPRECOMP_EXB_LOG") != nullptr;
 bool g_exb_poll = false;   // polling the burst's button tests on a held update (exb_poll_held)
-FuncPtr g_orig_ui_param = nullptr, g_orig_steer_move = nullptr, g_orig_pressed = nullptr, g_orig_rootmotion = nullptr, g_orig_slowmo = nullptr, g_orig_frame_end = nullptr, g_orig_pad = nullptr, g_orig_actor_dt = nullptr, g_orig_cam_dt = nullptr, g_orig_exb_ctrl = nullptr, g_orig_exb_pressed = nullptr, g_orig_exb_pressed2 = nullptr, g_orig_exb_prompt = nullptr, g_orig_exb_ui = nullptr;
+FuncPtr g_orig_ui_param = nullptr, g_orig_steer_move = nullptr, g_orig_pressed = nullptr, g_orig_rootmotion = nullptr, g_orig_slowmo = nullptr, g_orig_frame_end = nullptr, g_orig_pad = nullptr, g_orig_actor_dt = nullptr, g_orig_cam_dt = nullptr, g_orig_exb_ctrl = nullptr, g_orig_exb_pressed = nullptr, g_orig_exb_pressed2 = nullptr, g_orig_exb_prompt = nullptr, g_orig_exb_ui = nullptr, g_orig_face_step = nullptr;
 std::atomic<int> g_target{30};     // requested rate (settings / env)
 int g_interval = 2;                // interval written on the last frame end (2 = 30 Hz, 1 = 60 Hz and above)
 int g_rate = 30;                   // logic rate in effect (30, 60, 90, ... one frame per vblank above 30)
@@ -220,6 +225,7 @@ uint64_t g_fighter_seen[4] = {};   // g_tick when the fighter's step was last as
 //                                               <ms> tap <BUTTONS> [ms]         press, release after ms (default 100)
 //                                               <ms> analog <ax> <ay>           stick only
 //                                               <ms> mark <text>                 [TEST] line in the log
+//                                               <ms> rstick <ax> <ay>           hold the right stick (128 128 = centre; camera tests)
 //                                               <ms> quit                        exit the game
 //                                               <ms> sync [timeout] [scr]        hold the script until the player's action (script id) changes (or becomes `scr`); that update is T0
 //                                               <ms> batch <file>                hold it until <file> exists, then play (and delete) the lines in it: a driver feeds trials into a running battle
@@ -309,6 +315,12 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "scan") {   // scan <min drop> <max drop> <max value>: user RAM words that dropped by min..max since the last scan, and kept dropping (finds a stat the HUD shows)
             double lo = 150, hi = 400, mx = 2000; ss >> lo >> hi >> mx;
             ev.push_back({t, 14, static_cast<uint32_t>(lo), static_cast<uint32_t>(hi), std::to_string(static_cast<int>(mx)), rel});
+        } else if (cmd == "fxlights") {   // fxlights <0|1>: lights from glowing effects off / on (psp_fx_lights_set), for an A/B of the same trial in one run
+            int v = 1; ss >> v;
+            ev.push_back({t, 16, static_cast<uint32_t>(v), 0, "", rel});
+        } else if (cmd == "vsync") {   // vsync <0|1>: vertical sync off / on while running (psp_vsync_set), for pacing A/B in one run
+            int v = 1; ss >> v;
+            ev.push_back({t, 30, static_cast<uint32_t>(v), 0, "", rel});
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
@@ -331,6 +343,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "analog") {
             unsigned ax = 128, ay = 128; ss >> ax >> ay;
             ev.push_back({t, 1, 0, (ay & 255u) << 8 | (ax & 255u), ""});
+        } else if (cmd == "rstick") {   // rstick <ax> <ay>: hold the right stick there (128 128 = let go); camera tests
+            unsigned ax = 128, ay = 128; ss >> ax >> ay;
+            ev.push_back({t, 17, 0, (ay & 255u) << 8 | (ax & 255u), ""});
         } else if (cmd == "mark") {
             std::string rest; std::getline(ss, rest);
             ev.push_back({t, 2, 0, 0, rest});
@@ -621,6 +636,13 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             g_wait_kind = e.kind; g_wait_scr = cur_scr; g_wait_since = g_gt_ms; g_wait_timeout = e.b; g_wait_target = static_cast<int>(e.a);
             continue;
         }
+        if (e.kind == 16) { psp_fx_lights_set(e.a != 0); continue; }
+        if (e.kind == 17) {   // rstick: the debug socket's right-stick injection, held until the next rstick
+            g_injected_ranalog.store(e.b, std::memory_order_relaxed);
+            g_injected_ranalog_deadline_ms.store(e.b == 0x8080u ? 0 : INT64_MAX, std::memory_order_relaxed);
+            continue;
+        }
+        if (e.kind == 30) { psp_vsync_set(e.a != 0); continue; }
         if (e.kind == 15) {
             const uint32_t a = test_fighter(e.text == "cpu" ? 1u : 0u);
             if (a) { w32(a + e.a, e.b); std::fprintf(stderr, "[TEST] gt=%.0f poke %s +%X = %d\n", g_gt_ms, e.text.c_str(), e.a, static_cast<int>(e.b)); }
@@ -1572,7 +1594,67 @@ void fighter_log_frame() {
 // presses, measured from the first visible frame of the move) open after (a - 2) ticks. At 120 Hz the first update advanced it by 0.5 ticks: every
 // window sat 25 ms (1.5 ticks) later than at 30 Hz, at both edges, for every Jecht chain step (tools/combo_timing.py combos, 11 Nov). The first update
 // after a fighter's script id changed therefore runs with a 30 Hz sized step (the same as at 30 Hz), the rest as before.
+// Face texture animation (FUN_0886E5D0, eyes blinking, mouth shapes, face_texture events 0x0214). Its only caller, the actor update
+// FUN_0883C2E8, passes trunc(actor step) as a whole number of ticks to step: 2 per update at 30 Hz, 1 at 60, but 0 at 90 / 120
+// (step 0.67 / 0.5). So above 60 Hz faces only moved on the rare update with a whole-tick step (a move's first update, see below):
+// a blink that had closed the eyes stayed closed, a pattern switch waited, and a model could keep its first cell (all cells start
+// at -1 and nothing is copied until the first step). Above 30 Hz the fraction is kept per model (a0) and carried over, so the face
+// steps 2 ticks per 33 ms at every rate. At 30 Hz the call is left as it is (PSP behaviour, slow motion included).
+float g_face_dt = 0.f;        // the last actor step actor_dt_hook returned (the caller truncates it for the face step)
+bool g_face_dt_set = false;
+struct FaceAcc { uint32_t obj; float frac; uint64_t seen; double win_ms; int ticks, changes; uint32_t cells[8]; };
+FaceAcc g_face_acc[32];
+bool g_face_log = std::getenv("PSPRECOMP_FACE_LOG") != nullptr;
+bool g_face_fix = true;   // PSPRECOMP_FACE_STEP=0: pass the game's tick count through (A/B); the log still runs
+
+// PSPRECOMP_FACE_LOG: per model and 5 s of play time, the ticks stepped and how many times a group's cell changed (blinks, mouth shapes).
+void face_stats(FaceAcc& s, int ticks) {
+    const uint32_t tab = r32(s.obj + 132u);
+    if (!ok(tab)) return;
+    const uint32_t groups = r32(tab), n = std::min<uint32_t>(r32(tab + 4u), 8u);
+    if (!ok(groups)) return;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t cell = r32(groups + i * 96u + 48u);   // u16 u, u16 v
+        if (cell != s.cells[i]) { if (s.cells[i] != 0xFFFFFFFFu) s.changes++; s.cells[i] = cell; }
+    }
+    s.ticks += ticks;
+    if (s.win_ms < 0) s.win_ms = g_play_ms;
+    if (g_play_ms - s.win_ms >= 5000.0) {
+        std::fprintf(stderr, "[FACESTAT] obj=%08X groups=%u ms=%.0f ticks=%d per_s=%.1f cell_changes=%d fps=%d fix=%d\n", s.obj, n, g_play_ms - s.win_ms, s.ticks,
+                     s.ticks * 1000.0 / (g_play_ms - s.win_ms), s.changes, g_rate, g_face_fix ? 1 : 0);
+        s.win_ms = g_play_ms; s.ticks = 0; s.changes = 0;
+    }
+}
+
+void face_step_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t obj = static_cast<uint32_t>(ctx->r[4]);
+    const int game_ticks = static_cast<int>(ctx->r[5]);
+    const bool have_dt = g_face_dt_set;
+    g_face_dt_set = false;
+    FaceAcc* slot = nullptr;
+    for (auto& a : g_face_acc) if (a.obj == obj) { slot = &a; break; }
+    if (!slot) {   // a free slot, else the one seen longest ago
+        slot = &g_face_acc[0];
+        for (auto& a : g_face_acc) if (!a.obj || a.seen < slot->seen) { slot = &a; if (!a.obj) break; }
+        *slot = {obj, 0.f, 0, -1.0, 0, 0, {}};
+        for (auto& c : slot->cells) c = 0xFFFFFFFFu;
+    }
+    slot->seen = g_tick;
+    if (g_face_fix && g_ticks < 2.0f && have_dt && std::isfinite(g_face_dt) && g_face_dt >= 0.f && g_face_dt < 64.f &&
+        game_ticks == static_cast<int>(g_face_dt)) {
+        const float t = slot->frac + g_face_dt;
+        const int n = static_cast<int>(t);
+        slot->frac = t - static_cast<float>(n);
+        ctx->r[5] = n;
+    }
+    const int stepped = static_cast<int>(ctx->r[5]);
+    g_orig_face_step(rdram, ctx);
+    if (g_face_log) face_stats(*slot, stepped);
+}
+
 int g_actor_log_left = 4000;
+struct CoreSeen { uint32_t actor; uint64_t seen; };
+CoreSeen g_cores[8];   // kind-6 objects (EX cores) and the g_tick they last updated; one that stops updating was picked up
 struct ActorSeen { uint32_t actor; float res; int own; };
 ActorSeen g_actor_seen[24];
 
@@ -1707,13 +1789,23 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
             if (slot < 0) for (int i = 0; i < 4 && slot < 0; i++) if (!g_fighters[i] || g_tick - g_fighter_seen[i] > 120) slot = i;   // free or stale
             if (slot >= 0 && g_fighters[slot] != actor) g_ai_armed = false;   // a new fighter: a new fight (its intro waits for the brains)
             if (slot >= 0) { g_fighters[slot] = actor; g_fighter_seen[slot] = g_tick; }
-        } else if (g_fighter_log) {
+        } else if (g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 6) {   // object kind 6 = an EX core (the dash's fixed-point target): remembered for its light
+            int slot = -1;
+            for (int i = 0; i < 8; i++) if (g_cores[i].actor == actor) slot = i;
+            if (slot < 0) for (int i = 0; i < 8 && slot < 0; i++) if (!g_cores[i].actor || g_tick - g_cores[i].seen > 4) slot = i;
+            if (slot >= 0) {
+                if (g_cores[slot].actor != actor) { static int logged = 0; if (logged++ < 40) std::fprintf(stderr, "[EXCORE] actor %08X appeared at %.2f %.2f %.2f\n", actor, rdf(actor + 0x80u), rdf(actor + 0x84u), rdf(actor + 0x88u)); }
+                g_cores[slot].actor = actor; g_cores[slot].seen = g_tick;
+            }
+        }
+        if (!fighter && g_fighter_log) {
             bool known = false;
             for (uint32_t f : g_objects) known |= f == actor;
             for (uint32_t& f : g_objects) if (!known && !f) { f = actor; known = true; }
         }
     }
     const float before = ctx->f[0];
+    struct NoteDt { recomp_context* c; ~NoteDt() { g_face_dt = c->f[0]; g_face_dt_set = true; } } note_dt{ctx};   // for face_step_hook
     if (g_test_freeze_cpu && g_gt_started && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != test_player()) { ctx->f[0] = 0.f; return; }
     if (g_ticks != 2.0f && ok(actor) && own) ctx->f[0] *= g_ticks * 0.5f;   // own clock: a fixed 2.0 per frame
     if (g_action_start_step && g_ticks < 2.0f && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0) {
@@ -2287,10 +2379,23 @@ void fps_set(int fps) {
     fps = fps < 30 ? 30 : fps > 240 ? 240 : (fps + 15) / 30 * 30;   // a multiple of 30
     if (g_target.exchange(fps) != fps) std::fprintf(stderr, "[FPS] target frame rate %d\n", fps);
     psp_adhoc_set_local_fps(fps);   // told to the other players
+    psp_present_set_target_fps(fps);   // Android: ask the display for a matching refresh rate
 }
 const int k_rates[] = {30, 60, 90, 120, 150, 180, 210, 240};
 
 }  // namespace
+
+// EX cores in the world right now (psp_screenfx.cpp pickup lights): kind-6 objects that updated within the last few frames
+int dissidia_ex_cores(float (*P)[3], int max) {
+    int n = 0;
+    for (const CoreSeen& c : g_cores) {
+        if (n >= max) break;
+        if (!c.actor || !ok(c.actor) || g_tick - c.seen > 4) continue;
+        P[n][0] = rdf(c.actor + 0x80u); P[n][1] = rdf(c.actor + 0x84u); P[n][2] = rdf(c.actor + 0x88u);
+        ++n;
+    }
+    return n;
+}
 
 // The position (actor+0x80, vec3) of the fighter nearest to `eye` among those that were updated in the last two
 // seconds, for camera.cpp: the game's own camera sits behind the fighter you control, so that is the one the free camera
@@ -2320,6 +2425,38 @@ uint32_t dissidia_player_actor() {
         if (ok(brain) && r32(brain + 0x54u) != 0) return last = a;
     }
     return last && ok(last) && g_ram[(last + 0x542u) & 0x07FFFFFFu] == 0 ? last : 0u;
+}
+
+// The fighters on stage now (updated within the last 2 s), for discord_presence.cpp: fills up to `max` actors, returns the count.
+// Safe to call from another thread (it only reads words that the game thread writes whole).
+int dissidia_live_fighters(uint32_t* out, int max) {
+    int n = 0;
+    if (overlay_id() != 1) return 0;
+    for (int i = 0; i < 4 && n < max; i++) {
+        const uint32_t a = g_fighters[i];
+        if (!a || !ok(a) || g_tick - g_fighter_seen[i] > 120 || g_ram[(a + 0x542u) & 0x07FFFFFFu] != 0) continue;
+        out[n++] = a;
+    }
+    return n;
+}
+// charId of a fighter (-99 = unknown) and the object-table type of its model (actor +0x2F8 -> its object record: +6 charId,
+// +8 type: 0 player, 5 manikin), and whether a person drives it (brain +0x54 != 0, as dissidia_player_actor).
+int dissidia_fighter_char_id(uint32_t a) { return ok(a) ? fighter_char(a) : -99; }
+int dissidia_fighter_model_type(uint32_t a) {
+    const uint32_t info = ok(a) ? r32(a + 0x2F8u) : 0u;
+    return ok(info) ? g_ram[(info + 8u) & 0x07FFFFFFu] : -1;
+}
+// The fighter this copy's player drives: actor +0x5B0 bit 0x04 (0x...35 vs 0x...31; +0x760 is only set on it too). Unlike the brain's
+// human mode (+0x54, set for every pad-driven fighter, the remote players' too) it tells the local player apart in Communications Mode
+// (found by diffing two copies in one Group Battle; the same in a single-player Quick Battle).
+bool dissidia_fighter_local(uint32_t a) { return ok(a) && (r32(a + 0x5B0u) & 0x4u) != 0; }
+uint32_t dissidia_fighter_brain_mode(uint32_t a) {   // brain +0x54 (0 = CPU), for logs
+    const uint32_t brain = ok(a) ? r32(a + 0x5C4u) : 0u;
+    return ok(brain) ? r32(brain + 0x54u) : 0xFFFFFFFFu;
+}
+bool dissidia_fighter_human(uint32_t a) {
+    const uint32_t brain = ok(a) ? r32(a + 0x5C4u) : 0u;
+    return ok(brain) && r32(brain + 0x54u) != 0;
 }
 
 // Ticks (1/60 s) one game frame advances: 2 at 30 Hz, 1 at 60 Hz, 2/3 at 90 Hz, 0.5 at 120 Hz.
@@ -2391,6 +2528,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
     psp_dispatch_register(PAD_SET, pad_set_hook);
     psp_dispatch_register(ACTOR_DT, actor_dt_hook);
     psp_dispatch_register(CAM_DT, cam_dt_hook);
+    if (const char* fs = std::getenv("PSPRECOMP_FACE_STEP"); fs && fs[0] == '0') g_face_fix = false;
+    if ((g_face_fix || g_face_log) && (g_orig_face_step = psp_dispatch_probe_lookup(FACE_STEP))) psp_dispatch_register(FACE_STEP, face_step_hook);
     if ((g_orig_exb_pressed = ovl_battle_lookup(EXB_PRESSED))) psp_dispatch_register(EXB_PRESSED, exb_pressed_hook);
     if ((g_orig_exb_pressed2 = ovl_battle_lookup(EXB_PRESSED2))) psp_dispatch_register(EXB_PRESSED2, exb_pressed2_hook);
     VtReg<kNV - 1>::go();   // sticky presses for every virtual-button test the gated burst code calls (+ counts with PSPRECOMP_EXB_LOG)
@@ -2462,5 +2601,6 @@ void dissidia_framerate_install(uint8_t* rdram) {
     fx_install();
     psp_settings_set_frame_rate_hook({k_rates, static_cast<int>(std::size(k_rates)), fps_get, fps_set});
     psp_adhoc_set_local_fps(g_target.load());
+    psp_present_set_target_fps(g_target.load());
     std::fprintf(stderr, "[FPS] frame rate %d (battle logic; scope %s)\n", g_target.load(), g_scope_all ? "all" : "battle");
 }

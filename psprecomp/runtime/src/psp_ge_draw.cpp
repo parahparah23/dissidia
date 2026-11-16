@@ -1,4 +1,5 @@
 #include "psp_gl_window.h"
+#include "psp_quit.h"
 #include "hle/psp_savedata_dialog.h"
 #include "psp_ge_draw.h"
 #include "psp_post.h"
@@ -10,6 +11,8 @@
 #include "psp_ge_texture.h"
 #include "psp_ge_shader.h"
 #include "psp_fx_shader.h"
+#include "psp_refl_table.h"
+#include <unordered_set>
 #include "psp_fep_log.h"
 #include "psp_event_loop.h"
 #include "psp_prof.h"
@@ -24,6 +27,7 @@
 #include <cstring>
 #include <vector>
 #include "psp_settings.h"
+#include <array>
 #include <atomic>
 #include <unordered_map>
 #include <cstdarg>
@@ -1337,7 +1341,10 @@ static std::atomic<bool> g_fps_counter{false};   // simple transparent fps numbe
 static std::atomic<bool> g_perf_hud{false};   // settings menu Debug page / PSPRECOMP_PERF_HUD=1
 static Stream g_s2d, g_s3d;
 static std::atomic<bool> g_vb_active{false};   // view blocker fade (ge_draw_set_view_blocker)
+static std::atomic<bool> g_vb_linger{false};   // some draw is still (partly) faded: keep evaluating so it fades back in instead of popping
 static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim);
+static std::atomic<bool> g_cc_collect{false};   // camera collision: cache the main view's stage geometry (a battle camera is running)
+static void cc_collect(uint8_t* rdram, const GeState& st, int n, int prim);
 // Ring size in vertices. 3D vertices are 68 bytes, 2D 28: 8.9 MB + 3.6 MB.
 // Sized for several frames of high-poly characters; small enough for an APU
 // (Steam Deck) where it is carved from shared system memory. A single batch
@@ -1556,6 +1563,9 @@ struct Batch {
     std::vector<GLsizei> counts;
     bool fx_timed = false;   // FX shader override batch, GPU-timed (PSPRECOMP_FX_SHADER_LOG=2)
     bool fxl = false;        // an effects draw: also drawn into the screen-space effects layer (fxl_*)
+    float refl = 0.f;        // > 0: a reflective surface (material byte / 255): its triangles go to the reflectivity mask (g_rml_tris)
+    GLuint persist_vao = 0;  // != 0: one draw from a resident vertex buffer (gpu_vcache): no staging, no upload
+    size_t persist_n = 0;
 };
 static Batch g_batch;
 static GLuint g_copy_buf_bound = 0;
@@ -1651,6 +1661,18 @@ static FxLayer g_fxl[GE_MAX_TARGETS];
 static float g_fx_clearz[GE_MAX_TARGETS];
 static int g_fxl_draws = 0;
 static bool g_fxl_flag = false;   // the draws being queued are effects draws (set by fx_track)
+// ---- Reflectivity mask (issue #2, psp_refl_table.h) ----
+// Which pixels are reflective: the triangles of every depth-writing 3D draw whose texture has a reflectivity are captured in clip
+// space with the material byte (psp_refl_encode) and drawn into a mask by the screen-space pass in one go (psp_screenfx.cpp), which
+// keeps a mask texel only where its depth matches the scene's: whatever was drawn over a reflective floor later hides it. One pass
+// per frame however many draws reflect: re-issuing each draw into a mask framebuffer cost two render-pass breaks per draw, which
+// a tiled mobile GPU pays for in full (RP6, a tower top built of many reflective pieces).
+static std::vector<float> g_rml_tris[GE_MAX_TARGETS];   // per vertex: clip x y z w, material byte
+static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int count, float refl);
+static void fighter_capture(const GeState& st, uint8_t* rdram, int prim_type, int count);
+static bool g_rml_fighters[GE_MAX_TARGETS];   // the mask list also holds fighter triangles (material byte 1, fighter_capture)
+static bool fighter_mask_wanted(const GeState& st);
+static bool g_rml_flag = false;   // the draws being queued may be reflective (set by fx_track; the value comes from the bound texture)
 static void fxl_free(FxLayer& L) {
     if (L.fbo) glDeleteFramebuffers(1, &L.fbo);
     if (L.color) glDeleteTextures(1, &L.color);
@@ -1715,10 +1737,14 @@ static void flush_batch() {
     g_batch.fx_timed = false;
     const bool fxl_draw = g_batch.fxl;
     g_batch.fxl = false;
-    const size_t n = s.stage_n;
+    g_batch.refl = 0.f;
+    const size_t persist_n = g_batch.persist_n;
+    const GLuint persist_vao = g_batch.persist_vao;
+    g_batch.persist_n = 0; g_batch.persist_vao = 0;
+    const size_t n = persist_n ? persist_n : s.stage_n;
     if (n == 0) { g_batch.firsts.clear(); g_batch.counts.clear(); return; }
 
-    {
+    if (!persist_n) {
         psp_prof::Scope ps(psp_prof::S_UPLOAD);
         if (g_copy_buf_bound != s.vbo) {
             glBindBuffer(GL_COPY_WRITE_BUFFER, s.vbo);
@@ -1760,12 +1786,12 @@ static void flush_batch() {
             glBufferSubData(GL_COPY_WRITE_BUFFER, (GLintptr)(s.write * s.stride),
                             (GLsizeiptr)(n * s.stride), s.stage.data());
     }
-    const GLint first = static_cast<GLint>(s.write);
-    s.write += n;
+    const GLint first = persist_n ? 0 : static_cast<GLint>(s.write);
+    if (!persist_n) s.write += n;
 
     {
         psp_prof::Scope ps(psp_prof::S_DRAW);
-        gl_bind_vao(g_batch.vao);
+        gl_bind_vao(persist_n ? persist_vao : g_batch.vao);
         if (fx_timed) psp_fx_timer_begin();
         if (g_no_raster != 2) {
             const size_t nseg = g_batch.firsts.size();
@@ -1780,7 +1806,7 @@ static void flush_batch() {
                 if (g_no_raster != 1) glDisable(GL_RASTERIZER_DISCARD);
                 verify_compare(g_expect.size());
             } else {
-                const bool single = nseg == 1 || m == GL_TRIANGLES || m == GL_LINES || m == GL_POINTS;
+                const bool single = persist_n || nseg == 1 || m == GL_TRIANGLES || m == GL_LINES || m == GL_POINTS;
                 if (!single) for (size_t i = 0; i < nseg; i++) g_batch.firsts[i] += first;
                 auto issue = [&]() {
                     if (single) glDrawArrays(m, first, static_cast<GLsizei>(n));
@@ -1848,6 +1874,66 @@ void ge_draw_set_perf_overlay(bool on) {
     g_perf_hud = on;
     perf_overlay_apply(on);
     std::fprintf(stderr, "[DRAW] performance overlay %s\n", on ? "on" : "off");
+}
+
+// ---- Resident vertex buffers for cached decodes (PSPRECOMP_GPU_VCACHE=0 turns them off) ----
+// One static VBO + the two 3D layouts per decode-cache entry (psp_ge_vertex.cpp), made on first use and dropped when the
+// cache drops its entries (its generation changes). Same attribute layout as the 3D stream (setup_stream).
+struct GpuVBuf { GLuint vbo = 0, vao = 0, vao_plain = 0; };
+static std::unordered_map<uint64_t, GpuVBuf> g_vcache;
+static uint64_t g_vcache_gen = 0;
+static bool gpu_vcache_on() {
+    static const bool on = [] { const char* e = std::getenv("PSPRECOMP_GPU_VCACHE"); return !(e && e[0] == '0'); }();
+    return on;
+}
+static void vcache_layout(bool weights) {
+    const GLsizei st = static_cast<GLsizei>(sizeof(GeGpuVertex));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(12));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(24));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, st, reinterpret_cast<void*>(32));
+    glEnableVertexAttribArray(2);
+    if (weights) {
+        glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(36));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, st, reinterpret_cast<void*>(52));
+        glEnableVertexAttribArray(5);
+    }
+}
+static void gpu_vcache_drop_all() {
+    for (auto& kv : g_vcache) {
+        GLuint vaos[2] = {kv.second.vao, kv.second.vao_plain};
+        glDeleteVertexArrays(2, vaos);
+        glDeleteBuffers(1, &kv.second.vbo);
+    }
+    g_vcache.clear();
+    glc::vao = ~0u;                                       // a deleted array may be the cached binding: bind afresh next time
+}
+static const GpuVBuf& gpu_vcache_get(uint64_t id, const GeGpuVertex* v, size_t n) {
+    const uint64_t gen = ge_decode_cache_generation();
+    if (gen != g_vcache_gen) { flush_batch(); gpu_vcache_drop_all(); g_vcache_gen = gen; }
+    auto it = g_vcache.find(id);
+    if (it != g_vcache.end()) return it->second;
+    flush_batch();                                        // the buffer and layout bindings below change GL state
+    GpuVBuf b;
+    glGenBuffers(1, &b.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, b.vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * sizeof(GeGpuVertex)), v, GL_STATIC_DRAW);
+    glGenVertexArrays(1, &b.vao);
+    glBindVertexArray(b.vao);
+    vcache_layout(true);
+    glGenVertexArrays(1, &b.vao_plain);
+    glBindVertexArray(b.vao_plain);
+    vcache_layout(false);
+    glBindVertexArray(0);
+    glc::vao = 0;                                         // the raw binds above bypassed gl_bind_vao's cache
+    static int made = 0;
+    if (++made <= 40 || made % 100 == 0)
+        std::fprintf(stderr, "[GPU_VCACHE] resident buffer %d: %zu vertices (%.1f MB)\n", made, n, n * sizeof(GeGpuVertex) / 1048576.0);
+    return g_vcache.emplace(id, b).first->second;
 }
 
 static void setup_stream(Stream& s, size_t stride, bool is3d) {
@@ -1995,6 +2081,7 @@ static void fx_batch(const GeState& state, GLuint fbo_tex, const GeXform3D* g) {
     else if (out.depth == Depth::Write) gl_depth_mask(true);
     else if (out.depth == Depth::Off) gl_depth_enable(false);
     g_batch.fx_timed = out.timed;
+    g_batch.refl = 0.f;   // an override shader has no alpha override to write the mask with
 }
 
 // Make `k` the active batch (flushing a different one) with room for `need`
@@ -2013,6 +2100,15 @@ static void ensure_batch(const KeyBuf& k, Stream& s, GLuint vao, GLenum mode, si
     g_batch.fxl = g_fxl_flag;
     psp_prof::batches++;
     apply_gl_pipeline(rdram, state, prim_type, fbo_tex, xf != nullptr);
+    g_batch.refl = g_rml_flag && state.texture_enable && !fbo_tex ? ge_texture_bound_refl() : 0.f;
+    if (g_rml_flag && state.texture_enable && !fbo_tex) {   // PSPRECOMP_REFL_LOG=1: each surface texture once, to fill reflectivity.txt
+        static const bool lg = std::getenv("PSPRECOMP_REFL_LOG") != nullptr;
+        static std::unordered_set<uint64_t> seen;
+        const uint64_t id = ge_texture_bound_pack_id();
+        if (lg && id && seen.insert(id).second)
+            { const PspReflMaterial m = psp_refl_decode(uint8_t(g_batch.refl * 255.f + 0.5f));
+              std::fprintf(stderr, "[REFL] stage %d texture %016llx reflectivity %.2f roughness %.2f metal %d\n", psp_stage_id(), (unsigned long long)id, m.refl, m.rough, (int)m.metal); }
+    }
     GeXform3D g{};
     if (xf) {
         psp_prof::Scope ps(psp_prof::S_UNIFORM);
@@ -2125,8 +2221,10 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         const int path = kc.path;
         const KeyBuf& key = kc.key;
         float vb_f = 1.f;
-        if (g_vb_active.load(std::memory_order_relaxed) && path == 1 && state.depth_test_enable && !state.depth_write_disable)
+        if ((g_vb_active.load(std::memory_order_relaxed) || g_vb_linger.load(std::memory_order_relaxed)) && path == 1 && state.depth_test_enable && !state.depth_write_disable)
             vb_f = vb_fade_factor(rdram, state, n, prim_type);
+        if (path == 1 && state.depth_test_enable && !state.depth_write_disable && g_cc_collect.load(std::memory_order_relaxed))
+            cc_collect(rdram, state, n, prim_type);
         GeState vb_state; KeyBuf vb_key;
         const bool vb_on = vb_f < 0.999f;
         if (vb_on) {   // drawn blended with no depth writes (the game's own fade does the same), so the player behind it stays visible
@@ -2143,6 +2241,30 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         // texture is bound now, so its pack id is this draw's.
         static const bool fep_log = psp_fep_log_on();
         if (fep_log) psp_fep_log_draw(rdram, state, prim_type, n, ge_texture_bound_pack_id());
+        if (g_batch.refl > 0.f && !vb_on && path == 1) rml_capture(state, rdram, prim_type, n, g_batch.refl);   // reflectivity mask
+        if (path == 2 && fighter_mask_wanted(state)) fighter_capture(state, rdram, prim_type, n);   // the fighter mask (no self-shadowing)
+        if (!g_verify && n >= 512 && gpu_vcache_on()) {
+            // a big draw whose decoded vertices the decode cache holds (characters: the same every frame): drawn from a
+            // resident buffer made once, instead of copying ~70 bytes a vertex into the frame's ring and uploading it
+            uint64_t id = 0;
+            const GeGpuVertex* cv;
+            {
+                psp_prof::Scope ps(psp_prof::S_DECODE);
+                cv = ge_decode_vertices_gpu_cached(rdram, state, n, &id);
+            }
+            if (cv) {
+                const GpuVBuf& vb = gpu_vcache_get(id, cv, (size_t)n);
+                flush_batch();                                   // its own batch: the one before it is drawn first
+                ensure_batch(vb_on ? vb_key : key, g_s3d, path == 2 ? vb.vao : vb.vao_plain, mode, 0,
+                             rdram, vb_on ? vb_state : state, prim_type, fbo_tex, &xf);
+                g_batch.persist_vao = path == 2 ? vb.vao : vb.vao_plain;
+                g_batch.persist_n = (size_t)n;
+                flush_batch();
+                psp_prof::verts += (uint64_t)n;
+                g_has_drawn_prims = true;
+                return;
+            }
+        }
         uint8_t* dst = stage_reserve(g_s3d, (size_t)n);
         bool ok;
         {
@@ -3012,6 +3134,7 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     const bool replace = st.texture_enable && st.tex_func == 3;
     auto rgb = [](uint32_t c, int k) { return float((c >> (8 * k)) & 255) / 255.f; };
     std::vector<uint32_t>& cols = fx ? g_rt_fx_cols[target] : g_rt_cols[target];
+    const bool skinned = ge_vtype_weight(st.vertex_type) != 0;
     auto tri_color = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) {
         float col[3] = {1.f, 1.f, 1.f};
         if (!replace) {
@@ -3036,6 +3159,7 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
             else if (lit) al *= float(st.material_alpha & 0xFFu) / 255.f;
             alpha = uint32_t(std::min(255.f, std::max(24.f, al * 255.f)));
         }
+        if (!fx) alpha = (alpha & 0xFEu) | (skinned ? 1u : 0u);   // the low bit of the coverage: a fighter's triangle (k_rt_code skips a fighter's own body)
         uint32_t o = alpha << 24;
         for (int k = 0; k < 3; k++) o |= uint32_t(std::min(255.f, std::max(0.f, col[k] * t3[k] * 255.f + 0.5f))) << (8 * k);
         cols.push_back(o);
@@ -3064,12 +3188,317 @@ static void rt_capture(const GeState& st, uint8_t* rdram, int prim_type, int cou
     out.resize(size_t(op - out.data()));   // triangles left out above
 }
 
+// The triangles of a reflective draw, in clip space (what the GPU computes: proj x view x world, widescreen x scale), with its
+// material byte, for the reflectivity mask (g_rml_tris). Skinned draws are not stage surfaces and are left out.
+static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int count, float refl) {
+    if (g_current_target < 0 || count < 3 || prim_type < GE_PRIM_TRIANGLES || prim_type > GE_PRIM_TRIANGLE_FAN) return;
+    std::vector<float>& out = g_rml_tris[g_current_target];
+    if (out.size() > 5u * 3u * 200000u) return;
+    static thread_local std::vector<DecodedVertex> dv;
+    ge_decode_vertices(rdram, st, prim_type, count, dv);
+    const size_t n = dv.size();
+    if (n < 3) return;
+    const float* m = st.world_matrix;
+    const float* v = st.view_matrix;
+    const float* p = st.proj_matrix;
+    const float wx = draw_wide_x(st);
+    const float mat = std::floor(refl * 255.f + 0.5f);
+    auto push = [&](const DecodedVertex& d) {
+        const float x = m[0] * d.pos[0] + m[3] * d.pos[1] + m[6] * d.pos[2] + m[9];
+        const float y = m[1] * d.pos[0] + m[4] * d.pos[1] + m[7] * d.pos[2] + m[10];
+        const float z = m[2] * d.pos[0] + m[5] * d.pos[1] + m[8] * d.pos[2] + m[11];
+        const float vx = v[0] * x + v[3] * y + v[6] * z + v[9], vy = v[1] * x + v[4] * y + v[7] * z + v[10], vz = v[2] * x + v[5] * y + v[8] * z + v[11];
+        float c[4];
+        for (int r = 0; r < 4; ++r) c[r] = p[r] * vx + p[4 + r] * vy + p[8 + r] * vz + p[12 + r];
+        out.push_back(c[0] * wx); out.push_back(c[1]); out.push_back(c[2]); out.push_back(c[3]); out.push_back(mat);
+    };
+    auto tri = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) { push(a); push(b); push(c); };
+    if (prim_type == GE_PRIM_TRIANGLES) {
+        for (size_t i = 0; i + 2 < n; i += 3) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else if (prim_type == GE_PRIM_TRIANGLE_STRIP) {
+        for (size_t i = 0; i + 2 < n; i++) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else {
+        for (size_t i = 1; i + 1 < n; i++) tri(dv[0], dv[i], dv[i + 1]);
+    }
+}
+
+// Fighters do not shadow themselves: their low-poly models (and the solid cards of hair, fur and fringes) left grey blotches all
+// over the body, both with ray-traced and with screen-space shadows. The skinned draws' triangles (skinning included) go into the
+// mask list with material byte 1 (psp_refl_encode never gives 1: a reflective byte is >= 32), so the mask marks the pixels where a
+// fighter is visible; the shadow pass then ignores the fighters' own geometry for those pixels (psp_screenfx.cpp u_fmask).
+// PSPRECOMP_SELF_SHADOW=1 keeps the old self-shadowing.
+static bool self_shadow_on() { static const bool on = [] { const char* e = std::getenv("PSPRECOMP_SELF_SHADOW"); return e && e[0] == '1'; }(); return on; }
+static bool fighter_mask_wanted(const GeState& st) {
+    return !self_shadow_on() && g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && (psp_fx_contact() > 0 || psp_rt_active())
+           && ge_vtype_weight(st.vertex_type) != 0 && !ge_vtype_through(st.vertex_type) && st.depth_test_enable && !st.depth_write_disable
+           && is_main_key(g_targets[g_current_target].key);
+}
+static void fighter_capture(const GeState& st, uint8_t* rdram, int prim_type, int count) {
+    if (count < 3 || prim_type < GE_PRIM_TRIANGLES || prim_type > GE_PRIM_TRIANGLE_FAN) return;
+    std::vector<float>& out = g_rml_tris[g_current_target];
+    if (out.size() > 5u * 3u * 200000u) return;
+    static thread_local std::vector<DecodedVertex> dv;
+    ge_decode_vertices(rdram, st, prim_type, count, dv, true);   // skinned positions
+    const size_t n = dv.size();
+    if (n < 3) return;
+    const float* m = st.world_matrix;
+    const float* v = st.view_matrix;
+    const float* p = st.proj_matrix;
+    const float wx = draw_wide_x(st);
+    auto push = [&](const DecodedVertex& d) {
+        const float x = m[0] * d.pos[0] + m[3] * d.pos[1] + m[6] * d.pos[2] + m[9];
+        const float y = m[1] * d.pos[0] + m[4] * d.pos[1] + m[7] * d.pos[2] + m[10];
+        const float z = m[2] * d.pos[0] + m[5] * d.pos[1] + m[8] * d.pos[2] + m[11];
+        const float vx = v[0] * x + v[3] * y + v[6] * z + v[9], vy = v[1] * x + v[4] * y + v[7] * z + v[10], vz = v[2] * x + v[5] * y + v[8] * z + v[11];
+        float c[4];
+        for (int r = 0; r < 4; ++r) c[r] = p[r] * vx + p[4 + r] * vy + p[8 + r] * vz + p[12 + r];
+        out.push_back(c[0] * wx); out.push_back(c[1]); out.push_back(c[2]); out.push_back(c[3]); out.push_back(1.f);
+    };
+    auto tri = [&](const DecodedVertex& a, const DecodedVertex& b, const DecodedVertex& c) { push(a); push(b); push(c); };
+    if (prim_type == GE_PRIM_TRIANGLES) {
+        for (size_t i = 0; i + 2 < n; i += 3) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else if (prim_type == GE_PRIM_TRIANGLE_STRIP) {
+        for (size_t i = 0; i + 2 < n; i++) tri(dv[i], dv[i + 1], dv[i + 2]);
+    } else {
+        for (size_t i = 1; i + 1 < n; i++) tri(dv[0], dv[i], dv[i + 1]);
+    }
+    g_rml_fighters[g_current_target] = true;
+}
+
+// Effect lights (issue #4): glowing (additive) effect draws light the scene. Each such draw is summarised as a blob (world bbox,
+// area-weighted colour x coverage); at the end of the scene nearby blobs are merged and the brightest become point lights whose colour is
+// the effect's and whose reach / brightness follow its size (psp_screenfx.cpp adds them next to the stage lights). PSPRECOMP_FX_LIGHTS=0 turns them off.
+struct FxBlob { float lo[3], hi[3], rgb[3], area; };
+static std::vector<FxBlob> g_fx_blobs[GE_MAX_TARGETS];
+static int g_fx_n_steady[GE_MAX_TARGETS], g_fx_n_nonadd[GE_MAX_TARGETS], g_fx_n_static[GE_MAX_TARGETS];   // this scene: draws left out (the effect-light log)
+static std::atomic<int> g_fx_lights{-1};   // -1: from PSPRECOMP_FX_LIGHTS (on unless 0); psp_fx_lights_set overrides (test scripts: A/B in one run)
+static bool fx_lights_on() {
+    int v = g_fx_lights.load();
+    if (v < 0) { v = (std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0') ? 0 : 1; g_fx_lights.store(v); }
+    return v != 0;
+}
+// Brightness / reach multipliers of the effect lights (Settings > Debug rows, saved as env.FX_LIGHT_INTENSITY / _RADIUS = PSPRECOMP_FX_LIGHT_*)
+static std::atomic<float> g_fx_scale[2] = {{-1.f}, {-1.f}};
+float psp_fx_light_scale(int which) {
+    which = which ? 1 : 0;
+    float v = g_fx_scale[which].load();
+    if (v < 0.f) { const char* e = std::getenv(which ? "PSPRECOMP_FX_LIGHT_RADIUS" : "PSPRECOMP_FX_LIGHT_INTENSITY"); v = e && e[0] ? std::max(0.f, (float)std::atof(e)) : (which ? 1.5f : 2.5f); g_fx_scale[which].store(v); }   // defaults picked in game
+    return v;
+}
+void psp_fx_light_set_scale(int which, float v) { g_fx_scale[which ? 1 : 0].store(std::max(0.f, v)); }
+void psp_fx_lights_set(bool on) { g_fx_lights.store(on ? 1 : 0); std::fprintf(stderr, "[FXLIGHT] effect lights %s\n", on ? "on" : "off"); }
+static bool fx_additive(const GeState& st) {   // src x As (or 1) + dst x FIX with a bright FIX: the GE's additive glow
+    const int dst = (st.blend_mode >> 4) & 0xF, op = (st.blend_mode >> 8) & 0x7;
+    if (op != 0 || dst != 10) return false;
+    const uint32_t fb = st.blend_fix_b & 0xFFFFFFu;
+    return (fb & 0xFF) >= 0x80 && ((fb >> 8) & 0xFF) >= 0x80 && ((fb >> 16) & 0xFF) >= 0x80;
+}
+static void fx_blob_note(int cur, size_t t0, size_t c0) {
+    const std::vector<float>& T = g_rt_fx_tris[cur]; const std::vector<uint32_t>& C = g_rt_fx_cols[cur];
+    FxBlob b = {{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}, {0, 0, 0}, 0};
+    for (size_t k = t0, ci = c0; k + 9 <= T.size() && ci < C.size(); k += 9, ++ci) {
+        const float* v = &T[k];
+        for (int q = 0; q < 3; ++q) for (int a = 0; a < 3; ++a) { b.lo[a] = std::min(b.lo[a], v[q * 3 + a]); b.hi[a] = std::max(b.hi[a], v[q * 3 + a]); }
+        const float e1[3] = {v[3] - v[0], v[4] - v[1], v[5] - v[2]}, e2[3] = {v[6] - v[0], v[7] - v[1], v[8] - v[2]};
+        const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+        const float ar = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+        const uint32_t c = C[ci]; const float al = float(c >> 24) / 255.f;
+        for (int a = 0; a < 3; ++a) b.rgb[a] += float((c >> (8 * a)) & 255) / 255.f * al * ar;
+        b.area += ar;
+    }
+    if (b.area <= 1e-6f) return;
+    for (float& x : b.rgb) x /= b.area;
+    g_fx_blobs[cur].push_back(b);
+}
+// Merge the scene's blobs (overlapping / near ones are one effect) and turn the brightest into lights: {x y z r g b radius intensity clear}.
+static int fx_blob_lights(int cur, float (*out)[9], int max) {
+    std::vector<FxBlob>& B = g_fx_blobs[cur];
+    struct Cl { float lo[3], hi[3], rgb[3], area, peak; };   // peak: the brightest blob (a big soft halo must not dim the core)
+    std::vector<Cl> cl;
+    static const float max_ext = 40.f;
+    int n_big = 0, n_dim = 0; float big_ext = 0.f;
+    for (const FxBlob& b : B) {
+        const float ext = 0.5f * std::sqrt((b.hi[0] - b.lo[0]) * (b.hi[0] - b.lo[0]) + (b.hi[1] - b.lo[1]) * (b.hi[1] - b.lo[1]) + (b.hi[2] - b.lo[2]) * (b.hi[2] - b.lo[2]));
+        if (ext > max_ext) { ++n_big; big_ext = std::max(big_ext, ext); continue; }   // a screen-sized haze / flash card, not a light
+        Cl* hit = nullptr;
+        for (Cl& c : cl) {   // overlapping boxes (grown by 1 unit) are the same effect
+            bool ov = true;
+            for (int a = 0; a < 3; ++a) ov = ov && b.lo[a] <= c.hi[a] + 1.f && b.hi[a] >= c.lo[a] - 1.f;
+            if (ov) { hit = &c; break; }
+        }
+        const float bpk = std::max(b.rgb[0], std::max(b.rgb[1], b.rgb[2]));
+        if (!hit) { cl.push_back({{b.lo[0], b.lo[1], b.lo[2]}, {b.hi[0], b.hi[1], b.hi[2]}, {b.rgb[0] * b.area, b.rgb[1] * b.area, b.rgb[2] * b.area}, b.area, bpk}); continue; }
+        hit->peak = std::max(hit->peak, bpk);
+        for (int a = 0; a < 3; ++a) { hit->lo[a] = std::min(hit->lo[a], b.lo[a]); hit->hi[a] = std::max(hit->hi[a], b.hi[a]); hit->rgb[a] += b.rgb[a] * b.area; }
+        hit->area += b.area;
+    }
+    const float k_rad = psp_fx_light_scale(1), k_int = psp_fx_light_scale(0);
+    struct Cand { float score; float l[9]; };
+    std::vector<Cand> cand;
+    for (const Cl& c : cl) {
+        float rgb[3] = {c.rgb[0] / c.area, c.rgb[1] / c.area, c.rgb[2] / c.area};
+        const float avg = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+        if (avg < 1e-4f) { ++n_dim; continue; }
+        const float mx = c.peak;   // brightness of the brightest part; the colour stays the area average (normalised below)
+        for (float& x : rgb) x *= mx / avg;
+        if (mx < 0.03f) { ++n_dim; continue; }
+        const float ext = 0.5f * std::sqrt((c.hi[0] - c.lo[0]) * (c.hi[0] - c.lo[0]) + (c.hi[1] - c.lo[1]) * (c.hi[1] - c.lo[1]) + (c.hi[2] - c.lo[2]) * (c.hi[2] - c.lo[2]));
+        const float size = std::sqrt(c.area) * 0.5f;   // from the glowing area itself: touching pieces chain into a wide box (a trail, scattered sparks), which made small attacks huge lights
+        const float score = mx * std::sqrt(c.area);
+        if (score < 0.05f) { ++n_dim; continue; }
+        Cand d;
+        d.score = score;
+        for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
+        d.l[6] = std::min(14.f, std::max(3.f, 3.f + 2.5f * size)) * k_rad;                       // reach grows with the effect's size
+        // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
+        // score = peak brightness x sqrt(glowing area). Measured (Kain, Ultimecia): idle 0.9, jump / land 0.3-2, dodges 0.1-3.9, small hits 3-5,
+        // big attacks 10-26. Nothing below 1, then even up to full (1.2) at 16: dodges and landings stay faint, only big attacks light the scene.
+        d.l[7] = 1.2f * std::min(1.f, std::max(0.f, (score - 1.f) / 15.f)) * k_int;
+        if (d.l[7] < 0.02f) { ++n_dim; continue; }
+        d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
+        cand.push_back(d);
+    }
+    // A glow that stays in one place for seconds is part of the stage (a torch, a crystal, the EX core's own halo), not an attack: those are
+    // left to the hand-placed stage lights. Tracks: where a glow was, since when, last seen.
+    {
+        struct Track { float p[3]; double first, last; };
+        static std::vector<Track> tracks[GE_MAX_TARGETS];
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::vector<Track>& tr = tracks[cur];
+        tr.erase(std::remove_if(tr.begin(), tr.end(), [&](const Track& t) { return now - t.last > 0.5; }), tr.end());
+        static const double k_static = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STATIC_S"); return e ? std::atof(e) : 8.0; }();   // longer than any attack (Hell's Judgment ran past 3 s)
+        std::vector<Cand> keep;
+        for (const Cand& d : cand) {
+            Track* t = nullptr;
+            for (Track& x : tr) { const float dx = x.p[0] - d.l[0], dy = x.p[1] - d.l[1], dz = x.p[2] - d.l[2]; if (dx * dx + dy * dy + dz * dz < 1.5f * 1.5f) { t = &x; break; } }
+            if (!t) { tr.push_back({{d.l[0], d.l[1], d.l[2]}, now, now}); keep.push_back(d); continue; }
+            t->last = now;
+            if (now - t->first < k_static) keep.push_back(d); else ++g_fx_n_static[cur];
+        }
+        cand.swap(keep);
+    }
+    std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;   // what each glow scored (the cut-off is in score units)
+      if (dbg && !cand.empty() && lg++ % 5 == 0) { std::fprintf(stderr, "[FXLIGHT]   scores:"); for (size_t i = 0; i < cand.size() && i < 8; ++i) std::fprintf(stderr, " %.2f@(%.1f %.1f %.1f)", cand[i].score, cand[i].l[0], cand[i].l[1], cand[i].l[2]); std::fprintf(stderr, "\n"); } }
+    // Lights live a little across frames: matched to last frame's by position, a light takes a new, brighter value at once but fades out over
+    // ~0.15 s when its glow drops for a frame or two (Knight's Lance's light flickered as its pieces regrouped from frame to frame).
+    int n = 0;
+    {
+        struct Live { float l[9]; float I; bool seen; };
+        static std::vector<Live> live[GE_MAX_TARGETS];
+        static double last_t[GE_MAX_TARGETS];
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float dt = last_t[cur] > 0 ? float(std::min(0.2, now - last_t[cur])) : 0.f;
+        last_t[cur] = now;
+        std::vector<Live>& lv = live[cur];
+        for (Live& x : lv) x.seen = false;
+        for (size_t i = 0; i < cand.size() && i < 16; ++i) {
+            const Cand& d = cand[i];
+            Live* m = nullptr; float best = 2.5f * 2.5f;
+            for (Live& x : lv) { if (x.seen) continue; const float dx = x.l[0] - d.l[0], dy = x.l[1] - d.l[1], dz = x.l[2] - d.l[2], q = dx * dx + dy * dy + dz * dz; if (q < best) { best = q; m = &x; } }
+            if (!m) { lv.push_back({{}, 0.f, true}); m = &lv.back(); std::memcpy(m->l, d.l, sizeof d.l); m->I = d.l[7]; continue; }
+            const float I = m->I;
+            std::memcpy(m->l, d.l, sizeof d.l);
+            m->I = d.l[7] >= I ? d.l[7] : I + (d.l[7] - I) * std::min(1.f, dt * 7.f);
+            m->seen = true;
+        }
+        for (Live& x : lv) if (!x.seen) x.I -= x.I * std::min(1.f, dt * 7.f);
+        lv.erase(std::remove_if(lv.begin(), lv.end(), [](const Live& x) { return x.I < 0.02f; }), lv.end());
+        std::sort(lv.begin(), lv.end(), [](const Live& a, const Live& b) { return a.I > b.I; });
+        for (const Live& x : lv) { if (n >= max) break; std::memcpy(out[n], x.l, sizeof x.l); out[n][7] = x.I; ++n; }
+    }
+    {   // all effect lights together at most one full light's brightness: many small glows must not add up to a flood
+        float sum = 0.f;
+        for (int i = 0; i < n; ++i) sum += out[i][7];
+        const float cap = 1.2f * k_int;
+        if (sum > cap) for (int i = 0; i < n; ++i) out[i][7] *= cap / sum;
+    }
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+      if (dbg && (n || n_big || n_dim || g_fx_n_steady[cur] || g_fx_n_nonadd[cur] || g_fx_n_static[cur]) && lg++ % 5 == 0)
+        std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters -> %d lights | left out: %d too big (largest %.0f), %d too faint, %d steady draws, %d non-additive draws, %d staying put | first %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n",
+                     B.size(), cl.size(), n, n_big, big_ext, n_dim, g_fx_n_steady[cur], g_fx_n_nonadd[cur], g_fx_n_static[cur],
+                     n ? out[0][0] : 0.f, n ? out[0][1] : 0.f, n ? out[0][2] : 0.f, n ? out[0][3] : 0.f, n ? out[0][4] : 0.f, n ? out[0][5] : 0.f, n ? out[0][6] : 0.f, n ? out[0][7] : 0.f); }
+    { static int lg2 = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+      if (dbg && n && lg2++ % 5 == 0) { std::fprintf(stderr, "[FXLIGHT]   lights:"); for (int i = 0; i < n; ++i) std::fprintf(stderr, " (%.1f %.1f %.1f r%.1f i%.2f)", out[i][0], out[i][1], out[i][2], out[i][6], out[i][7]); std::fprintf(stderr, "\n"); } }
+    g_fx_n_steady[cur] = g_fx_n_nonadd[cur] = g_fx_n_static[cur] = 0;
+    return n;
+}
+// Glowing stage pieces (issue #4: Crystal World's and Empyreal Paradox's breakable crystals). The light editor marks a texture (+ vertex
+// format) of a stage as glowing (psp_screenfx.cpp, G key, `glow` lines in stage_lights.txt); every drawn piece with it gets a light per
+// connected part of its mesh (one per crystal), so a crystal that breaks and is no longer drawn stops lighting. Up to 12 per scene.
+static std::vector<std::array<float, 9>> g_glow_lights[GE_MAX_TARGETS];
+static float pt_tri_dist2(const float* p, const float* a, const float* b, const float* c) {   // squared distance, point to triangle (Ericson)
+    const float ab[3] = {b[0]-a[0], b[1]-a[1], b[2]-a[2]}, ac[3] = {c[0]-a[0], c[1]-a[1], c[2]-a[2]}, ap[3] = {p[0]-a[0], p[1]-a[1], p[2]-a[2]};
+    auto dot = [](const float* u, const float* v) { return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]; };
+    float q[3];
+    auto set = [&](float s_, float t_) { for (int k = 0; k < 3; ++k) q[k] = a[k] + ab[k]*s_ + ac[k]*t_; };
+    const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    const float bp[3] = {p[0]-b[0], p[1]-b[1], p[2]-b[2]}; const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    const float cp[3] = {p[0]-c[0], p[1]-c[1], p[2]-c[2]}; const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    const float vc = d1*d4 - d3*d2, vb = d5*d2 - d1*d6, va = d3*d6 - d5*d4;
+    if (d1 <= 0 && d2 <= 0) set(0, 0);
+    else if (d3 >= 0 && d4 <= d3) set(1, 0);
+    else if (vc <= 0 && d1 >= 0 && d3 <= 0) set(d1 / (d1 - d3), 0);
+    else if (d6 >= 0 && d5 <= d6) set(0, 1);
+    else if (vb <= 0 && d2 >= 0 && d6 <= 0) set(0, d2 / (d2 - d6));
+    else if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); set(1 - w, w); }
+    else { const float den = 1.f / (va + vb + vc); set(vb * den, vc * den); }
+    const float dx = q[0]-p[0], dy = q[1]-p[1], dz = q[2]-p[2];
+    return dx*dx + dy*dy + dz*dz;
+}
+struct GlowPick { float d2 = 1e30f; uint32_t hash = 0, vt = 0; };
+static GlowPick g_glow_pick[GE_MAX_TARGETS];
+// A drawn stage piece: its world triangles (9 floats each). Lights for a marked texture, and the G-key pick.
+static void glow_draw(int cur, const GeState& st, const float* T, size_t nf) {
+    if (nf < 9 || !st.texture_enable) return;
+    const uint32_t th = ge_texture_bound_hash();
+    if (!th) return;
+    float pp[3];
+    if (psp_stage_glow_pick_point(pp)) {
+        GlowPick& gp = g_glow_pick[cur];
+        for (size_t k = 0; k + 9 <= nf; k += 9) { const float d = pt_tri_dist2(pp, T + k, T + k + 3, T + k + 6); if (d < gp.d2) { gp.d2 = d; gp.hash = th; gp.vt = st.vertex_type; } }
+    }
+    float spec[5];
+    if (!psp_stage_glow_find(th, st.vertex_type, spec) || g_glow_lights[cur].size() >= 12) return;
+    // connected parts: triangles sharing a vertex (positions rounded to 1 cm)
+    const size_t nt = nf / 9;
+    std::vector<int> par(nt);
+    for (size_t i = 0; i < nt; ++i) par[i] = int(i);
+    auto find = [&](int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    std::unordered_map<uint64_t, int> at;
+    for (size_t i = 0; i < nt; ++i) for (int v = 0; v < 3; ++v) {
+        const float* q = T + i * 9 + v * 3;
+        const uint64_t key = (uint64_t(int64_t(std::lround(q[0] * 100.f)) & 0x1FFFFF) << 42) ^ (uint64_t(int64_t(std::lround(q[1] * 100.f)) & 0x1FFFFF) << 21) ^ (uint64_t(int64_t(std::lround(q[2] * 100.f)) & 0x1FFFFF));
+        auto it = at.find(key);
+        if (it == at.end()) at.emplace(key, int(i)); else { const int a = find(int(i)), b = find(it->second); if (a != b) par[a] = b; }
+    }
+    std::unordered_map<int, std::array<float, 7>> box;   // lo xyz, hi xyz, triangle count
+    for (size_t i = 0; i < nt; ++i) {
+        auto& bx = box.try_emplace(find(int(i)), std::array<float, 7>{1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f, 0.f}).first->second;
+        for (int v = 0; v < 3; ++v) for (int a = 0; a < 3; ++a) { const float x = T[i * 9 + v * 3 + a]; bx[a] = std::min(bx[a], x); bx[3 + a] = std::max(bx[3 + a], x); }
+        bx[6] += 1.f;
+    }
+    for (const auto& kv : box) {
+        if (g_glow_lights[cur].size() >= 12) break;
+        const auto& bx = kv.second;
+        const float ext = 0.5f * std::sqrt((bx[3]-bx[0])*(bx[3]-bx[0]) + (bx[4]-bx[1])*(bx[4]-bx[1]) + (bx[5]-bx[2])*(bx[5]-bx[2]));
+        g_glow_lights[cur].push_back({0.5f * (bx[0] + bx[3]), 0.5f * (bx[1] + bx[4]), 0.5f * (bx[2] + bx[5]), spec[0], spec[1], spec[2], spec[3], spec[4], ext});   // clear = its own size: the crystal does not shadow its light
+    }
+}
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
     {   // effects draws (blended, depth tested, not depth writing) are also drawn into the SSR effects layer (fxl_*)
-        const bool want = g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && psp_fx_ssr() > 0 && !psp_rt_refl_active()
+        // PSPRECOMP_SSR_FX_OFF=1: no effects layer at all (each effects draw is drawn twice, into another framebuffer: on a tiled mobile
+        // GPU that is two render-pass breaks per draw, 67 draws on stage 13); before, it only stopped the pass from reading the layer.
+        static const bool fxl_off = std::getenv("PSPRECOMP_SSR_FX_OFF") != nullptr;
+        const bool want = !fxl_off && g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && psp_fx_ssr() > 0 && !psp_rt_refl_active()
                           && !ge_vtype_through(st.vertex_type) && st.depth_test_enable && st.depth_write_disable && st.alpha_blend_enable
                           && is_main_key(g_targets[g_current_target].key);
         if (want != g_fxl_flag) { flush_batch(); g_fxl_flag = want; }
+        // depth-writing 3D draws may be reflective surfaces (reflectivity mask, rml_*; the value comes from the texture)
+        const bool want_m = g_current_target >= 0 && !g_ab_shadow && !st.clear_mode && (psp_fx_ssr() > 0 || psp_rt_refl_active())
+                            && psp_refl_table_active() && !ge_vtype_through(st.vertex_type) && st.texture_enable && st.depth_test_enable
+                            && !st.depth_write_disable && is_main_key(g_targets[g_current_target].key);
+        if (want_m != g_rml_flag) { flush_batch(); g_rml_flag = want_m; }
     }
     if (g_current_target < 0 || g_ab_shadow) return;
     const int cur = g_current_target;
@@ -3077,7 +3506,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         // The effects lists are not cleared here: the game draws most of its spell / beam effects after the 3D run (after the reflection pass
         // used the lists), so they are kept and traced by the next frame's pass, which clears them after use. Clearing them here left the
         // ray-traced reflection without Watera, Thundaga, ... (PSPRECOMP_RT_REFL_DEBUG=1 never showed an effect hit).
-        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); }
+        if (st.clear_flags == 0 || (st.clear_flags & 4)) { g_fx_n[cur] = 0; g_fx_done[cur] = false; g_fx_vote[cur].n = 0; g_rt_tris[cur].clear(); g_rt_cols[cur].clear(); g_rml_tris[cur].clear(); g_rml_fighters[cur] = false; }
         { static const int every = std::getenv("PSPRECOMP_RT_DUMP_EVERY") ? std::atoi(std::getenv("PSPRECOMP_RT_DUMP_EVERY")) : 0; static int fr = 0;
           if (every > 0 && g_rtdump.load() == 0 && (st.clear_flags == 0 || (st.clear_flags & 4)) && ++fr % every == 0) g_rtdump.store(1); }   // automated runs: one dump every N frames
         if (g_rtdump.load() == 1) { g_rtdump.store(2); rtdump_printf("[RTDUMP] begin target %d\n", cur); }
@@ -3090,10 +3519,16 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             if (will) { /* reason is filled in by rt_capture below; log after */ }
             else rtdump_printf("[RTDUMP] draw prim %d n %d  skip: depth_test %d depth_write_off %d blend %d atest %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, st.depth_test_enable, st.depth_write_disable, st.alpha_blend_enable, st.alpha_test_enable, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
         }
+        if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && !fx_additive(st)) ++g_fx_n_nonadd[cur];
+        if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && std::getenv("PSPRECOMP_FX_LIGHT_LOG")) {   // which blends the effects use
+            static std::map<uint64_t, int> seen; const uint64_t key = (uint64_t(st.blend_mode & 0xFFF) << 32) | (st.blend_fix_b & 0xFFFFFFu) | (uint64_t(st.blend_fix_a & 0xFFFFFFu) << 44);
+            if (seen[key]++ == 0) std::fprintf(stderr, "[FXLIGHT] blend %03x fixa %06x fixb %06x zwrite %d additive %d rt %d\n", (unsigned)(st.blend_mode & 0xFFF), (unsigned)(st.blend_fix_a & 0xFFFFFFu), (unsigned)(st.blend_fix_b & 0xFFFFFFu), st.depth_write_disable ? 0 : 1, (int)fx_additive(st), (int)psp_rt_active());
+        }
         if (st.depth_test_enable && !st.depth_write_disable) {
             g_fx_n[cur]++;
             const size_t dump_t0 = g_rt_tris[cur].size();
-            if (psp_rt_scene_wanted()) { const size_t t0 = g_rt_tris[cur].size(), c0 = g_rt_cols[cur].size(); const bool fixed = g_fx_vote[cur].n > 0 && !g_rt_nofix && std::memcmp(st.view_matrix, g_fx_vote[cur].view, 12 * sizeof(float)) != 0; const bool stage = st.vertex_type == 0x11au; const uint64_t pkey = stage ? rt_persist_key(st, rdram, prim_type, count, fixed) : 0; if (!(stage && rt_persist_reuse(cur, pkey))) { rt_capture(st, rdram, prim_type, count, cur); if (fixed) rt_fix_view(g_rt_tris[cur], t0, st.view_matrix, g_fx_vote[cur].view); if (stage) rt_persist_note(cur, t0, c0, pkey); } }
+            if (psp_rt_scene_wanted()) { const size_t t0 = g_rt_tris[cur].size(), c0 = g_rt_cols[cur].size(); const bool fixed = g_fx_vote[cur].n > 0 && !g_rt_nofix && std::memcmp(st.view_matrix, g_fx_vote[cur].view, 12 * sizeof(float)) != 0; const bool stage = st.vertex_type == 0x11au; const uint64_t pkey = stage ? rt_persist_key(st, rdram, prim_type, count, fixed) : 0; if (!(stage && rt_persist_reuse(cur, pkey))) { rt_capture(st, rdram, prim_type, count, cur); if (fixed) rt_fix_view(g_rt_tris[cur], t0, st.view_matrix, g_fx_vote[cur].view); if (stage) rt_persist_note(cur, t0, c0, pkey); if (g_rt_tris[cur].size() > t0) glow_draw(cur, st, g_rt_tris[cur].data() + t0, g_rt_tris[cur].size() - t0); }
+                else if (psp_stage_has_glow() || psp_stage_glow_pick_point(nullptr)) { auto it = g_rt_persist[cur].find(pkey); if (it != g_rt_persist[cur].end()) glow_draw(cur, st, it->second.tris.data(), it->second.tris.size()); } }
             if (g_rtdump.load() == 2) rtdump_printf("[RTDUMP] draw prim %d n %d  %s: blend %d atest %d tex %d texalpha %u rgba %d lit %d mask %06x/%02x bm %03x fa %06x fb %06x zw %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, g_rt_why, st.alpha_blend_enable, st.alpha_test_enable, st.texture_enable, (unsigned)(st.texture_enable ? ge_texture_bound_avg_color() >> 24 : 255u), st.tex_func_rgba, st.lighting_enable, (unsigned)st.mask_rgb, (unsigned)(st.mask_alpha & 0xFF), (unsigned)st.blend_mode, (unsigned)st.blend_fix_a & 0xFFFFFFu, (unsigned)st.blend_fix_b & 0xFFFFFFu, st.depth_write_disable ? 0 : 1, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
             if (g_rtdump.load() == 2 && g_rt_tris[cur].size() > dump_t0) { float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f}; const std::vector<float>& tv = g_rt_tris[cur];
                 for (size_t q = dump_t0; q + 2 < tv.size(); q += 3) for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], tv[q + k]); hi[k] = std::max(hi[k], tv[q + k]); }
@@ -3119,7 +3554,10 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) {
+        else if (st.depth_test_enable && st.alpha_blend_enable && ((psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) || (psp_rt_active() && fx_lights_on() && fx_additive(st) && st.vertex_type != 0x11au))) {
+            const bool refl_fx = psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled();
+            const bool light_fx = psp_rt_active() && fx_lights_on() && fx_additive(st) && st.vertex_type != 0x11au;   // 0x11a: the stage's own glow layers (stage lights cover those)
+            const size_t c0 = g_rt_fx_cols[cur].size();
             // Effects drawn with their own view matrix (some with an identity view: the world matrix then holds view-space positions) are
             // re-expressed in the main view's world, as the opaque draws are. Most effects come after the 3D run, when this scene's vote is
             // already reset: the last completed scene's main view is used then.
@@ -3127,6 +3565,41 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             rt_capture(st, rdram, prim_type, count, cur, true);
             const float* mv = g_fx_vote[cur].n > 0 ? g_fx_vote[cur].view : g_rt_main_view_ok[cur] ? g_rt_main_view[cur] : nullptr;
             if (mv && !g_rt_nofix && g_rt_fx_tris[cur].size() > t0) rt_fix_view(g_rt_fx_tris[cur], t0, st.view_matrix, mv);
+            // the same glow drawn every frame for seconds (the lock-on reticle, a stage glow) is not an attack: keyed by texture, format, size
+            bool steady = false;
+            if (light_fx) {
+                struct Seen { double first, last; bool latched; };   // first: start of the current unbroken streak; latched: the streak was logged
+                static std::unordered_map<uint64_t, Seen> seen;
+                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                const uint64_t key = (uint64_t(st.tex_addr[0]) << 32) ^ (uint64_t(st.vertex_type) << 12) ^ uint64_t(count) ^ (uint64_t(prim_type) << 28);
+                Seen& sn = seen[key];
+                if (sn.last == 0 || now - sn.last > 0.3) { sn.first = now; sn.latched = false; }
+                sn.last = now;
+                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 10.0; }();   // longer than any attack (Hell's Judgment ~7 s)
+                if (now - sn.first > k_steady && !sn.latched) {   // logged once per streak; a gap of 0.3 s starts a new streak (no lasting latch:
+                    sn.latched = true;                            // particles share texture / format / size with every effect that uses them)
+                    static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+                    if (dbg) std::fprintf(stderr, "[FXLIGHT] steady draw: tex %08x vt %08x prim %d n %d world t %.1f %.1f %.1f\n", (unsigned)st.tex_addr[0], (unsigned)st.vertex_type, prim_type, count, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11]);
+                }
+                steady = now - sn.first > k_steady;
+                if (seen.size() > 4096) seen.clear();
+            }
+            if (light_fx && steady) ++g_fx_n_steady[cur];
+            if (light_fx && !steady && g_rt_fx_tris[cur].size() > t0) {
+                fx_blob_note(cur, t0, c0);
+                static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+                if (dbg && !g_fx_blobs[cur].empty()) {   // which vertex formats / matrices the effects come with (blobs at the origin = a transform not applied)
+                    const FxBlob& b = g_fx_blobs[cur].back();
+                    static std::map<uint32_t, int> seen;
+                    const bool origin = std::fabs(0.5f * (b.lo[0] + b.hi[0])) < 0.3f && std::fabs(0.5f * (b.lo[2] + b.hi[2])) < 0.3f;
+                    if (seen[st.vertex_type * 2u + (origin ? 1u : 0u)]++ < 2)
+                        { float pp[3] = {0, 0, 0}; psp_player_pos(pp); std::fprintf(stderr, "[FXLIGHT] player %.1f %.1f %.1f\n", pp[0], pp[1], pp[2]); }
+                        std::fprintf(stderr, "[FXLIGHT] draw vt %08x prim %d n %d centre %.1f %.1f %.1f %s world t %.1f %.1f %.1f view t %.1f %.1f %.1f bone0 t %.1f %.1f %.1f\n", (unsigned)st.vertex_type, prim_type, count,
+                                     0.5f * (b.lo[0] + b.hi[0]), 0.5f * (b.lo[1] + b.hi[1]), 0.5f * (b.lo[2] + b.hi[2]), origin ? "ORIGIN" : "", st.world_matrix[9], st.world_matrix[10], st.world_matrix[11],
+                                     st.view_matrix[9], st.view_matrix[10], st.view_matrix[11], st.bone_matrix[9], st.bone_matrix[10], st.bone_matrix[11]);
+                }
+            }
+            if (!refl_fx) { g_rt_fx_tris[cur].resize(t0); g_rt_fx_cols[cur].resize(c0); }   // only wanted for the light
         }   // the effects layer is only traced from Medium up
         return;
     }
@@ -3145,6 +3618,37 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         if (psp_rt_scene_wanted() && (!g_rt_tris[i].empty() || !g_rt_persist[i].empty())) rt_persist_merge(i, s.proj, s.view);
         if (psp_rt_scene_wanted()) rt_static_refresh(i);
         std::memcpy(g_rt_main_view[i], s.view, sizeof g_rt_main_view[i]); g_rt_main_view_ok[i] = true;
+        { float lp[3]; if (psp_stage_light_pick_request(lp)) {   // light editor: colour of the surface the light touches
+            auto closest = [&](const float* a, const float* b, const float* c, float* q) {   // closest point on a triangle to lp (Ericson)
+                const float ab[3] = {b[0]-a[0], b[1]-a[1], b[2]-a[2]}, ac[3] = {c[0]-a[0], c[1]-a[1], c[2]-a[2]}, ap[3] = {lp[0]-a[0], lp[1]-a[1], lp[2]-a[2]};
+                auto dot = [](const float* u, const float* v) { return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]; };
+                const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+                auto set = [&](float s, float t) { for (int k = 0; k < 3; ++k) q[k] = a[k] + ab[k]*s + ac[k]*t; };
+                if (d1 <= 0 && d2 <= 0) { set(0, 0); return; }
+                const float bp[3] = {lp[0]-b[0], lp[1]-b[1], lp[2]-b[2]}; const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+                if (d3 >= 0 && d4 <= d3) { set(1, 0); return; }
+                const float vc = d1*d4 - d3*d2;
+                if (vc <= 0 && d1 >= 0 && d3 <= 0) { set(d1 / (d1 - d3), 0); return; }
+                const float cp[3] = {lp[0]-c[0], lp[1]-c[1], lp[2]-c[2]}; const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+                if (d6 >= 0 && d5 <= d6) { set(0, 1); return; }
+                const float vb = d5*d2 - d1*d6;
+                if (vb <= 0 && d2 >= 0 && d6 <= 0) { set(0, d2 / (d2 - d6)); return; }
+                const float va = d3*d6 - d5*d4;
+                if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); set(1 - w, w); return; }
+                const float den = 1.f / (va + vb + vc); set(vb * den, vc * den);
+            };
+            float best = 1e30f; uint32_t bc = 0; bool found = false;
+            auto scan = [&](const std::vector<float>& T, const std::vector<uint32_t>& C) {   // this frame's draws and the settled static part
+                for (size_t k = 0; k + 9 <= T.size() && k / 9 < C.size(); k += 9) {
+                    float q[3]; closest(&T[k], &T[k+3], &T[k+6], q);
+                    const float dx = q[0]-lp[0], dy = q[1]-lp[1], dz = q[2]-lp[2], d = dx*dx + dy*dy + dz*dz;
+                    if (d < best) { best = d; bc = C[k / 9]; found = true; }
+                }
+            };
+            scan(g_rt_tris[i], g_rt_cols[i]);
+            if (g_rt_static) scan(g_rt_st_tris[i], g_rt_st_cols[i]);
+            if (found) { const float rgb[3] = {float(bc & 255) / 255.f, float((bc >> 8) & 255) / 255.f, float((bc >> 16) & 255) / 255.f}; psp_stage_light_pick_result(rgb, std::sqrt(best)); }
+        } }
         if (g_rtdump.load() == 2) { g_rtdump.store(0); rtdump_printf("[RTDUMP] end: %zu scene triangles, %zu effects triangles\n", g_rt_tris[i].size() / 9, g_rt_fx_tris[i].size() / 9);
             rtdump_printf("[RTDUMP] proj"); for (int k = 0; k < 16; ++k) rtdump_printf(" %g", s.proj[k]); rtdump_printf("\n");
             rtdump_printf("[RTDUMP] view"); for (int k = 0; k < 12; ++k) rtdump_printf(" %g", s.view[k]); rtdump_printf("\n"); }
@@ -3159,9 +3663,19 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             g_rt_cpu = RtCpu{};
         }
         s.rt_fx = s.rt_ready && !g_rt_fx_cols[i].empty();
+        s.n_fx_lights = s.rt_ready ? fx_blob_lights(i, s.fx_lights, 8) : 0;
+        s.n_glow_lights = 0;
+        if (s.rt_ready) for (const auto& g : g_glow_lights[i]) { if (s.n_glow_lights >= 12) break; std::memcpy(s.glow_lights[s.n_glow_lights++], g.data(), sizeof s.glow_lights[0]); }
+        g_glow_lights[i].clear();
+        if (g_glow_pick[i].hash) { psp_stage_glow_pick_result(g_glow_pick[i].hash, g_glow_pick[i].vt, std::sqrt(g_glow_pick[i].d2)); g_glow_pick[i] = GlowPick{}; }
+        g_fx_blobs[i].clear();
         { static int n = 0; if (std::getenv("PSPRECOMP_SSR_FX_LOG") && n++ % 120 == 0) std::fprintf(stderr, "[SSR] effects layer used=%d fbo=%u draws=%d\n", (int)g_fxl[i].used, g_fxl[i].fbo, g_fxl_draws); }
         if (g_fxl[i].used && g_fxl[i].fbo) { s.fx_color = g_fxl[i].color; s.fx_depth = g_fxl[i].depth; }
         g_fxl[i].dirty = true; g_fxl[i].used = false; g_fxl_draws = 0;
+        s.refl_table = psp_refl_table_active();
+        s.refl_tris = g_rml_tris[i].empty() ? nullptr : g_rml_tris[i].data();
+        s.refl_nverts = (int)(g_rml_tris[i].size() / 5);
+        s.fighters = g_rml_fighters[i];
         if (s.rt_ready) {
             static int logged = 0;
             if (logged++ % 600 == 0) std::fprintf(stderr, "[RT] scene %zu triangles (frame %d)\n", g_rt_tris[i].size() / 9, logged);
@@ -3170,6 +3684,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         g_rt_tris[i].clear(); g_rt_cols[i].clear(); g_rt_fx_tris[i].clear(); g_rt_fx_cols[i].clear();
         g_fx_vote[i].n = 0;
         psp_screenfx_run(t.fbo, t.color_tex, t.w480 * t.rs, t.h272 * t.rs, s);
+        g_rml_tris[i].clear(); g_rml_fighters[i] = false;
         glBindFramebuffer(GL_FRAMEBUFFER, g_targets[g_current_target].fbo);
         glc::invalidate();
         ge_texture_invalidate_bind_cache();
@@ -3227,7 +3742,7 @@ static void ge_draw_prim_one(
     // debug socket's I command can snapshot them via ge_draw_get_stats.)
     static bool prim_detail_atexit_installed = false;
     if (!prim_detail_atexit_installed) {
-        std::atexit([]() {
+        static void (*const summary)() = []() {
             std::fprintf(stderr,
                 "[GE_PRIM_DETAIL_SUMMARY] total_observed=%d zero_count=%d\n",
                 g_prim_total_observed, g_prim_type_zero_count);
@@ -3248,7 +3763,8 @@ static void ge_draw_prim_one(
                 "clears=%d => %s\n",
                 real_ns, sprite_nc, clears,
                 real_ns > 0 ? "GRAPHICS" : "NO-GRAPHICS");
-        });
+        };
+        std::atexit(summary); psp_on_quit(summary);
         prim_detail_atexit_installed = true;
     }
 
@@ -3425,7 +3941,7 @@ static void ge_draw_prim_one(
             fvp.x, fvp.y, fvp.w, fvp.h, draw_wide_x(state));
     }
     if (psp_screenfx_active()) fx_track(state, rdram, prim_type, count);
-    else if (g_fxl_flag) { flush_batch(); g_fxl_flag = false; }
+    else if (g_fxl_flag || g_rml_flag) { flush_batch(); g_fxl_flag = g_rml_flag = false; }
     static const bool draw_trace_mat_env = std::getenv("PSPRECOMP_DRAW_TRACE_MAT") != nullptr;
     if (!state.clear_mode && prim_type == 3 && count > 30 && draw_trace_mat_env) {
         static int mat_n = 0;
@@ -4060,7 +4576,11 @@ static void present_service_window_capture() {
 // The overlay texture drawn with its own alpha over the window (the settings screen's opening circle): a textured quad over the
 // picture rectangle instead of the opaque blit.
 // (The Vulkan layer's GLSL translator reads one in / out / uniform declaration per line: keep them on separate lines.)
-static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
+static void draw_overlay_quad(GLuint tex, const PresentRect& pr, float u0, float v_top, float u1, float v_bot, bool blend);
+static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) { draw_overlay_quad(tex, pr, 0.f, 0.f, 1.f, 1.f, true); }
+// A textured quad over the window rectangle `pr` (GL y up: y1 is the top): texture coordinates u0..u1 left to right, v_top at the
+// top edge and v_bot at the bottom; `blend` = straight alpha, otherwise opaque.
+static void draw_overlay_quad(GLuint tex, const PresentRect& pr, float u0, float v_top, float u1, float v_bot, bool blend) {
     static GLuint prog = 0, vao = 0, vbo = 0;
     static GLint u_tex = -1;
     static bool failed = false;
@@ -4077,7 +4597,7 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
             glCompileShader(sh);
             GLint ok = 0;
             glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
-            if (!ok) { glDeleteShader(sh); return GLuint(0); }
+            if (!ok) { char log[512] = {}; glGetShaderInfoLog(sh, sizeof log, nullptr, log); std::fprintf(stderr, "[OVERLAY] alpha shader compile failed: %s\n", log); glDeleteShader(sh); return GLuint(0); }
             return sh;
         };
         GLuint vs = compile(GL_VERTEX_SHADER, vs_body), fs = compile(GL_FRAGMENT_SHADER, fs_body);
@@ -4089,7 +4609,7 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
         glDeleteShader(vs); glDeleteShader(fs);
         GLint ok = 0;
         glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-        if (!ok) { glDeleteProgram(prog); prog = 0; failed = true; return; }
+        if (!ok) { { char log[1024] = {}; glGetProgramInfoLog(prog, sizeof log, nullptr, log); std::fprintf(stderr, "[OVERLAY] alpha program link failed: %s\n", log); } glDeleteProgram(prog); prog = 0; failed = true; return; }
         u_tex = glGetUniformLocation(prog, "u_tex");
         GLint prev_vao = 0, prev_abo = 0;
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prev_vao);
@@ -4112,11 +4632,11 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     auto cy = [&](float y) { return y / float(dh) * 2.f - 1.f; };
     const float x0 = float(std::min(pr.x0, pr.x1)), x1 = float(std::max(pr.x0, pr.x1));
     const float yb = float(std::min(pr.y0, pr.y1)), yt = float(std::max(pr.y0, pr.y1));
-    const float verts[] = {   // texture row 0 = canvas top = the top edge of the quad
-        cx(x0), cy(yt), 0.f, 0.f,
-        cx(x1), cy(yt), 1.f, 0.f,
-        cx(x0), cy(yb), 0.f, 1.f,
-        cx(x1), cy(yb), 1.f, 1.f,
+    const float verts[] = {   // (canvas images: texture row 0 = canvas top = the top edge of the quad)
+        cx(x0), cy(yt), u0, v_top,
+        cx(x1), cy(yt), u1, v_top,
+        cx(x0), cy(yb), u0, v_bot,
+        cx(x1), cy(yb), u1, v_bot,
     };
     GLint prev_prog = 0, prev_vao = 0, prev_abo = 0, prev_vp[4], bsrc_rgb, bdst_rgb, bsrc_a, bdst_a, prev_fbo = 0, prev_tex = 0, prev_active = 0;
     GLboolean prev_blend = glIsEnabled(GL_BLEND), prev_depth = glIsEnabled(GL_DEPTH_TEST), prev_cull = glIsEnabled(GL_CULL_FACE),
@@ -4139,8 +4659,8 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     glViewport(0, 0, dw, dh);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_SCISSOR_TEST); glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    else glDisable(GL_BLEND);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUseProgram(prog);
     glUniform1i(u_tex, 0);
@@ -4164,6 +4684,90 @@ static void draw_overlay_alpha(GLuint tex, const PresentRect& pr) {
     glActiveTexture(GLenum(prev_active));
     glc::invalidate();
     ge_shader_note_external_program();
+}
+
+// ---- Game layer (ge_draw_set_game_layer) ----
+static std::mutex g_gl_mu;
+static std::vector<uint32_t> g_gl_px;
+static int g_gl_w = 0, g_gl_h = 0;
+static bool g_gl_dirty = false;
+static std::chrono::steady_clock::time_point g_gl_time;
+static std::vector<GeLayerCopy> g_gl_copies;
+void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h) {
+    if (!rgba || w <= 0 || h <= 0) { ge_draw_clear_game_layer(); return; }
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_px.assign(rgba, rgba + size_t(w) * size_t(h));
+    g_gl_w = w; g_gl_h = h; g_gl_dirty = true;
+    g_gl_time = std::chrono::steady_clock::now();
+}
+void ge_draw_clear_game_layer() {
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true;
+    g_gl_copies.clear();
+}
+void ge_draw_set_game_layer_copies(const GeLayerCopy* c, int n) {
+    std::lock_guard<std::mutex> lk(g_gl_mu);
+    g_gl_copies.assign(c, c + std::max(0, n));
+}
+// Redraws parts of the shown picture elsewhere (ge_draw_set_game_layer_copies), straight from the game's colour target `src_tex`
+// (sw x sh texels, GL rows bottom up, the PSP's 480x272 part where the band and wide extension put it), into the PSP area `band`.
+static void present_game_layer_copies(GLuint src_tex, int spw, int h272, const PresentRect& band) {
+    std::vector<GeLayerCopy> copies;
+    {
+        std::lock_guard<std::mutex> lk(g_gl_mu);
+        if (g_gl_w <= 0 || std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) return;
+        copies = g_gl_copies;
+    }
+    if (copies.empty() || !src_tex || spw <= 0 || h272 <= 0) return;
+    const float ox = (spw - 480) / 2.f, bb = float(band_b(h272));
+    const float bw = float(band.x1 - band.x0), bh = float(band.y1 - band.y0);
+    for (const GeLayerCopy& c : copies) {
+        PresentRect d = band;
+        d.x0 = band.x0 + int(c.dx0 / 480.f * bw + 0.5f); d.x1 = band.x0 + int(c.dx1 / 480.f * bw + 0.5f);
+        d.y1 = band.y1 - int(c.dy0 / 272.f * bh + 0.5f); d.y0 = band.y1 - int(c.dy1 / 272.f * bh + 0.5f);
+        if (d.x1 <= d.x0 || d.y1 <= d.y0) continue;
+        const float u0 = (c.sx0 + ox) / spw, u1 = (c.sx1 + ox) / spw;
+        const float vt = (bb + 272.f - c.sy0) / h272, vb = (bb + 272.f - c.sy1) / h272;
+        draw_overlay_quad(src_tex, d, u0, vt, u1, vb, false);
+    }
+}
+static void draw_overlay_alpha(GLuint tex, const PresentRect& pr);
+// Draws the game layer over the PSP area `band` (render thread, inside a present).
+static void present_game_layer(const PresentRect& band) {
+    static GLuint tex = 0;
+    static int tw = 0, th = 0;
+    static bool shown = false;
+    {
+        std::lock_guard<std::mutex> lk(g_gl_mu);
+        if (g_gl_w > 0 && std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) { g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true; }
+        if (g_gl_dirty) {
+            g_gl_dirty = false;
+            shown = g_gl_w > 0;
+            if (shown) {
+                GLint prev_tex = 0, prev_align = 4, prev_row = 0;
+                glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+                glGetIntegerv(GL_UNPACK_ALIGNMENT, &prev_align);
+                glGetIntegerv(GL_UNPACK_ROW_LENGTH, &prev_row);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                if (!tex) glGenTextures(1, &tex);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                if (tw != g_gl_w || th != g_gl_h) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_gl_w, g_gl_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    tw = g_gl_w; th = g_gl_h;
+                }
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_gl_w, g_gl_h, GL_RGBA, GL_UNSIGNED_BYTE, g_gl_px.data());
+                glBindTexture(GL_TEXTURE_2D, GLuint(prev_tex));
+                glPixelStorei(GL_UNPACK_ALIGNMENT, prev_align);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, prev_row);
+            }
+        }
+    }
+    if (shown && tex) draw_overlay_alpha(tex, band);
 }
 
 static void note_overlay_rect(SDL_Window* window, const PresentRect& r);
@@ -4322,7 +4926,7 @@ static int perf_rss_mb() {
 #ifndef PSPRECOMP_RELEASE_VERSION
 #define PSPRECOMP_RELEASE_VERSION "dev"
 #endif
-static std::string psp_release_version() { return PSPRECOMP_RELEASE_VERSION; }
+std::string psp_release_version() { return PSPRECOMP_RELEASE_VERSION; }   // also read by games/dissidia/runtime/discord_presence.cpp
 
 // ---- system information for the performance overlay (Linux; elsewhere the fields read "n/a") ----
 struct SysInfo {
@@ -4640,11 +5244,17 @@ void ge_draw_toast(const char* text, int ms, int y_px) {
 static float g_vb_target[3] = {0, 0, 0};
 static float g_vb_eye[3] = {0, 0, 0};   // the game camera's eye (the draws of the main view have this eye; screen-space effects use another view and are left alone)
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]) {
-    if (active) for (int i = 0; i < 3; i++) { g_vb_target[i] = target[i]; g_vb_eye[i] = eye[i]; }
+    for (int i = 0; i < 3; i++) g_vb_eye[i] = eye[i];   // always: a draw still fading back in must keep being matched to the main view
+    if (active) for (int i = 0; i < 3; i++) g_vb_target[i] = target[i];
     g_vb_active.store(active, std::memory_order_relaxed);
 }
-// Fade factor of a draw (1 = opaque), eased per draw so blocks fade in and out instead of popping. Keyed by the vertex data address and count.
-static std::unordered_map<uint64_t, float> g_vb_fade;
+// Fade state of one drawn instance (1 = opaque), eased in time so blocks fade in and out instead of popping. Keyed by the vertex
+// data address and count AND the instance's world position: one mesh drawn at several places (a row of pillars, repeated wall
+// pieces) used to share one entry, so one hit pillar faded all of them, and the un-hit copies drawn after it pulled it back.
+struct VbFade { float f = 1.f; double t = 0.0; };
+static std::unordered_map<uint64_t, VbFade> g_vb_fade;
+static double g_vb_last_faded_t = 0.0;
+static double vb_now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 static bool vb_main_view(const GeState& st, float eye[3]) {
     const float* V = st.view_matrix;
     eye[0] = -(V[0] * V[9] + V[1] * V[10] + V[2] * V[11]); eye[1] = -(V[3] * V[9] + V[4] * V[10] + V[5] * V[11]); eye[2] = -(V[6] * V[9] + V[7] * V[10] + V[8] * V[11]);
@@ -4655,9 +5265,21 @@ struct VbBox { float lo[3], hi[3]; };
 static std::unordered_map<uint64_t, VbBox> g_vb_box;   // model-space box of a draw's vertices, by vertex address and count (static geometry: decoded once)
 static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) {
     if (n < 3) return 1.f;
+    static const float k_alpha = [] { const char* e = std::getenv("PSPRECOMP_CAM_BLOCKER_ALPHA"); return e ? std::clamp((float)std::atof(e), 0.f, 1.f) : 0.3f; }();
+    const bool want = g_vb_active.load(std::memory_order_relaxed);
     const float* m = st.world_matrix;
     static thread_local std::vector<GeGpuVertex> tmp;
     const uint64_t key = (uint64_t)st.vertex_addr << 20 ^ (uint64_t)n;
+    // the instance: its world position, quantised to 25 cm (static pieces keep their entry; moving ones just do not fade)
+    auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 4.f); };
+    const uint64_t ikey = key * 0x9E3779B97F4A7C15ull ^ (q(m[9]) * 0xC2B2AE3D27D4EB4Full) ^ (q(m[10]) * 0x165667B19E3779F9ull) ^ (q(m[11]) * 0x27D4EB2F165667C5ull);
+    float eye[3];
+    if (!vb_main_view(st, eye)) return 1.f;   // not drawn from the game camera (screen-space effects, shadow maps, reflections, ...)
+    const double now = vb_now();
+    auto fi = g_vb_fade.find(ikey);
+    if (!want && fi == g_vb_fade.end()) return 1.f;   // lingering: only draws that are still faded need work
+    bool hit = false;
+    if (want) {
     auto bi = g_vb_box.find(key);
     if (bi == g_vb_box.end()) {
         VbBox bx{{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}};
@@ -4674,28 +5296,28 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
         const float w[3] = {m[0] * x + m[3] * y + m[6] * z + m[9], m[1] * x + m[4] * y + m[7] * z + m[10], m[2] * x + m[5] * y + m[8] * z + m[11]};
         for (int k = 0; k < 3; ++k) { wlo[k] = std::min(wlo[k], w[k]); whi[k] = std::max(whi[k], w[k]); }
     }
-    float eye[3];
-    if (!vb_main_view(st, eye)) return 1.f;   // not drawn from the game camera (screen-space effects, shadow maps, ...)
     const float* T = g_vb_target;   // the player's chest
-    bool hit = false;
     float hx = T[0] - eye[0], hz = T[2] - eye[2];
     const float hl = std::sqrt(hx * hx + hz * hz);
     if (hl > 1e-3f) { hx /= hl; hz /= hl; } else { hx = 0; hz = 1; }
-    // Rays to the whole body (feet, knee, chest, head, both shoulders), each starting a little behind the eye so a wall the camera touches or sits in
-    // still counts: the fighter has to stay visible, not just his chest.
-    const float aim[6][3] = {{0, -0.9f, 0}, {0, -0.4f, 0}, {0, 0, 0}, {0, 0.8f, 0}, {-hz * 0.5f, 0.2f, hx * 0.5f}, {hz * 0.5f, 0.2f, -hx * 0.5f}};
+    // Rays to the body (knee, chest, head, both shoulders), each starting a little behind the eye so a wall the camera touches
+    // still counts. Not to the feet: a ray grazing the floor at the fighter's feet faded floor pieces and kerbs. Floors and
+    // anything lower than the fighter's knees is never faded (the box top test), and the start is only 35 cm behind the eye
+    // (it was 2 m: a long wall the camera stood beside, out of the picture's way, faded as a whole).
+    const float aim[5][3] = {{0, -0.5f, 0}, {0, 0, 0}, {0, 0.75f, 0}, {-hz * 0.4f, 0.25f, hx * 0.4f}, {hz * 0.4f, 0.25f, -hx * 0.4f}};
     bool decoded = false;
-    if (n <= 1500) {   // (a block or a wall, not the whole stage: a single mesh of the floor or the sky would fade as one; Pandaemonium's walls are long slabs of a few triangles)
-        for (int ri = 0; ri < 6 && !hit; ++ri) {
+    const bool low = whi[1] < T[1] - 0.45f;   // top below the knees (feet are ~1 m below the chest)
+    if (n <= 1500 && !low) {   // (a block or a wall, not the whole stage: a single mesh of the floor or the sky would fade as one; Pandaemonium's walls are long slabs of a few triangles)
+        for (int ri = 0; ri < 5 && !hit; ++ri) {
             const float tg[3] = {T[0] + aim[ri][0], T[1] + aim[ri][1], T[2] + aim[ri][2]};
             float dir[3] = {tg[0] - eye[0], tg[1] - eye[1], tg[2] - eye[2]};
             const float dl = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
             if (dl < 1e-3f) continue;
-            const float back = 2.0f;   // start behind the eye
+            const float back = 0.35f;   // start behind the eye
             const float o[3] = {eye[0] - dir[0] / dl * back, eye[1] - dir[1] / dl * back, eye[2] - dir[2] / dl * back};
             const float d[3] = {tg[0] - o[0], tg[1] - o[1], tg[2] - o[2]};
             const float len = dl + back;
-            const float tmax = std::max(0.f, 1.f - 0.5f / len);   // stop a body's width short of the player: only what he is touching does not fade (a wall a step in front of him must)
+            const float tmax = std::max(0.f, 1.f - 0.6f / len);   // stop a body's width short of the player: only what he is touching does not fade (a wall a step in front of him must)
             float t0 = 0.f, t1 = tmax;
             for (int k = 0; k < 3 && t0 <= t1; ++k) {
                 const bool thin = whi[k] - wlo[k] < 0.3f;   // a wall is often a flat sheet: shrinking it would invert the box, so widen it a little instead
@@ -4710,7 +5332,7 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
                 decoded = true;
             }
             const GeGpuVertex* v = tmp.data();
-            auto W = [&](int i, float out[3]) { const float* q = v[i].pos; for (int r = 0; r < 3; ++r) out[r] = m[r] * q[0] + m[3 + r] * q[1] + m[6 + r] * q[2] + m[9 + r]; };
+            auto W = [&](int i, float out[3]) { const float* qv = v[i].pos; for (int r = 0; r < 3; ++r) out[r] = m[r] * qv[0] + m[3 + r] * qv[1] + m[6 + r] * qv[2] + m[9 + r]; };
             auto tri = [&](int ia, int ib, int ic) {
                 float a[3], b[3], c[3]; W(ia, a); W(ib, b); W(ic, c);
                 const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
@@ -4720,10 +5342,10 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
                 const float inv = 1.f / det, tv[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]};
                 const float u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) * inv;
                 if (u < 0.f || u > 1.f) return false;
-                const float qv[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]};
-                const float w = (d[0] * qv[0] + d[1] * qv[1] + d[2] * qv[2]) * inv;
+                const float qq[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]};
+                const float w = (d[0] * qq[0] + d[1] * qq[1] + d[2] * qq[2]) * inv;
                 if (w < 0.f || u + w > 1.f) return false;
-                const float t = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) * inv;
+                const float t = (e2[0] * qq[0] + e2[1] * qq[1] + e2[2] * qq[2]) * inv;
                 return t > 0.f && t < tmax;
             };
             if (prim == GE_PRIM_TRIANGLES) { for (int i = 0; i + 2 < n && !hit; i += 3) hit = tri(i, i + 1, i + 2); }
@@ -4731,11 +5353,147 @@ static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim) 
             else if (prim == GE_PRIM_TRIANGLE_FAN) { for (int i = 1; i + 1 < n && !hit; ++i) hit = tri(0, i, i + 1); }
         }
     }
-    float& f = g_vb_fade.try_emplace(key, 1.f).first->second;
-    const float target = hit ? 0.12f : 1.f;
-    f += (target - f) * (hit ? 0.5f : 0.2f);   // fades out fast (the fighter must not stay hidden), back in gently
-    if (std::fabs(f - target) < 0.01f) f = target;
+    }
+    if (fi == g_vb_fade.end()) {
+        if (!hit) return 1.f;   // only blocking instances get an entry
+        if (g_vb_fade.size() > 4096) g_vb_fade.clear();   // (moving pieces make new keys)
+        fi = g_vb_fade.emplace(ikey, VbFade{1.f, now}).first;
+    }
+    VbFade& e = fi->second;
+    const float dt = (float)std::clamp(now - e.t, 0.0, 0.1);   // per frame, not per draw: an instance drawn twice must not ease twice as fast
+    e.t = now;
+    const float target = hit ? k_alpha : 1.f;
+    const float tc = hit ? 0.08f : 0.3f;   // fades out fast (the fighter must not stay hidden), back in gently
+    e.f += (target - e.f) * (1.f - std::exp(-dt / tc));
+    if (std::fabs(e.f - target) < 0.01f) e.f = target;
+    const float f = e.f;
+    if (f >= 1.f) { g_vb_fade.erase(fi); return 1.f; }
+    g_vb_last_faded_t = now;
     return f;
+}
+// ---- Camera collision (ge_draw_camera_probe_*) ----
+// The stage geometry the main view draws, in world space, one entry per drawn instance (same key as the fade). Static pieces
+// are decoded once; an entry not drawn for 30 s is dropped, and everything is dropped when the total gets large (a new stage).
+// The game's own camera pulls in for walls behind ITS eye; a turned or held view needs its own test, or it ends up outside the
+// room looking at the back of a wall.
+struct CcMesh { float lo[3], hi[3]; std::vector<float> tri; double seen; int frames = 1; };   // frames: how many frames it was drawn in at this spot
+static std::unordered_map<uint64_t, CcMesh> g_cc;
+static size_t g_cc_tris = 0;
+static double g_cc_last_on = 0;
+static std::mutex g_cc_mu;
+static float g_cc_from[3], g_cc_to[3], g_cc_result = 1.f;
+static uint32_t g_cc_req_id = 0, g_cc_res_id = 0;
+static bool g_cc_pending = false;
+void ge_draw_camera_probe_request(const float from[3], const float to[3], uint32_t id) {
+    std::lock_guard<std::mutex> lk(g_cc_mu);
+    for (int i = 0; i < 3; i++) { g_cc_from[i] = from[i]; g_cc_to[i] = to[i]; }
+    g_cc_req_id = id; g_cc_pending = true;
+    g_cc_collect.store(true, std::memory_order_relaxed);
+    g_cc_last_on = vb_now();
+}
+float ge_draw_camera_probe_result(uint32_t* id) {
+    std::lock_guard<std::mutex> lk(g_cc_mu);
+    if (id) *id = g_cc_res_id;
+    return g_cc_result;
+}
+static void cc_collect(uint8_t* rdram, const GeState& st, int n, int prim) {
+    if (n < 3 || n > 12000) return;
+    if (prim != GE_PRIM_TRIANGLES && prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_TRIANGLE_FAN) return;
+    float eye[3];
+    if (!vb_main_view(st, eye)) return;
+    const float* m = st.world_matrix;
+    auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 4.f); };
+    const uint64_t key = (uint64_t)st.vertex_addr << 20 ^ (uint64_t)n;
+    const uint64_t ikey = key * 0x9E3779B97F4A7C15ull ^ (q(m[9]) * 0xC2B2AE3D27D4EB4Full) ^ (q(m[10]) * 0x165667B19E3779F9ull) ^ (q(m[11]) * 0x27D4EB2F165667C5ull);
+    const double now = vb_now();
+    auto it = g_cc.find(ikey);
+    if (it != g_cc.end()) { if (now - it->second.seen > 0.005) it->second.frames++; it->second.seen = now; return; }
+    if (g_cc_tris > 400000) { g_cc.clear(); g_cc_tris = 0; }
+    static thread_local std::vector<GeGpuVertex> tmp;
+    tmp.resize((size_t)n);
+    if (!ge_decode_vertices_gpu(rdram, st, n, tmp.data())) return;
+    CcMesh cm{{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}, {}, now};
+    auto add = [&](int ia, int ib, int ic) {
+        for (int j : {ia, ib, ic}) {
+            const float* p = tmp[j].pos;
+            for (int r = 0; r < 3; ++r) {
+                const float w = m[r] * p[0] + m[3 + r] * p[1] + m[6 + r] * p[2] + m[9 + r];
+                cm.tri.push_back(w); cm.lo[r] = std::min(cm.lo[r], w); cm.hi[r] = std::max(cm.hi[r], w);
+            }
+        }
+    };
+    if (prim == GE_PRIM_TRIANGLES) for (int i = 0; i + 2 < n; i += 3) add(i, i + 1, i + 2);
+    else if (prim == GE_PRIM_TRIANGLE_STRIP) for (int i = 0; i + 2 < n; ++i) add(i, i + 1, i + 2);
+    else for (int i = 1; i + 1 < n; ++i) add(0, i, i + 1);
+    if (!std::isfinite(cm.lo[0]) || cm.lo[0] > cm.hi[0]) return;
+    g_cc_tris += cm.tri.size() / 9;
+    g_cc.emplace(ikey, std::move(cm));
+}
+// First hit of the segment o -> o + d (t in 0..1) against the cached geometry; 1 when clear.
+static float cc_trace(const float o[3], const float d[3]) {
+    float best = 1.f;
+    const double now = vb_now();
+    for (const auto& kv : g_cc) {
+        const CcMesh& cm = kv.second;
+        if (cm.frames < 30 && now - cm.seen > 0.25) continue;   // something that moved (a prop, a weapon): only where it is now
+        float t0 = 0.f, t1 = best;
+        for (int k = 0; k < 3 && t0 <= t1; ++k) {
+            const float a2 = cm.lo[k] - 0.01f, b2 = cm.hi[k] + 0.01f;
+            if (std::fabs(d[k]) < 1e-7f) { if (o[k] < a2 || o[k] > b2) t0 = 2.f; }
+            else { float u0 = (a2 - o[k]) / d[k], u1 = (b2 - o[k]) / d[k]; if (u0 > u1) std::swap(u0, u1); t0 = std::max(t0, u0); t1 = std::min(t1, u1); }
+        }
+        if (t0 > t1) continue;
+        const float* v = cm.tri.data();
+        for (size_t i = 0; i + 8 < cm.tri.size(); i += 9) {
+            const float* a = v + i; const float* b = v + i + 3; const float* c = v + i + 6;
+            const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+            const float pv[3] = {d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]};
+            const float det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2];
+            if (std::fabs(det) < 1e-9f) continue;
+            const float inv = 1.f / det, tv[3] = {o[0] - a[0], o[1] - a[1], o[2] - a[2]};
+            const float u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) * inv;
+            if (u < 0.f || u > 1.f) continue;
+            const float qq[3] = {tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0]};
+            const float w = (d[0] * qq[0] + d[1] * qq[1] + d[2] * qq[2]) * inv;
+            if (w < 0.f || u + w > 1.f) continue;
+            const float t = (e2[0] * qq[0] + e2[1] * qq[1] + e2[2] * qq[2]) * inv;
+            if (t > 0.f && t < best) best = t;
+        }
+    }
+    return best;
+}
+static void cc_frame_end() {
+    const double now = vb_now();
+    if (g_cc_collect.load(std::memory_order_relaxed) && now - g_cc_last_on > 2.0) {   // no battle camera any more (menus): drop it all
+        g_cc_collect.store(false, std::memory_order_relaxed);
+        g_cc.clear(); g_cc_tris = 0;
+        return;
+    }
+    static double last_sweep = 0;
+    if (now - last_sweep > 5.0) {
+        last_sweep = now;
+        for (auto it = g_cc.begin(); it != g_cc.end();) {
+            if (now - it->second.seen > 30.0) { g_cc_tris -= it->second.tri.size() / 9; it = g_cc.erase(it); } else ++it;
+        }
+    }
+    float o[3], d[3]; uint32_t id;
+    {
+        std::lock_guard<std::mutex> lk(g_cc_mu);
+        if (!g_cc_pending) return;
+        g_cc_pending = false;
+        for (int i = 0; i < 3; i++) { o[i] = g_cc_from[i]; d[i] = g_cc_to[i] - g_cc_from[i]; }
+        id = g_cc_req_id;
+    }
+    const float r = cc_trace(o, d);
+    std::lock_guard<std::mutex> lk(g_cc_mu);
+    g_cc_result = r; g_cc_res_id = id;
+}
+
+// Called once per frame (present): keep evaluating draws after the custom camera is back on the game's while some are still faded.
+static void vb_frame_end() {
+    cc_frame_end();
+    g_vb_linger.store(!g_vb_fade.empty() && vb_now() - g_vb_last_faded_t < 1.0, std::memory_order_relaxed);
+    if (!g_vb_linger.load(std::memory_order_relaxed) && !g_vb_active.load(std::memory_order_relaxed)) g_vb_fade.clear();
 }
 
 
@@ -5141,12 +5899,22 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
     glBlitFramebuffer(0, 0, spw * srs, h272_of_fbo(fbo) * srs, pr.x0, pr.y0, pr.x1, pr.y1,
                       GL_COLOR_BUFFER_BIT, pf);
     perf_note_present();
+    vb_frame_end();
     if (!std::strcmp(why, "flip")) perf_note_flip();
     if (psp_post_final_active()) {   // copy of the scene for the final pass (grade / HDR), taken before the HUD and overlays
         int sdw = 0, sdh = 0;
         psp_gl_drawable_size(window, &sdw, &sdh);
         psp_post_scene_snapshot(sdw, sdh);
     }
+    {   // the game layer's copies of the picture, then its image
+        GLuint src_tex = 0;
+        for (int i = 0; i < GE_MAX_TARGETS && !src_tex; ++i) {
+            if (g_targets[i].fbo == fbo) src_tex = g_targets[i].color_tex;
+            else if (g_targets[i].ab_fbo && g_targets[i].ab_fbo == fbo) src_tex = g_targets[i].ab_tex;
+        }
+        present_game_layer_copies(src_tex, spw, h272_of_fbo(fbo), cpr);
+    }
+    present_game_layer(cpr);
     if (std::strcmp(why, "menu") != 0) { present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
     present_dialog_overlay(cpr, pr);
     if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)

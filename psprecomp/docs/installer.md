@@ -71,7 +71,7 @@ of the fork.
      of what the current stage does in the information panel. The step weights live in `setup/install.cpp`.
    - **Add to Steam** (desktop only; an Options toggle, and a row on the start page of an installed game): `plan_steam` runs `games/dissidia/tools/steam_shortcut.py` (Linux, Windows; the script also serves the Steam Deck setup) to add a non-Steam shortcut to every Steam account on the machine, pointing at `DissidiaRecomp --launch` (check for an update, then play), with the game's icon and the disc's PIC1.PNG as banner. Steam is closed for a moment (`-shutdown`) and started again, because it rewrites its shortcut list on exit. The step is optional: no Steam installed only adds a note to the last page.
    - **Change extras** (start page of an installed game): the Extras page again, applied without a rebuild (`plan_extras`): downloads / swaps / removes the HD texture pack, adds the Japanese voices, builds the Android version once.
-   - **Options** (one page in the game's Settings-screen look, without the category sidebar: HD textures on / off, then Texture pack when on, Japanese voices, Android version, Import saves, update check, install folder, Start installing): check for updates; HD textures (on / off) and, when on, Texture pack (LiinkPK's hand-retouched pack or the AI upscaled pack; the help line credits the selected pack); Japanese voices (undub; asks for the undub disc image first); Android
+   - **Options** (one page in the game's Settings-screen look, without the category sidebar: HD textures on / off, then Texture pack when on, Japanese voices, Android version, Import saves, update check, install folder, Start installing): check for updates; HD textures (on / off) and, when on, Texture pack (LiinkPK's hand-retouched pack or the AI upscaled pack; the help line credits the selected pack); Japanese voices (undub; asks for the undub disc image first); **Bartz: Dissidia 1 moves** (`d1_moves=1`; asks for a Dissidia Final Fantasy (2008) disc image, then `tools/d1_moves.py install --d1 <iso> --work <game>` rebuilds the mod's six files from the shipped patches in `game/d1_moves/` and the player's two discs, checks each against its SHA-256, adds the abilities to main.bin and writes `mods/retail_moves.txt`; also offered by Change extras); Android
      version; **Import saves** (cycles Off / each PPSSPP or memory-stick SAVEDATA folder found with Dissidia 012 saves, found by
      `psp_savemgr::detect_sources`; it adds the last install step, `DissidiaRecomp --import-saves FROM --dir WORK`, which copies the
      saves under the installed game's disc ID, re-signed, and never replaces a save that already exists in the install; verified
@@ -99,6 +99,11 @@ of the fork.
    - `.github/workflows/release.yml`: on a `v*` tag (or by hand for artifacts only) a Windows job builds the recompiler, an Ubuntu
      job installs SDL2's build headers, builds both platforms with `build_release.py`, writes `manifest.json`
      (`release/make_manifest.py`) and a `publish` job runs `gh release create` with the archives and the manifest.
+   - **Release notes** (`release/make_notes.py`, run by the `publish` job): the install table, then what changed since the last
+     *published* release (a tag whose build failed has no release, so its changes roll into the next). If `release/notes/<tag>.md`
+     exists it is used as written; otherwise each merged PR gives the bullets of its `## Release notes` section (the PR template asks
+     for one, in players' words; "none" leaves the PR out) or its title, CI / tooling / docs / test PRs and the `no-release-notes`
+     label are skipped, and "Fix..." items go under Fixes. Preview: `python3 release/make_notes.py --tag vX.Y.Z --to origin/main`.
    - **Release contents** (`assemble.py`): the wizard, `bin/psprecomp`, the trimmed bundle, the SDK, `game/` (whitelist: analysis
      metadata, game.toml, overlay tomls, features.ini, fx_shaders, `tools/*.py|json|txt` without tests), embedded Python on Windows
      (pinned in `toolchain/versions.json`; its `._pth` gets `..\game\tools` added), `licenses/`, `release.json` (version,

@@ -1,13 +1,13 @@
-# 60 fps and the settings menu
+# Frame rates above 30 (60, 90, 120 ... 240 fps)
 
 ## Using it
 
-- **Settings menu**: Esc or F1 on a keyboard, Guide or L3 + R3 (both stick buttons) on a pad. The game pauses while it
-  is open. Rows: Display (Fullscreen / Window), Window Size (a whole multiple of 480x272, or 1280 x 800, the Deck's
-  screen, when the desktop is big enough; in fullscreen it is remembered for Window mode), Render Scale (1x to 4x),
-  Frame Rate (30 / 60), FPS Counter (a small transparent frames-per-second number in the top-right corner; saved as
-  `fps_counter`, `PSPRECOMP_FPS_COUNTER=1` turns it on without the menu), Quit Game (press twice). Left / right changes a value, Cross cycles it, Circle or Start closes.
-  It is drawn from the game's own menu textures, like the save dialog.
+- **Settings menu** (all pages and rows: [settings-menu.md](settings-menu.md)): Esc or F1 on a keyboard, Guide or L3 + R3
+  (both stick buttons) on a pad, or the Settings row in the title screen, start menu and battle pause menu. The game
+  pauses while it is open. **Frame Rate** is any multiple of 30 up to 240; the default follows the display's refresh
+  rate (60 on a 60 Hz screen, 90 on the OLED Steam Deck, 120 on a 120 Hz one). Menus stay at 30, battles run at the
+  chosen rate. **FPS Counter** shows a small frames-per-second number in the top-right corner (saved as `fps_counter`,
+  `PSPRECOMP_FPS_COUNTER=1` turns it on without the menu).
 - **Debug page**: L / R (shoulder buttons), or Q / E / Tab on a keyboard, switches between System and Debug:
   - Performance Overlay: for debugging. Frames per second, average and worst frame time over the last half second,
     presents per second (a gap to the fps means the presenter runs without new game frames), render scale and process
@@ -278,3 +278,9 @@ Measured with `tools/combo_timing.py combos --rates 30,60,120` (accepted press d
 
 Rush > Neutral 2 at 120 Hz was repeated 5 times at 358 ms (Neutral 2 each time) and 367 ms (the repeat move each time). Everything is identical at 60 Hz and within one 8 ms update at 120 Hz.
 Not measured: the air chain at 60 / 120 Hz, other fighters (their first update still gets the step, no grid).
+
+### Face animation (blinks, mouth shapes) above 60 Hz (16 Nov)
+
+The face texture animation (`FUN_0886E5D0`: the GMO TexAnm groups, eyes and mouth, and the `face_texture` event 0x0214) is stepped by its only caller, the actor update `FUN_0883C2E8`, with `trunc(actor step)` whole ticks: 2 per update at 30 Hz, 1 at 60 Hz, **0 at 90 / 120 Hz** (step 0.67 / 0.5).
+Above 60 Hz faces then only moved on the rare update with a whole-tick step (a move's first update): a blink that had closed the eyes stayed closed (cutscenes have no move starts, so for good), pattern switches waited, and a model could keep showing a wrong cell.
+Fix (`face_step_hook`, on by default, `PSPRECOMP_FACE_STEP=0` turns it off): above 30 Hz the fraction is carried per model and the face steps whole ticks as they add up (every 2nd update at 120 Hz), 2 ticks per 33 ms at every rate. 30 Hz is unchanged. `PSPRECOMP_FACE_LOG=1` logs, per model and 5 s of play time, the ticks stepped (60 per second at every rate) and how often an eye / mouth cell changed (`[FACESTAT]`).

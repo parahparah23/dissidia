@@ -424,6 +424,8 @@ static void handle_sdl_event(const SDL_Event& ev) {
                 case SDLK_MINUS: what = PSP_LIGHT_INT_DOWN; break;
                 case SDLK_EQUALS: what = PSP_LIGHT_INT_UP; break;
                 case SDLK_p: what = PSP_LIGHT_NEAREST; break;
+                case SDLK_t: what = PSP_LIGHT_COPY_COLOR; break;
+                case SDLK_g: what = PSP_LIGHT_GLOW; break;
                 case SDLK_LEFTBRACKET: what = PSP_LIGHT_PREV; break;
                 case SDLK_RIGHTBRACKET: what = PSP_LIGHT_NEXT; break;
                 default: break;
@@ -676,7 +678,7 @@ int psp_runtime_init_sdl() {
 #endif
     if (use_vk) {
         std::string verr;
-        if (!vkgl::init(g_window, std::getenv("PSPRECOMP_VSYNC") != nullptr, &verr)) {
+        if (!vkgl::init(g_window, psp_vsync_wanted() != 0, &verr)) {
             std::fprintf(stderr, "[RT] Vulkan backend unavailable: %s\n", verr.c_str());
             SDL_DestroyWindow(g_window);
             SDL_Quit();
@@ -698,9 +700,9 @@ int psp_runtime_init_sdl() {
 
     gl_stats_install();   // PSPRECOMP_GL_STATS=1 call counters (psp_gl_stats.cpp)
 
-    // No driver-side vsync: the guest's vblank is simulated (hle display) and
-    // a blocking swap would stall the render thread for up to a refresh.
-    if (!use_vk) SDL_GL_SetSwapInterval(std::getenv("PSPRECOMP_VSYNC") ? 1 : 0);
+    // Vertical sync is a setting (off by default on desktops): the guest's vblank is simulated (hle display), so
+    // without it the swap never waits; with it the swap waits for the display, which on a VRR display follows the game.
+    if (!use_vk) psp_vsync_apply_gl();
 
     // 6. Print GL info for diagnostics
     std::fprintf(stderr, "[RT] GL: %s\n",

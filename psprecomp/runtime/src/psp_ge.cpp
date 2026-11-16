@@ -1,4 +1,5 @@
 #include "psp_ge.h"
+#include "psp_quit.h"
 #include "psp_ge_texture.h"
 #include "psp_prof.h"
 #include "psp_ge_constants.h"
@@ -255,7 +256,7 @@ void ge_init() {
     g_total_lists = 0;
     g_total_prims = 0;
     g_first_prim_logged = false;
-    std::atexit(ge_atexit_summary);
+    std::atexit(ge_atexit_summary); psp_on_quit(ge_atexit_summary);
     std::fprintf(stderr, "[GE] Initialized\n");
 }
 

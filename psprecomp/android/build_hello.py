@@ -33,7 +33,7 @@ def main():
     bd = out + "/build"
     os.makedirs(bd, exist_ok=True)
     cm = [a.cmake, "-S", here + "/hello", "-B", bd, "-G", "Ninja", "-DCMAKE_TOOLCHAIN_FILE=" + tc, "-DANDROID_ABI=arm64-v8a",
-          "-DANDROID_PLATFORM=android-" + a.api, "-DCMAKE_BUILD_TYPE=Release", "-DSDL2_SRC=" + os.path.abspath(a.sdl_src), "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
+          "-DANDROID_PLATFORM=android-" + a.api, "-DCMAKE_BUILD_TYPE=Release", "-DSDL2_SRC=" + os.path.abspath(a.sdl_src), "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"]
     if not a.main_so:
         run(cm, env=env); run([a.cmake, "--build", bd, "-j", str(os.cpu_count())], env=env)
     # 2. Java side: SDL's activity classes -> classes.dex

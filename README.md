@@ -17,6 +17,7 @@ Download the latest **Dissidia Recomp** from the [Releases page](https://github.
 - **Frame rates** above the PSP's 30: any multiple of 30 up to 240, with game logic, UI and EX Burst timing scaled to match ([docs/frame-rate.md](psprecomp/games/dissidia/docs/frame-rate.md)).
 - **HD textures** from community packs (on by default when present) and **undub audio** (Japanese voices and movies extracted from an undub disc) ([texture packs](psprecomp/games/dissidia/docs/texture-packs.md), [audio](psprecomp/games/dissidia/docs/audio.md)).
 - **Cloud save sync** between devices through a folder, WebDAV or Google Drive ([docs/cloud-sync.md](psprecomp/games/dissidia/docs/cloud-sync.md)).
+- **Discord Rich Presence**: your Discord profile shows the mode, the fighters and the stage ([docs/discord.md](psprecomp/games/dissidia/docs/discord.md)).
 - **Cross-region saves** and **internet multiplayer** (below).
 - A headless battle test harness for checking moves at different frame rates ([docs/testing.md](psprecomp/games/dissidia/docs/testing.md)).
 

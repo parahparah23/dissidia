@@ -116,6 +116,23 @@ void ge_draw_flash(uint32_t rgb, int ms);
 /// player's chest) fades out to a see-through alpha, like the game's own wall fade does for its camera (the game computes that from its
 /// own eye, so a camera we move ourselves needs it done here). Call once per camera update (game thread).
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]);   // eye: the game camera's eye this update; only draws made from that view fade
+// Camera collision against the stage geometry the main view has drawn (static, non-skinned, depth-writing draws, cached in world
+// space per stage): ask for the segment from -> to (game thread); the answer, the fraction of the segment before its first hit
+// (1 = clear), comes from the render thread a frame later. Returns the latest answer and the id of the request it belongs to.
+void ge_draw_camera_probe_request(const float from[3], const float to[3], uint32_t id);
+float ge_draw_camera_probe_result(uint32_t* id);
+
+/// Game layer: a translucent RGBA image (straight alpha, byte order R,G,B,A, row 0 = top) that a game module draws over the game's
+/// picture, covering the PSP's 480x272 area (w x h = 480*s x 272*s), under dialogs, menus and touch controls. Used to add elements to
+/// the game's own screens (an extra menu row). The image is copied; it is shown until cleared, or for 0.15 s after the last call
+/// (so a screen that stops calling it loses the layer by itself). Any thread.
+void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h);
+void ge_draw_clear_game_layer();
+/// Parts of the game's own picture redrawn elsewhere under the game layer, this frame's pixels (e.g. a neighbouring row's underline
+/// for an added menu row, whatever texture pack draws it): source and destination rectangles in PSP units (480x272, y down), a
+/// destination of another size stretches. Opaque. Kept with the layer image; set them before ge_draw_set_game_layer.
+struct GeLayerCopy { float sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1; };
+void ge_draw_set_game_layer_copies(const GeLayerCopy* c, int n);
 
 /// Present the last frame with the dialog/menu overlay now (game paused).
 /// Main (GL) thread.

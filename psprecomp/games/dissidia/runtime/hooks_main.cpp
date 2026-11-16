@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+void dissidia_register_reflectivity();   // refl_materials.cpp
 
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
@@ -55,8 +56,11 @@ extern void dissidia_roster_init(uint8_t* rdram);
 extern void dissidia_roster_boot_patch(uint8_t* rdram);
 extern void dissidia_roster_grid_install();
 extern void dissidia_wpnp_install();
+extern void dissidia_net_packs_install();
 // camera.cpp: analogue right-stick battle camera.
 extern void dissidia_camera_install(uint8_t* rdram);
+extern void dissidia_menu_settings_install(uint8_t* rdram);
+extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
 // direct_battle.cpp: test-only, skips the menus (PSPRECOMP_TEST_DIRECT_BATTLE=1).
 extern void dissidia_direct_battle_install(uint8_t* rdram);
 // input.cpp: continuous analogue stick direction (the game's own processing is 8-way).
@@ -65,6 +69,7 @@ extern void dissidia_input_install(uint8_t* rdram);
 extern void dissidia_framerate_install(uint8_t* rdram);
 
 bool dissidia_player_pos(float* P);   // camera.cpp
+int dissidia_ex_cores(float (*P)[3], int max);   // framerate.cpp
 
 namespace {
 
@@ -295,8 +300,10 @@ static int dissidia_stage_id() {
 void dissidia_register_hooks(uint8_t* rdram) {
     g_stage_ram = rdram;
     psp_set_stage_id_provider(dissidia_stage_id);
+    dissidia_register_reflectivity();
     psp_set_player_pos_provider(dissidia_player_pos);
-    psp_settings_add_debug_toggle({"Light Editor", "Stage light editor (debug)\nShows a marker at every light of the stage and turns on the keys: F6 drop a light, F7 remove the selected one, J/L I/K U/O move it, , . radius, - = intensity, [ ] or P select (P = the one closest to you), Shift = faster. Needs Ray-Traced Shadows on. The lights are saved in stage_lights.txt in the game folder (the file has the full key list). This session only.",
+    psp_set_pickup_lights_provider(dissidia_ex_cores);
+    psp_settings_add_debug_toggle({"Light Editor", "Stage light editor (debug)\nShows a marker at every light of the stage and turns on the keys: F6 drop a light, F7 remove the selected one, J/L I/K U/O move it, , . radius, - = intensity, [ ] or P select (P = the one closest to you), T copy the colour of the surface the light touches, G mark the stage piece nearest the light as glowing (breakable crystals), Shift = faster. Needs Ray-Traced Shadows on. The lights are saved in stage_lights.txt in the game folder (the file has the full key list). This session only.",
                                    +[]() { return psp_stage_light_edit_get(); }, +[](bool on) { psp_stage_light_edit_set(on); }});
     // One save set for every region: US, EU, JP.
     static const char* const kIds[] = {"ULUS10566", "ULES01505", "ULJM05681"};
@@ -311,6 +318,7 @@ void dissidia_register_hooks(uint8_t* rdram) {
     dissidia_models_install();   // model staging budget (hooks_models.cpp)
     dissidia_roster_init(rdram); // extra roster slots (roster.cpp)
     dissidia_wpnp_install();     // battle.bin wpnp table bigger than its retail buffer (roster.cpp)
+    dissidia_net_packs_install();   // verified packs from online players (net_packs.cpp)
     if (std::getenv("PSPRECOMP_TRACE_ATAN")) { g_orig_atan = psp_dispatch_probe_lookup(0x089A457Cu); if (g_orig_atan) psp_dispatch_register(0x089A457Cu, dissidia_atan_trace); }
     if (std::getenv("PSPRECOMP_TRACE_BONE")) { g_orig_bone = psp_dispatch_probe_lookup(0x089B2974u); if (g_orig_bone) psp_dispatch_register(0x089B2974u, dissidia_bone_trace); }
     if (std::getenv("PSPRECOMP_TRACE_POOL")) {
@@ -350,6 +358,8 @@ void dissidia_register_hooks(uint8_t* rdram) {
     dissidia_roster_grid_install();   // wraps overlay functions: needs the overlay dispatch tables
     dissidia_direct_battle_install(rdram);  // direct_battle.cpp
     dissidia_camera_install(rdram);   // camera.cpp (wraps a battle-overlay function too)
+    dissidia_menu_settings_install(rdram);   // menu_settings.cpp: Settings entries in the title / start menu / pause menu
+    dissidia_discord_install(rdram);         // discord_presence.cpp: Discord Rich Presence
     dissidia_input_install(rdram);    // input.cpp
     dissidia_framerate_install(rdram);   // framerate.cpp (wraps a battle-overlay function too)
 

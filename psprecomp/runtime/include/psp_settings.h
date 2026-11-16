@@ -8,7 +8,7 @@
 // the saved values win over PSPRECOMP_FULLSCREEN / PSPRECOMP_SCALE / PSPRECOMP_WINDOW / PSPRECOMP_RENDER_SCALE / PSPRECOMP_FPS.
 //
 // Categories (L / R shoulder, Q / E or Tab, the sidebar): Display, Graphics, Image (colour; sub-menu HDR), Effects (lighting; sub-menu Ray
-// Tracing), Controls (touch screens only), Network (applied at once through psp_adhoc_configure), Cloud, System, Drivers (Android, Adreno)
+// Tracing), Controls (touch screens only), Network (applied at once through psp_adhoc_configure; Discord status, psp_discord.h), Cloud, System, Drivers (Android, Adreno)
 // and Debug.
 //
 // Open / close: Esc or F1 on the keyboard; Guide, or both stick buttons (L3 + R3), on a game controller; the touch controls' menu button;

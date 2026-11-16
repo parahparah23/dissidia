@@ -48,8 +48,10 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 std::string dissidia_mods_dir();
+std::vector<std::string> dissidia_mod_roots();   // hooks_io.cpp: installed mod folders that are on
 uint32_t dissidia_model_budget_request(uint32_t bytes);
 
 namespace {
@@ -126,20 +128,24 @@ void reserve_blocks() {
 void prescan_mods_for_budget() {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const std::string dir = dissidia_mods_dir();
-    if (dir.empty() || !fs::is_directory(dir, ec)) return;
+    std::vector<std::string> dirs{dissidia_mods_dir()};
+    for (const std::string& r : dissidia_mod_roots()) dirs.push_back(r);
     uint64_t biggest = 0;
-    // Only the obj/ folder holds model overrides, so only it is walked. (The whole mods tree also holds the HD texture pack, thousands of
-    // files; walking it with fs::relative() canonicalised every path and took about 5 s of the start-up on Android's shared storage.)
-    for (fs::directory_iterator top(dir, fs::directory_options::skip_permission_denied, ec), tend; !ec && top != tend; top.increment(ec)) {
-        std::string name = top->path().filename().generic_string();
-        for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (name != "obj" || !top->is_directory(ec)) continue;
-        std::error_code ec2;
-        for (fs::recursive_directory_iterator it(top->path(), fs::directory_options::skip_permission_denied, ec2), end; !ec2 && it != end; it.increment(ec2)) {
-            if (!it->is_regular_file(ec2)) continue;
-            biggest = std::max<uint64_t>(biggest, it->file_size(ec2));
+    for (const std::string& dir : dirs) {   // <mods> and the installed mod folders that are on
+        if (dir.empty() || !fs::is_directory(dir, ec)) { ec.clear(); continue; }
+        // Only the obj/ folder holds model overrides, so only it is walked. (The whole mods tree also holds the HD texture pack, thousands of
+        // files; walking it with fs::relative() canonicalised every path and took about 5 s of the start-up on Android's shared storage.)
+        for (fs::directory_iterator top(dir, fs::directory_options::skip_permission_denied, ec), tend; !ec && top != tend; top.increment(ec)) {
+            std::string name = top->path().filename().generic_string();
+            for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (name != "obj" || !top->is_directory(ec)) continue;
+            std::error_code ec2;
+            for (fs::recursive_directory_iterator it(top->path(), fs::directory_options::skip_permission_denied, ec2), end; !ec2 && it != end; it.increment(ec2)) {
+                if (!it->is_regular_file(ec2)) continue;
+                biggest = std::max<uint64_t>(biggest, it->file_size(ec2));
+            }
         }
+        ec.clear();
     }
     if (biggest > g_staging) {
         const uint32_t b = dissidia_model_budget_request(static_cast<uint32_t>(std::min<uint64_t>(biggest, 0xFFFFFFFFull)));

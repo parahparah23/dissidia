@@ -17,6 +17,23 @@ mods/menu/jp/battle/chara_image/p_fiv100.gim
 mods/by_crc/0a1b2c3d.bin          replaces the entry with that CRC32 (hex) - for assets not in the path list
 ```
 
+**Installed mod folders (one toggle per mod, any platform):** a folder in the mods directory with a `mod.json` and an
+`install/` folder holding files at their game paths is one mod the settings menu can turn on and off (*Settings > Mods*,
+applies at the next start). While its `mod.json` does not say `"enabled": false`, `install/` counts as one more mods
+directory: its `obj/`, `by_crc/` ... files override the game's, its `textures/` joins the texture pack, and its `obj/`
+counts for the model budget. Loose files in the mods directory itself win over a folder's, and folders go in name order.
+A folder with a `mod.json` is never read as part of the loose-file tree. This is how a finished mod ships to a game with no
+build step at start (Android, a release install):
+
+```
+mods/nt-lightning/mod.json                     {"name": "Lightning: Dissidia NT model", "enabled": true, ...}
+mods/nt-lightning/install/obj/p_gst130_1p.gmo
+mods/nt-lightning/install/textures/fc0807432147e17e.png
+```
+
+The log says `[MODS] mod folder on: ...` / `[MODS] mod folder <name>: off` and `[TEXPACK] mod folder pack ...`. (`hooks_io.cpp`
+`mod_roots`, `package_mods.cpp` `walk`, `hooks_models.cpp` `prescan_mods_for_budget`, `psp_tex_pack.cpp` extra dirs.)
+
 **Blender add-on:** `blender/` holds the Dissidia character add-on (import from the ISO, model, animate, edit move events, export); `python3 blender/build_addon.py` builds the installable zip. Guide: [blender/README.md](../../../../blender/README.md).
 
 **Move Studio:** `studio/index.html` (open in Chrome): one place for a character's moves: the animation in 3D, its events on a timeline, each hit's damage and knock-back, saved straight into the mod folder. Guide: [studio/README.md](../../../../studio/README.md). What every event does: [docs/moves-and-events.md](moves-and-events.md).

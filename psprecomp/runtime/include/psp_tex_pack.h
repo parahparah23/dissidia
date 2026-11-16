@@ -24,6 +24,11 @@ using PspTexPackDirFn = std::string (*)();
 /// after psp_io_init). Without a provider the default is <ms0 parent>/mods/textures.
 void psp_texpack_set_dir_provider(PspTexPackDirFn fn);
 
+/// More replacement folders (installed mod folders' textures/): their <id>.png join the pack; the main pack wins on the same id.
+/// Called once with the pack. Replacements only (dumps and textures.ini stay in the main pack).
+using PspTexPackDirsFn = std::vector<std::string> (*)();
+void psp_texpack_set_extra_dirs_provider(PspTexPackDirsFn fn);
+
 /// True when any of dump / replacement (non-empty pack) / upscale is on.
 /// Cheap after the first call; when false ge_texture_bind computes no ids.
 bool psp_texpack_active();
@@ -80,6 +85,15 @@ uint32_t psp_texpack_xxh32(const uint8_t* p, size_t len, uint32_t seed);
 uint32_t psp_texpack_ppsspp_content_hash(const uint8_t* mem, size_t mem_len, int fmt, int w, int h, int bufw, int kind, uint32_t guest_addr = 0);
 /// PPSSPP's StableQuickTexHash (kind 3 = hash=quick); `aligned` = guest address is 16-byte aligned.
 uint32_t psp_texpack_quick_hash(const uint8_t* p, size_t size, bool aligned);
+
+/// Game art drawn by a game module itself (an element it adds to a screen) should use the same HD image the game gets. Register the
+/// texture's id (psp_texpack_make_id of the original texels) with psp_texpack_watch; when the game binds that texture, the
+/// image it is replaced with (id-named pack, PPSSPP-style pack or upscaler) is kept, and psp_texpack_watched returns it
+/// (false while the texture was not bound yet or nothing replaces it). Registering a watch turns id computation on. Any thread.
+void psp_texpack_watch(uint64_t id);
+bool psp_texpack_watching();
+bool psp_texpack_watched(uint64_t id, std::vector<uint8_t>& rgba, int& w, int& h);
+void psp_texpack_watch_store(uint64_t id, const uint8_t* rgba, int w, int h);   // the texture binder
 
 /// Write textures.txt now (also called periodically and at shutdown).
 void psp_texpack_flush();

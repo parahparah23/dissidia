@@ -99,8 +99,8 @@ see [Prerequisites](#prerequisites).
 ## Quickstart
 
 The build for the current target is scripted in `games/dissidia/tools/`. You need your own copy of
-the game as an `.iso` or `.cso`; no game data ships with this repo. The steps (Steam Deck and Linux PC) are in the
-top-level README: [Install and play](../README.md#install-and-play).
+the game as an `.iso` or `.cso`; no game data ships with this repo. Players use the setup app (top-level README:
+[Install](../README.md#install)); building from a checkout is [Building from source](../README.md#building-from-source) there.
 
 `pipeline.sh` builds the Rust recompiler, rebuilds the analysis from the shipped metadata (or runs
 Ghidra with `--ghidra <dir>`), recompiles the EBOOT and its overlays, and builds the runtime with

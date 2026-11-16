@@ -20,6 +20,8 @@ mods/<name>/
   skins/<skin>/       bodies and weapons that replace the default ones
 ```
 
+**Bartz's moves from the first Dissidia:** `psprecomp/games/dissidia/tools/d1_moves.py --d1 <Dissidia (2008) ISO> --iso012 <012 ISO>` makes `mods/bartz-dff` from your own two discs: eight moves 012 dropped come back as new abilities. Settings > Mods switches them on and off (next start). Details: [docs/character-mods.md](../psprecomp/games/dissidia/docs/character-mods.md) (*New moves for a retail character*).
+
 A folder with `"kind": "retail"` in its `mod.json` changes one of the game's own characters instead of adding one (the Move Studio's *Save as mod* makes those); its body can be swapped for your own model, and `"skin": "retail"` puts the game's back. A folder whose name starts with `_`, or whose `mod.json` has `"enabled": false`, is never built. `_template/` is the template.
 
 ## By hand
@@ -42,6 +44,11 @@ tools/charmod.py hits noctis             # every hit of every move
 ## Sharing
 
 A mod folder is data only: JSON, models, skins, pictures, sounds. The build refuses a folder with a script or program in it, so a shared mod can't carry code. Zip `mods/<name>/` and send it. Don't share `.blend` files to install (Blender can run scripts saved in them), and never run a script that came with a mod; nothing here needs one.
+
+**A finished mod on a game with no build step (Android, a release install):** put it in the game's mods folder as
+`<mods>/<name>/mod.json` plus `install/` holding the built files at their game paths (`install/obj/...`,
+`install/textures/...`). It shows up in *Settings > Mods* and turns on and off from there (next start). Details:
+[docs/loose-file-mods.md](../psprecomp/games/dissidia/docs/loose-file-mods.md), "Installed mod folders".
 
 ## Everything else
 

@@ -14,6 +14,7 @@
 #include "psp_post.h"
 #include "psp_screenfx.h"
 #include "psp_rt.h"
+#include "psp_refl_table.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -44,10 +45,17 @@ bool psp_stage_keeps_geometry() {
     for (int s : k_drop_unseen_stages) if (s == id) return false;
     return true;
 }
-struct StageLook { int id; float dark; };
+struct StageLook { int id; float dark; bool no_sun; };   // no_sun: the sky light casts no shadows there (the stage is lit by its own lights)
 static const StageLook k_stage_looks[] = {
-    {1, 0.3f},   // Pandaemonium: enclosed, no light source (issue #4)
+    {1, 0.3f, false},   // Pandaemonium: enclosed, no light source (issue #4)
+    {9, 1.f, true},     // Crystal World: lit by its sky crystal and the glowing crystals
+    {15, 1.f, true},    // Empyreal Paradox: lit by the centre crystal and the glowing crystals
 };
+static bool stage_no_sun() {
+    const int id = psp_stage_id();
+    for (const StageLook& s : k_stage_looks) if (s.id == id) return s.no_sun;
+    return false;
+}
 static float stage_dark() {
     static const bool has_env = std::getenv("PSPRECOMP_STAGE_DARK") != nullptr;
     const int id = psp_stage_id();
@@ -63,15 +71,18 @@ static float stage_dark() {
 //   stage <id>
 //   light <x> <y> <z> <r> <g> <b> <radius> <intensity>
 // In game: F6 drops a light at the camera + forward * distance (PageUp / PageDown change the distance), F7 removes the stage's last light.
-struct StageLight { float p[3], c[3], radius, intensity; };
-static const int kMaxLights = 16;
+struct StageLight { float p[3], c[3], radius, intensity; float clear = 0.f; };   // clear: the shadow ray stops this far short of the light (a pickup must not shadow itself)
+static const int kMaxLights = 24;
 static std::map<int, std::vector<StageLight>> g_light_file;   // from the file (overrides the built-in table of a stage)
+struct StageGlow { uint32_t hash, vt; float c[3], radius, intensity; };   // a glowing stage piece: texture hash + vertex format -> a light per part
+static std::map<int, std::vector<StageGlow>> g_glow_file;                    // `glow` lines (render thread only, like g_light_file)
 static std::atomic<int> g_light_req{0};                       // 1 drop, 2 remove the selected light (set by the event loop)
 static std::atomic<int> g_light_dist10{80};                   // placement distance x10
 static std::atomic<bool> g_light_edit{std::getenv("PSPRECOMP_LIGHT_EDIT") != nullptr};                 // edit mode: markers shown, the movement keys are live
 static std::atomic<unsigned> g_light_keys{0};                 // held keys, bit = PSP_LIGHT_LEFT..INT_UP, FAST
 static std::atomic<int> g_light_nav{0};                       // pending select prev (-1) / next (+1)
 static int g_light_sel = 0;
+static int g_light_first = 0, g_light_end = 0, g_light_fx0 = 0;   // fx0: the first effect light   // this frame: the stage's own lights are [first, end) of the lights sent to the shader
 static bool g_light_dirty = false;
 static double g_light_last_change = 0;
 static long g_light_mtime = -1;
@@ -80,7 +91,7 @@ static const char* light_path() { const char* e = std::getenv("PSPRECOMP_STAGE_L
 static void lights_save_file();
 static long file_mtime(const char* p);
 static void lights_load_file() {
-    g_light_file.clear();
+    g_light_file.clear(); g_glow_file.clear();
     FILE* f = std::fopen(light_path(), "r");
     if (!f) return;
     char line[256]; int stage = -1; bool has_help = false;
@@ -90,6 +101,8 @@ static void lights_load_file() {
         if (std::sscanf(line, "stage %d", &id) == 1) { stage = id; g_light_file[stage]; }
         else if (stage >= 0 && std::sscanf(line, "light %f %f %f %f %f %f %f %f", &l.p[0], &l.p[1], &l.p[2], &l.c[0], &l.c[1], &l.c[2], &l.radius, &l.intensity) == 8)
             g_light_file[stage].push_back(l);
+        else { unsigned h, vt; StageGlow g;
+            if (stage >= 0 && std::sscanf(line, "glow %x %x %f %f %f %f %f", &h, &vt, &g.c[0], &g.c[1], &g.c[2], &g.radius, &g.intensity) == 7) { g.hash = h; g.vt = vt; g_glow_file[stage].push_back(g); } }
     }
     std::fclose(f);
     if (!has_help) { lights_save_file(); g_light_mtime = file_mtime(light_path()); }   // add the controls note
@@ -110,11 +123,21 @@ static void lights_save_file() {
         "#   In edit mode (hold Shift for 4x speed):\n"
         "#     J / L  left / right     I / K  forward / back     U / O  down / up      (camera relative, kept level)\n"
         "#     , / .  radius - / +     - / =  intensity - / +     [ / ]  select previous / next light     P  select the light closest to the player\n"
+        "#     T  copy the colour of the surface the selected light is touching (the nearest scene triangle's texture colour, brightened to full)\n"
+        "#     G  mark the stage piece nearest the selected light as glowing (press again on it to unmark): every drawn piece with its texture\n"
+        "#        gets a light per part, with the selected light's colour / radius / intensity, until it breaks (Crystal World, Empyreal Paradox)\n"
+        "# glow <texture hash> <vertex format> <r> <g> <b> <radius> <intensity>   a glowing piece (written by G)\n"
         "#   The same edit mode can be switched on in Settings > Debug > Light Editor.\n"
         "#\n", f);
-    for (const auto& kv : g_light_file) {
-        std::fprintf(f, "stage %d\n", kv.first);
-        for (const StageLight& l : kv.second) std::fprintf(f, "light %.2f %.2f %.2f %.2f %.2f %.2f %.1f %.2f\n", l.p[0], l.p[1], l.p[2], l.c[0], l.c[1], l.c[2], l.radius, l.intensity);
+    std::map<int, bool> ids;
+    for (const auto& kv : g_light_file) ids[kv.first] = true;
+    for (const auto& kv : g_glow_file) ids[kv.first] = true;
+    for (const auto& id : ids) {
+        std::fprintf(f, "stage %d\n", id.first);
+        auto li = g_light_file.find(id.first);
+        if (li != g_light_file.end()) for (const StageLight& l : li->second) std::fprintf(f, "light %.2f %.2f %.2f %.2f %.2f %.2f %.1f %.2f\n", l.p[0], l.p[1], l.p[2], l.c[0], l.c[1], l.c[2], l.radius, l.intensity);
+        auto gi = g_glow_file.find(id.first);
+        if (gi != g_glow_file.end()) for (const StageGlow& g : gi->second) std::fprintf(f, "glow %08x %08x %.2f %.2f %.2f %.1f %.2f\n", g.hash, g.vt, g.c[0], g.c[1], g.c[2], g.radius, g.intensity);
     }
     std::fclose(f);
 }
@@ -129,10 +152,89 @@ static const StageLight k_builtin_stage1[] = {   // Pandaemonium
     {{-3.92f, 11.06f, -57.27f}, {1.00f, 0.40f, 0.90f}, 37.9f, 1.50f},
     {{3.55f, 2.28f, -28.05f}, {0.40f, 0.37f, 0.50f}, 24.6f, 1.50f},
     {{11.13f, 11.19f, -39.38f}, {1.00f, 0.40f, 0.90f}, 31.4f, 1.50f},
+    {{-35.60f, 15.58f, -24.77f}, {1.00f, 0.40f, 0.90f}, 80.0f, 1.50f},
+};
+static const StageLight k_builtin_stage6[] = {
+    {{-14.06f, 32.84f, 27.00f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-27.17f, 32.80f, -6.11f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-5.98f, 32.84f, -27.06f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-4.01f, 33.02f, -4.01f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{22.00f, 33.29f, -18.92f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{26.99f, 33.06f, 6.05f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{3.91f, 33.02f, 11.04f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-10.23f, 20.00f, 15.83f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{-7.83f, 12.26f, 6.04f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{-18.10f, 33.48f, -23.64f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{22.13f, 33.51f, 15.79f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+};
+static const StageLight k_builtin_stage7[] = {
+    {{0.07f, -34.00f, 0.16f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-0.25f, -34.00f, -10.90f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-4.32f, -34.00f, 13.91f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-14.08f, -34.00f, -1.08f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{15.12f, -34.00f, 2.17f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+};
+static const StageLight k_builtin_stage8[] = {
+    {{-1.92f, 27.64f, -0.09f}, {0.40f, 0.37f, 0.50f}, 40.0f, 1.50f},
+    {{-6.20f, -27.65f, 5.32f}, {0.40f, 0.37f, 0.50f}, 20.0f, 1.50f},
+    {{10.16f, -27.67f, -6.74f}, {0.40f, 0.37f, 0.50f}, 20.0f, 1.50f},
+    {{0.36f, -8.52f, -25.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-12.43f, -14.58f, -24.60f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{8.70f, -13.46f, -23.94f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-1.32f, 19.93f, -26.13f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{12.72f, 13.70f, -27.61f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-7.75f, 13.15f, -28.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+};
+static const StageLight k_builtin_stage9[] = {   // Crystal World
+    {{0.38f, 13.53f, -40.27f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+};
+static const StageLight k_builtin_stage10[] = {
+    {{-16.32f, 35.87f, 99.65f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+    {{5.31f, -20.38f, 18.80f}, {1.00f, 0.90f, 0.80f}, 400.0f, 1.50f},
+};
+static const StageLight k_builtin_stage15[] = {   // Empyreal Paradox
+    {{0.08f, 3.98f, -0.18f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+};
+static const StageLight k_builtin_stage18[] = {
+    {{19.98f, 7.62f, -19.23f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.03f, 7.60f, -15.87f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.95f, 7.83f, -12.37f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.02f, 7.89f, -8.88f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.98f, 7.68f, -5.32f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.99f, 7.74f, -1.58f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.97f, 7.87f, 1.61f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.00f, 7.80f, 5.06f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.00f, 7.72f, 8.67f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.93f, 7.79f, 12.15f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.01f, 7.75f, 15.66f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
 };
 static const std::vector<StageLight>* builtin_lights(int id) {
-    static const std::vector<StageLight> s1(std::begin(k_builtin_stage1), std::end(k_builtin_stage1));
-    return id == 1 ? &s1 : nullptr;
+    static const std::map<int, std::vector<StageLight>> t = {
+        {1, std::vector<StageLight>(std::begin(k_builtin_stage1), std::end(k_builtin_stage1))},
+        {6, std::vector<StageLight>(std::begin(k_builtin_stage6), std::end(k_builtin_stage6))},
+        {7, std::vector<StageLight>(std::begin(k_builtin_stage7), std::end(k_builtin_stage7))},
+        {8, std::vector<StageLight>(std::begin(k_builtin_stage8), std::end(k_builtin_stage8))},
+        {9, std::vector<StageLight>(std::begin(k_builtin_stage9), std::end(k_builtin_stage9))},
+        {10, std::vector<StageLight>(std::begin(k_builtin_stage10), std::end(k_builtin_stage10))},
+        {15, std::vector<StageLight>(std::begin(k_builtin_stage15), std::end(k_builtin_stage15))},
+        {18, std::vector<StageLight>(std::begin(k_builtin_stage18), std::end(k_builtin_stage18))},
+    };
+    const auto it = t.find(id);
+    return it == t.end() ? nullptr : &it->second;
+}
+// Glowing pieces that ship with the game (marked in game with G); `glow` lines for a stage in stage_lights.txt replace them.
+static const std::vector<StageGlow>* builtin_glows(int id) {
+    static const std::map<int, std::vector<StageGlow>> t = {
+        {9, {   // Crystal World
+            {0x61edd277u, 0x0000011au, {1.00f, 0.74f, 0.62f}, 10.0f, 1.50f},
+        }},
+        {15, {   // Empyreal Paradox
+            {0x8466d0a3u, 0x0000011au, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+            {0xe22c8d4cu, 0x00000299u, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+        }},
+    };
+    const auto it = t.find(id);
+    return it == t.end() ? nullptr : &it->second;
 }
 // The stage's lights now (file entries, re-read about once a second when the file changed).
 static const std::vector<StageLight>& stage_lights(int id) {
@@ -149,10 +251,34 @@ static const std::vector<StageLight>& stage_lights(int id) {
     return b ? *b : none;
 }
 static bool (*g_player_pos_fn)(float*) = nullptr;
+static int (*g_pickup_fn)(float (*)[3], int) = nullptr;
+void psp_set_pickup_lights_provider(int (*fn)(float (*)[3], int)) { g_pickup_fn = fn; }
 void psp_set_player_pos_provider(bool (*fn)(float*)) { g_player_pos_fn = fn; }
+bool psp_player_pos(float* p) { return g_player_pos_fn && g_player_pos_fn(p); }
 bool psp_stage_light_edit_get() { return g_light_edit.load(); }
 void psp_stage_light_edit_set(bool on) { g_light_edit.store(on); std::fprintf(stderr, "[LIGHT] edit mode %s\n", on ? "ON" : "off"); }
-static std::atomic<bool> g_light_nearest{false};
+static std::atomic<bool> g_light_nearest{false}, g_light_pickcol{false}, g_light_glow{false};
+static bool g_glow_wait = false, g_glow_have = false; static float g_glow_p[3], g_glow_dist; static uint32_t g_glow_hash, g_glow_vt;   // G pick (render thread)
+bool psp_stage_glow_pick_point(float* p) { if (!g_glow_wait) return false; if (p) std::memcpy(p, g_glow_p, sizeof g_glow_p); return true; }
+void psp_stage_glow_pick_result(uint32_t h, uint32_t vt, float dist) { if (!g_glow_wait) return; g_glow_wait = false; g_glow_have = true; g_glow_hash = h; g_glow_vt = vt; g_glow_dist = dist; }
+static const std::vector<StageGlow>* builtin_glows(int id);
+static const std::vector<StageGlow>* stage_glows(int id) {   // the file's glow lines for the stage, else the built-in ones
+    if (id < 0) return nullptr;
+    auto it = g_glow_file.find(id);
+    if (it != g_glow_file.end() && !it->second.empty()) return &it->second;
+    return builtin_glows(id);
+}
+bool psp_stage_has_glow() { const std::vector<StageGlow>* G = stage_glows(psp_stage_id()); return G && !G->empty(); }
+bool psp_stage_glow_find(uint32_t h, uint32_t vt, float* spec) {
+    const std::vector<StageGlow>* G = stage_glows(psp_stage_id());
+    if (!G) return false;
+    for (const StageGlow& g : *G) if (g.hash == h && g.vt == vt) { spec[0] = g.c[0]; spec[1] = g.c[1]; spec[2] = g.c[2]; spec[3] = g.radius; spec[4] = g.intensity; return true; }
+    return false;
+}
+// "Copy colour": the light service posts the selected light's position, the scene capture (psp_ge_draw.cpp, which owns the triangles) answers.
+static bool g_pick_wait = false, g_pick_have = false; static float g_pick_p[3], g_pick_rgb[3], g_pick_dist;
+bool psp_stage_light_pick_request(float* p) { if (!g_pick_wait) return false; g_pick_wait = false; std::memcpy(p, g_pick_p, sizeof g_pick_p); return true; }
+void psp_stage_light_pick_result(const float* rgb, float dist) { std::memcpy(g_pick_rgb, rgb, sizeof g_pick_rgb); g_pick_dist = dist; g_pick_have = true; }
 bool psp_stage_light_input(int what, bool down) {
     if (what == PSP_LIGHT_TOGGLE_EDIT) { if (down) { const bool v = !g_light_edit.load(); g_light_edit.store(v); std::fprintf(stderr, "[LIGHT] edit mode %s\n", v ? "ON" : "off"); } return true; }
     if (what == PSP_LIGHT_DROP) { if (down) { g_light_req.store(1); g_light_edit.store(true); } return true; }
@@ -164,6 +290,8 @@ bool psp_stage_light_input(int what, bool down) {
     if (what == PSP_LIGHT_FAST) { if (down) g_light_keys.fetch_or(1u << 31); else g_light_keys.fetch_and(~(1u << 31)); return false; }
     if (!g_light_edit.load()) return false;                    // the other keys only act in edit mode
     if (what == PSP_LIGHT_NEAREST) { if (down) g_light_nearest.store(true); return true; }
+    if (what == PSP_LIGHT_COPY_COLOR) { if (down) g_light_pickcol.store(true); return true; }
+    if (what == PSP_LIGHT_GLOW) { if (down) g_light_glow.store(true); return true; }
     if (what == PSP_LIGHT_PREV || what == PSP_LIGHT_NEXT) { if (down) g_light_nav.store(what == PSP_LIGHT_NEXT ? 1 : -1); return true; }
     if (what >= PSP_LIGHT_LEFT && what <= PSP_LIGHT_INT_UP) { if (down) g_light_keys.fetch_or(1u << what); else g_light_keys.fetch_and(~(1u << what)); return true; }
     return false;
@@ -201,6 +329,42 @@ static void lights_service(int id, const float* v) {
             std::fprintf(stderr, "[LIGHT] selected light %d of %d, the closest to the player (%.1f away)\n", best + 1, (int)L.size(), std::sqrt(bd));
         } else std::fprintf(stderr, "[LIGHT] no player position available\n");
     }
+    if (g_light_pickcol.exchange(false) && !L.empty()) {
+        g_light_sel = std::min(g_light_sel, (int)L.size() - 1);
+        std::memcpy(g_pick_p, L[g_light_sel].p, sizeof g_pick_p); g_pick_wait = true; g_pick_have = false;
+    }
+    if (g_light_glow.exchange(false) && !L.empty()) {
+        g_light_sel = std::min(g_light_sel, (int)L.size() - 1);
+        std::memcpy(g_glow_p, L[g_light_sel].p, sizeof g_glow_p); g_glow_wait = true; g_glow_have = false;
+    }
+    if (g_glow_have) {
+        g_glow_have = false;
+        if (g_light_sel < (int)L.size()) {
+            std::vector<StageGlow>& G = g_glow_file[id];
+            if (G.empty()) if (const std::vector<StageGlow>* b = builtin_glows(id)) G = *b;   // edits start from the shipped marks
+            auto it = std::find_if(G.begin(), G.end(), [&](const StageGlow& g) { return g.hash == g_glow_hash && g.vt == g_glow_vt; });
+            if (it != G.end()) { G.erase(it); std::fprintf(stderr, "[LIGHT] stage %d: piece %08x/%x no longer glows (it was %.1f from light %d)\n", id, g_glow_hash, g_glow_vt, g_glow_dist, g_light_sel + 1); }
+            else {
+                const StageLight& l = L[g_light_sel];
+                G.push_back({g_glow_hash, g_glow_vt, {l.c[0], l.c[1], l.c[2]}, l.radius, l.intensity});
+                std::fprintf(stderr, "[LIGHT] stage %d: piece %08x/%x glows (%.1f from light %d; colour %.2f %.2f %.2f radius %.1f intensity %.2f)\n", id, g_glow_hash, g_glow_vt, g_glow_dist, g_light_sel + 1, l.c[0], l.c[1], l.c[2], l.radius, l.intensity);
+            }
+            g_light_dirty = true; g_light_last_change = now;
+        }
+    }
+    if (g_pick_have) {
+        g_pick_have = false;
+        if (g_light_sel < (int)L.size()) {
+            StageLight& l = L[g_light_sel];
+            float mx = std::max(g_pick_rgb[0], std::max(g_pick_rgb[1], g_pick_rgb[2]));
+            if (mx < 0.02f) { std::fprintf(stderr, "[LIGHT] light %d: the surface %.1f away is black, colour kept\n", g_light_sel + 1, g_pick_dist); }
+            else {
+                for (int c = 0; c < 3; ++c) l.c[c] = g_pick_rgb[c] / mx;   // hue only: brightness is the intensity's job
+                g_light_dirty = true; g_light_last_change = now;
+                std::fprintf(stderr, "[LIGHT] light %d: colour %.2f %.2f %.2f copied from the surface %.1f away\n", g_light_sel + 1, l.c[0], l.c[1], l.c[2], g_pick_dist);
+            }
+        }
+    }
     if (const int nav = g_light_nav.exchange(0); nav && !L.empty()) { g_light_sel = (g_light_sel + nav + (int)L.size()) % (int)L.size(); std::fprintf(stderr, "[LIGHT] selected light %d of %d\n", g_light_sel + 1, (int)L.size()); }
     if (g_light_edit.load() && !L.empty() && dt > 0.f) {
         g_light_sel = std::min(g_light_sel, (int)L.size() - 1);
@@ -217,7 +381,7 @@ static void lights_service(int id, const float* v) {
         const float dr = (float(held(PSP_LIGHT_RAD_UP)) - float(held(PSP_LIGHT_RAD_DOWN))) * 6.f * dt, di = (float(held(PSP_LIGHT_INT_UP)) - float(held(PSP_LIGHT_INT_DOWN))) * 1.5f * dt;
         if (mv[0] != 0.f || mv[1] != 0.f || mv[2] != 0.f || dr != 0.f || di != 0.f) {
             for (int c = 0; c < 3; ++c) l.p[c] += mv[c];
-            l.radius = std::min(80.f, std::max(1.f, l.radius + dr)); l.intensity = std::min(20.f, std::max(0.f, l.intensity + di));
+            l.radius = std::min(1000.f, std::max(1.f, l.radius + dr)); l.intensity = std::min(20.f, std::max(0.f, l.intensity + di));
             g_light_dirty = true; g_light_last_change = now;
         }
     }
@@ -315,12 +479,23 @@ uniform float u_clearz;     // the cleared (background) depth
 uniform float u_sky;        // depth_t above which a pixel is the sky dome / background
 uniform vec2 u_fade;        // view distance where the effects start to fade out / are gone (the 16-bit depth is too coarse far away)
 
-float wd_at(vec2 uv) { return texture(u_depth, uv).r; }
+uniform int u_depth_snap;    // 0 = the old unsnapped read (PSPRECOMP_FX_DEPTH_SNAP=0, for comparison)
+// The depth at uv, from one definite full-resolution texel. The passes run at half resolution, where a pixel's centre lies exactly on
+// the border between two depth texels: nearest sampling then picks either one depending on the GPU's rounding (Adreno / Turnip did
+// not do it consistently), so the normals rebuilt from neighbouring depths jumped in bands along pixel columns and depth contours,
+// and AO and the ray-traced shadow's facing term drew evenly spaced lines on walls (RP6, render scale 2). The quarter-texel pull-back
+// makes every read land inside a texel.
+// The position is rebuilt at the same texel centre the depth came from (vpos): a depth from one place and a screen position from another
+// put a point off its surface by up to half a texel's depth change, which is large on a floor seen at a low angle (lines across floors).
+uniform int u_snap_split;   // debug PSPRECOMP_FX_SNAP_SPLIT=1
+vec2 snap_uv(vec2 uv) { return u_depth_snap == 0 ? uv : (floor(uv * u_size - 0.25) + 0.5) / u_size; }
+float wd_at(vec2 uv) { return texture(u_depth, snap_uv(uv)).r; }
 float depth_t(float wd) { return (wd - u_dr.x) / (u_dr.y - u_dr.x); }   // 0 at the near plane, 1 at the far plane
 bool is_far(float wd) { return abs(wd - u_clearz) < 3.0 / 65535.0 || depth_t(wd) > u_sky; }
 vec3 vpos(vec2 uv, float wd) {
     float z = depth_t(wd) * 2.0 - 1.0;
-    vec4 p = u_inv * vec4(uv * 2.0 - 1.0, z, 1.0);
+    vec2 ps = (u_snap_split != 0 && v_uv.x < 0.5) ? uv : snap_uv(uv);   // debug split: the left half rebuilds at the unsnapped point
+    vec4 p = u_inv * vec4(ps * 2.0 - 1.0, z, 1.0);
     return p.xyz / p.w;
 }
 vec3 vpos(vec2 uv) { return vpos(uv, wd_at(uv)); }
@@ -366,6 +541,41 @@ uniform int u_fx_dbg;       // PSPRECOMP_SSR_FX_DEBUG=1: a reflection that hit a
 uniform float u_fx_gain;    // base reflectivity of an effect (opaque reflections use Fresnel alone)
 uniform float u_fx_thick;   // how far behind an effect's front surface a ray still counts as inside it, view units
 uniform float u_lscale;     // 1 / stage darkening: the reflection layer is darkened with the stage, lights and markers must not be
+uniform int u_mask_on;      // 1: which surfaces reflect, and how much, is the alpha of u_color (reflectivity mask, k_fs_mask); 0: every upward surface
+uniform int u_mask_dbg;     // PSPRECOMP_REFL_MASK_DEBUG=1: tint the reflective surfaces green by their reflectivity (red: roughness, blue: metal)
+uniform float u_wave;       // water: reflection-normal tilt per unit of ripple-pattern gradient (PSPRECOMP_REFL_WAVE)
+uniform float u_wave_max;   // the largest tilt (PSPRECOMP_REFL_WAVE_MAX)
+uniform int u_fmask;        // 1: mask byte 1 in the alpha of u_color marks a fighter (psp_ge_draw.cpp fighter_capture): a fighter is not shadowed by fighters
+// The mask byte is a fighter (1). Read with linear filtering where a march sample lands, so a range rather than an exact byte.
+bool fighter_at(vec2 uv) { float b = texture(u_color, uv).a * 255.0; return b > 0.5 && b < 1.5; }
+// The surface's material from the mask byte (psp_refl_table.h psp_refl_encode): x reflectivity, y roughness, z metal, w water.
+vec4 mask_material(float a) {
+    float b = floor(a * 255.0 + 0.5);
+    return vec4(floor(b / 32.0) / 7.0, mod(floor(b / 4.0), 8.0) / 7.0, mod(floor(b / 2.0), 2.0), mod(b, 2.0));
+}
+// Water: the game animates its water by scrolling a ripple pattern, the geometry stays flat, so a reflection from the depth normal sat
+// on it as a still mirror. The ripples' brightness gradient (the scene copy, before the reflection is added) tilts the normal along the
+// surface, so the reflection bends and flows with the pattern. Limited, so an edge next to the water (a fighter's feet) cannot fold it.
+vec3 wave_normal(vec2 uv, vec3 P, vec3 n) {
+    vec2 s = u_step * 4.0;      // a wide span: the swell of the ripples, not their half-resolution texels (those gave a harsh speckle)
+    const vec3 lw = vec3(0.299, 0.587, 0.114);
+    float lx = dot(texture(u_color, uv + vec2(s.x, 0.0)).rgb - texture(u_color, uv - vec2(s.x, 0.0)).rgb, lw);
+    float ly = dot(texture(u_color, uv + vec2(0.0, s.y)).rgb - texture(u_color, uv - vec2(0.0, s.y)).rgb, lw);
+    vec3 dx = vpos(uv + vec2(s.x, 0.0)) - P, dy = vpos(uv + vec2(0.0, s.y)) - P;
+    vec3 tx = dx - n * dot(dx, n), ty = dy - n * dot(dy, n);
+    tx /= max(length(tx), 1e-5);
+    ty /= max(length(ty), 1e-5);
+    vec3 t = (tx * lx + ty * ly) * u_wave;
+    float tl = length(t);
+    if (tl > u_wave_max) t *= u_wave_max / tl;
+    return normalize(n - t);
+}
+// Schlick's Fresnel with the roughness damping of the grazing-angle boost: a rough surface does not turn into a mirror at a low
+// angle the way water or glass does. Metals reflect strongly head-on as well (base 0.5 instead of 0.04).
+float fresnel_r(float cosv, float rough, float metal) {
+    float f0 = mix(0.04, 0.5, metal);
+    return f0 + (max(1.0 - rough, f0) - f0) * pow(1.0 - clamp(cosv, 0.0, 1.0), 5.0);
+}
 //@RT_DECL
 // The effect at uv floats in front of the scene there: its depth is clearly nearer than the scene's. A blended sheet lying on a
 // surface (the water layer of the floor, decals, shadows) is at the scene's own depth and is not an effect to reflect.
@@ -420,6 +630,9 @@ void main() {
         if (facing > 0.0) {
             float jit = ign(gl_FragCoord.xy + 17.0);
             vec3 O = P + n * (0.01 + 0.004 * lp);
+            // A fighter's own body (and a fighter right next to it) does not shadow it: the low-poly models and their solid cards of
+            // hair / fur / fringes blotched the whole body. The stage and other objects still do.
+            bool self_rx = u_fmask != 0 && fighter_at(v_uv);
 //@RT_CODE
             for (int j = 0; j < u_n_cs; ++j) {
                 float t = (float(j) + jit) / float(u_n_cs);
@@ -430,6 +643,7 @@ void main() {
                 if (uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0) break;
                 float wd2 = wd_at(uv2);
                 if (is_far(wd2)) continue;
+                if (self_rx && fighter_at(uv2)) continue;
                 float diff = length(S) - length(vpos(uv2, wd2));
                 if (diff > 0.01 + 0.004 * lp && diff < u_cs_thick) { sh = facing * fd; break; }
             }
@@ -438,10 +652,16 @@ void main() {
     o_fx = vec4(ao, sh, 0.0, 1.0);
     if (u_fx_dbg == 2 && u_have_fx != 0) {   // debug: the effects layer itself, wherever the layer holds something
         vec4 fc = texture(u_fxc, v_uv);
-        if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, v_uv).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
+        if ((fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) && fx_floats(v_uv, wd, texture(u_fxd, snap_uv(v_uv)).r)) { o_refl = vec4(fc.rgb + vec3(0.4, 0.0, 0.4), 1.0); return; }
     }
 
-    if (u_n_ssr > 0 && dot(n, u_up) > 0.7) {
+    // How reflective this surface is (issue #2): the material's reflectivity from the mask, in any orientation (walls too). Without a
+    // reflectivity table (another game) the old rule: every upward-facing surface is a mirror floor.
+    vec4 mat = u_mask_on != 0 ? mask_material(texture(u_color, v_uv).a) : vec4(smoothstep(0.7, 0.95, dot(n, u_up)), 0.0, 0.0, 0.0);
+    float surf_k = mat.x, m_rough = mat.y, m_metal = mat.z;
+    vec3 n_geo = n;                                   // the reflection alone sees the water's ripples; the stage lights keep the flat normal
+    if (mat.w > 0.5 && u_wave > 0.0 && surf_k > 0.004 && u_n_ssr > 0) n = wave_normal(v_uv, P, n);
+    if (u_n_ssr > 0 && surf_k > 0.004) {
 //@RT_REFL
         {
         float upness = dot(n, u_up);
@@ -472,7 +692,7 @@ void main() {
                 // fragment's own depth; an effect later covered by opaque geometry (its depth behind the scene's) is not there.
                 vec4 fc = texture(u_fxc, uv2);
                 if (fc.a > 0.03 || max(fc.r, max(fc.g, fc.b)) > 0.06) {
-                    float efd = texture(u_fxd, uv2).r;
+                    float efd = texture(u_fxd, snap_uv(uv2)).r;
                     if ((is_far(wd2) || fx_floats(uv2, wd2, efd))) {
                         float de = length(vpos(uv2, efd)), ds = length(S);
                         if (ds > de - 0.02 * lp && ds < de + stepl * 2.5 + u_fx_thick) { fx_hit = true; fx_t = t; fx_c = fc; fx_uv = uv2; }
@@ -517,8 +737,8 @@ void main() {
             if (hit.x >= 0.0) { col = texture(u_color, hit).rgb; euv = hit; }
             vec2 e = min(euv, 1.0 - euv);
             float edge = smoothstep(0.0, 0.12, min(e.x, e.y));
-            float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -V), 0.0, 1.0), 5.0);
-            float refl_k = smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
+            float fres = fresnel_r(dot(n, -V), m_rough, m_metal);
+            float refl_k = surf_k * fd * u_ssr_amt;
             float k = hit.x >= 0.0 ? clamp(fres * 1.6 + 0.08, 0.0, 1.0) * edge * (1.0 - ht / maxd * 0.6) * refl_k : 0.0;
             o_refl = vec4(col * k, k);
             if (fx_hit) {
@@ -534,7 +754,90 @@ void main() {
         }
         }
     }
+    n = n_geo;
+    if (m_metal > 0.5 && o_refl.a > 0.0) {   // metal: the reflection takes the surface's colour (gold reflects gold)
+        vec3 alb = texture(u_color, v_uv).rgb;
+        float l = max(dot(alb, vec3(0.299, 0.587, 0.114)), 0.05);
+        o_refl.rgb *= clamp(alb / l, 0.0, 2.0) * 0.85;
+    }
+    if (u_mask_dbg != 0 && u_n_ssr > 0) o_refl = vec4(0.7 * m_rough * surf_k, 0.7 * surf_k, 0.7 * m_metal * surf_k, 0.7 * surf_k);
 //@RT_LIGHTS
+}
+)GLSL";
+
+// Reflectivity mask (issue #2; psp_ge_draw.cpp g_rml_tris): the reflective draws' triangles, captured in clip space with their
+// material byte, drawn in one pass into a full-resolution mask (RGBA8, alpha = the byte) with its own depth.
+const char* const k_vs_rmask = R"GLSL(
+in vec4 a_clip;
+in float a_mat;
+out float v_mat;
+void main() {
+    v_mat = a_mat;
+    gl_Position = a_clip;
+}
+)GLSL";
+const char* const k_fs_rmask = R"GLSL(
+in float v_mat;
+uniform float u_byte;       // 1/255 (a uniform also keeps the Vulkan layer's uniform block from being empty)
+layout(location = 0) out vec4 o_color;
+void main() {
+    o_color = vec4(0.0, 0.0, 0.0, v_mat * u_byte);
+}
+)GLSL";
+// Mask resolve, half resolution, into the alpha of the colour copy (which pass 1 reads as u_color anyway, so it costs no sampler
+// there). A mask texel counts only where its depth is still the scene's: nothing that does not reflect was drawn over it later, and
+// a see-through texel of a cut-out card (the scene shows what lies behind it) does not count either.
+const char* const k_fs_mask = R"GLSL(
+layout(location = 0) out vec4 o_color;
+uniform sampler2D u_mask;   // alpha = reflectivity (0 where no reflective draw)
+uniform sampler2D u_mdepth; // the mask's own depth
+uniform int u_have;         // 0: no reflective draw this frame
+void main() {
+    float r = 0.0;
+    float wd = wd_at(v_uv);
+    if (u_have != 0 && !is_far(wd)) {
+        float m = texture(u_mask, snap_uv(v_uv)).a;
+        if (m > 0.0) {
+            float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, snap_uv(v_uv)).r));
+            if (abs(a - b) < 0.002 * a + 0.01) r = m;
+        }
+    }
+    o_color = vec4(0.0, 0.0, 0.0, r);
+}
+)GLSL";
+
+// Glossy reflections (issue #2): a separable blur of the reflection layer whose radius is the surface's roughness (from the mask byte in
+// the colour copy's alpha), so polished stone gets a soft sheen and water stays a mirror. Depth-aware and limited to reflective
+// neighbours, so nothing bleeds across a silhouette or onto a surface that does not reflect.
+const char* const k_fs_rblur = R"GLSL(
+out vec4 o_color;
+uniform sampler2D u_src;    // the reflection layer (premultiplied)
+uniform sampler2D u_color;  // alpha = the mask byte
+uniform vec2 u_dir;         // one texel along the blur axis
+uniform float u_rad;        // radius in texels at roughness 1
+float rough_at(vec2 uv) { float b = floor(texture(u_color, uv).a * 255.0 + 0.5); return b < 32.0 ? -1.0 : mod(floor(b / 4.0), 8.0) / 7.0; }
+void main() {
+    vec4 c0 = texture(u_src, v_uv);
+    float rough = rough_at(v_uv);
+    float wd = wd_at(v_uv);
+    if (rough <= 0.0 || is_far(wd)) { o_color = c0; return; }
+    float z0 = vz(wd);
+    float r = rough * u_rad;
+    vec4 sum = c0;
+    float ws = 1.0;
+    for (int i = 1; i <= 6; ++i) {
+        float t = float(i) / 6.0;
+        for (int sd = -1; sd <= 1; sd += 2) {
+            vec2 uv = v_uv + u_dir * (float(sd) * t * r);
+            float w2 = wd_at(uv);
+            if (is_far(w2) || rough_at(uv) < 0.0) continue;
+            float dl = abs(vz(w2) - z0) / abs(z0);
+            float w = exp(-t * t * 2.5) * exp(-dl * 40.0);
+            sum += texture(u_src, uv) * w;
+            ws += w;
+        }
+    }
+    o_color = sum / ws;
 }
 )GLSL";
 
@@ -639,7 +942,7 @@ struct Prog {
     GLuint id = 0;
     bool failed = false;
 };
-Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_p;
+Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_p, g_mask_p, g_rblur_p, g_rmask_p;
 
 // Ray-queried contact shadow (PSPRECOMP_VK_RT, Vulkan only; docs/VULKAN_PORT.md): the pass-1 shader with the screen-space march
 // replaced by a ray query from the surface toward the light against the frame's world-space triangles (psp_rt.h). The GL
@@ -647,15 +950,18 @@ Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_
 const char* const k_rt_decl = R"GLSL(
 uniform accelerationStructureEXT u_tlas;
 uniform int u_use_rt;
+uniform int u_sun;           // 0: the sky light casts no shadows (stage_no_sun)
 uniform mat4 u_view_inv;    // view space -> PSP world space (where the triangles are)
 uniform vec3 u_light_w;     // world space, towards the light
 uniform float u_rt_len;     // ray length, world units
+uniform float u_rt_self_len; // on a fighter, fighter triangles nearer than this along the shadow ray are its own body (PSPRECOMP_RT_SELF_LEN)
 uniform int u_rt_rays;      // shadow rays per pixel (quality level: 1, 3, 6), jittered across the light disc for a soft edge
 uniform float u_rt_soft;    // half angle of the light disc, radians-ish
 uniform int u_use_rt_refl;
 uniform int u_rt_dbg;       // debug (PSPRECOMP_RT_REFL_DEBUG=1): colour by what the ray found (red tri colour, green visible on screen, blue miss, yellow sky)
 uniform int u_rt_refl_rays; // reflection rays per pixel (quality: 1, 1, 3), jittered by u_rt_rough for a glossy blur
 uniform float u_rt_rough;
+uniform float u_rough_jit;  // extra jitter at material roughness 1
 uniform int u_rt_fx;        // the scene has an effects layer
 uniform float u_fx_minh;    // effect hits lower than this above the reflecting surface are skipped (world units, PSPRECOMP_RT_FX_MINH)
 uniform float u_rt_hidden;   // brightness / strength of a hit on a surface that is not visible on screen
@@ -665,11 +971,16 @@ uniform int u_refl_split;   // debug (PSPRECOMP_RT_REFL_SPLIT=1): the left half 
 uniform float u_rt_refl_len; // reflection ray length, world units
 uniform vec3 u_rt_sky;      // what a reflection ray that hits nothing shows when the sky is off screen
 uniform int u_n_lights;     // stage point lights (world space xyz + radius; colour x intensity)
-uniform vec4 u_lp[16];
-uniform vec4 u_lc[16];
-uniform vec4 u_lvp[16];     // the same lights in view space (markers)
+uniform vec4 u_lp[24];
+uniform vec4 u_lc[24];
+uniform vec4 u_lvp[24];     // the same lights in view space (markers)
 uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
+uniform int u_fx0;          // lights from u_fx0 on are effect lights (linear falloff)
+uniform int u_fx_split;     // debug: effect lights only on the left half of the screen
+uniform float u_fx_alb;     // the least albedo an effect light sees
+uniform int u_mark0;        // markers for lights [u_mark0, u_mark1) (the stage's own, not EX cores / effects)
+uniform int u_mark1;
 //@SKY_DECL
 uniform int u_env_on;
 // The sky seen in world direction d. A direction never on screen yet (overhead, behind the camera) falls back to the same
@@ -706,11 +1017,11 @@ const char* const k_rt_refl = R"GLSL(
             vec4 racc = vec4(0.0);
             for (int ri = 0; ri < u_rt_refl_rays; ++ri) {
             vec3 R = R0;
-            if (u_rt_refl_rays > 1) {
+            if (u_rt_refl_rays > 1 || m_rough > 0.0) {
                 // Glossy jitter. The part along the normal is limited to half the ray's own elevation: at a grazing angle a fixed
                 // angular jitter bent rays up by many times their elevation and smeared the horizon over the whole floor (High looked blurry).
                 float ja = ign(gl_FragCoord.xy + 31.0 * float(ri + 1)) * 6.2831853, jb = ign(gl_FragCoord.yx + 57.0 * float(ri + 1)) * 2.0 - 1.0, jr = sqrt(1.0 - jb * jb);
-                vec3 J = vec3(cos(ja) * jr, jb, sin(ja) * jr) * u_rt_rough;
+                vec3 J = vec3(cos(ja) * jr, jb, sin(ja) * jr) * (u_rt_rough + m_rough * u_rough_jit);   // the material's roughness widens the lobe (the blur pass smooths the noise)
                 float jn = dot(J, n);
                 J += n * (clamp(jn, -0.5 * el0, 0.5 * el0) - jn);
                 R = normalize(R0 + J);
@@ -805,14 +1116,14 @@ const char* const k_rt_refl = R"GLSL(
                     if (++nfx >= 4) rayQueryTerminateEXT(rf);
                 }
             }
-            float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -V), 0.0, 1.0), 5.0);
-            float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
+            float fres = fresnel_r(dot(n, -V), m_rough, m_metal);
+            float k = clamp(fres * 1.6 + 0.08, 0.0, 1.0) * (hidden ? u_rt_hidden : 1.0) * (1.0 - hit_t / u_rt_refl_len * 0.5) * surf_k * fd * u_ssr_amt * (sky ? u_rt_sky_amt : 1.0);
             o_refl = vec4(col * k, k);
             if (fxa > 0.0) {
                 // Effects are glows (beams, bolts, the water orb's highlights): their reflection adds light over the floor and its reflection
                 // instead of covering them, with a stronger base than the Fresnel-only opaque reflection (same as the screen-space effects
                 // layer, PSPRECOMP_SSR_FX_GAIN): at the floor's steep angles a glow at plain Fresnel strength was invisible.
-                float kf = clamp(fres * 1.6 + u_fx_gain, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * smoothstep(0.7, 0.95, upness) * fd * u_ssr_amt;
+                float kf = clamp(fres * 1.6 + u_fx_gain, 0.0, 1.0) * (1.0 - fx_t / u_rt_refl_len * 0.5) * surf_k * fd * u_ssr_amt;
                 o_refl.rgb += min(fxc, vec3(1.5)) * kf;   // fxc is already colour x coverage, summed
                 if (u_rt_dbg != 0) dbg = vec3(1.0, 0.0, 1.0);
             }
@@ -827,7 +1138,7 @@ const char* const k_rt_mark = R"GLSL(
         vec4 q = u_inv * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
         vec3 dir = normalize(q.xyz / q.w);
         float surf = is_far(wd) ? 1e9 : length(vpos(v_uv, wd));
-        for (int li = 0; li < u_n_lights; ++li) {
+        for (int li = u_mark0; li < min(u_mark1, u_n_lights); ++li) {
             vec3 Lv = u_lvp[li].xyz;
             float t = dot(Lv, dir);
             if (t <= 0.0) continue;
@@ -843,27 +1154,33 @@ const char* const k_rt_lights = R"GLSL(
     if (u_n_lights > 0 && u_use_rt != 0) {
         vec3 Pw = (u_view_inv * vec4(P, 1.0)).xyz;
         vec3 nw = normalize((u_view_inv * vec4(n, 0.0)).xyz);
-        vec3 acc = vec3(0.0);
+        vec3 acc = vec3(0.0), acc_fx = vec3(0.0);
         for (int li = 0; li < u_n_lights; ++li) {
             vec3 d = u_lp[li].xyz - Pw;
             float dist = length(d), rad = u_lp[li].w;
             if (dist >= rad || dist < 1e-3) continue;
             vec3 L = d / dist;
             float ndl = max(dot(nw, L), 0.0);
-            float x = 1.0 - dist / rad, att = x * x;
+            if (li >= u_fx0 && u_fx_split != 0 && v_uv.x > 0.5) continue;
+            float x = 1.0 - dist / rad, att = li >= u_fx0 ? x : x * x;   // an attack's flash carries further than a lamp's pool
+            if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
-            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, dist - 0.1);
+            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
             while (rayQueryProceedEXT(rl)) {}
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
-            acc += u_lc[li].rgb * (ndl * att);
+            if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
         }
-        o_refl.rgb += texture(u_color, v_uv).rgb * acc * fd * u_lscale;
+        vec3 alb = texture(u_color, v_uv).rgb;
+        // an attack's flash lights dark surfaces too (the scene colour is the albedo here, and a dark floor took almost nothing): effect lights
+        // see at least u_fx_alb
+        o_refl.rgb += (alb * acc + max(alb, vec3(u_fx_alb)) * acc_fx) * fd * u_lscale;
     }
     o_refl.rgb += mk * u_lscale;
 )GLSL";
 const char* const k_rt_code = R"GLSL(
             if (u_use_rt != 0) {
+              if (u_sun != 0) {
                 vec3 Ow = (u_view_inv * vec4(O, 1.0)).xyz;
                 vec3 lw = u_light_w;
                 vec3 lu = normalize(abs(lw.y) < 0.99 ? cross(lw, vec3(0.0, 1.0, 0.0)) : cross(lw, vec3(1.0, 0.0, 0.0))), lv = cross(lw, lu);
@@ -875,11 +1192,25 @@ const char* const k_rt_code = R"GLSL(
                         ld = normalize(lw + lu * (cos(a) * rad) + lv * (sin(a) * rad));
                     }
                     rayQueryEXT rq;
-                    rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
-                    while (rayQueryProceedEXT(rq)) {}
+                    if (self_rx) {
+                        // on a fighter: every triangle is a candidate; a fighter's triangle (low bit of its coverage, psp_ge_draw.cpp
+                        // rt_capture) within u_rt_self_len is its own body and is passed through, anything else blocks
+                        rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
+                        while (rayQueryProceedEXT(rq)) {
+                            if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+                            uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false) + rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)];
+                            if ((pc & 0x01000000u) != 0u && rayQueryGetIntersectionTEXT(rq, false) < u_rt_self_len) continue;
+                            rayQueryConfirmIntersectionEXT(rq);
+                            rayQueryTerminateEXT(rq);
+                        }
+                    } else {
+                        rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
+                        while (rayQueryProceedEXT(rq)) {}
+                    }
                     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) blocked += 1.0;
                 }
                 if (blocked > 0.0) sh = facing * fd * blocked / float(u_rt_rays);
+              }
             } else
 )GLSL";
 static int env_int_dbg() { const char* e = std::getenv("PSPRECOMP_RT_REFL_DEBUG"); return e ? (std::atoi(e) == 2 ? 2 : 1) : 0; }
@@ -909,6 +1240,9 @@ GLuint g_depth_tex = 0, g_depth_fbo = 0;
 GLuint g_color_tex = 0, g_color_fbo = 0;                     // half-res copy of the scene
 GLuint g_fx_tex[2] = {0, 0}, g_refl_tex = 0;
 GLuint g_main_fbo = 0, g_fx_fbo[2] = {0, 0};                 // main: fx[0] + refl; fx_fbo[i]: fx[i] alone
+GLuint g_refl_fbo = 0;                                        // refl alone (the glossy blur's second pass)
+GLuint g_rm_fbo = 0, g_rm_tex = 0, g_rm_depth = 0;            // reflectivity mask, full resolution (k_vs_rmask)
+GLuint g_rm_vao = 0, g_rm_vbo = 0;
 GLuint g_env_tex = 0, g_env_fbo = 0;                          // the sky map (k_fs_env), not tied to the screen size
 bool g_env_fp16 = false;
 int g_env_stage = -2;
@@ -961,6 +1295,34 @@ bool build(Prog& p, const char* fs_body) {
     return true;
 }
 
+// A program from its own vertex and fragment shader (no k_common): the reflectivity mask.
+bool build_vf(Prog& p, const char* vs_body, const char* fs_body) {
+    if (p.id) return true;
+    if (p.failed) return false;
+    GLuint vs = compile(GL_VERTEX_SHADER, &vs_body, 1), fs = vs ? compile(GL_FRAGMENT_SHADER, &fs_body, 1) : 0;
+    if (!vs || !fs) { p.failed = true; if (vs) glDeleteShader(vs); return false; }
+    GLuint id = glCreateProgram();
+    glAttachShader(id, vs);
+    glAttachShader(id, fs);
+    glBindAttribLocation(id, 0, "a_clip");   // the Vulkan layer numbers inputs in declaration order: the same
+    glBindAttribLocation(id, 1, "a_mat");
+    glLinkProgram(id);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = 0;
+    glGetProgramiv(id, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048];
+        glGetProgramInfoLog(id, sizeof log, nullptr, log);
+        std::fprintf(stderr, "[SCREENFX] link failed:\n%s\n", log);
+        glDeleteProgram(id);
+        p.failed = true;
+        return false;
+    }
+    p.id = id;
+    return true;
+}
+
 GLuint make_tex(GLenum ifmt, GLenum fmt, GLenum type, int w, int h, GLint filter) {
     GLuint t = 0;
     glGenTextures(1, &t);
@@ -974,13 +1336,14 @@ GLuint make_tex(GLenum ifmt, GLenum fmt, GLenum type, int w, int h, GLint filter
 }
 
 void free_targets() {
-    GLuint f[5] = {g_depth_fbo, g_color_fbo, g_main_fbo, g_fx_fbo[0], g_fx_fbo[1]};
-    GLuint t[5] = {g_depth_tex, g_color_tex, g_fx_tex[0], g_fx_tex[1], g_refl_tex};
-    for (int i = 0; i < 5; ++i) {
+    GLuint f[7] = {g_depth_fbo, g_color_fbo, g_main_fbo, g_fx_fbo[0], g_fx_fbo[1], g_refl_fbo, g_rm_fbo};
+    GLuint t[7] = {g_depth_tex, g_color_tex, g_fx_tex[0], g_fx_tex[1], g_refl_tex, g_rm_tex, g_rm_depth};
+    for (int i = 0; i < 7; ++i) {
         if (f[i]) glDeleteFramebuffers(1, &f[i]);
         if (t[i]) glDeleteTextures(1, &t[i]);
     }
-    g_depth_fbo = g_color_fbo = g_main_fbo = g_fx_fbo[0] = g_fx_fbo[1] = 0;
+    g_depth_fbo = g_color_fbo = g_main_fbo = g_fx_fbo[0] = g_fx_fbo[1] = g_refl_fbo = g_rm_fbo = 0;
+    g_rm_tex = g_rm_depth = 0;
     g_depth_tex = g_color_tex = g_fx_tex[0] = g_fx_tex[1] = g_refl_tex = 0;
 }
 
@@ -1018,6 +1381,17 @@ bool ensure_targets(int w, int h) {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, g_refl_tex, 0);
     const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, bufs);
+    ok = ok && complete();
+    glGenFramebuffers(1, &g_refl_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_refl_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_refl_tex, 0);
+    ok = ok && complete();
+    g_rm_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h, GL_NEAREST);
+    g_rm_depth = make_tex(GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, w, h, GL_NEAREST);
+    glGenFramebuffers(1, &g_rm_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_rm_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_rm_tex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, g_rm_depth, 0);
     ok = ok && complete();
     if (!ok) std::fprintf(stderr, "[SCREENFX] framebuffer incomplete (%dx%d)\n", w, h);
     return ok;
@@ -1194,10 +1568,29 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     if (sc.rt_ready && cs > 0 && psp_rt_enabled()) {   // stage lights need the ray-traced scene for their shadows
         const int sid = psp_stage_id();
         lights_service(sid, sc.view);
-        for (const StageLight& l : stage_lights(sid)) {
+        std::vector<StageLight> all;
+        if (g_pickup_fn) {   // pickups that glow (the game module's EX cores): a warm light each, first so the stage's own lights cannot crowd them out
+            static const float pc[5] = {env_float("PSPRECOMP_PICKUP_R", 0.35f), env_float("PSPRECOMP_PICKUP_G", 0.75f), env_float("PSPRECOMP_PICKUP_B", 1.0f),
+                                        env_float("PSPRECOMP_PICKUP_RADIUS", 22.f), env_float("PSPRECOMP_PICKUP_INTENSITY", 1.5f)};
+            float P[4][3]; const int n = g_pickup_fn(P, 4);
+            for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4], env_float("PSPRECOMP_PICKUP_CLEAR", 2.5f)});
+        }
+        g_light_first = (int)all.size();   // the editor's markers / selection start at the stage's own lights
+        for (const StageLight& l : stage_lights(sid)) all.push_back(l);
+        g_light_end = (int)all.size();
+        for (int i = 0; i < sc.n_glow_lights; ++i) {   // glowing stage pieces (crystals until they break)
+            const float* f = sc.glow_lights[i];
+            all.push_back({{f[0], f[1], f[2]}, {f[3], f[4], f[5]}, f[6], f[7], f[8]});
+        }
+        g_light_fx0 = (int)all.size();
+        for (int i = 0; i < sc.n_fx_lights; ++i) {   // glowing effects (attacks) fill the slots left: their colour, reach / brightness from their size
+            const float* f = sc.fx_lights[i];
+            all.push_back({{f[0], f[1], f[2]}, {f[3], f[4], f[5]}, f[6], f[7], f[8]});
+        }
+        for (const StageLight& l : all) {
             if (n_lights >= kMaxLights) break;
             for (int k = 0; k < 3; ++k) { lp4[n_lights * 4 + k] = l.p[k]; lc4[n_lights * 4 + k] = l.c[k] * l.intensity; }
-            lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = 0.f;
+            lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = l.clear;
             for (int k = 0; k < 3; ++k) lv4[n_lights * 4 + k] = sc.view[k] * l.p[0] + sc.view[3 + k] * l.p[1] + sc.view[6 + k] * l.p[2] + sc.view[9 + k];
             lv4[n_lights * 4 + 3] = 1.f;
             ++n_lights;
@@ -1265,11 +1658,66 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1f(c.clearz, sc.clear_z);
         glUniform1f(c.sky, sky_t);
         glUniform2f(c.fade, fade0, fade1);
+        static const int depth_snap = std::getenv("PSPRECOMP_FX_DEPTH_SNAP") ? std::atoi(std::getenv("PSPRECOMP_FX_DEPTH_SNAP")) : 1;
+        glUniform1i(glGetUniformLocation(prog, "u_depth_snap"), depth_snap);
+        static const int snap_split = std::getenv("PSPRECOMP_FX_SNAP_SPLIT") ? 1 : 0;
+        glUniform1i(glGetUniformLocation(prog, "u_snap_split"), snap_split);
     };
     auto loc = [](GLuint p, const char* n) { return glGetUniformLocation(p, n); };
 
     float vm[16] = {sc.view[0], sc.view[1], sc.view[2], 0.f, sc.view[3], sc.view[4], sc.view[5], 0.f,
                     sc.view[6], sc.view[7], sc.view[8], 0.f, sc.view[9], sc.view[10], sc.view[11], 1.f};
+    // 0a: the reflectivity mask into the alpha of the half-resolution colour copy (k_fs_mask)
+    // (it also marks where fighters are, material byte 1, when their shadows on themselves are left out: psp_ge_draw.cpp fighter_capture)
+    const bool refl_mask = sr && sc.refl_table;
+    const bool fmask_want = cs > 0 && sc.fighters;
+    const bool mask_on = (refl_mask || fmask_want) && build(g_mask_p, k_fs_mask);
+    const bool have_mask = mask_on && sc.refl_tris && sc.refl_nverts >= 3 && build_vf(g_rmask_p, k_vs_rmask, k_fs_rmask);
+    const bool fmask = fmask_want && have_mask;
+    if (have_mask) {   // the reflective triangles into the mask, one draw (depth range and test as the scene's draws had them)
+        if (!g_rm_vao) { glGenVertexArrays(1, &g_rm_vao); glGenBuffers(1, &g_rm_vbo); }
+        glBindFramebuffer(GL_FRAMEBUFFER, g_rm_fbo);
+        glViewport(0, 0, w, h);
+        glDepthMask(GL_TRUE);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClearDepth(sc.clear_z);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(sc.near_z > sc.far_z ? GL_GEQUAL : GL_LEQUAL);
+        glDepthRange(sc.near_z, sc.far_z);
+        glUseProgram(g_rmask_p.id);
+        glUniform1f(glGetUniformLocation(g_rmask_p.id, "u_byte"), 1.f / 255.f);
+        glBindVertexArray(g_rm_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, g_rm_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sc.refl_nverts * 5 * sizeof(float), sc.refl_tris, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void*)(4 * sizeof(float)));
+        glDrawArrays(GL_TRIANGLES, 0, sc.refl_nverts);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDisable(GL_DEPTH_TEST);
+        glDepthRange(0.0, 1.0);
+        glBindVertexArray(g_vao);
+    }
+    if (mask_on) {
+        psp_refl_poll();   // reflectivity.txt edited while the game runs
+        glBindFramebuffer(GL_FRAMEBUFFER, g_color_fbo);
+        glViewport(0, 0, g_hw, g_hh);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        set_common(g_mask_p.id, g_hw, g_hh);
+        const bool have = have_mask;
+        if (have) {
+            bind_tex(1, g_rm_tex, g_smp_nn);
+            bind_tex(2, g_rm_depth, g_smp_nn);
+            glUniform1i(loc(g_mask_p.id, "u_mask"), 1);
+            glUniform1i(loc(g_mask_p.id, "u_mdepth"), 2);
+        }
+        glUniform1i(loc(g_mask_p.id, "u_have"), have ? 1 : 0);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+
     // 0: the sky map (ray-traced reflections only), from this frame's sky pixels
     bool have_env = false;
     if (use_rt && use_rt_refl && build(g_env_p, k_fs_env)) {
@@ -1323,6 +1771,11 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glUniform1f(loc(mp.id, "u_cs_thick"), cs_thick);
     glUniform1f(loc(mp.id, "u_ssr_len"), ssr_len);
     glUniform1f(loc(mp.id, "u_ssr_amt"), k_sr_amt[sr]);
+    glUniform1i(loc(mp.id, "u_mask_on"), mask_on && refl_mask ? 1 : 0);
+    glUniform1i(loc(mp.id, "u_fmask"), fmask ? 1 : 0);
+    glUniform1f(loc(mp.id, "u_wave"), env_float("PSPRECOMP_REFL_WAVE", 0.8f));
+    glUniform1f(loc(mp.id, "u_wave_max"), env_float("PSPRECOMP_REFL_WAVE_MAX", 0.08f));
+    glUniform1i(loc(mp.id, "u_mask_dbg"), std::getenv("PSPRECOMP_REFL_MASK_DEBUG") ? 1 : 0);
     static const bool fxl_off = std::getenv("PSPRECOMP_SSR_FX_OFF") != nullptr;
     const bool have_fx = sr && sc.fx_color && sc.fx_depth && !use_rt_refl && !fxl_off;
     glUniform1i(loc(mp.id, "u_have_fx"), have_fx ? 1 : 0);
@@ -1337,10 +1790,12 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     }
     if (use_rt) {
         glUniform1i(loc(mp.id, "u_use_rt"), use_rt_sh ? 1 : 0);
+        glUniform1i(loc(mp.id, "u_sun"), stage_no_sun() ? 0 : 1);
         glUniform1i(loc(mp.id, "u_use_rt_refl"), use_rt_refl ? 1 : 0);
         glUniform1i(loc(mp.id, "u_rt_dbg"), env_int_dbg());
         { const int q = psp_rt_refl_quality(); glUniform1i(loc(mp.id, "u_rt_refl_rays"), q >= 3 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_rough"), env_float("PSPRECOMP_RT_ROUGH", 0.005f));
+        glUniform1f(loc(mp.id, "u_rough_jit"), env_float("PSPRECOMP_REFL_ROUGH_JITTER", 0.12f));
         glUniform1i(loc(mp.id, "u_rt_fx"), !sc.rt_fx || psp_rt_refl_quality() < 2 || !psp_rt_refl_fx_enabled() || std::getenv("PSPRECOMP_RT_FX_OFF") ? 0 : std::getenv("PSPRECOMP_RT_FX_SPLIT") ? 2 : 1);
         glUniform1f(loc(mp.id, "u_rt_hidden"), env_float("PSPRECOMP_RT_HIDDEN", 0.45f));
         glUniform1f(loc(mp.id, "u_fx_minh"), env_float("PSPRECOMP_RT_FX_MINH", 0.6f));
@@ -1358,13 +1813,16 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniformMatrix4fv(loc(mp.id, "u_view_inv"), 1, GL_FALSE, vinv);
         glUniform3f(loc(mp.id, "u_light_w"), wl_n[0], wl_n[1], wl_n[2]);
         glUniform1f(loc(mp.id, "u_rt_len"), env_float("PSPRECOMP_RT_LEN", 40.f));
+        glUniform1f(loc(mp.id, "u_rt_self_len"), env_float("PSPRECOMP_RT_SELF_LEN", 3.f));
         { const int q = psp_rt_quality(); glUniform1i(loc(mp.id, "u_rt_rays"), q >= 3 ? 6 : q == 2 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_soft"), psp_rt_soft_angle());
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);
         if (n_lights) { glUniform4fv(loc(mp.id, "u_lp"), n_lights, lp4); glUniform4fv(loc(mp.id, "u_lc"), n_lights, lc4); glUniform4fv(loc(mp.id, "u_lvp"), n_lights, lv4); }
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
-        glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() ? 1 : 0);
-        glUniform1i(loc(mp.id, "u_sel"), g_light_sel);
+        static const bool mark_all = std::getenv("PSPRECOMP_FX_LIGHT_MARK") != nullptr;   // debug: markers on every light (EX cores, effects too)
+        glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() || mark_all ? 1 : 0);
+        { static const bool split = std::getenv("PSPRECOMP_FX_LIGHT_SPLIT") != nullptr; glUniform1i(loc(mp.id, "u_fx0"), g_light_fx0); glUniform1i(loc(mp.id, "u_fx_split"), split ? 1 : 0); glUniform1f(loc(mp.id, "u_fx_alb"), env_float("PSPRECOMP_FX_LIGHT_MIN_ALBEDO", 0.15f)); }
+        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), mark_all ? 0 : g_light_first); glUniform1i(loc(mp.id, "u_mark1"), mark_all ? 64 : g_light_end);   // (the Vulkan GL layer has no glUniform2i)
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ts_mark(2);
@@ -1381,6 +1839,23 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         }
     }
 
+    // 2b: glossy reflections: blur the reflection layer by the surface's roughness, there (into fx[1], free after the AO blur) and back
+    static const bool rblur_off = std::getenv("PSPRECOMP_REFL_BLUR_OFF") != nullptr;
+    if (mask_on && refl_mask && !rblur_off && build(g_rblur_p, k_fs_rblur)) {
+        const float rad = env_float("PSPRECOMP_REFL_BLUR", 10.f) * float(g_hh) / 408.f;   // texels at roughness 1, scaled with the resolution
+        for (int pass = 0; pass < 2; ++pass) {
+            glBindFramebuffer(GL_FRAMEBUFFER, pass ? g_refl_fbo : g_fx_fbo[1]);
+            set_common(g_rblur_p.id, g_hw, g_hh);
+            bind_tex(1, pass ? g_fx_tex[1] : g_refl_tex, g_smp_lin);
+            bind_tex(2, g_color_tex, g_smp_nn);
+            glUniform1i(loc(g_rblur_p.id, "u_src"), 1);
+            glUniform1i(loc(g_rblur_p.id, "u_color"), 2);
+            glUniform2f(loc(g_rblur_p.id, "u_dir"), pass ? 0.f : 1.f / g_hw, pass ? 1.f / g_hh : 0.f);
+            glUniform1f(loc(g_rblur_p.id, "u_rad"), rad);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+    }
+
     ts_mark(3);
     // 3: composite into the scene (RGB only: alpha is the GE's stencil)
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -1388,6 +1863,11 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
     if (ao || cs || dark < 0.999f) {
         glEnable(GL_BLEND);
+        // debug PSPRECOMP_FX_SHOW=<s>: the AO x shadow factor alone, as the picture, from <s> seconds after the first 3D frame
+        static const char* fx_show_e = std::getenv("PSPRECOMP_FX_SHOW");
+        static const auto fx_t0 = std::chrono::steady_clock::now();
+        const bool fx_show = fx_show_e && std::chrono::duration<double>(std::chrono::steady_clock::now() - fx_t0).count() >= std::atof(fx_show_e);
+        if (fx_show) glBlendFunc(GL_ONE, GL_ZERO); else
         glBlendFunc(GL_ZERO, GL_SRC_COLOR);              // dst * (AO * (1 - shadow))
         set_common(g_mul_p.id, w, h);
         bind_tex(1, g_fx_tex[0], g_smp_nn);

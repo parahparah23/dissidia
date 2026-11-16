@@ -6,7 +6,8 @@
 The app (running as that user, with no game files yet) connects to 127.0.0.1:<port> on the phone, which `adb reverse` forwards to this script, and
 writes what it receives into its own folder. Steps: this script sets up the reverse + the property debug.psprecomp.import_port, listens, and prints
 "READY"; then start the app as the target user. Files come from a work folder on this machine (--dir) or are streamed from another connected
-device's copy (--source-device, no local disk needed). Python 3 standard library only.
+device's copy (--source-device, no local disk needed). It also works on a phone that has the game already: the files sent are
+added or replaced (e.g. --dir STAGE --parts mods with only the changed mod files in STAGE/mods). Python 3 standard library only.
 """
 import argparse
 import os
@@ -23,6 +24,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", required=True, help="the phone to load (adb serial)")
     ap.add_argument("--source-device", help="stream the files from this device's app folder")
+    ap.add_argument("--source-dir", default=SRC_DEVICE_DIR, help="that device's game folder (default %(default)s; some keep it in Android/media)")
     ap.add_argument("--dir", help="or: a work folder on this machine (disc0/, mods/, ...)")
     ap.add_argument("--port", type=int, default=9998)
     ap.add_argument("--parts", default="disc0,mods,movie_jp,voice_jp")
@@ -42,7 +44,7 @@ def main():
     sent = 0
     try:
         if a.source_device:
-            p = subprocess.Popen(["adb", "-s", a.source_device, "exec-out", "tar c -C %s %s" % (SRC_DEVICE_DIR, " ".join(parts))], stdout=subprocess.PIPE)
+            p = subprocess.Popen(["adb", "-s", a.source_device, "exec-out", "tar c -C %s %s" % (a.source_dir, " ".join(parts))], stdout=subprocess.PIPE)
             with tarfile.open(fileobj=p.stdout, mode="r|") as t:
                 for m in t:
                     if not m.isfile():
