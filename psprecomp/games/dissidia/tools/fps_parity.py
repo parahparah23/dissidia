@@ -384,8 +384,8 @@ def compare_trials(base, other, a, info=None):
     if base.result != 'started':
         return []
     tb, to = base.start, other.start
-    sb = [s for s in base.samples if s[0] >= tb]
-    so = [s for s in other.samples if s[0] >= to]
+    sb = [s for s in base.samples if s[0] >= tb - 1]   # (the log gives the start in whole ms: 410866.67 is logged as 410867)
+    so = [s for s in other.samples if s[0] >= to - 1]
     n = min(len(sb), len(so))
     if n < 3:
         return ['too few samples (%d / %d)' % (len(sb), len(so))]
@@ -407,8 +407,8 @@ def compare_trials(base, other, a, info=None):
                 why.append('%s %d starts %+d frames off (%.0f ms vs %.0f ms into the move)' % (
                     label, a_seg[k][0], o_seg[k][1] - a_seg[k][1], o_seg[k][1] * FRAME_MS, a_seg[k][1] * FRAME_MS))
     # hits on the dummy
-    hb = [h for h in base.hits if h[0] >= tb and (base.end is None or h[0] <= base.end + 2000)]
-    ho = [h for h in other.hits if h[0] >= to and (other.end is None or h[0] <= other.end + 2000)]
+    hb = [h for h in base.hits if h[0] >= tb - 1 and (base.end is None or h[0] <= base.end + 2000)]
+    ho = [h for h in other.hits if h[0] >= to - 1 and (other.end is None or h[0] <= other.end + 2000)]
     if len(hb) != len(ho):
         why.append('dummy took %d hits vs %d at 30 fps (attacks %s vs %s)' % (len(ho), len(hb), [h[1] for h in ho][:10], [h[1] for h in hb][:10]))
     else:

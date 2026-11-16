@@ -1130,7 +1130,12 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint64_t n = static_cast<uint64_t>(g_rate / 30);
         g_l30_logic_now = g_l30_frame % n == 0;
         wrf(timer + 0x18u, g_l30_logic_now ? 2.0f : 0.0f);   // the coming frame's step (read directly by 85 battle sites); the global step follows via global_step_hook
+        // the renderer blends the coming frame's draws between the last two gameplay frames (psp_ge_draw.h ge_interp_set_frame)
+        static uint32_t gen = 0;
+        if (g_l30_logic_now) gen++;
+        ge_interp_set_frame(gen, static_cast<float>(g_l30_frame % n) / static_cast<float>(n));
     } else if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
+    if (!l30_active()) ge_interp_set_frame(0, -1.0f);
 
     if (g_log && ok(timer)) {
         const int64_t t = now_ms();
@@ -2078,7 +2083,7 @@ struct DtScale {
     }
     ~DtScale() { for (int i = n - 1; i >= 0; i--) wrf(addr[i], was[i]); }
 };
-bool fx_fix_on() { return g_rate > 30 && g_fx60; }
+bool fx_fix_on() { return g_rate > 30 && g_fx60 && !l30_active(); }   // 30 Hz logic: the components already step once per 30 Hz frame, with step 2
 
 template <int I>
 void fx_every_other_hook(uint8_t* rdram, recomp_context* ctx) {

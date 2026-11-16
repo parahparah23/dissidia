@@ -2584,7 +2584,109 @@ void ge_draw_end_list() {
 
 static void ge_draw_prim_one(uint8_t* rdram, int prim_type, int count);
 
+// ---- Frame interpolation (ge_interp_set_frame, psp_ge_draw.h) ----
+namespace {
+struct IpMats { float w[12], v[12], p[16], b[96], tg[12], uv[4]; };   // uv: texture scale u/v, offset u/v (scrolling textures)
+std::atomic<uint32_t> g_ip_set_gen{0};
+std::atomic<float> g_ip_set_phase{-1.0f};
+uint32_t g_ip_gen = 0;                 // tag of the list being processed (render thread)
+float g_ip_phase = -1.0f;
+uint32_t g_ip_tab_gen = 0;             // gameplay frame recorded in g_ip_cur
+bool g_ip_have = false;
+std::unordered_map<uint64_t, IpMats> g_ip_prev, g_ip_cur;
+std::unordered_map<uint64_t, uint32_t> g_ip_occ;   // occurrences of each draw key in the frame being drawn
+uint32_t g_ip_occ_gen = ~0u; float g_ip_occ_phase = -2.0f;
+int ip_mode() {
+    static const int m = [] { const char* e = std::getenv("PSPRECOMP_INTERP"); return e && e[0] ? std::atoi(e) : 1; }();
+    return m;
+}
+uint64_t ip_key(const GeState& st, int prim_type, int count, bool loose = false) {
+    uint64_t h = loose ? 0x5bd1e9955bd1e995ull : 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    if (!loose) { mix(st.vertex_addr); mix(st.index_addr); }   // loose: without the addresses (the game double-buffers some vertex data, e.g. weapons)
+    mix(st.vertex_type); mix(static_cast<uint64_t>(prim_type)); mix(static_cast<uint64_t>(count));
+    mix(st.tex_addr[0]);   // not the render target: the game alternates two framebuffers every frame
+    return h;
+}
+void ip_lerp(float* dst, const float* a, const float* b, float t, int n) { for (int i = 0; i < n; i++) dst[i] = a[i] + (b[i] - a[i]) * t; }
+bool ip_far(const float* a, const float* b) {   // world positions more than 3 m apart: a teleport, do not blend
+    const float dx = a[9] - b[9], dy = a[10] - b[10], dz = a[11] - b[11];
+    return dx * dx + dy * dy + dz * dz > 9.0f;
+}
+void ip_eye(const float* m, float* e) {   // camera position of a GE view matrix (rows 0..2 the basis, row 3 = m[9..11] the translation): e = -t R^T
+    for (int j = 0; j < 3; j++) e[j] = -(m[9] * m[j * 3 + 0] + m[10] * m[j * 3 + 1] + m[11] * m[j * 3 + 2]);
+}
+bool ip_cut(const float* a, const float* b) {   // the camera moved more than 3 m between two gameplay frames: a cut, do not blend
+    float ea[3], eb[3]; ip_eye(a, ea); ip_eye(b, eb);
+    const float dx = ea[0] - eb[0], dy = ea[1] - eb[1], dz = ea[2] - eb[2];
+    return dx * dx + dy * dy + dz * dz > 9.0f;
+}
+}  // namespace
+
+void ge_interp_set_frame(uint32_t gen, float phase) { g_ip_set_gen.store(gen); g_ip_set_phase.store(phase); }
+void ge_interp_current_tag(uint32_t* gen, float* phase) { *gen = g_ip_set_gen.load(); *phase = g_ip_set_phase.load(); }
+void ge_interp_list_tag(uint32_t gen, float phase) { g_ip_gen = gen; g_ip_phase = phase; }
+
+// Swap the draw's matrices for interpolated ones (restored by the caller); false = drawn as issued.
+struct IpStat { uint32_t gen = 0; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0; };
+static IpStat g_ip_stat;
+static void ip_stat_flush() {
+    static int left = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? std::atoi(e) : 0; }();
+    if (left > 0 && g_ip_stat.draws > 0) { left--; std::fprintf(stderr, "[INTERP] gen %u phase %.2f: %d 3D draws, %d blended, %d no match, %d far, %d no previous frame, %d 2D\n",
+        g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch, g_ip_stat.far, g_ip_stat.noprev, g_ip_stat.flat); }
+    g_ip_stat = IpStat{}; g_ip_stat.gen = g_ip_gen; g_ip_stat.phase = g_ip_phase;
+}
+static bool ip_apply(int prim_type, int count, IpMats* saved) {
+    if (g_ip_phase < 0.0f || ip_mode() == 0) return false;
+    if (g_ip_stat.gen != g_ip_gen || g_ip_stat.phase != g_ip_phase) ip_stat_flush();
+    GeState& st = ge_get_state_mut();
+    if (st.clear_mode || ge_vtype_through(st.vertex_type)) { g_ip_stat.flat++; return false; }   // 2D (HUD, screen copies): no matrices
+    g_ip_stat.draws++;
+    if (g_ip_phase == 0.0f && (!g_ip_have || g_ip_gen != g_ip_tab_gen)) {   // a new gameplay frame: its draws become the current table
+        g_ip_prev.swap(g_ip_cur); g_ip_cur.clear();
+        g_ip_have = g_ip_tab_gen + 1 == g_ip_gen;                       // the previous table is the gameplay frame just before
+        g_ip_tab_gen = g_ip_gen;
+    }
+    if (g_ip_gen != g_ip_occ_gen || g_ip_phase != g_ip_occ_phase) { g_ip_occ.clear(); g_ip_occ_gen = g_ip_gen; g_ip_occ_phase = g_ip_phase; }
+    const uint64_t base = ip_key(st, prim_type, count), lbase = ip_key(st, prim_type, count, true);
+    const uint64_t key = base ^ (static_cast<uint64_t>(g_ip_occ[base]++) * 0x9E3779B97F4A7C15ull);
+    const uint64_t lkey = lbase ^ (static_cast<uint64_t>(g_ip_occ[lbase]++) * 0x9E3779B97F4A7C15ull);
+    IpMats cur;
+    std::memcpy(cur.w, st.world_matrix, sizeof cur.w); std::memcpy(cur.v, st.view_matrix, sizeof cur.v);
+    std::memcpy(cur.p, st.proj_matrix, sizeof cur.p); std::memcpy(cur.b, st.bone_matrix, sizeof cur.b);
+    std::memcpy(cur.tg, st.tgen_matrix, sizeof cur.tg);
+    cur.uv[0] = st.tex_scale_u; cur.uv[1] = st.tex_scale_v; cur.uv[2] = st.tex_offset_u; cur.uv[3] = st.tex_offset_v;
+    if (g_ip_phase == 0.0f && g_ip_gen == g_ip_tab_gen) { g_ip_cur[key] = cur; g_ip_cur[lkey] = cur; }
+    if (!g_ip_have) { g_ip_stat.noprev++; return false; }
+    auto it = g_ip_prev.find(key);
+    if (it == g_ip_prev.end()) it = g_ip_prev.find(lkey);   // the same draw from the other of two vertex buffers
+    if (it == g_ip_prev.end()) { g_ip_stat.nomatch++; return false; }
+    const IpMats& pv = it->second;
+    if (ip_far(pv.w, cur.w) || ip_cut(pv.v, cur.v)) {
+        static int lg = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? 12 : 0; }();
+        if (lg > 0) { lg--; float ea[3], eb[3]; ip_eye(pv.v, ea); ip_eye(cur.v, eb);
+            std::fprintf(stderr, "[INTERPFAR] phase %.2f w %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f  v %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f  eye %.2f,%.2f,%.2f -> %.2f,%.2f,%.2f\n", g_ip_phase,
+                pv.w[9], pv.w[10], pv.w[11], cur.w[9], cur.w[10], cur.w[11], pv.v[9], pv.v[10], pv.v[11], cur.v[9], cur.v[10], cur.v[11], ea[0], ea[1], ea[2], eb[0], eb[1], eb[2]); }
+        g_ip_stat.far++; return false; }
+    g_ip_stat.applied++;
+    *saved = cur;
+    const float t = ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase;   // 1: prev -> cur (one frame behind); 2: cur projected ahead
+    ip_lerp(st.world_matrix, pv.w, cur.w, t, 12); ip_lerp(st.view_matrix, pv.v, cur.v, t, 12);
+    ip_lerp(st.proj_matrix, pv.p, cur.p, t, 16); ip_lerp(st.bone_matrix, pv.b, cur.b, t, 96);
+    ip_lerp(st.tgen_matrix, pv.tg, cur.tg, t, 12);
+    float uv[4]; ip_lerp(uv, pv.uv, cur.uv, t, 4);
+    for (int i = 0; i < 4; i++) if (std::fabs(cur.uv[i] - pv.uv[i]) > 0.5f) uv[i] = cur.uv[i];   // a scrolling offset that wrapped: no blend
+    st.tex_scale_u = uv[0]; st.tex_scale_v = uv[1]; st.tex_offset_u = uv[2]; st.tex_offset_v = uv[3];
+    return true;
+}
+
 void ge_draw_prim(uint8_t* rdram, int prim_type, int count) {
+    IpMats ip_saved;
+    struct IpRestore { IpMats* m; bool on; ~IpRestore() { if (!on) return; GeState& st = ge_get_state_mut();
+        std::memcpy(st.world_matrix, m->w, sizeof m->w); std::memcpy(st.view_matrix, m->v, sizeof m->v);
+        std::memcpy(st.proj_matrix, m->p, sizeof m->p); std::memcpy(st.bone_matrix, m->b, sizeof m->b);
+        std::memcpy(st.tgen_matrix, m->tg, sizeof m->tg);
+        st.tex_scale_u = m->uv[0]; st.tex_scale_v = m->uv[1]; st.tex_offset_u = m->uv[2]; st.tex_offset_v = m->uv[3]; } } ip_restore{&ip_saved, count > 0 && ip_apply(prim_type, count, &ip_saved)};
     psp_perf::Scope perf_scope_(psp_perf::PRIM);
     if (!g_ab || !g_fast_enabled || g_current_target < 0 || !g_targets[g_current_target].ab_fbo) {
         ge_draw_prim_one(rdram, prim_type, count);

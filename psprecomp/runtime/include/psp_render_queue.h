@@ -40,6 +40,8 @@ struct GePendingList {
     bool processed = false;
     bool stalled = false;      // True if hit stall, waiting for update
     bool begun = false;        // True if ge_draw_begin_list was called
+    uint32_t ip_gen = 0;       // frame interpolation tag captured at enqueue (ge_interp_set_frame): gameplay frame number
+    float ip_phase = -1.0f;    // and position between gameplay frames (0 = a gameplay frame, k/n = drawn-only; < 0 = no interpolation)
 };
 
 /// Game thread side: post FramePresent request and block until main thread

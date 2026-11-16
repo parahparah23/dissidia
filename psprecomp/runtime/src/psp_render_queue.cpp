@@ -111,6 +111,7 @@ int render_queue_enqueue_ge_list(
     entry.processed = false;
     entry.stalled = false;
     entry.begun = false;
+    ge_interp_current_tag(&entry.ip_gen, &entry.ip_phase);
 
     g_ge_queue.push_back(entry);
 
@@ -252,6 +253,7 @@ void render_queue_process() {
 
         for (auto& entry : to_process) {
             psp_prof::seq("list-begin", entry.uid);
+            ge_interp_list_tag(entry.ip_gen, entry.ip_phase);
             GeListResult result = ge_process_display_list(
                 entry.rdram,
                 entry.current_pc,
