@@ -2,7 +2,8 @@
 
 The Dissidia-specific part of the PSPRecomp fork: manifests, runtime hooks, the setup and build scripts, the modding tools, the Blender add-on and the Move Studio. No game data is included.
 
-**Installing and playing** is in the [top-level README](../../../README.md#install-and-play). Everything else is in [docs/](docs/README.md).
+**Installing and playing** is in the [top-level README](../../../README.md#install) (the setup app); building from a checkout is
+[Building from source](../../../README.md#building-from-source) there. Everything else is in [docs/](docs/README.md).
 
 ## What's here
 

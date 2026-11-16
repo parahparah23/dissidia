@@ -1,12 +1,12 @@
 # The native build in detail
 
-How the three setup steps work, the work folder, and every runtime option (window, scaling, render resolution, input, camera). The short install steps are in the [top-level README](../../../../README.md#install-and-play); the Steam Deck walkthrough is [steamdeck.md](steamdeck.md). Paths are relative to `psprecomp/games/dissidia/`.
+How the three setup steps work, the work folder, and every runtime option (window, scaling, render resolution, input, camera). Players install with the setup app ([top-level README](../../../../README.md#install)), which runs these same steps for them; the short from-source steps are in [Building from source](../../../../README.md#building-from-source), and the Steam Deck walkthrough is [steamdeck.md](steamdeck.md). Paths are relative to `psprecomp/games/dissidia/`.
 
 ## What each step does
 
 You need your own copy of the game, a 64-bit Linux PC or a Steam Deck, about 8 GB of free disk space, and patience:
-the first build takes a long time (tens of minutes to hours). The steps, for the Deck and for a Linux PC, are in the
-top-level README: [Install and play](../../../../README.md#install-and-play). Steam Deck details (Steam, controls,
+the first build takes a long time (tens of minutes to hours). The from-source steps for a Linux PC or a Mac are in the
+top-level README: [Building from source](../../../../README.md#building-from-source); for the Deck, [`docs/steamdeck.md`](steamdeck.md). Steam Deck details (Steam, controls,
 display, troubleshooting): [`docs/steamdeck.md`](steamdeck.md).
 
 On a Linux PC or a Mac, `tools/install.sh <game.iso> [workdir]` does all of it in one go: the build tools (apt or Homebrew,

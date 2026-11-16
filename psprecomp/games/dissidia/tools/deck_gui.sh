@@ -16,7 +16,7 @@ set -uo pipefail
 
 APP="Dissidia Trēdecim"
 BASE="$HOME/dissidia"
-REPO_URL="https://github.com/dissidia-fan/dissidia"
+REPO_URL="https://github.com/schindlershadow/dissidia"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 HERE="$(dirname "$SELF")"
 
@@ -300,6 +300,10 @@ bootstrap() {
   if [ -f "$clone/$gui" ]; then exec bash "$clone/$gui" "$@"; fi
   if [ -d "$clone/.git" ]; then
     ask "Your copy of the project in ~/dissidia/repo is older than this setup tool. Download the latest version now?" "Download" "Cancel" || exit 0
+    # Checkouts made before 16 Nov 2026 cloned the dissidia-fan mirror, which no longer gets updates: move them to the project.
+    case "$(git -C "$clone" remote get-url origin 2>/dev/null)" in
+      *github.com/dissidia-fan/dissidia*) git -C "$clone" remote set-url origin https://github.com/schindlershadow/dissidia ;;
+    esac
     pulse "Downloading the latest version…" with_login --remember-in "$clone" git -C "$clone" pull --ff-only \
       || { say error "Updating ~/dissidia/repo failed:
 
