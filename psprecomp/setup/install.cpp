@@ -171,6 +171,15 @@ static void append_extras(std::vector<Step>& p, const Layout& l, const std::stri
         j.weight = 0.05;
         p.push_back(j);
     }
+    if (o.d1_moves && feature_available(l, "d1_moves") && !o.d1_iso.empty()) {
+        Step d;
+        d.label = "Adding Bartz's Dissidia 1 moves";
+        d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
+        d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
+        d.env = {{"PYTHONUNBUFFERED", "1"}};
+        d.weight = 0.01;
+        p.push_back(d);
+    }
     if (!o.import_saves.empty()) {
         Step v;
         v.label = "Importing your saves";
@@ -333,6 +342,15 @@ static void append_extras_android(std::vector<Step>& p, const Layout& l, const s
         j.env = android_env(l, workdir);
         j.weight = 0.05;
         p.push_back(j);
+    }
+    if (o.d1_moves && feature_available(l, "d1_moves") && !o.d1_iso.empty()) {
+        Step d;
+        d.label = "Adding Bartz's Dissidia 1 moves";
+        d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
+        d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
+        d.env = android_env(l, workdir);
+        d.weight = 0.01;
+        p.push_back(d);
     }
 }
 
@@ -559,6 +577,7 @@ State load_state(const std::string& file) {
         else if (k == "hd_textures") s.options.hd_textures = v == "1";
         else if (k == "texture_pack") s.options.texture_pack = v == "ai" ? "ai" : "liink";
         else if (k == "jp_audio") s.options.jp_audio = v == "1";
+        else if (k == "d1_moves") s.options.d1_moves = v == "1";
         else if (k == "android") s.options.android = v == "1";
         else if (k == "undub_iso") s.options.undub_iso = v;
     }
@@ -569,7 +588,7 @@ bool save_state(const std::string& file, const State& s) {
     std::ofstream f(file, std::ios::trunc);
     if (!f) return false;
     f << "workdir=" << s.workdir << "\niso=" << s.iso << "\nversion=" << s.version << "\n"
-      << "check_updates=" << s.options.check_updates << "\nhd_textures=" << s.options.hd_textures << "\ntexture_pack=" << s.options.texture_pack << "\njp_audio=" << s.options.jp_audio
+      << "check_updates=" << s.options.check_updates << "\nhd_textures=" << s.options.hd_textures << "\ntexture_pack=" << s.options.texture_pack << "\njp_audio=" << s.options.jp_audio << "\nd1_moves=" << s.options.d1_moves
       << "\nandroid=" << s.options.android << "\nundub_iso=" << s.options.undub_iso << "\nbuilt_fp=" << s.built_fp << "\n";
     return (bool)f;
 }

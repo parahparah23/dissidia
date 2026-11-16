@@ -12,7 +12,7 @@ part is the frame-rate rule in `runtime/framerate.cpp`.
 
 Open Communications mode in the menu and challenge a player as on a PSP. Nothing else needs turning on: the network
 layer starts the first time the game uses it. Players need the same game version and character set (do not mix a
-modded roster with an unmodded one).
+modded roster with an unmodded one). Packs listed below are the exception: they are sent to players who lack them.
 
 ### Internet (the default)
 
@@ -127,6 +127,42 @@ Details worth knowing when changing it:
   (0 on would-block). The game adds that count to what it has sent.
 - Struct layouts follow PPSSPP: scan info 28 bytes, peer info 152 bytes, PDP stat 20, PTP stat 36 (the last two are
   unchecked against the game).
+
+## Mods that change a character (verified packs)
+
+A player who uses a known pack (today: Bartz's Dissidia 1 moves, `mods/bartz-dff`) can play online with players who
+never installed it: as soon as both are in the same lobby, the other game fetches what it needs from that player
+(about 760 KB: the moveset, the models and the voice bank, as deltas against the retail 012 files every player has),
+caches it in `<mods>/.net_cache/`, and uses it for that session. A player's own characters are not changed by it.
+Only the player who wants the moves needs the Dissidia 1 disc.
+
+Nothing a peer sends is trusted. The packs a game accepts are compiled into it (`games/dissidia/net_packs.json` ->
+`runtime/net_packs.inc`, written by `tools/netpack.py record`): every file with its size and SHA-256, the SHA-256 of the
+retail file the delta applies to, and the abilities. The receiving game applies the delta to its own retail file
+(`runtime/net_delta.h`: every copy bounds-checked, output capped at the listed size, inflate capped; host test
+`tests/run_net_delta_test.sh`, run under AddressSanitizer with corrupted and hostile deltas), keeps the result only if
+size and SHA-256 match, stores it under that hash (never a name a peer sent), and builds the ability records itself
+from the list. So a peer can make another game use exactly the listed files and abilities, or nothing.
+
+Who may start a match (`net_packs.cpp` `allow_match`, through the ad-hoc layer's match filter): a player who uses a
+pack this game does not know (another version, an edited mod, a build that is not the listed one) or has not been
+received and verified yet is refused, and a player who uses a pack only plays with players who confirmed having it. A
+refused player is not shown in the lobby. Two players without packs play as before.
+
+Transport: a side channel of the ad-hoc layer (PDP to the reserved port 0xD1D1, `psp_adhoc_side_*`), so the party
+server needs no change. Messages: a manifest every second (packs in use, packs ready), requests and 1 KB pieces of a
+delta (24 in flight, resent after 0.4 s, given up after 90 s). A sender serves only the deltas `netpack.py deltas`
+wrote (run by `charmod.py build`) for packs whose files it has installed byte for byte (`<mods>/.net/<sha256>.dlt`).
+
+Tested 16 Nov 2026 with two instances in LAN mode: A with the pack and Ascendant Lance / Soul Eater equipped, B with an
+empty mods folder. B fetched and verified all six files in the lobby within seconds, the match started, A picked Bartz
+and B Lightning, and both screens showed the same Brave and HP values through Ascendant Lance and Soul Eater. With
+one of A's deltas altered (valid format, different bytes), B threw that file away and the two players no longer saw
+each other in the lobby. Not done yet: an on-screen note telling a refused player why.
+
+Adding a pack: build the mod, `netpack.py record <mods dir> <folder> --version N` (updates the JSON and the .inc), rebuild
+the game. The recorded hashes must be what `d1_moves.py` / the mod build makes on every machine (they are deterministic
+for the same discs: rebuilding from scratch gave identical files).
 
 ## The party server
 

@@ -56,6 +56,7 @@ extern void dissidia_roster_init(uint8_t* rdram);
 extern void dissidia_roster_boot_patch(uint8_t* rdram);
 extern void dissidia_roster_grid_install();
 extern void dissidia_wpnp_install();
+extern void dissidia_net_packs_install();
 // camera.cpp: analogue right-stick battle camera.
 extern void dissidia_camera_install(uint8_t* rdram);
 extern void dissidia_menu_settings_install(uint8_t* rdram);
@@ -317,6 +318,7 @@ void dissidia_register_hooks(uint8_t* rdram) {
     dissidia_models_install();   // model staging budget (hooks_models.cpp)
     dissidia_roster_init(rdram); // extra roster slots (roster.cpp)
     dissidia_wpnp_install();     // battle.bin wpnp table bigger than its retail buffer (roster.cpp)
+    dissidia_net_packs_install();   // verified packs from online players (net_packs.cpp)
     if (std::getenv("PSPRECOMP_TRACE_ATAN")) { g_orig_atan = psp_dispatch_probe_lookup(0x089A457Cu); if (g_orig_atan) psp_dispatch_register(0x089A457Cu, dissidia_atan_trace); }
     if (std::getenv("PSPRECOMP_TRACE_BONE")) { g_orig_bone = psp_dispatch_probe_lookup(0x089B2974u); if (g_orig_bone) psp_dispatch_register(0x089B2974u, dissidia_bone_trace); }
     if (std::getenv("PSPRECOMP_TRACE_POOL")) {

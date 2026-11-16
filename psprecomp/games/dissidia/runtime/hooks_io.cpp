@@ -13,6 +13,7 @@
 // redirect needs no knowledge of the engine's data structures.
 
 #include "package_mods.h"
+#include "voice_merge.h"
 #include "psp_quit.h"
 #include "psp_platform.h"
 #include "psp_settings.h"
@@ -30,6 +31,7 @@
 #include <utility>
 #include <vector>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -54,6 +56,8 @@ enum { TAG_NONE = 0, TAG_INDEX = 1, TAG_PACKAGE = 2, TAG_OVL_BASE = 10 };   // T
 
 
 dissidia::PackageMods g_mods;
+std::recursive_mutex g_mods_mu;   // g_mods can change while the game runs (net_packs.cpp adds a pack received online)
+bool g_net_possible = false;      // packs may arrive online: keep PACKAGE.BIN tagged even with no mods (dissidia_mods_net_possible)
 bool g_built = false;
 bool g_active = false;
 int g_trace_left = 0;
@@ -267,12 +271,13 @@ void ensure_built(const std::string& host_info_path) {
     std::string dir = mods_dir();
     std::vector<std::string> extra = mod_roots();   // installed mod folders that are on, then the voice pack
     for (const std::string& r : extra) std::fprintf(stderr, "[MODS] mod folder on: %s\n", r.c_str());
+    std::string jp_dir;                             // the Japanese voice pack, when on and present
     if (voice_jp_on()) {
         const std::string vd = work_parent() + "/voice_jp";
-        if (is_dir(vd)) { extra.push_back(vd); std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
+        if (is_dir(vd)) { extra.push_back(vd); jp_dir = vd; std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
         else std::fprintf(stderr, "[VOICE] Japanese voice selected but %s does not exist (run tools/jp_audio.py): English voices\n", vd.c_str());
     }
-    if (!is_dir(dir) && extra.empty()) {
+    if (!is_dir(dir) && extra.empty() && !g_net_possible) {
         std::fprintf(stderr, "[MODS] no mods directory (%s): loose-file overrides off\n", dir.c_str());
         return;
     }
@@ -287,7 +292,37 @@ void ensure_built(const std::string& host_info_path) {
     std::ifstream f(host_info_path, std::ios::binary);
     std::vector<uint8_t> orig((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     std::string log, err;
-    if (!g_mods.build(orig, (uint64_t)pst.st_size, dir, &log, &err, g_index_capacity, extra)) {
+    // Japanese voices + a mod that changes a battle voice bank: the Japanese bank with the mod's added clips, served
+    // ahead of both (voice_merge.h); without this the mod's English-based bank would win over voice_jp/
+    std::string first = dir;
+    std::vector<std::string> rest = extra;
+    if (!jp_dir.empty() && is_dir(dir + "/voice")) {
+        namespace fs = std::filesystem;
+        const std::string merged = dir + "/.voice_jp_merged";
+        int banks = 0;
+        std::error_code ec;
+        for (auto it = fs::recursive_directory_iterator(dir + "/voice", ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().extension() != ".scd") continue;
+            const std::string rel = fs::relative(it->path(), dir, ec).generic_string();
+            std::vector<uint8_t> mod, jp, out;
+            int added = 0;
+            auto rd = [](const std::string& p, std::vector<uint8_t>* b) {
+                std::ifstream in(p, std::ios::binary);
+                if (!in) return false;
+                b->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                return true;
+            };
+            if (!rd(jp_dir + "/" + rel, &jp) || !rd(it->path().string(), &mod)) continue;
+            if (!dissidia::merge_voice_bank(jp, mod, &out, &added)) continue;
+            fs::create_directories(fs::path(merged + "/" + rel).parent_path(), ec);
+            std::ofstream o(merged + "/" + rel, std::ios::binary | std::ios::trunc);
+            o.write(reinterpret_cast<const char*>(out.data()), (std::streamsize)out.size());
+            banks++;
+            std::fprintf(stderr, "[VOICE] %s: Japanese bank + %d clip(s) the mod adds (no Japanese recording of them)\n", rel.c_str(), added);
+        }
+        if (banks) { first = merged; rest.insert(rest.begin(), dir); }
+    }
+    if (!g_mods.build(orig, (uint64_t)pst.st_size, first, &log, &err, g_index_capacity, rest)) {
         std::fprintf(stderr, "[MODS] cannot parse %s: %s (overrides off)\n", host_info_path.c_str(), err.c_str());
         return;
     }
@@ -333,7 +368,7 @@ int classify_open(const char* psp_path) {
         const size_t slash = host.find_last_of('/');
         if (slash != std::string::npos) g_data_dir = host.substr(0, slash);
     }
-    if (!g_active) return (pkg && !asset_patches().empty()) ? TAG_PACKAGE : TAG_NONE;
+    if (!g_active) return (pkg && (!asset_patches().empty() || g_net_possible)) ? TAG_PACKAGE : TAG_NONE;
     return info ? TAG_INDEX : TAG_PACKAGE;
 }
 
@@ -358,6 +393,7 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
         }
         return got;
     };
+    std::lock_guard<std::recursive_mutex> mods_lock(g_mods_mu);
     if (tag == TAG_PACKAGE && !asset_patches().empty() && !g_active) {   // no loose-file mods: plain read plus the built-in edits
         const int64_t got = base(dest, size, off);
         *nread = (uint32_t)std::max<int64_t>(got, 0);
@@ -389,6 +425,26 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
 
 std::string dissidia_mods_dir() { return mods_dir(); }
 std::vector<std::string> dissidia_mod_roots() { return mod_roots(); }
+// the Japanese voice pack folder when Japanese voices are on and the pack exists, else "" (net_packs.cpp merges a
+// received voice bank into it, as ensure_built does for installed ones)
+std::string dissidia_voice_jp_dir() { const std::string vd = work_parent() + "/voice_jp"; return voice_jp_on() && is_dir(vd) ? vd : std::string(); }
+// net_packs.cpp, at registration (before the game opens PACKAGE.BIN): packs may arrive online, so PACKAGE.BIN reads go
+// through the override layer even when no mod is installed (it serves nothing until a pack is added).
+void dissidia_mods_net_possible() { g_net_possible = true; }
+// net_packs.cpp, game thread: serve `file` for `asset` from now on (a verified pack received online). The entry moves to
+// fresh virtual sectors past every other override, in the patched index and in the game's in-memory copy.
+extern bool dissidia_index_set_entry(uint8_t* rdram, uint32_t crc, uint32_t sector, uint32_t size_flags);
+bool dissidia_mods_add_override(uint8_t* rdram, const std::string& asset, const std::string& file, uint32_t size) {
+    std::lock_guard<std::recursive_mutex> lk(g_mods_mu);
+    if (!g_built) return false;
+    dissidia::IndexEntry e;
+    if (!g_mods.add_override(asset, file, size, &e)) return false;
+    if (!dissidia_index_set_entry(rdram, e.crc, e.sector, e.size_flags)) return false;
+    g_active = true;
+    { std::lock_guard<std::mutex> l2(g_lt_mu); g_by_sector.clear(); }
+    std::fprintf(stderr, "[MODS] online pack: %s now served from %s (%u B, sector %u)\n", asset.c_str(), file.c_str(), size, e.sector);
+    return true;
+}
 std::string dissidia_package_dir() { return g_data_dir; }
 void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::vector<uint8_t>&)> edit) {
     AssetPatch p;

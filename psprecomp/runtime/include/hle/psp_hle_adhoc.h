@@ -55,5 +55,23 @@ void psp_adhoc_set_nickname(const char* utf8);
 /// milliseconds; players found so far are forgotten.
 void psp_adhoc_configure(bool internet, const char* server, const char* room, const char* peers);
 
+/// Side channel for a game module (e.g. sharing verified mod packs with the other players): datagrams to the
+/// reserved PDP port PSP_ADHOC_SIDE_PORT go to `handler` instead of the game's sockets. The handler runs on the
+/// network thread: it must not touch guest memory and must treat the bytes as untrusted. Only players in the same
+/// ad-hoc group are heard. Messages up to PSP_ADHOC_SIDE_MAX bytes; `mac` all 0xFF = everyone in the group.
+constexpr uint16_t PSP_ADHOC_SIDE_PORT = 0xD1D1;
+constexpr size_t PSP_ADHOC_SIDE_MAX = 16000;
+void psp_adhoc_side_set_handler(void (*handler)(const uint8_t mac[6], const uint8_t* data, size_t len));
+bool psp_adhoc_side_send(const uint8_t mac[6], const uint8_t* data, size_t len);
+/// The MACs of the players in this instance's ad-hoc group (empty when not in one); `own` gets this instance's.
+void psp_adhoc_group_peers(uint8_t (*out)[6], size_t max, size_t* count, uint8_t own[6]);
+/// A game module's say on who may start a match with this player: matching packets from a player for whom
+/// `allow` returns false are dropped (they never reach the game, so no match with them can start).
+void psp_adhoc_set_match_filter(bool (*allow)(const uint8_t mac[6]));
+
+/// Called on a guest thread at the start of every psp_adhoc_pump (while the network is up), before the queued
+/// callbacks run: where a game module may change guest memory in reaction to the network (side channel).
+void psp_adhoc_set_pump_hook(void (*hook)(uint8_t* rdram));
+
 /// A one-line description of the network state for the settings menu.
 void psp_adhoc_status(char* out, size_t n);

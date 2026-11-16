@@ -127,7 +127,24 @@ def mpk_unpack(d):
     return bytes(d[:8]), ents
 
 
-def mpk_pack(head, ents):
+def mpk_offsets(d):
+    """{member name: data offset} of an MPK."""
+    cnt = struct.unpack_from("<I", d, 8)[0]
+    out = {}
+    for i in range(cnt):
+        no, do, _sz, _ex = struct.unpack_from("<4I", d, 0x10 + 16 * i)
+        out[d[no:d.index(b"\0", no)].decode()] = do
+    return out
+
+
+MPK_KEEP_ALIGN = 256   # every member of a rebuilt main.bin starts at its retail offset modulo this
+
+
+def mpk_pack(head, ents, keep=None):
+    """keep: {member name: offset in the original archive}: each such member is placed at an offset congruent to its
+    original one modulo MPK_KEEP_ALIGN. The game uses main.bin's members in place (sound banks snd_common.scd /
+    snd_menu.scd, the resident effect library resident.frr): with system.bin grown by a few records they used to move
+    by 16-byte steps, and battle sound effects played the wrong clips (Bartz's Dissidia 1 moves, 16 Nov 2026)."""
     n = len(ents)
     names = b"".join(e[0].encode() + b"\0" for e in ents)
     name_base = 0x10 + 16 * n
@@ -140,6 +157,8 @@ def mpk_pack(head, ents):
     body = bytearray()
     for e, no in zip(ents, offs):
         out_pos = (out_pos + 15) & ~15
+        if keep and e[0] in keep:
+            out_pos += (keep[e[0]] - out_pos) % MPK_KEEP_ALIGN
         table += struct.pack("<4I", no, out_pos, len(e[2]), e[1])
         body += b"\0" * (out_pos - data_base - len(body))
         body += e[2]
@@ -931,6 +950,24 @@ def disable_abilities(aents, chars, names, log=print):
     return sorted(i for ids in off.values() for i in ids)
 
 
+def retail_named(recs, chars, names, log=print):
+    """[(charId, code, charId)] of the retail characters the name map lists (a "kind": "retail" mod's new or disabled
+    moves, e.g. Bartz's Dissidia 1 moves, mods/bartz-dff): their own records get the same treatment as an added
+    character's (add_new_abilities ... disable_abilities); the chrp / objentry records stay retail. Found by the code in
+    the chrp record (+0x74 'P_FIV100')."""
+    if not names:
+        return []
+    have = {(c or "").lower() for _, c, _ in chars}
+    by_code = {bytes(r[0x74:0x7C]).rstrip(b"\0").decode("latin1").lower()[2:]: r[0] for r in recs}
+    out = []
+    for code in sorted(names):
+        if code in have or code not in by_code or by_code[code] >= FIRST_NEW:
+            continue
+        out.append((by_code[code], code, by_code[code]))
+        log("ablt names: retail %s (charId %d): %d entries" % (code, by_code[code], len(names[code])))
+    return out
+
+
 def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, objs_char=None, rowmap_out=None,
           names=None, texts=None):
     """data: original main.bin; chars: [(charId, code or None, like)]. Returns the new main.bin.
@@ -1029,8 +1066,9 @@ def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, 
         assert [struct.unpack_from("<H", r, 0)[0] for r in orecs] == sorted(struct.unpack_from("<H", r, 0)[0] for r in orecs)
         add_abilities(aents, char, like, log)
 
+    named = chars + retail_named(recs, chars, names, log)   # retail characters a "kind": "retail" mod adds moves to
     if names:
-        add_new_abilities(aents, chars, names, log)
+        add_new_abilities(aents, named, names, log)
     ablt = next(e for e in aents if e[0] == "ablt")[2]
     if struct.unpack_from("<I", ablt, 8)[0] > ABLT_GAME_ROWS:
         log("ablt: %d records > %d: needs the runtime's ablt hook (roster.cpp, ROSTER_ABLT), or the game's copy overflows"
@@ -1040,17 +1078,17 @@ def build(data, chars, rmax=ROSTER_MAX, log=print, min_id=FIRST_NEW, objs=None, 
         if rowmap_out is not None:
             rowmap_out.update(rowmap)
     if names and texts is not None:
-        apply_ability_names(aents, chars, names, texts, log)
+        apply_ability_names(aents, named, names, texts, log)
     if names:
-        set_learn_levels(aents, chars, names, log)
+        set_learn_levels(aents, named, names, log)
     if names:                                    # after the kinds ("after") are set, before disabling drops entries
-        sync_followup_unlocks(aents, chars, names, log)
+        sync_followup_unlocks(aents, named, names, log)
     if names:                                    # last: the naming above looks records up by owner and command
-        disable_abilities(aents, chars, names, log)
+        disable_abilities(aents, named, names, log)
     chrp[2] =bytes(chd[:4]) + struct.pack("<I", len(recs)) + b"".join(bytes(r) for r in recs)
     obj[2] = bytes(ohead) + struct.pack("<I", len(orecs)) + b"".join(bytes(r) for r in orecs)
     by["system.bin"][2] = arc_pack(ahead, aents)
-    return mpk_pack(head, ents)
+    return mpk_pack(head, ents, keep=mpk_offsets(data))
 
 
 def main(argv):

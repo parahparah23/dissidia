@@ -312,11 +312,16 @@ int established_count(Match& m) {
     return n;
 }
 
+// ---- side channel (psp_adhoc_side_*): PDP to the reserved port, handed to the game module, never to the game ----
+void (*g_side_handler)(const uint8_t mac[6], const uint8_t* data, size_t len) = nullptr;
+bool (*g_match_filter)(const uint8_t mac[6]) = nullptr;
+
 void handle_match(const Mac& src, const uint8_t* body, size_t len) {
     if (len < 6 + 2 + 1 + 4) return;
     Mac dst; std::memcpy(dst.data(), body, 6);
     if (dst != g_mac && !is_bcast(dst)) return;
     if (!same_group(src)) return;
+    if (g_match_filter && !g_match_filter(src.data())) return;   // the game module refuses matches with this player
     int port = get16(body + 6);
     uint8_t op = body[8];
     uint32_t extra = get32(body + 9);
@@ -406,6 +411,10 @@ void handle_pdp(const Mac& src, const uint8_t* body, size_t len) {
     if (dst != g_mac && !is_bcast(dst)) return;
     if (!same_group(src)) return;
     uint16_t sport = get16(body + 6), dport = get16(body + 8);
+    if (dport == PSP_ADHOC_SIDE_PORT) {      // (g_mu is held: the handler only copies the bytes and returns)
+        if (g_side_handler && len - 10 <= PSP_ADHOC_SIDE_MAX) g_side_handler(src.data(), body + 10, len - 10);
+        return;
+    }
     for (auto& [id, s] : g_pdp) {
         if (s.port != dport) continue;
         size_t used = 0;
@@ -1541,6 +1550,35 @@ void psp_adhoc_status(char* out, size_t n) {
     }
 }
 
+void psp_adhoc_side_set_handler(void (*handler)(const uint8_t mac[6], const uint8_t* data, size_t len)) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_side_handler = handler;
+}
+void psp_adhoc_set_match_filter(bool (*allow)(const uint8_t mac[6])) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_match_filter = allow;
+}
+bool psp_adhoc_side_send(const uint8_t mac[6], const uint8_t* data, size_t len) {
+    if (len > PSP_ADHOC_SIDE_MAX) return false;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_net_ready || !g_connected) return false;
+    Mac dst; std::memcpy(dst.data(), mac, 6);
+    std::vector<uint8_t> b(dst.begin(), dst.end());
+    put16(b, PSP_ADHOC_SIDE_PORT);
+    put16(b, PSP_ADHOC_SIDE_PORT);
+    b.insert(b.end(), data, data + len);
+    send_to_mac(dst, T_PDP, b);
+    return true;
+}
+void psp_adhoc_group_peers(uint8_t (*out)[6], size_t max, size_t* count, uint8_t own[6]) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (own) std::memcpy(own, g_mac.data(), 6);
+    size_t n = 0;
+    if (g_connected)
+        for (auto& [m, p] : g_peers)
+            if (n < max && same_group(m)) std::memcpy(out[n++], m.data(), 6);
+    *count = n;
+}
 void psp_adhoc_set_local_fps(int fps) { std::lock_guard<std::mutex> lk(g_mu); g_local_fps = fps; }
 
 int psp_adhoc_group_fps_cap() {
@@ -1618,9 +1656,12 @@ int psp_adhoc_group_size() {
     return n;
 }
 
+void (*g_pump_hook)(uint8_t* rdram) = nullptr;
+void psp_adhoc_set_pump_hook(void (*hook)(uint8_t* rdram)) { g_pump_hook = hook; }
 void psp_adhoc_pump(uint8_t* rdram, recomp_context* ctx) {
     if (!g_net_ready) return;
     if (g_pumping.exchange(true)) return;
+    if (g_pump_hook) g_pump_hook(rdram);   // the game module's game-thread work, before the queued callbacks run
     for (;;) {
         Ev e;
         {

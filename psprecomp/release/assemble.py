@@ -9,7 +9,7 @@ The result is what the wizard (setup/install.h "Layout") expects, flat:
   DissidiaRecomp[.exe]   the wizard           bin/psprecomp[.exe]   the recompiler
   toolchain/              the portable compiler bundle (toolchain/build_bundle.py), trimmed
   sdk/                    prebuilt runtime core + headers + link project + toolchain.json
-  game/                   games/dissidia: game.toml, overlay tomls, analysis/, features.ini, fx_shaders/, tools/*.py
+  game/                   games/dissidia: game.toml, overlay tomls, analysis/, features.ini, fx_shaders/, tools/*.py, d1_moves/, net_packs.json
   python/                 embedded Python (Windows only; Linux uses python3 from PATH)
   licenses/               third-party licenses
   release.json            version, platform, bundle identity, sha256 of every file (the updater diffs against it)
@@ -120,7 +120,9 @@ def main():
         top = rel.split("/")[0]
         if top in ("analysis", "fx_shaders", "icon") and not rel.endswith(".py"):
             return True
-        if rel in ("game.toml", "features.ini", "package_paths.txt", "README.md") or (rel.startswith("overlay_") and rel.endswith(".toml")):
+        if rel in ("game.toml", "features.ini", "package_paths.txt", "README.md", "net_packs.json") or (rel.startswith("overlay_") and rel.endswith(".toml")):
+            return True
+        if top == "d1_moves" and rel.endswith((".json", ".npd")):   # Bartz's Dissidia 1 moves: patches against the player's discs
             return True
         if top == "tools" and rel.count("/") == 1 and rel.endswith((".py", ".json", ".txt")) and not os.path.basename(rel).startswith("test_"):
             return True
