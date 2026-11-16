@@ -2993,9 +2993,9 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         Cand d;
         d.score = score;
         for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
-        d.l[6] = std::min(45.f, std::max(7.f, 7.f + 4.f * size)) * k_rad;                       // reach grows with the effect's size
+        d.l[6] = std::min(20.f, std::max(3.f, 3.f + 2.5f * size)) * k_rad;                       // reach grows with the effect's size
         // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
-        d.l[7] = (2.5f + 1.f * std::min(size, 3.f)) * std::min(1.f, std::max(0.4f, mx * 3.f)) * k_int;
+        d.l[7] = std::min(1.2f, 0.35f * score) * k_int;   // score = brightness x sqrt(area): sparkles and markers stay faint, a big blast reaches 1.2
         d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
         cand.push_back(d);
     }
@@ -3102,7 +3102,21 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             rt_capture(st, rdram, prim_type, count, cur, true);
             const float* mv = g_fx_vote[cur].n > 0 ? g_fx_vote[cur].view : g_rt_main_view_ok[cur] ? g_rt_main_view[cur] : nullptr;
             if (mv && !g_rt_nofix && g_rt_fx_tris[cur].size() > t0) rt_fix_view(g_rt_fx_tris[cur], t0, st.view_matrix, mv);
-            if (light_fx && g_rt_fx_tris[cur].size() > t0) {
+            // the same glow drawn every frame for seconds (the lock-on reticle, a stage glow) is not an attack: keyed by texture, format, size
+            bool steady = false;
+            if (light_fx) {
+                struct Seen { double first, last; };
+                static std::unordered_map<uint64_t, Seen> seen;
+                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                const uint64_t key = (uint64_t(st.tex_addr[0]) << 32) ^ (uint64_t(st.vertex_type) << 12) ^ uint64_t(count) ^ (uint64_t(prim_type) << 28);
+                Seen& sn = seen[key];
+                if (sn.last == 0 || now - sn.last > 0.3) sn.first = now;
+                sn.last = now;
+                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 2.5; }();
+                steady = now - sn.first > k_steady;
+                if (seen.size() > 4096) seen.clear();
+            }
+            if (light_fx && !steady && g_rt_fx_tris[cur].size() > t0) {
                 fx_blob_note(cur, t0, c0);
                 static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
                 if (dbg && !g_fx_blobs[cur].empty()) {   // which vertex formats / matrices the effects come with (blobs at the origin = a transform not applied)
