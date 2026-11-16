@@ -72,8 +72,12 @@ match 30 fps exactly, because a keyed event at 30 fps acts for a whole 33 ms fra
   (0x089D5EAC, copied a frame late by FUN_08864DD8) is made to show the step of the frame it will be used in (`global_step_hook`), and
   the slow-motion clock only advances before gameplay frames.
 - **Input**: the pad changes only on gameplay frames; a press that comes and goes between two of them is latched and shown once.
+- **Camera**: the camera manager update (FUN_08B3CA24) is in the gameplay part of the battle list: it runs on gameplay frames only
+  (counted), and the renderer blends the view between them.
+- **Random sequences** (0x09AF84D0, 0x09AFB89C) are put back after drawn-only frames (measured: not drawn from there; a guard).
 - **Compensations for native high rates** (press latch, Jecht grid, EX Burst gating, gauges, UI step, steered moves, action start step,
-  exact steps, FX60) all stand down: they test for a step below 2 or for 30 Hz logic.
+  exact steps, FX60) all stand down: they test for a step below 2 or for 30 Hz logic. A new one must too (FX60 did not at first:
+  it lengthened hitboxes, extra hits at 60 / 120 fps).
 - **Drawing the frames between** (runtime/src/psp_ge_draw.cpp, `PSPRECOMP_INTERP`): the game module tags each display list with
   (gameplay generation, phase) via `ge_interp_set_frame`; the render queue hands the tag to the renderer per list. On gameplay frames the
   world / view / projection / bone matrices, texture-gen matrix and texture scale / offset of every 3D draw are recorded, keyed by the

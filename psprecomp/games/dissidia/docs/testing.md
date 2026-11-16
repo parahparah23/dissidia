@@ -467,3 +467,23 @@ in the environment (the tool passes the environment on).
   "ran ahead" counts went to 0 at every rate under 30 Hz logic. Natively judged runs are affected the same way (part of the phase lead
   reported there is this).
 - `waitidle` timeouts on long stances (Squall 1259, script 8000) happen at 30 fps too; they are not a rate problem.
+- **Whole roster, all eight rates (l30full, 16 Nov, ~8 h with 5 games at once):** 3.1-4.1 % of trials fail per rate (84 of 2054 at
+  60 fps, 75 of 1976 at 120), against 75-81 % natively; two 30 fps runs differ on 15 % (318 of 2054, reported apart). Jecht's combo
+  test with 30 Hz logic passes at every rate (natively Rush > Neutral 2 / Up 2 failed at 90 / 150). Of the 503 failures left:
+  - 221 were HP damage only (the hits right, the damage not): **harness bug**, fixed. `home` restores the status blocks from a snapshot
+    taken at the first `home`, and status `+0x14` is `<initial bravery u16 hi><current u16 lo>`: one run's snapshot caught the current
+    bravery at 0 (Sephiroth 60 fps: `0x005F0000`, the others `0x005F005F`), so every trial of that run hit for ~82 less. `home` now sets
+    the current bravery to the initial one. Sephiroth (91 of them) logged identical damage at 30 / 30b / 60 / 120 after the fix.
+  - 94 were `run` / `run_jump`: the player ran the opposite way (+z at 30 fps, -z at 60-240, the same numbers at every rate; running is
+    camera-relative). NOT the camera running on drawn-only frames: the camera manager update (FUN_08B3CA24) only runs on gameplay
+    frames under 30 Hz logic (counted: 2400 vs 0). A Kefka run with the bravery fix passed them (90 fps: 7 -> 3 failures), so the
+    trial before probably left the fighters / camera differently through the bravery state; the l30full2 rerun confirms or not.
+    Only shows after the full action list: `--moves-only` passes either way.
+  - The rest (path, peak, hit count) is spread thinly, 0-8 per character and rate; many are juggles that also differ between two 30 fps
+    runs. A character whose failures are the same at every rate (Sephiroth's air dash 1.03 m) points at an odd 30 fps reference run.
+- **Things ruled out**: the game's random sequences (rand() LCG word 0x09AF84D0, effect LCG 0x09AFB89C) are never drawn from on
+  drawn-only frames (0 of 3600); framerate.cpp puts them back after each drawn-only frame anyway (`PSPRECOMP_L30_RNG=0` turns that off).
+- **Harness tips**: `[fps_parity] ... FAILED: the game exited` with a log that just stops is a crash: `journalctl -k | grep segfault`
+  (a fault address like `9dd4c0` = an emulated address read through a null base, e.g. a module's own `g_ram` never set). Other sessions
+  run games on the same host, so match the time. A character's games that "never started (direct)" (Vaan 90/120/180/210 once) passed on a
+  rerun. Categorise a report by failure kind before reading it trial by trial (a few lines of Python over `*/report.txt`).
