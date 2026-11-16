@@ -2587,15 +2587,17 @@ static void ge_draw_prim_one(uint8_t* rdram, int prim_type, int count);
 // ---- Frame interpolation (ge_interp_set_frame, psp_ge_draw.h) ----
 namespace {
 struct IpMats { float w[12], v[12], p[16], b[96], tg[12], uv[4]; };   // uv: texture scale u/v, offset u/v (scrolling textures)
-std::atomic<uint32_t> g_ip_set_gen{0};
-std::atomic<float> g_ip_set_phase{-1.0f};
+std::mutex g_ip_set_mu;
+GeInterpTag g_ip_set;                  // the tag the game thread set for the frame it is building
 uint32_t g_ip_gen = 0;                 // tag of the list being processed (render thread)
 float g_ip_phase = -1.0f;
+uint32_t g_ip_seq = 0;
+bool g_ip_rec = false;
 uint32_t g_ip_tab_gen = 0;             // gameplay frame recorded in g_ip_cur
 bool g_ip_have = false;
 std::unordered_map<uint64_t, IpMats> g_ip_prev, g_ip_cur;
 std::unordered_map<uint64_t, uint32_t> g_ip_occ;   // occurrences of each draw key in the frame being drawn
-uint32_t g_ip_occ_gen = ~0u; float g_ip_occ_phase = -2.0f;
+uint32_t g_ip_occ_seq = ~0u;
 int ip_mode() {
     static const int m = [] { const char* e = std::getenv("PSPRECOMP_INTERP"); return e && e[0] ? std::atoi(e) : 1; }();
     return m;
@@ -2623,31 +2625,33 @@ bool ip_cut(const float* a, const float* b) {   // the camera moved more than 3 
 }
 }  // namespace
 
-void ge_interp_set_frame(uint32_t gen, float phase) { g_ip_set_gen.store(gen); g_ip_set_phase.store(phase); }
-void ge_interp_current_tag(uint32_t* gen, float* phase) { *gen = g_ip_set_gen.load(); *phase = g_ip_set_phase.load(); }
-void ge_interp_list_tag(uint32_t gen, float phase) { g_ip_gen = gen; g_ip_phase = phase; }
+void ge_interp_set_frame(const GeInterpTag& tag) { std::lock_guard<std::mutex> lk(g_ip_set_mu); g_ip_set = tag; }
+GeInterpTag ge_interp_current_tag() { std::lock_guard<std::mutex> lk(g_ip_set_mu); return g_ip_set; }
+void ge_interp_list_tag(const GeInterpTag& tag) { g_ip_gen = tag.gen; g_ip_phase = tag.phase; g_ip_seq = tag.seq; g_ip_rec = tag.record; }
 
 // Swap the draw's matrices for interpolated ones (restored by the caller); false = drawn as issued.
-struct IpStat { uint32_t gen = 0; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0; };
+struct IpStat { uint32_t gen = 0, seq = ~0u; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0, skinned = 0, matmove = 0, vtxonly = 0, vtxprims = 0; };
+std::unordered_map<uint64_t, uint64_t> g_ip_vhash_prev, g_ip_vhash_cur;   // diagnostic (PSPRECOMP_INTERP_LOG): vertex bytes per draw key on gameplay frames
+uint8_t* g_ip_rdram = nullptr;
 static IpStat g_ip_stat;
 static void ip_stat_flush() {
     static int left = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? std::atoi(e) : 0; }();
-    if (left > 0 && g_ip_stat.draws > 0) { left--; std::fprintf(stderr, "[INTERP] gen %u phase %.2f: %d 3D draws, %d blended, %d no match, %d far, %d no previous frame, %d 2D\n",
-        g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch, g_ip_stat.far, g_ip_stat.noprev, g_ip_stat.flat); }
-    g_ip_stat = IpStat{}; g_ip_stat.gen = g_ip_gen; g_ip_stat.phase = g_ip_phase;
+    if (left > 0 && g_ip_stat.draws > 0) { left--; std::fprintf(stderr, "[INTERP] gen %u phase %.2f: %d 3D draws, %d blended, %d no match, %d far, %d no previous frame, %d 2D; %d skinned, %d moved by matrix, %d moved by vertices only (%d prims)\n",
+        g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch, g_ip_stat.far, g_ip_stat.noprev, g_ip_stat.flat, g_ip_stat.skinned, g_ip_stat.matmove, g_ip_stat.vtxonly, g_ip_stat.vtxprims); }
+    g_ip_stat = IpStat{}; g_ip_stat.gen = g_ip_gen; g_ip_stat.phase = g_ip_phase; g_ip_stat.seq = g_ip_seq;
 }
 static bool ip_apply(int prim_type, int count, IpMats* saved) {
     if (g_ip_phase < 0.0f || ip_mode() == 0) return false;
-    if (g_ip_stat.gen != g_ip_gen || g_ip_stat.phase != g_ip_phase) ip_stat_flush();
+    if (g_ip_stat.seq != g_ip_seq) ip_stat_flush();
     GeState& st = ge_get_state_mut();
     if (st.clear_mode || ge_vtype_through(st.vertex_type)) { g_ip_stat.flat++; return false; }   // 2D (HUD, screen copies): no matrices
     g_ip_stat.draws++;
-    if (g_ip_phase == 0.0f && (!g_ip_have || g_ip_gen != g_ip_tab_gen)) {   // a new gameplay frame: its draws become the current table
+    if (g_ip_rec && (!g_ip_have || g_ip_gen != g_ip_tab_gen)) {   // a new gameplay frame: its draws become the current table
         g_ip_prev.swap(g_ip_cur); g_ip_cur.clear();
         g_ip_have = g_ip_tab_gen + 1 == g_ip_gen;                       // the previous table is the gameplay frame just before
         g_ip_tab_gen = g_ip_gen;
     }
-    if (g_ip_gen != g_ip_occ_gen || g_ip_phase != g_ip_occ_phase) { g_ip_occ.clear(); g_ip_occ_gen = g_ip_gen; g_ip_occ_phase = g_ip_phase; }
+    if (g_ip_seq != g_ip_occ_seq) { g_ip_occ.clear(); g_ip_occ_seq = g_ip_seq; }
     const uint64_t base = ip_key(st, prim_type, count), lbase = ip_key(st, prim_type, count, true);
     const uint64_t key = base ^ (static_cast<uint64_t>(g_ip_occ[base]++) * 0x9E3779B97F4A7C15ull);
     const uint64_t lkey = lbase ^ (static_cast<uint64_t>(g_ip_occ[lbase]++) * 0x9E3779B97F4A7C15ull);
@@ -2656,7 +2660,19 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
     std::memcpy(cur.p, st.proj_matrix, sizeof cur.p); std::memcpy(cur.b, st.bone_matrix, sizeof cur.b);
     std::memcpy(cur.tg, st.tgen_matrix, sizeof cur.tg);
     cur.uv[0] = st.tex_scale_u; cur.uv[1] = st.tex_scale_v; cur.uv[2] = st.tex_offset_u; cur.uv[3] = st.tex_offset_v;
-    if (g_ip_phase == 0.0f && g_ip_gen == g_ip_tab_gen) { g_ip_cur[key] = cur; g_ip_cur[lkey] = cur; }
+    if (g_ip_rec && g_ip_gen == g_ip_tab_gen) { g_ip_cur[key] = cur; g_ip_cur[lkey] = cur; }
+    static const bool diag = std::getenv("PSPRECOMP_INTERP_LOG") != nullptr;
+    if (diag && g_ip_rec && g_ip_rdram) {   // what moves this draw between gameplay frames: its matrices or its vertex bytes
+        if (st.vertex_type & 0x1C000u) g_ip_stat.skinned++;   // weight count bits: GE skinning
+        uint64_t vh = 1469598103934665603ull; const uint32_t va = st.vertex_addr & 0x07FFFFFFu;
+        for (uint32_t i = 0; i < 256 && va + i < 0x08000000u; i += 4) { uint32_t w; std::memcpy(&w, g_ip_rdram + va + i, 4); vh = (vh ^ w) * 1099511628211ull; }
+        if (g_ip_gen == g_ip_tab_gen) { if (g_ip_vhash_cur.empty() || g_ip_vhash_cur.count(~0ull) == 0 || g_ip_vhash_cur[~0ull] != g_ip_gen) { g_ip_vhash_prev.swap(g_ip_vhash_cur); g_ip_vhash_cur.clear(); g_ip_vhash_cur[~0ull] = g_ip_gen; } g_ip_vhash_cur[key] = vh; }
+        auto pm = g_ip_prev.find(key); auto ph = g_ip_vhash_prev.find(key);
+        if (pm != g_ip_prev.end() && ph != g_ip_vhash_prev.end()) {
+            const bool mat = std::memcmp(pm->second.w, cur.w, sizeof cur.w) || std::memcmp(pm->second.v, cur.v, sizeof cur.v) || std::memcmp(pm->second.b, cur.b, sizeof cur.b);
+            if (mat) g_ip_stat.matmove++; else if (ph->second != vh) { g_ip_stat.vtxonly++; g_ip_stat.vtxprims += count; }
+        }
+    }
     if (!g_ip_have) { g_ip_stat.noprev++; return false; }
     auto it = g_ip_prev.find(key);
     if (it == g_ip_prev.end()) it = g_ip_prev.find(lkey);   // the same draw from the other of two vertex buffers
@@ -2681,6 +2697,7 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
 }
 
 void ge_draw_prim(uint8_t* rdram, int prim_type, int count) {
+    g_ip_rdram = rdram;
     IpMats ip_saved;
     struct IpRestore { IpMats* m; bool on; ~IpRestore() { if (!on) return; GeState& st = ge_get_state_mut();
         std::memcpy(st.world_matrix, m->w, sizeof m->w); std::memcpy(st.view_matrix, m->v, sizeof m->v);

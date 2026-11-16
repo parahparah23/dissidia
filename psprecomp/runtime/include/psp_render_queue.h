@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "psp_ge_draw.h"   // GeInterpTag
 
 /// Render request types for the GL-on-main-thread queue.
 /// Phase 5 fills in actual GL dispatch for each type.
@@ -40,8 +41,7 @@ struct GePendingList {
     bool processed = false;
     bool stalled = false;      // True if hit stall, waiting for update
     bool begun = false;        // True if ge_draw_begin_list was called
-    uint32_t ip_gen = 0;       // frame interpolation tag captured at enqueue (ge_interp_set_frame): gameplay frame number
-    float ip_phase = -1.0f;    // and position between gameplay frames (0 = a gameplay frame, k/n = drawn-only; < 0 = no interpolation)
+    GeInterpTag ip_tag;        // frame interpolation tag captured at enqueue (ge_interp_set_frame, psp_ge_draw.h)
 };
 
 /// Game thread side: post FramePresent request and block until main thread

@@ -48,14 +48,17 @@ void ge_draw_request_no_raster(int mode);
 
 /// Frame interpolation (a game that runs its logic at 30 Hz and re-issues its frame on the frames in between).
 /// Game thread, before each frame's lists are enqueued: gen = number of the gameplay frame whose state the frame shows,
-/// phase = 0 on a gameplay frame, k/n on the k-th of the n-1 drawn-only frames after it; phase < 0 turns it off.
+/// phase = how far the frame is shown past that gameplay frame, in gameplay frames (0..1; k/n for the k-th of n-1 drawn-only frames
+/// when paced by frame count, measured time when paced by the clock); phase < 0 turns it off. record = this is the gameplay frame
+/// itself (its draws become the current table); seq numbers the frames.
 /// The renderer records every 3D draw's world / view / projection / bone matrices on gameplay frames and draws each frame with
 /// matrices between the last two gameplay frames (PSPRECOMP_INTERP=1, default: one gameplay frame behind) or projected ahead of
 /// the last one (=2); =0 off. A draw is matched with the one of the previous gameplay frame by what it draws (vertex / index / texture
 /// address, type, count, target) and its occurrence; unmatched draws and jumps (cuts, teleports) are drawn as issued.
-void ge_interp_set_frame(uint32_t gen, float phase);
-void ge_interp_current_tag(uint32_t* gen, float* phase);   // render queue: the tag a list gets at enqueue
-void ge_interp_list_tag(uint32_t gen, float phase);         // render thread: the tag of the list about to be processed
+struct GeInterpTag { uint32_t gen = 0, seq = 0; float phase = -1.0f; bool record = false; };
+void ge_interp_set_frame(const GeInterpTag& tag);
+GeInterpTag ge_interp_current_tag();                // render queue: the tag a list gets at enqueue
+void ge_interp_list_tag(const GeInterpTag& tag);    // render thread: the tag of the list about to be processed
 // Height (PSP rows) of the displayed buffers: 272, or more on a tall window. The settings screen draws a canvas that tall; an overlay
 // canvas taller than 480:272 is drawn over the whole picture instead of the PSP's band.
 int ge_draw_tall_rows();

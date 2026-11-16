@@ -65,6 +65,12 @@ Above 30 fps the battle can run its gameplay at the PSP's 30 updates a second in
 match 30 fps exactly, because a keyed event at 30 fps acts for a whole 33 ms frame; with 30 Hz logic every move plays as at 30 fps
 (docs/testing.md "30 Hz logic" for the parity results).
 
+- **Pacing** (`l30_decide_next`): in play a gameplay frame is due every 33.3 ms of real time (the frame shown nearest to it runs the
+  gameplay), and each frame is blended by the time actually passed since the last gameplay frame. Counting frames instead (every
+  rate / 30-th frame, phases k/n) looked jittery on the RP6 at 120 fps while moving: it drops ~7 % of frames, and a late frame then
+  showed the picture a quarter step on although more time had passed. Tests stay on frame counting (repeatable): parity runs, a test
+  script, `PSPRECOMP_VCLOCK`, or `PSPRECOMP_L30_PACE=frames`; `=clock` forces real time. `PSPRECOMP_L30_PACE_LOG=<n>` logs decisions,
+  `PSPRECOMP_L30_TIMING=1` frame times by position after the gameplay frame.
 - **Task tree** (framerate.cpp `task_run_hook` on the runner FUN_0888245C): on drawn-only frames the battle scene list runs with the
   pause filter (flags mask/value 4/4 instead of 1/1), so the scene is still built and drawn, minus 11 tasks that change gameplay when
   run that way (the skip list in framerate.cpp; `PSPRECOMP_L30_KEEP` keeps them, for checks).

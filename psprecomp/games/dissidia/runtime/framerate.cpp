@@ -1055,8 +1055,46 @@ void note_negotiated_rate(int cap) {
 // battle code too) is the current frame's. With a constant step that does not matter; with a varying one (exact steps, 30 Hz logic) the two
 // disagreed by a frame (30 Hz logic: direct readers got 0 on the gameplay frame). While the task runs, the timer shows the NEXT frame's step.
 FuncPtr g_orig_global_step = nullptr;
+// 30 Hz logic: is the frame after the current one a gameplay frame? Decided once per frame (the global step needs it before the frame ends).
+// Paced by the clock (play): a gameplay frame is due every 33.3 ms of real time, so a late frame does not leave the picture behind and the
+// game keeps its speed when frames are dropped; the frames between are blended by the time that has passed (g_l30_next_phase). Paced
+// by frame count (tests: PSPRECOMP_TEST_PARITY / _TEST_SCRIPT / VCLOCK, or PSPRECOMP_L30_PACE=frames): every rate/30-th frame, repeatable.
+uint64_t g_l30_dec_frame = ~0ull;
+bool g_l30_next_logic = true;
+float g_l30_next_phase = 0.0f;
+double g_l30_due_ms = 0, g_l30_last_ms = 0;   // when the next gameplay frame is due / the last one was (real time, ms)
+bool l30_clock_paced() {
+    static const int m = [] {
+        const char* e = std::getenv("PSPRECOMP_L30_PACE");
+        if (e && !std::strcmp(e, "frames")) return 0;
+        if (e && !std::strcmp(e, "clock")) return 1;
+        return std::getenv("PSPRECOMP_TEST_PARITY") || std::getenv("PSPRECOMP_TEST_SCRIPT") || std::getenv("PSPRECOMP_VCLOCK") ? 0 : 1;
+    }();
+    return m == 1;
+}
+bool l30_decide_next() {
+    if (g_l30_dec_frame == g_l30_frame) return g_l30_next_logic;
+    g_l30_dec_frame = g_l30_frame;
+    const uint64_t n = static_cast<uint64_t>(std::max(1, g_rate / 30));
+    if (!l30_clock_paced()) {
+        g_l30_next_logic = (g_l30_frame + 1) % n == 0;
+        g_l30_next_phase = static_cast<float>((g_l30_frame + 1) % n) / static_cast<float>(n);
+        return g_l30_next_logic;
+    }
+    const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double frame = 1000.0 / g_rate, period = 1000.0 / 30.0;
+    const double shown = now + frame;   // about when the coming frame reaches the screen
+    if (g_l30_due_ms == 0 || shown - g_l30_due_ms > 100.0) g_l30_due_ms = shown;   // start, or far behind (a hitch): catch up at once
+    g_l30_next_logic = shown + frame * 0.5 >= g_l30_due_ms;   // the 30 Hz step falls within this frame (nearest frame)
+    if (g_l30_next_logic) { g_l30_last_ms = g_l30_due_ms; g_l30_due_ms += period; }
+    g_l30_next_phase = static_cast<float>(std::clamp((shown - g_l30_last_ms) / period, 0.0, 0.999));
+    static int dlog = [] { const char* e = std::getenv("PSPRECOMP_L30_PACE_LOG"); return e ? std::atoi(e) : 0; }();
+    if (dlog > 0 && g_battle_age > 300.f) { dlog--; std::fprintf(stderr, "[L30P] frame %llu now %.2f shown %.2f due %.2f last %.2f -> %s phase %.2f\n", (unsigned long long)g_l30_frame,
+        now, shown, g_l30_due_ms, g_l30_last_ms, g_l30_next_logic ? "GAMEPLAY" : "drawn", g_l30_next_phase); }
+    return g_l30_next_logic;
+}
 float next_frame_step() {
-    if (l30_active()) return (g_l30_frame + 1) % static_cast<uint64_t>(g_rate / 30) == 0 ? 2.0f : 0.0f;
+    if (l30_active()) return l30_decide_next() ? 2.0f : 0.0f;
     if (g_rate > 60) return step_for(g_rate, g_step_idx + 1);
     return -1.0f;   // constant step: leave it
 }
@@ -1149,17 +1187,41 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
             if (rng_frames % 3600 == 0) std::fprintf(stderr, "[FPS] 30 Hz logic: random sequence drawn from in %llu of %llu drawn-only frames (put back)\n",
                                                      (unsigned long long)rng_moved, (unsigned long long)rng_frames);
         }
+        static const bool timing = std::getenv("PSPRECOMP_L30_TIMING") != nullptr;   // diagnostic: frame time by position in the 30 Hz frame
+        if (timing) {
+            using clk = std::chrono::steady_clock;
+            static clk::time_point last{}; static double sum[8] = {}, mx[8] = {}; static uint64_t cnt[8] = {}, late[8] = {}, frames = 0;
+            const clk::time_point t = clk::now();
+            static int since = 0; since = g_l30_logic_now ? 0 : std::min(since + 1, 7);
+            const int ph = since;   // 0 = the gameplay frame that just ended
+            if (last.time_since_epoch().count()) {
+                const double ms = std::chrono::duration<double, std::milli>(t - last).count();
+                sum[ph] += ms; cnt[ph]++; mx[ph] = std::max(mx[ph], ms); if (ms > 1000.0 / g_rate * 1.5) late[ph]++;
+                if (++frames % 1200 == 0) {
+                    std::fprintf(stderr, "[L30T] %d fps, frame time by position (0 = gameplay):", g_rate);
+                    for (int i = 0; i < std::min(8, g_rate / 30); i++) {
+                        std::fprintf(stderr, " %d: avg %.2f max %.1f late %llu |", i, cnt[i] ? sum[i] / cnt[i] : 0.0, mx[i], (unsigned long long)late[i]);
+                        sum[i] = mx[i] = 0; cnt[i] = late[i] = 0;
+                    }
+                    std::fprintf(stderr, "\n");
+                }
+            }
+            last = t;
+        }
+        const bool next_logic = l30_decide_next();
+        const float next_phase = g_l30_next_phase;
         g_l30_frame++;
-        const uint64_t n = static_cast<uint64_t>(g_rate / 30);
-        g_l30_logic_now = g_l30_frame % n == 0;
+        g_l30_logic_now = next_logic;
         wrf(timer + 0x18u, g_l30_logic_now ? 2.0f : 0.0f);   // the coming frame's step (read directly by 85 battle sites); the global step follows via global_step_hook
         // the renderer blends the coming frame's draws between the last two gameplay frames (psp_ge_draw.h ge_interp_set_frame)
         static uint32_t gen = 0;
         if (g_l30_logic_now) gen++;
-        ge_interp_set_frame(gen, static_cast<float>(g_l30_frame % n) / static_cast<float>(n));
+        static uint32_t seq = 0;
+        GeInterpTag tag; tag.gen = gen; tag.seq = ++seq; tag.phase = next_phase; tag.record = g_l30_logic_now;
+        ge_interp_set_frame(tag);
         if (rng_keep && !g_l30_logic_now) { for (int i = 0; i < 2; i++) rng_saved[i] = r32(RNG_WORDS[i]); rng_have = true; }   // the coming frame is drawn-only
     } else if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
-    if (!l30_active()) ge_interp_set_frame(0, -1.0f);
+    if (!l30_active()) ge_interp_set_frame(GeInterpTag{});
 
     if (g_log && ok(timer)) {
         const int64_t t = now_ms();
@@ -2228,7 +2290,7 @@ bool l30_active() {
     static bool on = false;
     static const bool from_clock = std::getenv("PSPRECOMP_L30_FROM_CLOCK") != nullptr;   // experiment: only from the test clock on
     const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && (from_clock ? g_gt_started : battle_running());
-    if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; }
+    if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; g_l30_dec_frame = ~0ull; g_l30_due_ms = 0; }
     on = want || (on && g_logic30 && g_rate > 30 && overlay_id() == 1 && battle_running());
     return on;
 }
