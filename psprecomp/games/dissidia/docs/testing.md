@@ -434,6 +434,12 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
   teleport a jump was sometimes not taken and the dummy sometimes not hittable: trials start 0.6 s after it. Left (Squall, 80 trials):
   7 trials whose dummy reactions or one air jump differ, and the HP damage of an HP attack (the attacker's bravery) differing by a steady
   ~190 between runs in 11 trials; where that comes from was not found. `--repeat-base` reports such trials as NONDETERMINISTIC.
+- **The dummy's brain is stopped (`PSPRECOMP_TEST_NO_AI`) and its virtual pad cleared every update** (brain `actor+0x5C4`, pad brain+0x53C:
+  +4 state, +8 pending, +12 previous). A CPU caught mid-dash when the clock started kept its dash buttons held and dashed through a whole
+  run (Gabranth's second 30 fps run: 71 idle waits timed out). A brain left running with only its presses blocked still starts moves.
+  A run where over a quarter of the idle waits time out is retried; one where the character under test is not in the fight fails at once.
+- **Character swap and unusual model entries**: the player model entry is found by name (`P_<code>_1P`, costume 1, not an assist / manikin
+  type); Prishe's is type 16, not 0, and with the old type-0 test she was never swapped in (Squall's model loaded).
 - **The first seconds after the intro are not repeatable**: a first trial right after the fight starts gave 0 hits in one 30 fps run and
   19 in the next. Every run now starts with a 3 s settle (`mark SETTLE`); with it two 30 fps runs agree.
 - **Camera**: after `home` the 120 fps camera ends up on the other side (running forward goes +z instead of -z).
