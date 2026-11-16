@@ -443,4 +443,9 @@ Output: `DIR/summary.txt` (characters x rates), `DIR/<char>/report.txt` (every f
 - **The first seconds after the intro are not repeatable**: a first trial right after the fight starts gave 0 hits in one 30 fps run and
   19 in the next. Every run now starts with a 3 s settle (`mark SETTLE`); with it two 30 fps runs agree.
 - **Camera**: after `home` the 120 fps camera ends up on the other side (running forward goes +z instead of -z).
-- Whole-roster results: see the latest `summary.txt` of a full run (`~/dissidia/fpsparity/full1` on the test host).
+- **Whole roster, all eight rates (full4, 15-16 Nov, `~/dissidia/fpsparity/full4` on the test host, ~11 h with 6 games at once):** every
+  character fails at every rate above 30: 75 % of the trials at 60 fps, 80-81 % at 90-240 (1665 of 2054 at 120). At 120 fps the failing
+  trials show: player path off 1232, dummy path off 1072, player peak height 638, end of the move 636, dummy reaction order 612, dummy
+  peak height 570, hit count / timing ~600. All 31 characters fail jump, double jump and dodge, 30 air dodge; where the jump height
+  differs it is LOWER at 120 fps for every character (30 of 30, e.g. Warrior of Light 3.55 vs 3.77 m). Two 30 fps runs differ on 1-15 %
+  of a character's trials (Kefka 27 of 67, Squall 18 of 80, Onion Knight 15 of 48 are the noisiest; Prishe 1 of 136, Kain 1 of 52).
