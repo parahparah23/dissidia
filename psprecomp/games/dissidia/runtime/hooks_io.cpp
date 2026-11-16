@@ -271,9 +271,10 @@ void ensure_built(const std::string& host_info_path) {
     std::string dir = mods_dir();
     std::vector<std::string> extra = mod_roots();   // installed mod folders that are on, then the voice pack
     for (const std::string& r : extra) std::fprintf(stderr, "[MODS] mod folder on: %s\n", r.c_str());
+    std::string jp_dir;                             // the Japanese voice pack, when on and present
     if (voice_jp_on()) {
         const std::string vd = work_parent() + "/voice_jp";
-        if (is_dir(vd)) { extra.push_back(vd); std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
+        if (is_dir(vd)) { extra.push_back(vd); jp_dir = vd; std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
         else std::fprintf(stderr, "[VOICE] Japanese voice selected but %s does not exist (run tools/jp_audio.py): English voices\n", vd.c_str());
     }
     if (!is_dir(dir) && extra.empty() && !g_net_possible) {
@@ -295,7 +296,7 @@ void ensure_built(const std::string& host_info_path) {
     // ahead of both (voice_merge.h); without this the mod's English-based bank would win over voice_jp/
     std::string first = dir;
     std::vector<std::string> rest = extra;
-    if (voice_jp_on() && !extra.empty() && is_dir(dir + "/voice")) {
+    if (!jp_dir.empty() && is_dir(dir + "/voice")) {
         namespace fs = std::filesystem;
         const std::string merged = dir + "/.voice_jp_merged";
         int banks = 0;
@@ -311,7 +312,7 @@ void ensure_built(const std::string& host_info_path) {
                 b->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                 return true;
             };
-            if (!rd(extra[0] + "/" + rel, &jp) || !rd(it->path().string(), &mod)) continue;
+            if (!rd(jp_dir + "/" + rel, &jp) || !rd(it->path().string(), &mod)) continue;
             if (!dissidia::merge_voice_bank(jp, mod, &out, &added)) continue;
             fs::create_directories(fs::path(merged + "/" + rel).parent_path(), ec);
             std::ofstream o(merged + "/" + rel, std::ios::binary | std::ios::trunc);
