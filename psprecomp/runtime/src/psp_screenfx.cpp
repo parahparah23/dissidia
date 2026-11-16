@@ -45,10 +45,17 @@ bool psp_stage_keeps_geometry() {
     for (int s : k_drop_unseen_stages) if (s == id) return false;
     return true;
 }
-struct StageLook { int id; float dark; };
+struct StageLook { int id; float dark; bool no_sun; };   // no_sun: the sky light casts no shadows there (the stage is lit by its own lights)
 static const StageLook k_stage_looks[] = {
-    {1, 0.3f},   // Pandaemonium: enclosed, no light source (issue #4)
+    {1, 0.3f, false},   // Pandaemonium: enclosed, no light source (issue #4)
+    {9, 1.f, true},     // Crystal World: lit by its sky crystal and the glowing crystals
+    {15, 1.f, true},    // Empyreal Paradox: lit by the centre crystal and the glowing crystals
 };
+static bool stage_no_sun() {
+    const int id = psp_stage_id();
+    for (const StageLook& s : k_stage_looks) if (s.id == id) return s.no_sun;
+    return false;
+}
 static float stage_dark() {
     static const bool has_env = std::getenv("PSPRECOMP_STAGE_DARK") != nullptr;
     const int id = psp_stage_id();
@@ -178,14 +185,14 @@ static const StageLight k_builtin_stage8[] = {
     {{12.72f, 13.70f, -27.61f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
     {{-7.75f, 13.15f, -28.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
 };
-static const StageLight k_builtin_stage9[] = {
+static const StageLight k_builtin_stage9[] = {   // Crystal World
     {{0.38f, 13.53f, -40.27f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
 };
 static const StageLight k_builtin_stage10[] = {
     {{-16.32f, 35.87f, 99.65f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
     {{5.31f, -20.38f, 18.80f}, {1.00f, 0.90f, 0.80f}, 400.0f, 1.50f},
 };
-static const StageLight k_builtin_stage15[] = {
+static const StageLight k_builtin_stage15[] = {   // Empyreal Paradox
     {{0.08f, 3.98f, -0.18f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
 };
 static const StageLight k_builtin_stage18[] = {
@@ -215,6 +222,20 @@ static const std::vector<StageLight>* builtin_lights(int id) {
     const auto it = t.find(id);
     return it == t.end() ? nullptr : &it->second;
 }
+// Glowing pieces that ship with the game (marked in game with G); `glow` lines for a stage in stage_lights.txt replace them.
+static const std::vector<StageGlow>* builtin_glows(int id) {
+    static const std::map<int, std::vector<StageGlow>> t = {
+        {9, {   // Crystal World
+            {0x61edd277u, 0x0000011au, {1.00f, 0.74f, 0.62f}, 10.0f, 1.50f},
+        }},
+        {15, {   // Empyreal Paradox
+            {0x8466d0a3u, 0x0000011au, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+            {0xe22c8d4cu, 0x00000299u, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+        }},
+    };
+    const auto it = t.find(id);
+    return it == t.end() ? nullptr : &it->second;
+}
 // The stage's lights now (file entries, re-read about once a second when the file changed).
 static const std::vector<StageLight>& stage_lights(int id) {
     static const std::vector<StageLight> none;
@@ -240,13 +261,18 @@ static std::atomic<bool> g_light_nearest{false}, g_light_pickcol{false}, g_light
 static bool g_glow_wait = false, g_glow_have = false; static float g_glow_p[3], g_glow_dist; static uint32_t g_glow_hash, g_glow_vt;   // G pick (render thread)
 bool psp_stage_glow_pick_point(float* p) { if (!g_glow_wait) return false; if (p) std::memcpy(p, g_glow_p, sizeof g_glow_p); return true; }
 void psp_stage_glow_pick_result(uint32_t h, uint32_t vt, float dist) { if (!g_glow_wait) return; g_glow_wait = false; g_glow_have = true; g_glow_hash = h; g_glow_vt = vt; g_glow_dist = dist; }
-bool psp_stage_has_glow() { const int id = psp_stage_id(); auto it = g_glow_file.find(id); return id >= 0 && it != g_glow_file.end() && !it->second.empty(); }
-bool psp_stage_glow_find(uint32_t h, uint32_t vt, float* spec) {
-    const int id = psp_stage_id();
-    if (id < 0) return false;
+static const std::vector<StageGlow>* builtin_glows(int id);
+static const std::vector<StageGlow>* stage_glows(int id) {   // the file's glow lines for the stage, else the built-in ones
+    if (id < 0) return nullptr;
     auto it = g_glow_file.find(id);
-    if (it == g_glow_file.end()) return false;
-    for (const StageGlow& g : it->second) if (g.hash == h && g.vt == vt) { spec[0] = g.c[0]; spec[1] = g.c[1]; spec[2] = g.c[2]; spec[3] = g.radius; spec[4] = g.intensity; return true; }
+    if (it != g_glow_file.end() && !it->second.empty()) return &it->second;
+    return builtin_glows(id);
+}
+bool psp_stage_has_glow() { const std::vector<StageGlow>* G = stage_glows(psp_stage_id()); return G && !G->empty(); }
+bool psp_stage_glow_find(uint32_t h, uint32_t vt, float* spec) {
+    const std::vector<StageGlow>* G = stage_glows(psp_stage_id());
+    if (!G) return false;
+    for (const StageGlow& g : *G) if (g.hash == h && g.vt == vt) { spec[0] = g.c[0]; spec[1] = g.c[1]; spec[2] = g.c[2]; spec[3] = g.radius; spec[4] = g.intensity; return true; }
     return false;
 }
 // "Copy colour": the light service posts the selected light's position, the scene capture (psp_ge_draw.cpp, which owns the triangles) answers.
@@ -315,6 +341,7 @@ static void lights_service(int id, const float* v) {
         g_glow_have = false;
         if (g_light_sel < (int)L.size()) {
             std::vector<StageGlow>& G = g_glow_file[id];
+            if (G.empty()) if (const std::vector<StageGlow>* b = builtin_glows(id)) G = *b;   // edits start from the shipped marks
             auto it = std::find_if(G.begin(), G.end(), [&](const StageGlow& g) { return g.hash == g_glow_hash && g.vt == g_glow_vt; });
             if (it != G.end()) { G.erase(it); std::fprintf(stderr, "[LIGHT] stage %d: piece %08x/%x no longer glows (it was %.1f from light %d)\n", id, g_glow_hash, g_glow_vt, g_glow_dist, g_light_sel + 1); }
             else {
@@ -916,6 +943,7 @@ Prog g_main_p, g_blur_p, g_mul_p, g_refl_p, g_main_rt_p, g_main_rt_sky_p, g_env_
 const char* const k_rt_decl = R"GLSL(
 uniform accelerationStructureEXT u_tlas;
 uniform int u_use_rt;
+uniform int u_sun;           // 0: the sky light casts no shadows (stage_no_sun)
 uniform mat4 u_view_inv;    // view space -> PSP world space (where the triangles are)
 uniform vec3 u_light_w;     // world space, towards the light
 uniform float u_rt_len;     // ray length, world units
@@ -1144,6 +1172,7 @@ const char* const k_rt_lights = R"GLSL(
 )GLSL";
 const char* const k_rt_code = R"GLSL(
             if (u_use_rt != 0) {
+              if (u_sun != 0) {
                 vec3 Ow = (u_view_inv * vec4(O, 1.0)).xyz;
                 vec3 lw = u_light_w;
                 vec3 lu = normalize(abs(lw.y) < 0.99 ? cross(lw, vec3(0.0, 1.0, 0.0)) : cross(lw, vec3(1.0, 0.0, 0.0))), lv = cross(lw, lu);
@@ -1160,6 +1189,7 @@ const char* const k_rt_code = R"GLSL(
                     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) blocked += 1.0;
                 }
                 if (blocked > 0.0) sh = facing * fd * blocked / float(u_rt_rays);
+              }
             } else
 )GLSL";
 static int env_int_dbg() { const char* e = std::getenv("PSPRECOMP_RT_REFL_DEBUG"); return e ? (std::atoi(e) == 2 ? 2 : 1) : 0; }
@@ -1734,6 +1764,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     }
     if (use_rt) {
         glUniform1i(loc(mp.id, "u_use_rt"), use_rt_sh ? 1 : 0);
+        glUniform1i(loc(mp.id, "u_sun"), stage_no_sun() ? 0 : 1);
         glUniform1i(loc(mp.id, "u_use_rt_refl"), use_rt_refl ? 1 : 0);
         glUniform1i(loc(mp.id, "u_rt_dbg"), env_int_dbg());
         { const int q = psp_rt_refl_quality(); glUniform1i(loc(mp.id, "u_rt_refl_rays"), q >= 3 ? 3 : 1); }
