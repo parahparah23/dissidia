@@ -671,7 +671,10 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         else if (e.kind == 2) std::fprintf(stderr, "[TEST] gt=%.0f mark%s\n", g_gt_ms, e.text.c_str());
         else if (e.kind == 4) {
             const uint32_t a = test_fighter(e.b);
+            const float keep_step = rdf(FRAME_STEP);
+            if (l30_active()) wrf(FRAME_STEP, 2.0f);   // 30 Hz logic: the move starts with the gameplay step, as one started inside a gameplay update
             const int r = a ? dissidia_test_action(rdram, ctx, a, static_cast<int>(e.a)) : -2;
+            if (l30_active()) wrf(FRAME_STEP, keep_step);
             std::fprintf(stderr, "[TEST] gt=%.0f action %d on %08X (%s): %s\n", g_gt_ms, static_cast<int>(e.a), a, e.b == 1 ? "cpu" : "player",
                          r == 1 ? "started" : r == 0 ? "NOT started" : r == -1 ? "no such record" : "no such fighter");
         }
@@ -1035,6 +1038,29 @@ void note_negotiated_rate(int cap) {
     shown = cap;
 }
 
+
+// The global step (0x089D5EAC, what actors move by) is copied from the frame timer by the root task FUN_08864DD8, which runs near the end of a
+// frame (after the battle's tasks): what it computes is used by the NEXT frame, while the timer's own step (+0x18, read directly by the
+// battle code too) is the current frame's. With a constant step that does not matter; with a varying one (exact steps, 30 Hz logic) the two
+// disagreed by a frame (30 Hz logic: direct readers got 0 on the gameplay frame). While the task runs, the timer shows the NEXT frame's step.
+FuncPtr g_orig_global_step = nullptr;
+float next_frame_step() {
+    if (l30_active()) return (g_l30_frame + 1) % static_cast<uint64_t>(g_rate / 30) == 0 ? 2.0f : 0.0f;
+    if (g_rate > 60) return step_for(g_rate, g_step_idx + 1);
+    return -1.0f;   // constant step: leave it
+}
+void global_step_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t timer = r32(0x089D69E0u);
+    const float nx = ok(timer) && overlay_id() == 1 ? next_frame_step() : -1.0f;
+    if (nx < 0.0f) { g_orig_global_step(rdram, ctx); return; }
+    if (l30_active() && nx == 0.0f) { wrf(FRAME_STEP, 0.0f); return; }   // before a drawn-only frame: nothing moves, and the slow-motion clock (also
+                                                                          // advanced by this task) only runs on gameplay frames, as at 30 fps
+    const float cur = rdf(timer + 0x18u);
+    wrf(timer + 0x18u, nx);
+    g_orig_global_step(rdram, ctx);
+    wrf(timer + 0x18u, cur);
+}
+
 void task_dump_frame();
 void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t timer = static_cast<uint32_t>(ctx->r[4]);
@@ -1082,6 +1108,15 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     fighter_log_frame();
     task_dump_frame();
+    {   // PSPRECOMP_L30_PRIMLOG=<n> (diagnostic): GE prims per frame for n frames once 30 Hz logic runs ("G" gameplay frame, "d" drawn-only)
+        static int left = [] { const char* e = std::getenv("PSPRECOMP_L30_PRIMLOG"); return e ? std::atoi(e) : 0; }();
+        static int last = 0;
+        if (left > 0 && l30_active() && g_battle_age > 600.f) {
+            int prims = 0; ge_draw_get_stats(nullptr, &prims, nullptr, nullptr, nullptr);
+            std::fprintf(stderr, "[L30PRIM] %s %d\n", g_logic_step > 0.0f ? "G" : "d", prims - last);
+            last = prims; left--;
+        }
+    }
     combo_frame();
     if (g_battle_age > 420.f) g_ai_armed = true; else if (overlay_id() != 1) g_ai_armed = false;
     for (int i = 0; i < 4; i++) {
@@ -1094,10 +1129,9 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         g_l30_frame++;
         const uint64_t n = static_cast<uint64_t>(g_rate / 30);
         g_l30_logic_now = g_l30_frame % n == 0;
-        // the timer step written now is copied into the global step (0x089D5EAC) by FUN_08864DD8 during the NEXT frame, after the battle's
-        // tasks, so the frame after next is the one that moves by it
-        wrf(timer + 0x18u, (g_l30_frame + 1) % n == 0 ? 2.0f : 0.0f);
+        wrf(timer + 0x18u, g_l30_logic_now ? 2.0f : 0.0f);   // the coming frame's step (read directly by 85 battle sites); the global step follows via global_step_hook
     } else if (g_rate > 60 && ok(timer)) wrf(timer + 0x18u, step_for(g_rate, ++g_step_idx));   // the frame waited for one (short) vblank: dt = 60 / rate (exact steps above)
+
     if (g_log && ok(timer)) {
         const int64_t t = now_ms();
         if (!g_win_t0) g_win_t0 = t;
@@ -1474,9 +1508,31 @@ bool battle_scene_list(uint32_t list) {   // the battle scene's task list: the o
 void task_run_hook(uint8_t* rdram, recomp_context* ctx) {
     if (l30_active() && !g_l30_logic_now && ctx->r[5] == 1 && ctx->r[6] == 1 && battle_scene_list(static_cast<uint32_t>(ctx->r[4]))) {
         ctx->r[5] = 4; ctx->r[6] = 4;   // a drawn-only frame: the battle runs as if paused
-        // PSPRECOMP_L30_SKIP=<fn>,<fn>... (experiment): tasks also left out of drawn-only frames (their filter flags cleared for this pass)
-        static std::vector<uint32_t> skip = [] { std::vector<uint32_t> v; if (const char* e = std::getenv("PSPRECOMP_L30_SKIP"))
+        static const bool none = std::getenv("PSPRECOMP_L30_NONE") != nullptr;   // experiment: no battle task at all on drawn-only frames
+        if (none) return;
+        // PSPRECOMP_L30_KEEP=<fn>,<fn>... (experiment): on drawn-only frames ONLY these tasks run (every other one's filter flags cleared for this pass)
+        static std::vector<uint32_t> keep = [] { std::vector<uint32_t> v; if (const char* e = std::getenv("PSPRECOMP_L30_KEEP"))
             for (const char* q = e; *q;) { v.push_back(static_cast<uint32_t>(std::strtoul(q, nullptr, 16))); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; } return v; }();
+        if (!keep.empty()) {
+            std::vector<std::pair<uint32_t, uint32_t>> saved;
+            uint32_t t = r32(static_cast<uint32_t>(ctx->r[4]) + 4u);
+            for (int i = 0; i < 200 && ok(t); i++, t = r32(t + 52u)) {
+                bool k = false;
+                for (uint32_t f : keep) k |= r32(t) == f;
+                if (!k) { saved.push_back({t, r32(t + 40u)}); w32(t + 40u, 0u); }
+            }
+            g_orig_task_run(rdram, ctx);
+            for (auto& sv : saved) w32(sv.first + 40u, sv.second);
+            return;
+        }
+        // PSPRECOMP_L30_SKIP=<fn>,<fn>... (experiment): tasks also left out of drawn-only frames (their filter flags cleared for this pass)
+        // By default the tasks below are left out: they run while paused but change gameplay (a binary search with the parity tests found that
+        // with them a few hits / reactions differed from 30 fps) and none of them draws the battle scene (the scene is still drawn whole on every
+        // frame without them: 3,635 prims as on a gameplay frame). Most are flagged 0x27 / 0x2F (UI). PSPRECOMP_L30_SKIP replaces the list.
+        static std::vector<uint32_t> skip = [] { std::vector<uint32_t> v{0x088892C8u, 0x088CD704u, 0x088CCB18u, 0x088DE5ACu, 0x088D7028u, 0x088CE5F4u,
+                                                                         0x08ADFA74u, 0x08A229C8u, 0x08A22A18u, 0x08B01BC4u, 0x08B1DAB0u};
+            if (const char* e = std::getenv("PSPRECOMP_L30_SKIP")) { v.clear();
+            for (const char* q = e; *q;) { v.push_back(static_cast<uint32_t>(std::strtoul(q, nullptr, 16))); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; } } return v; }();
         if (!skip.empty()) {
             std::vector<std::pair<uint32_t, uint32_t>> saved;
             uint32_t t = r32(static_cast<uint32_t>(ctx->r[4]) + 4u);
@@ -2137,7 +2193,8 @@ float dissidia_frame_ticks() { return g_ticks; }
 namespace {
 bool l30_active() {
     static bool on = false;
-    const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && g_gt_started;   // EXPERIMENT: from the test clock on (the intro stalled with drawn-only frames)
+    static const bool from_clock = std::getenv("PSPRECOMP_L30_FROM_CLOCK") != nullptr;   // experiment: only from the test clock on
+    const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && (from_clock ? g_gt_started : battle_running());
     if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; }
     on = want || (on && g_logic30 && g_rate > 30 && overlay_id() == 1 && battle_running());
     return on;
@@ -2258,7 +2315,10 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* us = std::getenv("PSPRECOMP_UI_STEP"); us && us[0] == '0') g_ui_step = false;
     if ((g_orig_ui_param = psp_dispatch_probe_lookup(UI_PARAM_STEP))) psp_dispatch_register(UI_PARAM_STEP, ui_param_hook);
     else std::fprintf(stderr, "[FPS] UI step hook NOT installed (no function at %08X)\n", UI_PARAM_STEP);
-    if ((g_orig_slowmo = psp_dispatch_probe_lookup(SLOWMO_FRAME))) psp_dispatch_register(SLOWMO_FRAME, slowmo_frame_hook);
+    if ((g_orig_slowmo = psp_dispatch_probe_lookup(SLOWMO_FRAME))) {
+        psp_dispatch_register(SLOWMO_FRAME, global_step_hook);   // global_step_hook -> slowmo_frame_hook -> the game's FUN_08864DD8
+        g_orig_global_step = slowmo_frame_hook;
+    }
     else std::fprintf(stderr, "[FPS] slow-motion hook NOT installed (no function at %08X)\n", SLOWMO_FRAME);
     if (const char* sm = std::getenv("PSPRECOMP_STEER_MOVE"); !(sm && sm[0] == '0') && (g_orig_steer_move = ovl_battle_lookup(STEER_MOVE))) { psp_dispatch_register(STEER_MOVE, steer_move_hook); std::fprintf(stderr, "[FPS] steered-move hook installed\n"); }
     if (g_log && (g_orig_skel = psp_dispatch_probe_lookup(SKEL_BUILD))) psp_dispatch_register(SKEL_BUILD, skel_build_hook);
