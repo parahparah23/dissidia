@@ -2928,7 +2928,13 @@ static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int co
 // the effect's and whose reach / brightness follow its size (psp_screenfx.cpp adds them next to the stage lights). PSPRECOMP_FX_LIGHTS=0 turns them off.
 struct FxBlob { float lo[3], hi[3], rgb[3], area; };
 static std::vector<FxBlob> g_fx_blobs[GE_MAX_TARGETS];
-static bool fx_lights_on() { static const bool on = !(std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0'); return on; }
+static std::atomic<int> g_fx_lights{-1};   // -1: from PSPRECOMP_FX_LIGHTS (on unless 0); psp_fx_lights_set overrides (test scripts: A/B in one run)
+static bool fx_lights_on() {
+    int v = g_fx_lights.load();
+    if (v < 0) { v = (std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0') ? 0 : 1; g_fx_lights.store(v); }
+    return v != 0;
+}
+void psp_fx_lights_set(bool on) { g_fx_lights.store(on ? 1 : 0); std::fprintf(stderr, "[FXLIGHT] effect lights %s\n", on ? "on" : "off"); }
 static bool fx_additive(const GeState& st) {   // src x As (or 1) + dst x FIX with a bright FIX: the GE's additive glow
     const int dst = (st.blend_mode >> 4) & 0xF, op = (st.blend_mode >> 8) & 0x7;
     if (op != 0 || dst != 10) return false;
@@ -2986,9 +2992,9 @@ static int fx_blob_lights(int cur, float (*out)[9], int max) {
         Cand d;
         d.score = score;
         for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
-        d.l[6] = std::min(40.f, std::max(4.f, 4.f + 3.f * size)) * k_rad;                       // reach grows with the effect's size
+        d.l[6] = std::min(45.f, std::max(7.f, 7.f + 4.f * size)) * k_rad;                       // reach grows with the effect's size
         // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
-        d.l[7] = (1.2f + 0.4f * std::min(size, 3.f)) * std::min(1.f, std::max(0.3f, mx * 3.f)) * k_int;
+        d.l[7] = (2.5f + 1.f * std::min(size, 3.f)) * std::min(1.f, std::max(0.4f, mx * 3.f)) * k_int;
         d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
         cand.push_back(d);
     }

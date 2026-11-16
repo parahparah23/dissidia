@@ -40,6 +40,7 @@
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
 #include "psp_ge_draw.h"
+#include "psp_screenfx.h"
 #include <algorithm>
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -263,6 +264,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "scan") {   // scan <min drop> <max drop> <max value>: user RAM words that dropped by min..max since the last scan, and kept dropping (finds a stat the HUD shows)
             double lo = 150, hi = 400, mx = 2000; ss >> lo >> hi >> mx;
             ev.push_back({t, 14, static_cast<uint32_t>(lo), static_cast<uint32_t>(hi), std::to_string(static_cast<int>(mx)), rel});
+        } else if (cmd == "fxlights") {   // fxlights <0|1>: lights from glowing effects off / on (psp_fx_lights_set), for an A/B of the same trial in one run
+            int v = 1; ss >> v;
+            ev.push_back({t, 16, static_cast<uint32_t>(v), 0, "", rel});
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
@@ -551,6 +555,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             g_wait_kind = e.kind; g_wait_scr = cur_scr; g_wait_since = g_gt_ms; g_wait_timeout = e.b; g_wait_target = static_cast<int>(e.a);
             continue;
         }
+        if (e.kind == 16) { psp_fx_lights_set(e.a != 0); continue; }
         if (e.kind == 15) {
             const uint32_t a = test_fighter(e.text == "cpu" ? 1u : 0u);
             if (a) { w32(a + e.a, e.b); std::fprintf(stderr, "[TEST] gt=%.0f poke %s +%X = %d\n", g_gt_ms, e.text.c_str(), e.a, static_cast<int>(e.b)); }

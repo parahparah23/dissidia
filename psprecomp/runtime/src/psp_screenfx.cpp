@@ -896,6 +896,8 @@ uniform vec4 u_lc[24];
 uniform vec4 u_lvp[24];     // the same lights in view space (markers)
 uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
+uniform int u_fx0;          // lights from u_fx0 on are effect lights (linear falloff)
+uniform int u_fx_split;     // debug: effect lights only on the left half of the screen
 uniform int u_mark0;        // markers for lights [u_mark0, u_mark1) (the stage's own, not EX cores / effects)
 uniform int u_mark1;
 //@SKY_DECL
@@ -1078,7 +1080,8 @@ const char* const k_rt_lights = R"GLSL(
             if (dist >= rad || dist < 1e-3) continue;
             vec3 L = d / dist;
             float ndl = max(dot(nw, L), 0.0);
-            float x = 1.0 - dist / rad, att = x * x;
+            if (li >= u_fx0 && u_fx_split != 0 && v_uv.x > 0.5) continue;
+            float x = 1.0 - dist / rad, att = li >= u_fx0 ? x : x * x;   // an attack's flash carries further than a lamp's pool
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
             rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
@@ -1706,6 +1709,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
         static const bool mark_all = std::getenv("PSPRECOMP_FX_LIGHT_MARK") != nullptr;   // debug: markers on every light (EX cores, effects too)
         glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() || mark_all ? 1 : 0);
+        { static const bool split = std::getenv("PSPRECOMP_FX_LIGHT_SPLIT") != nullptr; glUniform1i(loc(mp.id, "u_fx0"), g_light_end); glUniform1i(loc(mp.id, "u_fx_split"), split ? 1 : 0); }
         glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), mark_all ? 0 : g_light_first); glUniform1i(loc(mp.id, "u_mark1"), mark_all ? 64 : g_light_end);   // (the Vulkan GL layer has no glUniform2i)
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
