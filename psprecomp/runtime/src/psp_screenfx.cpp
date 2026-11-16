@@ -64,8 +64,8 @@ static float stage_dark() {
 //   stage <id>
 //   light <x> <y> <z> <r> <g> <b> <radius> <intensity>
 // In game: F6 drops a light at the camera + forward * distance (PageUp / PageDown change the distance), F7 removes the stage's last light.
-struct StageLight { float p[3], c[3], radius, intensity; };
-static const int kMaxLights = 16;
+struct StageLight { float p[3], c[3], radius, intensity; float clear = 0.f; };   // clear: the shadow ray stops this far short of the light (a pickup must not shadow itself)
+static const int kMaxLights = 24;
 static std::map<int, std::vector<StageLight>> g_light_file;   // from the file (overrides the built-in table of a stage)
 static std::atomic<int> g_light_req{0};                       // 1 drop, 2 remove the selected light (set by the event loop)
 static std::atomic<int> g_light_dist10{80};                   // placement distance x10
@@ -73,6 +73,7 @@ static std::atomic<bool> g_light_edit{std::getenv("PSPRECOMP_LIGHT_EDIT") != nul
 static std::atomic<unsigned> g_light_keys{0};                 // held keys, bit = PSP_LIGHT_LEFT..INT_UP, FAST
 static std::atomic<int> g_light_nav{0};                       // pending select prev (-1) / next (+1)
 static int g_light_sel = 0;
+static int g_light_first = 0, g_light_end = 0;   // this frame: the stage's own lights are [first, end) of the lights sent to the shader
 static bool g_light_dirty = false;
 static double g_light_last_change = 0;
 static long g_light_mtime = -1;
@@ -111,6 +112,7 @@ static void lights_save_file() {
         "#   In edit mode (hold Shift for 4x speed):\n"
         "#     J / L  left / right     I / K  forward / back     U / O  down / up      (camera relative, kept level)\n"
         "#     , / .  radius - / +     - / =  intensity - / +     [ / ]  select previous / next light     P  select the light closest to the player\n"
+        "#     T  copy the colour of the surface the selected light is touching (the nearest scene triangle's texture colour, brightened to full)\n"
         "#   The same edit mode can be switched on in Settings > Debug > Light Editor.\n"
         "#\n", f);
     for (const auto& kv : g_light_file) {
@@ -130,10 +132,75 @@ static const StageLight k_builtin_stage1[] = {   // Pandaemonium
     {{-3.92f, 11.06f, -57.27f}, {1.00f, 0.40f, 0.90f}, 37.9f, 1.50f},
     {{3.55f, 2.28f, -28.05f}, {0.40f, 0.37f, 0.50f}, 24.6f, 1.50f},
     {{11.13f, 11.19f, -39.38f}, {1.00f, 0.40f, 0.90f}, 31.4f, 1.50f},
+    {{-35.60f, 15.58f, -24.77f}, {1.00f, 0.40f, 0.90f}, 80.0f, 1.50f},
+};
+static const StageLight k_builtin_stage6[] = {
+    {{-14.06f, 32.84f, 27.00f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-27.17f, 32.80f, -6.11f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-5.98f, 32.84f, -27.06f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-4.01f, 33.02f, -4.01f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{22.00f, 33.29f, -18.92f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{26.99f, 33.06f, 6.05f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{3.91f, 33.02f, 11.04f}, {1.00f, 0.90f, 0.80f}, 20.0f, 3.50f},
+    {{-10.23f, 20.00f, 15.83f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{-7.83f, 12.26f, 6.04f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{-18.10f, 33.48f, -23.64f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+    {{22.13f, 33.51f, 15.79f}, {1.00f, 0.90f, 0.80f}, 40.0f, 1.50f},
+};
+static const StageLight k_builtin_stage7[] = {
+    {{0.07f, -34.00f, 0.16f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-0.25f, -34.00f, -10.90f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-4.32f, -34.00f, 13.91f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{-14.08f, -34.00f, -1.08f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+    {{15.12f, -34.00f, 2.17f}, {0.43f, 1.00f, 0.81f}, 800.0f, 1.50f},
+};
+static const StageLight k_builtin_stage8[] = {
+    {{-1.92f, 27.64f, -0.09f}, {0.40f, 0.37f, 0.50f}, 40.0f, 1.50f},
+    {{-6.20f, -27.65f, 5.32f}, {0.40f, 0.37f, 0.50f}, 20.0f, 1.50f},
+    {{10.16f, -27.67f, -6.74f}, {0.40f, 0.37f, 0.50f}, 20.0f, 1.50f},
+    {{0.36f, -8.52f, -25.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-12.43f, -14.58f, -24.60f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{8.70f, -13.46f, -23.94f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-1.32f, 19.93f, -26.13f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{12.72f, 13.70f, -27.61f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+    {{-7.75f, 13.15f, -28.84f}, {1.00f, 0.90f, 0.80f}, 100.0f, 1.50f},
+};
+static const StageLight k_builtin_stage9[] = {
+    {{0.38f, 13.53f, -40.27f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+};
+static const StageLight k_builtin_stage10[] = {
+    {{-16.32f, 35.87f, 99.65f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+    {{5.31f, -20.38f, 18.80f}, {1.00f, 0.90f, 0.80f}, 400.0f, 1.50f},
+};
+static const StageLight k_builtin_stage15[] = {
+    {{0.08f, 3.98f, -0.18f}, {1.00f, 0.90f, 0.80f}, 200.0f, 1.50f},
+};
+static const StageLight k_builtin_stage18[] = {
+    {{19.98f, 7.62f, -19.23f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.03f, 7.60f, -15.87f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.95f, 7.83f, -12.37f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.02f, 7.89f, -8.88f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.98f, 7.68f, -5.32f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.99f, 7.74f, -1.58f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.97f, 7.87f, 1.61f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.00f, 7.80f, 5.06f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.00f, 7.72f, 8.67f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{19.93f, 7.79f, 12.15f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
+    {{20.01f, 7.75f, 15.66f}, {1.00f, 0.90f, 0.80f}, 14.0f, 1.50f},
 };
 static const std::vector<StageLight>* builtin_lights(int id) {
-    static const std::vector<StageLight> s1(std::begin(k_builtin_stage1), std::end(k_builtin_stage1));
-    return id == 1 ? &s1 : nullptr;
+    static const std::map<int, std::vector<StageLight>> t = {
+        {1, std::vector<StageLight>(std::begin(k_builtin_stage1), std::end(k_builtin_stage1))},
+        {6, std::vector<StageLight>(std::begin(k_builtin_stage6), std::end(k_builtin_stage6))},
+        {7, std::vector<StageLight>(std::begin(k_builtin_stage7), std::end(k_builtin_stage7))},
+        {8, std::vector<StageLight>(std::begin(k_builtin_stage8), std::end(k_builtin_stage8))},
+        {9, std::vector<StageLight>(std::begin(k_builtin_stage9), std::end(k_builtin_stage9))},
+        {10, std::vector<StageLight>(std::begin(k_builtin_stage10), std::end(k_builtin_stage10))},
+        {15, std::vector<StageLight>(std::begin(k_builtin_stage15), std::end(k_builtin_stage15))},
+        {18, std::vector<StageLight>(std::begin(k_builtin_stage18), std::end(k_builtin_stage18))},
+    };
+    const auto it = t.find(id);
+    return it == t.end() ? nullptr : &it->second;
 }
 // The stage's lights now (file entries, re-read about once a second when the file changed).
 static const std::vector<StageLight>& stage_lights(int id) {
@@ -150,10 +217,17 @@ static const std::vector<StageLight>& stage_lights(int id) {
     return b ? *b : none;
 }
 static bool (*g_player_pos_fn)(float*) = nullptr;
+static int (*g_pickup_fn)(float (*)[3], int) = nullptr;
+void psp_set_pickup_lights_provider(int (*fn)(float (*)[3], int)) { g_pickup_fn = fn; }
 void psp_set_player_pos_provider(bool (*fn)(float*)) { g_player_pos_fn = fn; }
+bool psp_player_pos(float* p) { return g_player_pos_fn && g_player_pos_fn(p); }
 bool psp_stage_light_edit_get() { return g_light_edit.load(); }
 void psp_stage_light_edit_set(bool on) { g_light_edit.store(on); std::fprintf(stderr, "[LIGHT] edit mode %s\n", on ? "ON" : "off"); }
-static std::atomic<bool> g_light_nearest{false};
+static std::atomic<bool> g_light_nearest{false}, g_light_pickcol{false};
+// "Copy colour": the light service posts the selected light's position, the scene capture (psp_ge_draw.cpp, which owns the triangles) answers.
+static bool g_pick_wait = false, g_pick_have = false; static float g_pick_p[3], g_pick_rgb[3], g_pick_dist;
+bool psp_stage_light_pick_request(float* p) { if (!g_pick_wait) return false; g_pick_wait = false; std::memcpy(p, g_pick_p, sizeof g_pick_p); return true; }
+void psp_stage_light_pick_result(const float* rgb, float dist) { std::memcpy(g_pick_rgb, rgb, sizeof g_pick_rgb); g_pick_dist = dist; g_pick_have = true; }
 bool psp_stage_light_input(int what, bool down) {
     if (what == PSP_LIGHT_TOGGLE_EDIT) { if (down) { const bool v = !g_light_edit.load(); g_light_edit.store(v); std::fprintf(stderr, "[LIGHT] edit mode %s\n", v ? "ON" : "off"); } return true; }
     if (what == PSP_LIGHT_DROP) { if (down) { g_light_req.store(1); g_light_edit.store(true); } return true; }
@@ -165,6 +239,7 @@ bool psp_stage_light_input(int what, bool down) {
     if (what == PSP_LIGHT_FAST) { if (down) g_light_keys.fetch_or(1u << 31); else g_light_keys.fetch_and(~(1u << 31)); return false; }
     if (!g_light_edit.load()) return false;                    // the other keys only act in edit mode
     if (what == PSP_LIGHT_NEAREST) { if (down) g_light_nearest.store(true); return true; }
+    if (what == PSP_LIGHT_COPY_COLOR) { if (down) g_light_pickcol.store(true); return true; }
     if (what == PSP_LIGHT_PREV || what == PSP_LIGHT_NEXT) { if (down) g_light_nav.store(what == PSP_LIGHT_NEXT ? 1 : -1); return true; }
     if (what >= PSP_LIGHT_LEFT && what <= PSP_LIGHT_INT_UP) { if (down) g_light_keys.fetch_or(1u << what); else g_light_keys.fetch_and(~(1u << what)); return true; }
     return false;
@@ -202,6 +277,23 @@ static void lights_service(int id, const float* v) {
             std::fprintf(stderr, "[LIGHT] selected light %d of %d, the closest to the player (%.1f away)\n", best + 1, (int)L.size(), std::sqrt(bd));
         } else std::fprintf(stderr, "[LIGHT] no player position available\n");
     }
+    if (g_light_pickcol.exchange(false) && !L.empty()) {
+        g_light_sel = std::min(g_light_sel, (int)L.size() - 1);
+        std::memcpy(g_pick_p, L[g_light_sel].p, sizeof g_pick_p); g_pick_wait = true; g_pick_have = false;
+    }
+    if (g_pick_have) {
+        g_pick_have = false;
+        if (g_light_sel < (int)L.size()) {
+            StageLight& l = L[g_light_sel];
+            float mx = std::max(g_pick_rgb[0], std::max(g_pick_rgb[1], g_pick_rgb[2]));
+            if (mx < 0.02f) { std::fprintf(stderr, "[LIGHT] light %d: the surface %.1f away is black, colour kept\n", g_light_sel + 1, g_pick_dist); }
+            else {
+                for (int c = 0; c < 3; ++c) l.c[c] = g_pick_rgb[c] / mx;   // hue only: brightness is the intensity's job
+                g_light_dirty = true; g_light_last_change = now;
+                std::fprintf(stderr, "[LIGHT] light %d: colour %.2f %.2f %.2f copied from the surface %.1f away\n", g_light_sel + 1, l.c[0], l.c[1], l.c[2], g_pick_dist);
+            }
+        }
+    }
     if (const int nav = g_light_nav.exchange(0); nav && !L.empty()) { g_light_sel = (g_light_sel + nav + (int)L.size()) % (int)L.size(); std::fprintf(stderr, "[LIGHT] selected light %d of %d\n", g_light_sel + 1, (int)L.size()); }
     if (g_light_edit.load() && !L.empty() && dt > 0.f) {
         g_light_sel = std::min(g_light_sel, (int)L.size() - 1);
@@ -218,7 +310,7 @@ static void lights_service(int id, const float* v) {
         const float dr = (float(held(PSP_LIGHT_RAD_UP)) - float(held(PSP_LIGHT_RAD_DOWN))) * 6.f * dt, di = (float(held(PSP_LIGHT_INT_UP)) - float(held(PSP_LIGHT_INT_DOWN))) * 1.5f * dt;
         if (mv[0] != 0.f || mv[1] != 0.f || mv[2] != 0.f || dr != 0.f || di != 0.f) {
             for (int c = 0; c < 3; ++c) l.p[c] += mv[c];
-            l.radius = std::min(80.f, std::max(1.f, l.radius + dr)); l.intensity = std::min(20.f, std::max(0.f, l.intensity + di));
+            l.radius = std::min(1000.f, std::max(1.f, l.radius + dr)); l.intensity = std::min(20.f, std::max(0.f, l.intensity + di));
             g_light_dirty = true; g_light_last_change = now;
         }
     }
@@ -799,11 +891,16 @@ uniform int u_refl_split;   // debug (PSPRECOMP_RT_REFL_SPLIT=1): the left half 
 uniform float u_rt_refl_len; // reflection ray length, world units
 uniform vec3 u_rt_sky;      // what a reflection ray that hits nothing shows when the sky is off screen
 uniform int u_n_lights;     // stage point lights (world space xyz + radius; colour x intensity)
-uniform vec4 u_lp[16];
-uniform vec4 u_lc[16];
-uniform vec4 u_lvp[16];     // the same lights in view space (markers)
+uniform vec4 u_lp[24];
+uniform vec4 u_lc[24];
+uniform vec4 u_lvp[24];     // the same lights in view space (markers)
 uniform int u_edit;         // light edit mode: draw a marker at each light
 uniform int u_sel;          // the selected light
+uniform int u_fx0;          // lights from u_fx0 on are effect lights (linear falloff)
+uniform int u_fx_split;     // debug: effect lights only on the left half of the screen
+uniform float u_fx_alb;     // the least albedo an effect light sees
+uniform int u_mark0;        // markers for lights [u_mark0, u_mark1) (the stage's own, not EX cores / effects)
+uniform int u_mark1;
 //@SKY_DECL
 uniform int u_env_on;
 // The sky seen in world direction d. A direction never on screen yet (overhead, behind the camera) falls back to the same
@@ -961,7 +1058,7 @@ const char* const k_rt_mark = R"GLSL(
         vec4 q = u_inv * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
         vec3 dir = normalize(q.xyz / q.w);
         float surf = is_far(wd) ? 1e9 : length(vpos(v_uv, wd));
-        for (int li = 0; li < u_n_lights; ++li) {
+        for (int li = u_mark0; li < min(u_mark1, u_n_lights); ++li) {
             vec3 Lv = u_lvp[li].xyz;
             float t = dot(Lv, dir);
             if (t <= 0.0) continue;
@@ -977,22 +1074,27 @@ const char* const k_rt_lights = R"GLSL(
     if (u_n_lights > 0 && u_use_rt != 0) {
         vec3 Pw = (u_view_inv * vec4(P, 1.0)).xyz;
         vec3 nw = normalize((u_view_inv * vec4(n, 0.0)).xyz);
-        vec3 acc = vec3(0.0);
+        vec3 acc = vec3(0.0), acc_fx = vec3(0.0);
         for (int li = 0; li < u_n_lights; ++li) {
             vec3 d = u_lp[li].xyz - Pw;
             float dist = length(d), rad = u_lp[li].w;
             if (dist >= rad || dist < 1e-3) continue;
             vec3 L = d / dist;
             float ndl = max(dot(nw, L), 0.0);
-            float x = 1.0 - dist / rad, att = x * x;
+            if (li >= u_fx0 && u_fx_split != 0 && v_uv.x > 0.5) continue;
+            float x = 1.0 - dist / rad, att = li >= u_fx0 ? x : x * x;   // an attack's flash carries further than a lamp's pool
+            if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
-            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, dist - 0.1);
+            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
             while (rayQueryProceedEXT(rl)) {}
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
-            acc += u_lc[li].rgb * (ndl * att);
+            if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
         }
-        o_refl.rgb += texture(u_color, v_uv).rgb * acc * fd * u_lscale;
+        vec3 alb = texture(u_color, v_uv).rgb;
+        // an attack's flash lights dark surfaces too (the scene colour is the albedo here, and a dark floor took almost nothing): effect lights
+        // see at least u_fx_alb
+        o_refl.rgb += (alb * acc + max(alb, vec3(u_fx_alb)) * acc_fx) * fd * u_lscale;
     }
     o_refl.rgb += mk * u_lscale;
 )GLSL";
@@ -1371,10 +1473,24 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     if (sc.rt_ready && cs > 0 && psp_rt_enabled()) {   // stage lights need the ray-traced scene for their shadows
         const int sid = psp_stage_id();
         lights_service(sid, sc.view);
-        for (const StageLight& l : stage_lights(sid)) {
+        std::vector<StageLight> all;
+        if (g_pickup_fn) {   // pickups that glow (the game module's EX cores): a warm light each, first so the stage's own lights cannot crowd them out
+            static const float pc[5] = {env_float("PSPRECOMP_PICKUP_R", 0.35f), env_float("PSPRECOMP_PICKUP_G", 0.75f), env_float("PSPRECOMP_PICKUP_B", 1.0f),
+                                        env_float("PSPRECOMP_PICKUP_RADIUS", 22.f), env_float("PSPRECOMP_PICKUP_INTENSITY", 1.5f)};
+            float P[4][3]; const int n = g_pickup_fn(P, 4);
+            for (int i = 0; i < n; ++i) all.push_back({{P[i][0], P[i][1], P[i][2]}, {pc[0], pc[1], pc[2]}, pc[3], pc[4], env_float("PSPRECOMP_PICKUP_CLEAR", 2.5f)});
+        }
+        g_light_first = (int)all.size();   // the editor's markers / selection start at the stage's own lights
+        for (const StageLight& l : stage_lights(sid)) all.push_back(l);
+        g_light_end = (int)all.size();
+        for (int i = 0; i < sc.n_fx_lights; ++i) {   // glowing effects (attacks) fill the slots left: their colour, reach / brightness from their size
+            const float* f = sc.fx_lights[i];
+            all.push_back({{f[0], f[1], f[2]}, {f[3], f[4], f[5]}, f[6], f[7], f[8]});
+        }
+        for (const StageLight& l : all) {
             if (n_lights >= kMaxLights) break;
             for (int k = 0; k < 3; ++k) { lp4[n_lights * 4 + k] = l.p[k]; lc4[n_lights * 4 + k] = l.c[k] * l.intensity; }
-            lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = 0.f;
+            lp4[n_lights * 4 + 3] = l.radius; lc4[n_lights * 4 + 3] = l.clear;
             for (int k = 0; k < 3; ++k) lv4[n_lights * 4 + k] = sc.view[k] * l.p[0] + sc.view[3 + k] * l.p[1] + sc.view[6 + k] * l.p[2] + sc.view[9 + k];
             lv4[n_lights * 4 + 3] = 1.f;
             ++n_lights;
@@ -1596,8 +1712,10 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);
         if (n_lights) { glUniform4fv(loc(mp.id, "u_lp"), n_lights, lp4); glUniform4fv(loc(mp.id, "u_lc"), n_lights, lc4); glUniform4fv(loc(mp.id, "u_lvp"), n_lights, lv4); }
         glUniform1f(loc(mp.id, "u_lscale"), 1.f / std::max(0.05f, dark));
-        glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() ? 1 : 0);
-        glUniform1i(loc(mp.id, "u_sel"), g_light_sel);
+        static const bool mark_all = std::getenv("PSPRECOMP_FX_LIGHT_MARK") != nullptr;   // debug: markers on every light (EX cores, effects too)
+        glUniform1i(loc(mp.id, "u_edit"), g_light_edit.load() || mark_all ? 1 : 0);
+        { static const bool split = std::getenv("PSPRECOMP_FX_LIGHT_SPLIT") != nullptr; glUniform1i(loc(mp.id, "u_fx0"), g_light_end); glUniform1i(loc(mp.id, "u_fx_split"), split ? 1 : 0); glUniform1f(loc(mp.id, "u_fx_alb"), env_float("PSPRECOMP_FX_LIGHT_MIN_ALBEDO", 0.15f)); }
+        glUniform1i(loc(mp.id, "u_sel"), g_light_sel + g_light_first); glUniform1i(loc(mp.id, "u_mark0"), mark_all ? 0 : g_light_first); glUniform1i(loc(mp.id, "u_mark1"), mark_all ? 64 : g_light_end);   // (the Vulkan GL layer has no glUniform2i)
     }
     glDrawArrays(GL_TRIANGLES, 0, 3);
     ts_mark(2);

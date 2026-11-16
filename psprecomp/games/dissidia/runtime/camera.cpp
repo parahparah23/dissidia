@@ -383,15 +383,15 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
 
 }  // namespace
 
-bool dissidia_player_pos(float* P) { return pl_pos(P); }   // for the stage light editor (runtime/src/psp_screenfx.cpp)
+bool dissidia_player_pos(float* P) { return g_ram && pl_pos(P); }   // stage light editor / effect-light log (psp_screenfx.cpp); g_ram is only set once the camera hooks run (not with PSPRECOMP_CAM_FREE=0)
 
 void dissidia_camera_install(uint8_t* rdram) {
     const char* e = std::getenv("PSPRECOMP_HITCAM");
     g_cine_on = !(e && e[0] == '0');
     e = std::getenv("PSPRECOMP_CAM_FREE");
     g_free = !(e && e[0] == '0');
+    g_ram = rdram;   // also for dissidia_player_pos with the analogue camera off
     if (!g_free) { std::fprintf(stderr, "[CAM] analogue camera disabled (PSPRECOMP_CAM_FREE=0)\n"); return; }
-    g_ram = rdram;
     if ((e = std::getenv("PSPRECOMP_CAM_SENS"))) g_sens = static_cast<float>(std::atof(e));
     g_invert = (e = std::getenv("PSPRECOMP_CAM_INVERT_Y")) && e[0] && e[0] != '0';
     if ((e = std::getenv("PSPRECOMP_CAM_PITCH_MIN"))) g_pitch_min = static_cast<float>(std::atof(e));

@@ -2923,6 +2923,164 @@ static void rml_capture(const GeState& st, uint8_t* rdram, int prim_type, int co
     }
 }
 
+// Effect lights (issue #4): glowing (additive) effect draws light the scene. Each such draw is summarised as a blob (world bbox,
+// area-weighted colour x coverage); at the end of the scene nearby blobs are merged and the brightest become point lights whose colour is
+// the effect's and whose reach / brightness follow its size (psp_screenfx.cpp adds them next to the stage lights). PSPRECOMP_FX_LIGHTS=0 turns them off.
+struct FxBlob { float lo[3], hi[3], rgb[3], area; };
+static std::vector<FxBlob> g_fx_blobs[GE_MAX_TARGETS];
+static int g_fx_n_steady[GE_MAX_TARGETS], g_fx_n_nonadd[GE_MAX_TARGETS], g_fx_n_static[GE_MAX_TARGETS];   // this scene: draws left out (the effect-light log)
+static std::atomic<int> g_fx_lights{-1};   // -1: from PSPRECOMP_FX_LIGHTS (on unless 0); psp_fx_lights_set overrides (test scripts: A/B in one run)
+static bool fx_lights_on() {
+    int v = g_fx_lights.load();
+    if (v < 0) { v = (std::getenv("PSPRECOMP_FX_LIGHTS") && std::getenv("PSPRECOMP_FX_LIGHTS")[0] == '0') ? 0 : 1; g_fx_lights.store(v); }
+    return v != 0;
+}
+// Brightness / reach multipliers of the effect lights (Settings > Debug rows, saved as env.FX_LIGHT_INTENSITY / _RADIUS = PSPRECOMP_FX_LIGHT_*)
+static std::atomic<float> g_fx_scale[2] = {{-1.f}, {-1.f}};
+float psp_fx_light_scale(int which) {
+    which = which ? 1 : 0;
+    float v = g_fx_scale[which].load();
+    if (v < 0.f) { const char* e = std::getenv(which ? "PSPRECOMP_FX_LIGHT_RADIUS" : "PSPRECOMP_FX_LIGHT_INTENSITY"); v = e && e[0] ? std::max(0.f, (float)std::atof(e)) : (which ? 1.5f : 2.5f); g_fx_scale[which].store(v); }   // defaults picked in game
+    return v;
+}
+void psp_fx_light_set_scale(int which, float v) { g_fx_scale[which ? 1 : 0].store(std::max(0.f, v)); }
+void psp_fx_lights_set(bool on) { g_fx_lights.store(on ? 1 : 0); std::fprintf(stderr, "[FXLIGHT] effect lights %s\n", on ? "on" : "off"); }
+static bool fx_additive(const GeState& st) {   // src x As (or 1) + dst x FIX with a bright FIX: the GE's additive glow
+    const int dst = (st.blend_mode >> 4) & 0xF, op = (st.blend_mode >> 8) & 0x7;
+    if (op != 0 || dst != 10) return false;
+    const uint32_t fb = st.blend_fix_b & 0xFFFFFFu;
+    return (fb & 0xFF) >= 0x80 && ((fb >> 8) & 0xFF) >= 0x80 && ((fb >> 16) & 0xFF) >= 0x80;
+}
+static void fx_blob_note(int cur, size_t t0, size_t c0) {
+    const std::vector<float>& T = g_rt_fx_tris[cur]; const std::vector<uint32_t>& C = g_rt_fx_cols[cur];
+    FxBlob b = {{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}, {0, 0, 0}, 0};
+    for (size_t k = t0, ci = c0; k + 9 <= T.size() && ci < C.size(); k += 9, ++ci) {
+        const float* v = &T[k];
+        for (int q = 0; q < 3; ++q) for (int a = 0; a < 3; ++a) { b.lo[a] = std::min(b.lo[a], v[q * 3 + a]); b.hi[a] = std::max(b.hi[a], v[q * 3 + a]); }
+        const float e1[3] = {v[3] - v[0], v[4] - v[1], v[5] - v[2]}, e2[3] = {v[6] - v[0], v[7] - v[1], v[8] - v[2]};
+        const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+        const float ar = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+        const uint32_t c = C[ci]; const float al = float(c >> 24) / 255.f;
+        for (int a = 0; a < 3; ++a) b.rgb[a] += float((c >> (8 * a)) & 255) / 255.f * al * ar;
+        b.area += ar;
+    }
+    if (b.area <= 1e-6f) return;
+    for (float& x : b.rgb) x /= b.area;
+    g_fx_blobs[cur].push_back(b);
+}
+// Merge the scene's blobs (overlapping / near ones are one effect) and turn the brightest into lights: {x y z r g b radius intensity clear}.
+static int fx_blob_lights(int cur, float (*out)[9], int max) {
+    std::vector<FxBlob>& B = g_fx_blobs[cur];
+    struct Cl { float lo[3], hi[3], rgb[3], area, peak; };   // peak: the brightest blob (a big soft halo must not dim the core)
+    std::vector<Cl> cl;
+    static const float max_ext = 40.f;
+    int n_big = 0, n_dim = 0; float big_ext = 0.f;
+    for (const FxBlob& b : B) {
+        const float ext = 0.5f * std::sqrt((b.hi[0] - b.lo[0]) * (b.hi[0] - b.lo[0]) + (b.hi[1] - b.lo[1]) * (b.hi[1] - b.lo[1]) + (b.hi[2] - b.lo[2]) * (b.hi[2] - b.lo[2]));
+        if (ext > max_ext) { ++n_big; big_ext = std::max(big_ext, ext); continue; }   // a screen-sized haze / flash card, not a light
+        Cl* hit = nullptr;
+        for (Cl& c : cl) {   // overlapping boxes (grown by 1 unit) are the same effect
+            bool ov = true;
+            for (int a = 0; a < 3; ++a) ov = ov && b.lo[a] <= c.hi[a] + 1.f && b.hi[a] >= c.lo[a] - 1.f;
+            if (ov) { hit = &c; break; }
+        }
+        const float bpk = std::max(b.rgb[0], std::max(b.rgb[1], b.rgb[2]));
+        if (!hit) { cl.push_back({{b.lo[0], b.lo[1], b.lo[2]}, {b.hi[0], b.hi[1], b.hi[2]}, {b.rgb[0] * b.area, b.rgb[1] * b.area, b.rgb[2] * b.area}, b.area, bpk}); continue; }
+        hit->peak = std::max(hit->peak, bpk);
+        for (int a = 0; a < 3; ++a) { hit->lo[a] = std::min(hit->lo[a], b.lo[a]); hit->hi[a] = std::max(hit->hi[a], b.hi[a]); hit->rgb[a] += b.rgb[a] * b.area; }
+        hit->area += b.area;
+    }
+    const float k_rad = psp_fx_light_scale(1), k_int = psp_fx_light_scale(0);
+    struct Cand { float score; float l[9]; };
+    std::vector<Cand> cand;
+    for (const Cl& c : cl) {
+        float rgb[3] = {c.rgb[0] / c.area, c.rgb[1] / c.area, c.rgb[2] / c.area};
+        const float avg = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+        if (avg < 1e-4f) { ++n_dim; continue; }
+        const float mx = c.peak;   // brightness of the brightest part; the colour stays the area average (normalised below)
+        for (float& x : rgb) x *= mx / avg;
+        if (mx < 0.03f) { ++n_dim; continue; }
+        const float ext = 0.5f * std::sqrt((c.hi[0] - c.lo[0]) * (c.hi[0] - c.lo[0]) + (c.hi[1] - c.lo[1]) * (c.hi[1] - c.lo[1]) + (c.hi[2] - c.lo[2]) * (c.hi[2] - c.lo[2]));
+        const float size = std::sqrt(c.area) * 0.5f;   // from the glowing area itself: touching pieces chain into a wide box (a trail, scattered sparks), which made small attacks huge lights
+        const float score = mx * std::sqrt(c.area);
+        if (score < 0.05f) { ++n_dim; continue; }
+        Cand d;
+        d.score = score;
+        for (int a = 0; a < 3; ++a) { d.l[a] = 0.5f * (c.lo[a] + c.hi[a]); d.l[3 + a] = rgb[a] / mx; }
+        d.l[6] = std::min(14.f, std::max(3.f, 3.f + 2.5f * size)) * k_rad;                       // reach grows with the effect's size
+        // brightness: additive glows look far brighter than their average texel (mostly soft falloff), so the average only scales a base
+        // score = peak brightness x sqrt(glowing area). Measured (Kain, Ultimecia): idle 0.9, jump / land 0.3-2, dodges 0.1-3.9, small hits 3-5,
+        // big attacks 10-26. Nothing below 1, then even up to full (1.2) at 16: dodges and landings stay faint, only big attacks light the scene.
+        d.l[7] = 1.2f * std::min(1.f, std::max(0.f, (score - 1.f) / 15.f)) * k_int;
+        if (d.l[7] < 0.02f) { ++n_dim; continue; }
+        d.l[8] = std::min(ext, 2.f);                                                             // the caster (a hand / weapon inside the glow) does not block it
+        cand.push_back(d);
+    }
+    // A glow that stays in one place for seconds is part of the stage (a torch, a crystal, the EX core's own halo), not an attack: those are
+    // left to the hand-placed stage lights. Tracks: where a glow was, since when, last seen.
+    {
+        struct Track { float p[3]; double first, last; };
+        static std::vector<Track> tracks[GE_MAX_TARGETS];
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::vector<Track>& tr = tracks[cur];
+        tr.erase(std::remove_if(tr.begin(), tr.end(), [&](const Track& t) { return now - t.last > 0.5; }), tr.end());
+        static const double k_static = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STATIC_S"); return e ? std::atof(e) : 8.0; }();   // longer than any attack (Hell's Judgment ran past 3 s)
+        std::vector<Cand> keep;
+        for (const Cand& d : cand) {
+            Track* t = nullptr;
+            for (Track& x : tr) { const float dx = x.p[0] - d.l[0], dy = x.p[1] - d.l[1], dz = x.p[2] - d.l[2]; if (dx * dx + dy * dy + dz * dz < 1.5f * 1.5f) { t = &x; break; } }
+            if (!t) { tr.push_back({{d.l[0], d.l[1], d.l[2]}, now, now}); keep.push_back(d); continue; }
+            t->last = now;
+            if (now - t->first < k_static) keep.push_back(d); else ++g_fx_n_static[cur];
+        }
+        cand.swap(keep);
+    }
+    std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;   // what each glow scored (the cut-off is in score units)
+      if (dbg && !cand.empty() && lg++ % 5 == 0) { std::fprintf(stderr, "[FXLIGHT]   scores:"); for (size_t i = 0; i < cand.size() && i < 8; ++i) std::fprintf(stderr, " %.2f@(%.1f %.1f %.1f)", cand[i].score, cand[i].l[0], cand[i].l[1], cand[i].l[2]); std::fprintf(stderr, "\n"); } }
+    // Lights live a little across frames: matched to last frame's by position, a light takes a new, brighter value at once but fades out over
+    // ~0.15 s when its glow drops for a frame or two (Knight's Lance's light flickered as its pieces regrouped from frame to frame).
+    int n = 0;
+    {
+        struct Live { float l[9]; float I; bool seen; };
+        static std::vector<Live> live[GE_MAX_TARGETS];
+        static double last_t[GE_MAX_TARGETS];
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const float dt = last_t[cur] > 0 ? float(std::min(0.2, now - last_t[cur])) : 0.f;
+        last_t[cur] = now;
+        std::vector<Live>& lv = live[cur];
+        for (Live& x : lv) x.seen = false;
+        for (size_t i = 0; i < cand.size() && i < 16; ++i) {
+            const Cand& d = cand[i];
+            Live* m = nullptr; float best = 2.5f * 2.5f;
+            for (Live& x : lv) { if (x.seen) continue; const float dx = x.l[0] - d.l[0], dy = x.l[1] - d.l[1], dz = x.l[2] - d.l[2], q = dx * dx + dy * dy + dz * dz; if (q < best) { best = q; m = &x; } }
+            if (!m) { lv.push_back({{}, 0.f, true}); m = &lv.back(); std::memcpy(m->l, d.l, sizeof d.l); m->I = d.l[7]; continue; }
+            const float I = m->I;
+            std::memcpy(m->l, d.l, sizeof d.l);
+            m->I = d.l[7] >= I ? d.l[7] : I + (d.l[7] - I) * std::min(1.f, dt * 7.f);
+            m->seen = true;
+        }
+        for (Live& x : lv) if (!x.seen) x.I -= x.I * std::min(1.f, dt * 7.f);
+        lv.erase(std::remove_if(lv.begin(), lv.end(), [](const Live& x) { return x.I < 0.02f; }), lv.end());
+        std::sort(lv.begin(), lv.end(), [](const Live& a, const Live& b) { return a.I > b.I; });
+        for (const Live& x : lv) { if (n >= max) break; std::memcpy(out[n], x.l, sizeof x.l); out[n][7] = x.I; ++n; }
+    }
+    {   // all effect lights together at most one full light's brightness: many small glows must not add up to a flood
+        float sum = 0.f;
+        for (int i = 0; i < n; ++i) sum += out[i][7];
+        const float cap = 1.2f * k_int;
+        if (sum > cap) for (int i = 0; i < n; ++i) out[i][7] *= cap / sum;
+    }
+    { static int lg = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+      if (dbg && (n || n_big || n_dim || g_fx_n_steady[cur] || g_fx_n_nonadd[cur] || g_fx_n_static[cur]) && lg++ % 5 == 0)
+        std::fprintf(stderr, "[FXLIGHT] %zu blobs, %zu clusters -> %d lights | left out: %d too big (largest %.0f), %d too faint, %d steady draws, %d non-additive draws, %d staying put | first %.1f %.1f %.1f rgb %.2f %.2f %.2f radius %.1f intensity %.2f\n",
+                     B.size(), cl.size(), n, n_big, big_ext, n_dim, g_fx_n_steady[cur], g_fx_n_nonadd[cur], g_fx_n_static[cur],
+                     n ? out[0][0] : 0.f, n ? out[0][1] : 0.f, n ? out[0][2] : 0.f, n ? out[0][3] : 0.f, n ? out[0][4] : 0.f, n ? out[0][5] : 0.f, n ? out[0][6] : 0.f, n ? out[0][7] : 0.f); }
+    { static int lg2 = 0; static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+      if (dbg && n && lg2++ % 5 == 0) { std::fprintf(stderr, "[FXLIGHT]   lights:"); for (int i = 0; i < n; ++i) std::fprintf(stderr, " (%.1f %.1f %.1f r%.1f i%.2f)", out[i][0], out[i][1], out[i][2], out[i][6], out[i][7]); std::fprintf(stderr, "\n"); } }
+    g_fx_n_steady[cur] = g_fx_n_nonadd[cur] = g_fx_n_static[cur] = 0;
+    return n;
+}
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
     {   // effects draws (blended, depth tested, not depth writing) are also drawn into the SSR effects layer (fxl_*)
         // PSPRECOMP_SSR_FX_OFF=1: no effects layer at all (each effects draw is drawn twice, into another framebuffer: on a tiled mobile
@@ -2957,6 +3115,11 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             if (will) { /* reason is filled in by rt_capture below; log after */ }
             else rtdump_printf("[RTDUMP] draw prim %d n %d  skip: depth_test %d depth_write_off %d blend %d atest %d  pos %.1f %.1f %.1f  vt %08x\n", prim_type, count, st.depth_test_enable, st.depth_write_disable, st.alpha_blend_enable, st.alpha_test_enable, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11], (unsigned)st.vertex_type);
         }
+        if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && !fx_additive(st)) ++g_fx_n_nonadd[cur];
+        if (st.depth_test_enable && st.alpha_blend_enable && st.depth_write_disable && std::getenv("PSPRECOMP_FX_LIGHT_LOG")) {   // which blends the effects use
+            static std::map<uint64_t, int> seen; const uint64_t key = (uint64_t(st.blend_mode & 0xFFF) << 32) | (st.blend_fix_b & 0xFFFFFFu) | (uint64_t(st.blend_fix_a & 0xFFFFFFu) << 44);
+            if (seen[key]++ == 0) std::fprintf(stderr, "[FXLIGHT] blend %03x fixa %06x fixb %06x zwrite %d additive %d rt %d\n", (unsigned)(st.blend_mode & 0xFFF), (unsigned)(st.blend_fix_a & 0xFFFFFFu), (unsigned)(st.blend_fix_b & 0xFFFFFFu), st.depth_write_disable ? 0 : 1, (int)fx_additive(st), (int)psp_rt_active());
+        }
         if (st.depth_test_enable && !st.depth_write_disable) {
             g_fx_n[cur]++;
             const size_t dump_t0 = g_rt_tris[cur].size();
@@ -2986,7 +3149,10 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
                 v.n = 1;
             }
         }
-        else if (st.depth_test_enable && st.alpha_blend_enable && psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) {
+        else if (st.depth_test_enable && st.alpha_blend_enable && ((psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled()) || (psp_rt_active() && fx_lights_on() && fx_additive(st) && st.vertex_type != 0x11au))) {
+            const bool refl_fx = psp_rt_refl_active() && psp_rt_refl_quality() >= 2 && psp_rt_refl_fx_enabled();
+            const bool light_fx = psp_rt_active() && fx_lights_on() && fx_additive(st) && st.vertex_type != 0x11au;   // 0x11a: the stage's own glow layers (stage lights cover those)
+            const size_t c0 = g_rt_fx_cols[cur].size();
             // Effects drawn with their own view matrix (some with an identity view: the world matrix then holds view-space positions) are
             // re-expressed in the main view's world, as the opaque draws are. Most effects come after the 3D run, when this scene's vote is
             // already reset: the last completed scene's main view is used then.
@@ -2994,6 +3160,41 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             rt_capture(st, rdram, prim_type, count, cur, true);
             const float* mv = g_fx_vote[cur].n > 0 ? g_fx_vote[cur].view : g_rt_main_view_ok[cur] ? g_rt_main_view[cur] : nullptr;
             if (mv && !g_rt_nofix && g_rt_fx_tris[cur].size() > t0) rt_fix_view(g_rt_fx_tris[cur], t0, st.view_matrix, mv);
+            // the same glow drawn every frame for seconds (the lock-on reticle, a stage glow) is not an attack: keyed by texture, format, size
+            bool steady = false;
+            if (light_fx) {
+                struct Seen { double first, last; bool latched; };   // first: start of the current unbroken streak; latched: the streak was logged
+                static std::unordered_map<uint64_t, Seen> seen;
+                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                const uint64_t key = (uint64_t(st.tex_addr[0]) << 32) ^ (uint64_t(st.vertex_type) << 12) ^ uint64_t(count) ^ (uint64_t(prim_type) << 28);
+                Seen& sn = seen[key];
+                if (sn.last == 0 || now - sn.last > 0.3) { sn.first = now; sn.latched = false; }
+                sn.last = now;
+                static const double k_steady = [] { const char* e = std::getenv("PSPRECOMP_FX_LIGHT_STEADY_S"); return e ? std::atof(e) : 10.0; }();   // longer than any attack (Hell's Judgment ~7 s)
+                if (now - sn.first > k_steady && !sn.latched) {   // logged once per streak; a gap of 0.3 s starts a new streak (no lasting latch:
+                    sn.latched = true;                            // particles share texture / format / size with every effect that uses them)
+                    static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+                    if (dbg) std::fprintf(stderr, "[FXLIGHT] steady draw: tex %08x vt %08x prim %d n %d world t %.1f %.1f %.1f\n", (unsigned)st.tex_addr[0], (unsigned)st.vertex_type, prim_type, count, st.world_matrix[9], st.world_matrix[10], st.world_matrix[11]);
+                }
+                steady = now - sn.first > k_steady;
+                if (seen.size() > 4096) seen.clear();
+            }
+            if (light_fx && steady) ++g_fx_n_steady[cur];
+            if (light_fx && !steady && g_rt_fx_tris[cur].size() > t0) {
+                fx_blob_note(cur, t0, c0);
+                static const bool dbg = std::getenv("PSPRECOMP_FX_LIGHT_LOG") != nullptr;
+                if (dbg && !g_fx_blobs[cur].empty()) {   // which vertex formats / matrices the effects come with (blobs at the origin = a transform not applied)
+                    const FxBlob& b = g_fx_blobs[cur].back();
+                    static std::map<uint32_t, int> seen;
+                    const bool origin = std::fabs(0.5f * (b.lo[0] + b.hi[0])) < 0.3f && std::fabs(0.5f * (b.lo[2] + b.hi[2])) < 0.3f;
+                    if (seen[st.vertex_type * 2u + (origin ? 1u : 0u)]++ < 2)
+                        { float pp[3] = {0, 0, 0}; psp_player_pos(pp); std::fprintf(stderr, "[FXLIGHT] player %.1f %.1f %.1f\n", pp[0], pp[1], pp[2]); }
+                        std::fprintf(stderr, "[FXLIGHT] draw vt %08x prim %d n %d centre %.1f %.1f %.1f %s world t %.1f %.1f %.1f view t %.1f %.1f %.1f bone0 t %.1f %.1f %.1f\n", (unsigned)st.vertex_type, prim_type, count,
+                                     0.5f * (b.lo[0] + b.hi[0]), 0.5f * (b.lo[1] + b.hi[1]), 0.5f * (b.lo[2] + b.hi[2]), origin ? "ORIGIN" : "", st.world_matrix[9], st.world_matrix[10], st.world_matrix[11],
+                                     st.view_matrix[9], st.view_matrix[10], st.view_matrix[11], st.bone_matrix[9], st.bone_matrix[10], st.bone_matrix[11]);
+                }
+            }
+            if (!refl_fx) { g_rt_fx_tris[cur].resize(t0); g_rt_fx_cols[cur].resize(c0); }   // only wanted for the light
         }   // the effects layer is only traced from Medium up
         return;
     }
@@ -3012,6 +3213,37 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         if (psp_rt_scene_wanted() && (!g_rt_tris[i].empty() || !g_rt_persist[i].empty())) rt_persist_merge(i, s.proj, s.view);
         if (psp_rt_scene_wanted()) rt_static_refresh(i);
         std::memcpy(g_rt_main_view[i], s.view, sizeof g_rt_main_view[i]); g_rt_main_view_ok[i] = true;
+        { float lp[3]; if (psp_stage_light_pick_request(lp)) {   // light editor: colour of the surface the light touches
+            auto closest = [&](const float* a, const float* b, const float* c, float* q) {   // closest point on a triangle to lp (Ericson)
+                const float ab[3] = {b[0]-a[0], b[1]-a[1], b[2]-a[2]}, ac[3] = {c[0]-a[0], c[1]-a[1], c[2]-a[2]}, ap[3] = {lp[0]-a[0], lp[1]-a[1], lp[2]-a[2]};
+                auto dot = [](const float* u, const float* v) { return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]; };
+                const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+                auto set = [&](float s, float t) { for (int k = 0; k < 3; ++k) q[k] = a[k] + ab[k]*s + ac[k]*t; };
+                if (d1 <= 0 && d2 <= 0) { set(0, 0); return; }
+                const float bp[3] = {lp[0]-b[0], lp[1]-b[1], lp[2]-b[2]}; const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+                if (d3 >= 0 && d4 <= d3) { set(1, 0); return; }
+                const float vc = d1*d4 - d3*d2;
+                if (vc <= 0 && d1 >= 0 && d3 <= 0) { set(d1 / (d1 - d3), 0); return; }
+                const float cp[3] = {lp[0]-c[0], lp[1]-c[1], lp[2]-c[2]}; const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+                if (d6 >= 0 && d5 <= d6) { set(0, 1); return; }
+                const float vb = d5*d2 - d1*d6;
+                if (vb <= 0 && d2 >= 0 && d6 <= 0) { set(0, d2 / (d2 - d6)); return; }
+                const float va = d3*d6 - d5*d4;
+                if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); set(1 - w, w); return; }
+                const float den = 1.f / (va + vb + vc); set(vb * den, vc * den);
+            };
+            float best = 1e30f; uint32_t bc = 0; bool found = false;
+            auto scan = [&](const std::vector<float>& T, const std::vector<uint32_t>& C) {   // this frame's draws and the settled static part
+                for (size_t k = 0; k + 9 <= T.size() && k / 9 < C.size(); k += 9) {
+                    float q[3]; closest(&T[k], &T[k+3], &T[k+6], q);
+                    const float dx = q[0]-lp[0], dy = q[1]-lp[1], dz = q[2]-lp[2], d = dx*dx + dy*dy + dz*dz;
+                    if (d < best) { best = d; bc = C[k / 9]; found = true; }
+                }
+            };
+            scan(g_rt_tris[i], g_rt_cols[i]);
+            if (g_rt_static) scan(g_rt_st_tris[i], g_rt_st_cols[i]);
+            if (found) { const float rgb[3] = {float(bc & 255) / 255.f, float((bc >> 8) & 255) / 255.f, float((bc >> 16) & 255) / 255.f}; psp_stage_light_pick_result(rgb, std::sqrt(best)); }
+        } }
         if (g_rtdump.load() == 2) { g_rtdump.store(0); rtdump_printf("[RTDUMP] end: %zu scene triangles, %zu effects triangles\n", g_rt_tris[i].size() / 9, g_rt_fx_tris[i].size() / 9);
             rtdump_printf("[RTDUMP] proj"); for (int k = 0; k < 16; ++k) rtdump_printf(" %g", s.proj[k]); rtdump_printf("\n");
             rtdump_printf("[RTDUMP] view"); for (int k = 0; k < 12; ++k) rtdump_printf(" %g", s.view[k]); rtdump_printf("\n"); }
@@ -3026,6 +3258,8 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             g_rt_cpu = RtCpu{};
         }
         s.rt_fx = s.rt_ready && !g_rt_fx_cols[i].empty();
+        s.n_fx_lights = s.rt_ready ? fx_blob_lights(i, s.fx_lights, 8) : 0;
+        g_fx_blobs[i].clear();
         { static int n = 0; if (std::getenv("PSPRECOMP_SSR_FX_LOG") && n++ % 120 == 0) std::fprintf(stderr, "[SSR] effects layer used=%d fbo=%u draws=%d\n", (int)g_fxl[i].used, g_fxl[i].fbo, g_fxl_draws); }
         if (g_fxl[i].used && g_fxl[i].fbo) { s.fx_color = g_fxl[i].color; s.fx_depth = g_fxl[i].depth; }
         g_fxl[i].dirty = true; g_fxl[i].used = false; g_fxl_draws = 0;

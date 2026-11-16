@@ -40,6 +40,7 @@
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
 #include "psp_ge_draw.h"
+#include "psp_screenfx.h"
 #include <algorithm>
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -263,6 +264,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "scan") {   // scan <min drop> <max drop> <max value>: user RAM words that dropped by min..max since the last scan, and kept dropping (finds a stat the HUD shows)
             double lo = 150, hi = 400, mx = 2000; ss >> lo >> hi >> mx;
             ev.push_back({t, 14, static_cast<uint32_t>(lo), static_cast<uint32_t>(hi), std::to_string(static_cast<int>(mx)), rel});
+        } else if (cmd == "fxlights") {   // fxlights <0|1>: lights from glowing effects off / on (psp_fx_lights_set), for an A/B of the same trial in one run
+            int v = 1; ss >> v;
+            ev.push_back({t, 16, static_cast<uint32_t>(v), 0, "", rel});
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
@@ -551,6 +555,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             g_wait_kind = e.kind; g_wait_scr = cur_scr; g_wait_since = g_gt_ms; g_wait_timeout = e.b; g_wait_target = static_cast<int>(e.a);
             continue;
         }
+        if (e.kind == 16) { psp_fx_lights_set(e.a != 0); continue; }
         if (e.kind == 15) {
             const uint32_t a = test_fighter(e.text == "cpu" ? 1u : 0u);
             if (a) { w32(a + e.a, e.b); std::fprintf(stderr, "[TEST] gt=%.0f poke %s +%X = %d\n", g_gt_ms, e.text.c_str(), e.a, static_cast<int>(e.b)); }
@@ -1265,6 +1270,8 @@ void fighter_log_frame() {
 // window sat 25 ms (1.5 ticks) later than at 30 Hz, at both edges, for every Jecht chain step (tools/combo_timing.py combos, 11 Nov). The first update
 // after a fighter's script id changed therefore runs with a 30 Hz sized step (the same as at 30 Hz), the rest as before.
 int g_actor_log_left = 4000;
+struct CoreSeen { uint32_t actor; uint64_t seen; };
+CoreSeen g_cores[8];   // kind-6 objects (EX cores) and the g_tick they last updated; one that stops updating was picked up
 struct ActorSeen { uint32_t actor; float res; int own; };
 ActorSeen g_actor_seen[24];
 
@@ -1281,7 +1288,16 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
             if (slot < 0) for (int i = 0; i < 4 && slot < 0; i++) if (!g_fighters[i] || g_tick - g_fighter_seen[i] > 120) slot = i;   // free or stale
             if (slot >= 0 && g_fighters[slot] != actor) g_ai_armed = false;   // a new fighter: a new fight (its intro waits for the brains)
             if (slot >= 0) { g_fighters[slot] = actor; g_fighter_seen[slot] = g_tick; }
-        } else if (g_fighter_log) {
+        } else if (g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 6) {   // object kind 6 = an EX core (the dash's fixed-point target): remembered for its light
+            int slot = -1;
+            for (int i = 0; i < 8; i++) if (g_cores[i].actor == actor) slot = i;
+            if (slot < 0) for (int i = 0; i < 8 && slot < 0; i++) if (!g_cores[i].actor || g_tick - g_cores[i].seen > 4) slot = i;
+            if (slot >= 0) {
+                if (g_cores[slot].actor != actor) { static int logged = 0; if (logged++ < 40) std::fprintf(stderr, "[EXCORE] actor %08X appeared at %.2f %.2f %.2f\n", actor, rdf(actor + 0x80u), rdf(actor + 0x84u), rdf(actor + 0x88u)); }
+                g_cores[slot].actor = actor; g_cores[slot].seen = g_tick;
+            }
+        }
+        if (!fighter && g_fighter_log) {
             bool known = false;
             for (uint32_t f : g_objects) known |= f == actor;
             for (uint32_t& f : g_objects) if (!known && !f) { f = actor; known = true; }
@@ -1864,6 +1880,18 @@ void fps_set(int fps) {
 const int k_rates[] = {30, 60, 90, 120, 150, 180, 210, 240};
 
 }  // namespace
+
+// EX cores in the world right now (psp_screenfx.cpp pickup lights): kind-6 objects that updated within the last few frames
+int dissidia_ex_cores(float (*P)[3], int max) {
+    int n = 0;
+    for (const CoreSeen& c : g_cores) {
+        if (n >= max) break;
+        if (!c.actor || !ok(c.actor) || g_tick - c.seen > 4) continue;
+        P[n][0] = rdf(c.actor + 0x80u); P[n][1] = rdf(c.actor + 0x84u); P[n][2] = rdf(c.actor + 0x88u);
+        ++n;
+    }
+    return n;
+}
 
 // The position (actor+0x80, vec3) of the fighter nearest to `eye` among those that were updated in the last two
 // seconds, for camera.cpp: the game's own camera sits behind the fighter you control, so that is the one the free camera
