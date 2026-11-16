@@ -127,6 +127,7 @@ bool g_logic30 = false;
 bool l30_active();                 // 30 Hz logic is on and the fight is past its intro
 uint64_t g_l30_frame = 0;
 bool g_l30_logic_now = true;       // the frame being run is a gameplay frame
+uint64_t g_l30_calls[2][2] = {};   // diagnostic (PSPRECOMP_L30_TIMING): [0 UI update, 1 effect components][0 gameplay, 1 drawn-only frame]
 float g_logic_step = 2.0f;         // ticks of gameplay the frame that just ran advanced (2 or 0 in 30 Hz logic mode, else g_ticks)
 uint64_t g_step_idx = 0;           // index of the step the next update uses
 float step_for(int rate, uint64_t i) {
@@ -1063,6 +1064,8 @@ uint64_t g_l30_dec_frame = ~0ull;
 bool g_l30_next_logic = true;
 float g_l30_next_phase = 0.0f;
 double g_l30_due_ms = 0, g_l30_last_ms = 0;   // when the next gameplay frame is due / the last one was (real time, ms)
+double g_l30_end_ms = 0;                      // when the last frame ended (frame_end_hook, after the frame's wait: a steady point)
+double l30_now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 bool l30_clock_paced() {
     static const int m = [] {
         const char* e = std::getenv("PSPRECOMP_L30_PACE");
@@ -1081,13 +1084,17 @@ bool l30_decide_next() {
         g_l30_next_phase = static_cast<float>((g_l30_frame + 1) % n) / static_cast<float>(n);
         return g_l30_next_logic;
     }
-    const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    // Timed from the end of the last frame, not from now: this runs part way through the frame, later on a gameplay frame (more work
+    // before it) than on a drawn-only one, and timing from there gave uneven phases (0, 0.26, 0.73, 0.23 at a steady 60 fps: jitter).
     const double frame = 1000.0 / g_rate, period = 1000.0 / 30.0;
-    const double shown = now + frame;   // about when the coming frame reaches the screen
+    const double now = l30_now_ms();
+    const double shown = g_l30_end_ms > 0 && now - g_l30_end_ms < 4 * frame ? g_l30_end_ms + 2 * frame : now + frame;   // the frame after this one reaches the screen about two frame times after the last frame ended
     if (g_l30_due_ms == 0 || shown - g_l30_due_ms > 100.0) g_l30_due_ms = shown;   // start, or far behind (a hitch): catch up at once
     g_l30_next_logic = shown + frame * 0.5 >= g_l30_due_ms;   // the 30 Hz step falls within this frame (nearest frame)
     if (g_l30_next_logic) { g_l30_last_ms = g_l30_due_ms; g_l30_due_ms += period; }
-    g_l30_next_phase = static_cast<float>(std::clamp((shown - g_l30_last_ms) / period, 0.0, 0.999));
+    // not clamped at 0: a gameplay frame shown a little before its slot gets a small negative phase (the blend runs that bit back from
+    // the step before); clamping it made the steps uneven (0 -> 0.31 -> 1.0 at 60 fps instead of a steady half step)
+    g_l30_next_phase = static_cast<float>(std::clamp((shown - g_l30_last_ms) / period, -0.5, 1.0));
     static int dlog = [] { const char* e = std::getenv("PSPRECOMP_L30_PACE_LOG"); return e ? std::atoi(e) : 0; }();
     if (dlog > 0 && g_battle_age > 300.f) { dlog--; std::fprintf(stderr, "[L30P] frame %llu now %.2f shown %.2f due %.2f last %.2f -> %s phase %.2f\n", (unsigned long long)g_l30_frame,
         now, shown, g_l30_due_ms, g_l30_last_ms, g_l30_next_logic ? "GAMEPLAY" : "drawn", g_l30_next_phase); }
@@ -1197,19 +1204,22 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
             if (last.time_since_epoch().count()) {
                 const double ms = std::chrono::duration<double, std::milli>(t - last).count();
                 sum[ph] += ms; cnt[ph]++; mx[ph] = std::max(mx[ph], ms); if (ms > 1000.0 / g_rate * 1.5) late[ph]++;
-                if (++frames % 1200 == 0) {
+                if (++frames % 240 == 0) {
                     std::fprintf(stderr, "[L30T] %d fps, frame time by position (0 = gameplay):", g_rate);
                     for (int i = 0; i < std::min(8, g_rate / 30); i++) {
                         std::fprintf(stderr, " %d: avg %.2f max %.1f late %llu |", i, cnt[i] ? sum[i] / cnt[i] : 0.0, mx[i], (unsigned long long)late[i]);
                         sum[i] = mx[i] = 0; cnt[i] = late[i] = 0;
                     }
-                    std::fprintf(stderr, "\n");
+                    std::fprintf(stderr, " UI updates %llu / %llu, effect steps %llu / %llu (gameplay / drawn-only frames)\n",
+                                 (unsigned long long)g_l30_calls[0][0], (unsigned long long)g_l30_calls[0][1], (unsigned long long)g_l30_calls[1][0], (unsigned long long)g_l30_calls[1][1]);
+                    std::memset(g_l30_calls, 0, sizeof g_l30_calls);
                 }
             }
             last = t;
         }
         const bool next_logic = l30_decide_next();
         const float next_phase = g_l30_next_phase;
+        g_l30_end_ms = l30_now_ms();
         g_l30_frame++;
         g_l30_logic_now = next_logic;
         wrf(timer + 0x18u, g_l30_logic_now ? 2.0f : 0.0f);   // the coming frame's step (read directly by 85 battle sites); the global step follows via global_step_hook
@@ -1267,10 +1277,14 @@ void slowmo_frame_hook(uint8_t* rdram, recomp_context* ctx) {
 // PSPRECOMP_UI_STEP=0 turns it off (A/B).
 bool g_ui_step = true;
 void ui_param_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (l30_active()) g_l30_calls[0][g_l30_logic_now ? 0 : 1]++;
+    // 30 Hz logic: the UI update still runs on every frame (counted: as often on drawn-only frames as on gameplay ones), so its fixed
+    // steps are scaled by 30 / rate as at a native high rate (EX gauge, EX core, lock-on reticle, banter ran 2-4x fast).
+    const float k = l30_active() ? 30.0f / static_cast<float>(g_rate) : g_ticks * 0.5f;
     const uint32_t mgr = r32(UI_MGR_PTR);
-    if (!g_ui_step || g_ticks == 2.0f || overlay_id() != 1 || !ok(mgr) || g_ram[(mgr + 33u) & 0x07FFFFFFu] != 0 || g_ram[(mgr + 34u) & 0x07FFFFFFu] != 0) { g_orig_ui_param(rdram, ctx); return; }
+    if (!g_ui_step || k == 1.0f || overlay_id() != 1 || !ok(mgr) || g_ram[(mgr + 33u) & 0x07FFFFFFu] != 0 || g_ram[(mgr + 34u) & 0x07FFFFFFu] != 0) { g_orig_ui_param(rdram, ctx); return; }
     const float was = rdf(UI_STEP);
-    wrf(UI_STEP, was * g_ticks * 0.5f);
+    wrf(UI_STEP, was * k);
     g_orig_ui_param(rdram, ctx);
     wrf(UI_STEP, was);
 }
@@ -2177,6 +2191,7 @@ bool fx_fix_on() { return g_rate > 30 && g_fx60 && !l30_active(); }   // 30 Hz l
 
 template <int I>
 void fx_every_other_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (l30_active()) g_l30_calls[1][g_l30_logic_now ? 0 : 1]++;
     if (!fx_fix_on()) { g_fx_orig[I](rdram, ctx); return; }
     if (!fx_step_due(fx_step_of(static_cast<uint32_t>(ctx->r[7])))) { g_fx_holds++; return; }
     g_fx_runs++;
@@ -2290,7 +2305,7 @@ bool l30_active() {
     static bool on = false;
     static const bool from_clock = std::getenv("PSPRECOMP_L30_FROM_CLOCK") != nullptr;   // experiment: only from the test clock on
     const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && (from_clock ? g_gt_started : battle_running());
-    if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; g_l30_dec_frame = ~0ull; g_l30_due_ms = 0; }
+    if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; g_l30_dec_frame = ~0ull; g_l30_due_ms = 0; g_l30_end_ms = 0; }
     on = want || (on && g_logic30 && g_rate > 30 && overlay_id() == 1 && battle_running());
     return on;
 }

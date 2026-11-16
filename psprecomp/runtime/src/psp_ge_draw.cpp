@@ -2630,7 +2630,7 @@ GeInterpTag ge_interp_current_tag() { std::lock_guard<std::mutex> lk(g_ip_set_mu
 void ge_interp_list_tag(const GeInterpTag& tag) { g_ip_gen = tag.gen; g_ip_phase = tag.phase; g_ip_seq = tag.seq; g_ip_rec = tag.record; }
 
 // Swap the draw's matrices for interpolated ones (restored by the caller); false = drawn as issued.
-struct IpStat { uint32_t gen = 0, seq = ~0u; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0, skinned = 0, matmove = 0, vtxonly = 0, vtxprims = 0; };
+struct IpStat { float pw[3] = {}, eye[3] = {}; int pcount = -1; uint32_t gen = 0, seq = ~0u; float phase = -2.f; int draws = 0, applied = 0, nomatch = 0, far = 0, noprev = 0, flat = 0, skinned = 0, matmove = 0, vtxonly = 0, vtxprims = 0; };
 std::unordered_map<uint64_t, uint64_t> g_ip_vhash_prev, g_ip_vhash_cur;   // diagnostic (PSPRECOMP_INTERP_LOG): vertex bytes per draw key on gameplay frames
 uint8_t* g_ip_rdram = nullptr;
 static IpStat g_ip_stat;
@@ -2638,10 +2638,13 @@ static void ip_stat_flush() {
     static int left = [] { const char* e = std::getenv("PSPRECOMP_INTERP_LOG"); return e ? std::atoi(e) : 0; }();
     if (left > 0 && g_ip_stat.draws > 0) { left--; std::fprintf(stderr, "[INTERP] gen %u phase %.2f: %d 3D draws, %d blended, %d no match, %d far, %d no previous frame, %d 2D; %d skinned, %d moved by matrix, %d moved by vertices only (%d prims)\n",
         g_ip_stat.gen, g_ip_stat.phase, g_ip_stat.draws, g_ip_stat.applied, g_ip_stat.nomatch, g_ip_stat.far, g_ip_stat.noprev, g_ip_stat.flat, g_ip_stat.skinned, g_ip_stat.matmove, g_ip_stat.vtxonly, g_ip_stat.vtxprims); }
+    static const bool trace = std::getenv("PSPRECOMP_INTERP_TRACE") != nullptr;   // per frame: where the biggest skinned draw (a fighter) and the camera are drawn
+    if (trace && g_ip_stat.pcount >= 0) std::fprintf(stderr, "[IPTRACE] seq %u gen %u phase %.3f rec %d model %.4f %.4f %.4f eye %.4f %.4f %.4f\n", g_ip_stat.seq, g_ip_stat.gen, g_ip_stat.phase,
+        0, g_ip_stat.pw[0], g_ip_stat.pw[1], g_ip_stat.pw[2], g_ip_stat.eye[0], g_ip_stat.eye[1], g_ip_stat.eye[2]);
     g_ip_stat = IpStat{}; g_ip_stat.gen = g_ip_gen; g_ip_stat.phase = g_ip_phase; g_ip_stat.seq = g_ip_seq;
 }
 static bool ip_apply(int prim_type, int count, IpMats* saved) {
-    if (g_ip_phase < 0.0f || ip_mode() == 0) return false;
+    if (g_ip_phase <= -1.0f || ip_mode() == 0) return false;   // -1 = off; a gameplay frame shown a bit early has a small negative phase
     if (g_ip_stat.seq != g_ip_seq) ip_stat_flush();
     GeState& st = ge_get_state_mut();
     if (st.clear_mode || ge_vtype_through(st.vertex_type)) { g_ip_stat.flat++; return false; }   // 2D (HUD, screen copies): no matrices
@@ -2686,6 +2689,7 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
         g_ip_stat.far++; return false; }
     g_ip_stat.applied++;
     *saved = cur;
+    g_ge_state_gen++;   // the draw-key cache (keyed by this) must not reuse matrices built for another draw: the blend changes them without a GE command
     const float t = ip_mode() == 2 ? 1.0f + g_ip_phase : g_ip_phase;   // 1: prev -> cur (one frame behind); 2: cur projected ahead
     ip_lerp(st.world_matrix, pv.w, cur.w, t, 12); ip_lerp(st.view_matrix, pv.v, cur.v, t, 12);
     ip_lerp(st.proj_matrix, pv.p, cur.p, t, 16); ip_lerp(st.bone_matrix, pv.b, cur.b, t, 96);
@@ -2693,6 +2697,12 @@ static bool ip_apply(int prim_type, int count, IpMats* saved) {
     float uv[4]; ip_lerp(uv, pv.uv, cur.uv, t, 4);
     for (int i = 0; i < 4; i++) if (std::fabs(cur.uv[i] - pv.uv[i]) > 0.5f) uv[i] = cur.uv[i];   // a scrolling offset that wrapped: no blend
     st.tex_scale_u = uv[0]; st.tex_scale_v = uv[1]; st.tex_offset_u = uv[2]; st.tex_offset_v = uv[3];
+    if ((st.vertex_type & 0x1C000u) && count > g_ip_stat.pcount) {   // trace: the drawn (blended) position of the biggest skinned draw = world x bone 0 translation
+        g_ip_stat.pcount = count;
+        const float* w = st.world_matrix; const float* b = st.bone_matrix;
+        for (int j = 0; j < 3; j++) g_ip_stat.pw[j] = b[9] * w[j] + b[10] * w[3 + j] + b[11] * w[6 + j] + w[9 + j];
+        ip_eye(st.view_matrix, g_ip_stat.eye);
+    }
     return true;
 }
 
@@ -2703,7 +2713,7 @@ void ge_draw_prim(uint8_t* rdram, int prim_type, int count) {
         std::memcpy(st.world_matrix, m->w, sizeof m->w); std::memcpy(st.view_matrix, m->v, sizeof m->v);
         std::memcpy(st.proj_matrix, m->p, sizeof m->p); std::memcpy(st.bone_matrix, m->b, sizeof m->b);
         std::memcpy(st.tgen_matrix, m->tg, sizeof m->tg);
-        st.tex_scale_u = m->uv[0]; st.tex_scale_v = m->uv[1]; st.tex_offset_u = m->uv[2]; st.tex_offset_v = m->uv[3]; } } ip_restore{&ip_saved, count > 0 && ip_apply(prim_type, count, &ip_saved)};
+        st.tex_scale_u = m->uv[0]; st.tex_scale_v = m->uv[1]; st.tex_offset_u = m->uv[2]; st.tex_offset_v = m->uv[3]; g_ge_state_gen++; } } ip_restore{&ip_saved, count > 0 && ip_apply(prim_type, count, &ip_saved)};
     psp_perf::Scope perf_scope_(psp_perf::PRIM);
     if (!g_ab || !g_fast_enabled || g_current_target < 0 || !g_targets[g_current_target].ab_fbo) {
         ge_draw_prim_one(rdram, prim_type, count);
