@@ -15,6 +15,7 @@
 #include "hle/psp_cloud_service.h"
 #include "psp_gpu_driver.h"
 #include "psp_gl_window.h"
+#include "psp_discord.h"
 
 #include <SDL.h>
 #if defined(PSPRECOMP_HAVE_VKGL)
@@ -156,8 +157,8 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
-           ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS,   // Network page
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
+           ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
@@ -168,7 +169,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_WIDE, ROW
            ROW_ENV0, ROW_ENV_END = ROW_ENV0 + 63,               // a developer-options category page: one row per environment variable
            ROW_MOD0, ROW_MOD_END = ROW_MOD0 + 31, ROW_MODS_NONE,   // Mods page: one toggle per mod folder, or a note when there are none
            ROW_SEC_WINDOW, ROW_SEC_PERF, ROW_SEC_QUALITY, ROW_SEC_AA, ROW_SEC_TEX, ROW_SEC_ENGINE, ROW_SEC_COLOUR, ROW_SEC_HDR, ROW_SEC_LIGHT,
-           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV,   // section captions (not selectable)
+           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD,   // section captions (not selectable)
            ROW_COUNT };
 static_assert(ROW_COUNT < psp_sddialog::SET_MAX_IDS, "row ids are animation slots");
 bool is_section(Row r) { return r >= ROW_SEC_WINDOW && r < ROW_COUNT; }
@@ -303,7 +304,7 @@ constexpr int k_max_rs = 16;   // 16x = 7680x4352 (8K); the draw layer clamps to
 // ---- Network page --------------------------------------------------------------------------------------
 constexpr const char* NET_DEFAULT_SERVER = "party.schindlershadow.com:27500";
 bool g_net_internet = true;
-std::string g_net_server = NET_DEFAULT_SERVER, g_net_room, g_net_peers, g_net_status;
+std::string g_net_server = NET_DEFAULT_SERVER, g_net_room, g_net_peers, g_net_status, g_discord_status;
 bool g_net_loaded = false;
 int64_t g_status_next = 0;
 
@@ -443,7 +444,7 @@ void edit_move(int dr, int dc, const psp_sddialog::SetGeom* geom) {
 // A mod folder has a mod.json; "enabled": false in it keeps the mod out of the game. Folders are looked for in the mods source
 // (PSPRECOMP_MODS_SRC, set by run.sh: mods/ in the repository) and in the game's mods directory (PSPRECOMP_MODS, else <work>/mods).
 // The mods are built into the game when it starts, so a change applies at the next start.
-struct ModEntry { std::string dir, name, where; bool on = true; int roster_line = -1; };   // roster_line >= 0: a character line of <mods>/roster.txt (dir = that file)
+struct ModEntry { std::string dir, name, where; bool on = true; int roster_line = -1; };   // roster_line >= 0: a line of <mods>/roster.txt or retail_moves.txt (dir = that file)
 std::vector<ModEntry> g_mods;
 bool g_restart_pending = false;        // something was changed that only applies at the next start
 std::string read_text_file(const std::string& p) { std::ifstream f(p, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); return ss.str(); }
@@ -510,10 +511,42 @@ void mods_scan_roster(const std::string& root) {
         g_mods.push_back(std::move(m));
     }
 }
+// New moves for retail characters (e.g. Bartz's Dissidia (2008) moves) are lines of retail_moves.txt
+// ("[#off# ]<folder> <charId> <ids> nm=<label>", written by the game module's mod build); "#off# " hides them at the next start.
+std::vector<std::string> g_moves_folders;    // folders with such a line: their own mod.json row would be a second switch
+void mods_scan_moves(const std::string& root) {
+    g_moves_folders.clear();
+    std::ifstream f(root + "/retail_moves.txt");
+    std::string line;
+    for (int n = 0; std::getline(f, line); ++n) {
+        if (g_mods.size() >= size_t(ROW_MOD_END - ROW_MOD0 + 1)) return;
+        bool on = true;
+        std::string spec = line;
+        if (spec.compare(0, 6, "#off# ") == 0) { on = false; spec = spec.substr(6); }
+        else if (spec.empty() || spec[0] == '#') continue;
+        std::istringstream is(spec);
+        std::string folder, tok, nm;
+        if (!(is >> folder)) continue;
+        while (is >> tok) if (tok.compare(0, 3, "nm=") == 0) nm = tok.substr(3);
+        for (char& ch : nm) if (ch == '_') ch = ' ';
+        ModEntry m;
+        m.dir = root + "/retail_moves.txt"; m.roster_line = n; m.on = on;
+        m.name = nm.empty() ? folder : nm;
+        m.where = "moves";
+        g_moves_folders.push_back(folder);
+        g_mods.push_back(std::move(m));
+    }
+}
 void mods_load() {
     g_mods.clear();
+    mods_scan_moves(mods_dir_path());
+    const size_t moves = g_mods.size();
     if (const char* src = std::getenv("PSPRECOMP_MODS_SRC")) mods_scan(src, "mods");
     mods_scan(mods_dir_path(), "the game's mods folder");
+    g_mods.erase(std::remove_if(g_mods.begin() + std::ptrdiff_t(moves), g_mods.end(), [](const ModEntry& m) {
+        const std::string folder = m.dir.substr(m.dir.find_last_of('/') + 1);
+        return std::find(g_moves_folders.begin(), g_moves_folders.end(), folder) != g_moves_folders.end();
+    }), g_mods.end());
     mods_scan_roster(mods_dir_path());
 }
 bool mod_set_enabled(size_t i, bool on) {
@@ -531,7 +564,7 @@ bool mod_set_enabled(size_t i, bool on) {
         for (const std::string& x : lines) o << x << "\n";
         g_mods[i].on = on;
         g_restart_pending = true;
-        std::fprintf(stderr, "[SETTINGS] character %s %s (next start)\n", g_mods[i].name.c_str(), on ? "enabled" : "disabled");
+        std::fprintf(stderr, "[SETTINGS] %s %s %s (next start)\n", g_mods[i].where == "moves" ? "moves" : "character", g_mods[i].name.c_str(), on ? "enabled" : "disabled");
         return true;
     }
     const std::string p = g_mods[i].dir + "/mod.json";
@@ -612,7 +645,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             if (i < g_mods.size()) {
                 m.label = g_mods[i].name;
                 m.value = g_mods[i].on ? "On" : "Off";
-                m.help = g_mods[i].name + (g_mods[i].roster_line >= 0 ? "\nTurn this extra character on or off (its line in roster.txt). Its files stay in the mods folder. Takes effect the next time the game starts."
+                m.help = g_mods[i].name + (g_mods[i].where == "moves" ? "\nNew moves for a character. On: the character knows them and you can equip them in the Abilities menu. Off: they are hidden and do nothing (a save that has them equipped shows an empty slot). Takes effect the next time the game starts."
+                                          : g_mods[i].roster_line >= 0 ? "\nTurn this extra character on or off (its line in roster.txt). Its files stay in the mods folder. Takes effect the next time the game starts."
                                                                : "\nTurn this mod on or off. Folder: " + g_mods[i].dir + ". Takes effect the next time the game starts.");
             }
             out.push_back(std::move(m));
@@ -802,6 +836,20 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = g_net_status.empty() ? "..." : g_net_status;
             m.help = "Network status\nWhether the server answers and how many players are in your room (or nearby, on a LAN). Communications mode starts the connection.";
             break;
+        case ROW_DISCORD: {
+            const bool on = psp_discord::enabled();
+            m.label = "Discord Status";
+            m.value = on ? "On" : "Off";
+            m.can_dec = on;
+            m.can_inc = !on;
+            m.help = "Discord Rich Presence\nShows what you are playing on your Discord profile: the mode, the fighters and the stage, and how long you have been at it. Needs the Discord desktop app running on this computer. Nothing is sent anywhere else. Saved.";
+            break;
+        }
+        case ROW_DISCORD_STATUS:
+            m.label = "Discord";
+            m.value = g_discord_status.empty() ? "..." : g_discord_status;
+            m.help = "Discord connection\nWhether the Discord app was found. It is looked for again every few seconds, so it can be started at any time.";
+            break;
         case ROW_CLOUD_PROVIDER:
             m.label = "Cloud Sync";
             m.value = psp_cloud_svc::provider_name(g_cloud.provider);
@@ -958,6 +1006,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_SEC_SESSION: m.label = "Session"; break;
         case ROW_SEC_REFL: m.label = "Reflections"; break;
         case ROW_SEC_SERVER: m.label = "Connection"; break;
+        case ROW_SEC_DISCORD: m.label = "Discord"; break;
         case ROW_SEC_SYNC: m.label = "Sync"; break;
         case ROW_SEC_DRIVER: m.label = "Driver"; break;
         case ROW_COUNT: break;
@@ -967,6 +1016,17 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = g_quit_armed ? "Quit\nUnsaved progress is lost. Press again to quit, or move away to cancel."
                                   : "Quit\nClose the game and return to the desktop / Steam.";
             break;
+        case ROW_VSYNC: {
+            const bool on = psp_vsync_wanted() != 0;
+            m.label = "Vertical Sync";
+            m.value = on ? "On" : "Off";
+            m.can_dec = on; m.can_inc = !on;
+            m.help = "Vertical sync\nOn: each frame waits for the screen, so the picture never tears. With a variable refresh rate "
+                     "screen (FreeSync, G-Sync, HDMI VRR) the screen then follows the game's frame rate: smooth at any rate, "
+                     "no tearing. Off: frames are shown at once, the lowest delay, but the picture can tear (not inside "
+                     "Steam's Game Mode, which never tears). Saved.";
+            break;
+        }
         case ROW_FPSCOUNT: {
             const bool on = ge_draw_fps_counter();
             m.label = "FPS Counter";
@@ -1271,7 +1331,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
-    case ROW_FPSCOUNT: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
+    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
@@ -1280,7 +1340,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_QUIT: return K::Danger;
     case ROW_SUB_HDR: case ROW_SUB_RT: return K::Submenu;
     case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_CLOUD_FOLDER: case ROW_CLOUD_URL: case ROW_CLOUD_USER: case ROW_CLOUD_PASS: return K::Text;
-    case ROW_NET_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: return K::Info;
+    case ROW_NET_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: return K::Info;
     default: return is_section(r) ? K::Header : K::Choice;
     }
 }
@@ -1478,6 +1538,13 @@ bool updates_choice() {
     return !(e && e[0] == '0');
 }
 void apply_updates(bool on) { save("check_updates", on ? "1" : "0"); }
+// Discord Rich Presence: applies at once (psp_discord), saved as discord=0|1 (exported as PSPRECOMP_DISCORD at the next start).
+void apply_discord(bool on) {
+    if (on == psp_discord::enabled()) return;
+    psp_discord::set_enabled(on);
+    save("discord", on ? "1" : "0");
+    g_discord_status = psp_discord::status();
+}
 
 void build_rows();
 
@@ -1542,6 +1609,7 @@ void change(int d) {   // left / right on the selected row
     case ROW_VOICE: apply_voice(d > 0); break;   // left: English, right: Japanese
     case ROW_TEXPACK: apply_texpack(d > 0); break;
     case ROW_UPDATES: apply_updates(d > 0); break;
+    case ROW_DISCORD: apply_discord(d > 0); break;
     case ROW_TOUCH: {
         const int t = std::clamp(psp_touch_mode() + d, 0, 2);
         psp_touch_set_mode(t);
@@ -1557,7 +1625,7 @@ void change(int d) {   // left / right on the selected row
             build_rows();   // the rows differ: server and room, or direct peers
         }
         break;
-    case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_NET_STATUS: break;
+    case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_NET_STATUS: case ROW_DISCORD_STATUS: break;
     case ROW_CLOUD_PROVIDER: {
         const int cur = int(g_cloud.provider), nx = std::clamp(cur + d, 0, 3);
         if (nx != cur) {
@@ -1572,6 +1640,12 @@ void change(int d) {   // left / right on the selected row
     case ROW_CLOUD_REPLAYS: if (g_cloud.replays != (d > 0)) { g_cloud.replays = d > 0; cloud_apply(); } break;
     case ROW_CLOUD_FOLDER: case ROW_CLOUD_URL: case ROW_CLOUD_USER: case ROW_CLOUD_PASS: case ROW_CLOUD_GOOGLE:
     case ROW_CLOUD_NOW: case ROW_CLOUD_STATUS: break;
+    case ROW_VSYNC:
+        if ((d > 0) != (psp_vsync_wanted() != 0)) {
+            psp_vsync_set(d > 0);
+            save("vsync", d > 0 ? "1" : "0");
+        }
+        break;
     case ROW_FPSCOUNT:
         if ((d > 0) != ge_draw_fps_counter()) {
             ge_draw_set_fps_counter(d > 0);
@@ -1764,6 +1838,7 @@ void build_rows() {
         add(ROW_SEC_WINDOW); add(ROW_DISPLAY); if (!is_fullscreen()) add(ROW_RES); add(ROW_WIDE); if (window_is_tall()) add(ROW_TALL); add(ROW_UPSCALE);
         add(ROW_SEC_PERF);
         if (g_fps.get && g_fps.count > 1) add(ROW_FPS);
+        add(ROW_VSYNC);
         add(ROW_FPSCOUNT);
         break;
     case PAGE_GRAPHICS:
@@ -1800,6 +1875,7 @@ void build_rows() {
         if (g_net_internet) { add(ROW_NET_SERVER); add(ROW_NET_ROOM); }
         else add(ROW_NET_PEERS);
         add(ROW_NET_STATUS);
+        if (psp_discord::available()) { add(ROW_SEC_DISCORD); add(ROW_DISCORD); add(ROW_DISCORD_STATUS); }
         break;
     case PAGE_CLOUD:
         cloud_load();
@@ -2078,6 +2154,8 @@ void confirm_row() {
     case ROW_VOICE: apply_voice(!voice_jp_choice()); break;
     case ROW_TEXPACK: apply_texpack(!texpack_choice()); break;
     case ROW_UPDATES: apply_updates(!updates_choice()); break;
+    case ROW_DISCORD: apply_discord(!psp_discord::enabled()); break;
+    case ROW_DISCORD_STATUS: break;
     case ROW_TOUCH: change(psp_touch_mode() >= 2 ? -2 : 1); return;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
     case ROW_NET_MODE: change(g_net_internet ? 1 : -1); return;
@@ -2102,6 +2180,7 @@ void confirm_row() {
         break;
     case ROW_CLOUD_STATUS: break;
     case ROW_FPSCOUNT: change(ge_draw_fps_counter() ? -1 : 1); return;
+    case ROW_VSYNC: change(psp_vsync_wanted() ? -1 : 1); return;
     case ROW_PERF: change(ge_draw_perf_overlay() ? -1 : 1); return;
     case ROW_FX: change(ge_draw_fx_shaders() ? -1 : 1); return;
     case ROW_SYNC: ge_draw_set_sync_mode((ge_draw_sync_mode() + 1) % 5); break;
@@ -2427,6 +2506,7 @@ void psp_settings_load_early() {
         put("PSPRECOMP_VOICE", it->second);
     if ((it = g_saved.find("hd_textures")) != g_saved.end() && (it->second == "0" || it->second == "1"))
         put("PSPRECOMP_TEX_REPLACE", it->second);
+    if ((it = g_saved.find("discord")) != g_saved.end() && (it->second == "0" || it->second == "1")) put("PSPRECOMP_DISCORD", it->second);
     if ((it = g_saved.find("renderer")) != g_saved.end() && (it->second == "gl" || it->second == "vulkan")) put("PSPRECOMP_RENDERER", it->second);
     if ((it = g_saved.find("gpu_driver")) != g_saved.end()) {
         if (it->second.empty()) psp_plat::unsetenv_("PSPRECOMP_GPU_DRIVER");
@@ -2445,6 +2525,7 @@ void psp_settings_load_early() {
     if ((it = g_saved.find("net_room")) != g_saved.end()) put("PSPRECOMP_ADHOC_ROOM", it->second);
     if ((it = g_saved.find("net_peers")) != g_saved.end()) put("PSPRECOMP_ADHOC_PEERS", it->second);
     if ((it = g_saved.find("fps_counter")) != g_saved.end()) put("PSPRECOMP_FPS_COUNTER", it->second == "1" ? "1" : "0");
+    if ((it = g_saved.find("vsync")) != g_saved.end() && (it->second == "0" || it->second == "1")) put("PSPRECOMP_VSYNC", it->second);
     if ((it = g_saved.find("perf_overlay")) != g_saved.end()) put("PSPRECOMP_PERF_HUD", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("ge_ring")) != g_saved.end() && (it->second == "map" || it->second == "sub"))
         put("PSPRECOMP_GE_RING", it->second);
@@ -2654,6 +2735,8 @@ void psp_settings_tick() {
         char st[128];
         psp_adhoc_status(st, sizeof st);
         if (g_net_status != st) { g_net_status = st; g_dirty = true; }
+        const std::string ds = psp_discord::status();
+        if (g_discord_status != ds) { g_discord_status = ds; g_dirty = true; }
     }
     if (page_id() == PAGE_GPU && !g_edit.active) {   // the list / download run on a worker thread
         if (!g_gpu_list_asked) { g_gpu_list_asked = true; psp_gpu::refresh(); }   // load the live list the first time the page is seen

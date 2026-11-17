@@ -46,11 +46,15 @@ def main():
                 t.extractall(d, members=[m for m in members if m.name])
         return d
 
+    # 16 KB pages (Android 15+ devices may run a 16 KB kernel; Play requires it): the NDK r27 toolchain then links every shared
+    # library with -z max-page-size=16384 (the default from r28). android/apk_pack.py checks the result.
+    PAGE16K = ["-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"]
+
     def cmake_dep(name, extra):
         src = unpack(name); bd = out + "/build-" + name
         run([a.cmake, "-S", src, "-B", bd, "-G", "Ninja", "-DCMAKE_TOOLCHAIN_FILE=" + tc, "-DANDROID_ABI=arm64-v8a",
              "-DANDROID_PLATFORM=android-" + a.api, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_INSTALL_PREFIX=" + deps,
-             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"] + extra, env=env)
+             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"] + PAGE16K + extra, env=env)
         run([a.cmake, "--build", bd, "-j", j], env=env); run([a.cmake, "--install", bd], env=env)
 
     if not os.path.isfile(deps + "/lib/libfreetype.a"):
@@ -80,7 +84,7 @@ def main():
         shutil.copytree(lsrc, asrc + "/lib/linkernsbypass")   # a git submodule upstream: not in the source tarball
         bd = out + "/build-libadrenotools"
         run([a.cmake, "-S", asrc, "-B", bd, "-G", "Ninja", "-DCMAKE_TOOLCHAIN_FILE=" + tc, "-DANDROID_ABI=arm64-v8a",
-             "-DANDROID_PLATFORM=android-" + a.api, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"], env=env)
+             "-DANDROID_PLATFORM=android-" + a.api, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"] + PAGE16K, env=env)
         run([a.cmake, "--build", bd, "-j", j], env=env)
         os.makedirs(deps + "/lib", exist_ok=True)
         for pat in ("libadrenotools.a", "lib/linkernsbypass/liblinkernsbypass.a"):
@@ -139,7 +143,7 @@ set(ZLIB_FOUND TRUE)
     with open(out + "/link.txt", "w") as f:
         f.write("\n".join(link) + "\n")
     with open(out + "/toolchain.cmake", "w") as f:
-        f.write('set(ANDROID_ABI arm64-v8a)\nset(ANDROID_PLATFORM android-%s)\ninclude("%s")\nset(PSPRECOMP_DEPS_CMAKE "%s/deps.cmake")\n' % (a.api, tc, out))
+        f.write('set(ANDROID_ABI arm64-v8a)\nset(ANDROID_PLATFORM android-%s)\nset(ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES ON)\ninclude("%s")\nset(PSPRECOMP_DEPS_CMAKE "%s/deps.cmake")\n' % (a.api, tc, out))
     print("deps ready in", out)
 
 if __name__ == "__main__":

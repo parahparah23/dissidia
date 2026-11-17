@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Automated battle tests: boot the game headless, walk the menus to a Quick Battle (Squall vs a CPU fighter), play a
+"""Automated battle tests: boot the game headless, get to a Quick Battle (Squall vs a CPU fighter), play a
 scripted pad input in game time, quit, and compare the same script at several frame rates.
+
+The fight is reached by replaying a recorded pad walk inside the game (--direct, the default: ~30 s). The old
+picture-by-picture menu walk (~100 s) is off unless asked for with --menu-walk or BT_MENU_WALK=1; use it only when
+really needed (recording a walk for another character or stage, a runtime without direct_battle.cpp).
 
   battle_test.py run     --work DIR --script FILE [--fps 120] [--out DIR] [--char Squall] [--timeout 240]
   battle_test.py compare --work DIR --script FILE [--rates 30,120] [--out DIR]
@@ -44,8 +48,8 @@ BTN = {'select': 0x1, 'start': 0x8, 'up': 0x10, 'right': 0x20, 'down': 0x40, 'le
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Player Select grid: (row, column) of each character with the cursor starting on (0, 0); read off the screen
-GRID = {'lightning': (0, 0), 'vaan': (0, 1), 'squall': (1, 5), 'kain': (0, 4), 'terra': (1, 3), 'jecht': (2, 7)}   # (down presses, right presses; negative = left)
-CHAR_ID = {'lightning': 31, 'squall': 15, 'kain': 24, 'terra': 11, 'jecht': 20}      # the game's charId (the fighter the tests drive; the other one is the dummy)
+GRID = {'lightning': (0, 0), 'vaan': (0, 1), 'bartz': (1, 2), 'squall': (1, 5), 'kain': (0, 4), 'terra': (1, 3), 'jecht': (2, 7)}   # (down presses, right presses; negative = left)
+CHAR_ID = {'lightning': 31, 'bartz': 9, 'squall': 15, 'kain': 24, 'terra': 11, 'jecht': 20}      # the game's charId (the fighter the tests drive; the other one is the dummy)
 
 
 class Game:
@@ -66,10 +70,16 @@ class Game:
         shutil.copytree(os.path.join(self.work, 'ms0'), ms0)
         ini = os.path.join(self.out, 'settings_%d.ini' % self.fps)
         with open(ini, 'w') as f:
-            f.write('display=window\nfps=%d\nrender_scale=%d\nwidescreen=%d\nvoice=en\ncheck_updates=0\nhd_textures=%d\n' % (self.fps, self.render_scale, self.widescreen, 1 if os.environ.get('PSPRECOMP_TEXPACK') else 0))
+            f.write('display=%s\nfps=%d\nrender_scale=%d\nwidescreen=%d\nvoice=%s\ncheck_updates=0\nhd_textures=%d\n' % (
+                os.environ.get('BT_DISPLAY_MODE', 'window'),   # BT_DISPLAY_MODE=fullscreen: a real-display test the way players run (VRR, pacing)
+                self.fps, self.render_scale, self.widescreen,
+                os.environ.get('BT_VOICE', 'en'),              # BT_VOICE=jp: the Japanese voices (needs voice_jp/ next to the run's ms0, i.e. in --out)
+                1 if os.environ.get('PSPRECOMP_TEXPACK') else 0))
         env = dict(os.environ, DISPLAY=self.display, PSPRECOMP_SETTINGS=ini, PSPRECOMP_MS0=ms0, PSPRECOMP_FIGHTER_LOG='1',
                    PSPRECOMP_DEBUG_PORT=str(self.port), PSPRECOMP_SAVEDATA_AUTO='0', PSPRECOMP_TEST_FREEZE_CPU='1')
         env.pop('PSPRECOMP_FPS', None)
+        if gpu_headless():
+            env.update(gpu_env())
         env.setdefault('PSPRECOMP_TEST_NO_AI', '1')   # the CPU brain never ticks: the dummy does not attack (BT_NO_FREEZE=1 lets it act)
         if os.environ.get('BT_NO_FREEZE'):
             env['PSPRECOMP_TEST_NO_AI'] = '0'      # let the CPU fighter act (the dummy is the default)
@@ -173,7 +183,23 @@ class _NoProc:
         pass
 
 
+NVIDIA_EGL = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
+
+
+def gpu_headless():
+    """BT_GPU=1: render on the NVIDIA GPU with no X server (SDL's offscreen video driver makes an EGL context; Xvfb only has
+    llvmpipe). BT_GPU=auto: when the NVIDIA EGL vendor file is there."""
+    v = os.environ.get('BT_GPU', '0')
+    return v == '1' or (v == 'auto' and os.path.exists(NVIDIA_EGL))
+
+
+def gpu_env():
+    return {'SDL_VIDEODRIVER': 'offscreen', '__EGL_VENDOR_LIBRARY_FILENAMES': os.environ.get('BT_EGL_VENDOR', NVIDIA_EGL)}
+
+
 def start_xvfb():
+    if gpu_headless():                         # no display at all: the game renders offscreen on the GPU
+        return _NoProc(), ':gpu-offscreen'
     if os.environ.get('BT_DISPLAY'):           # no Xvfb on this machine: use an existing X display (the 480x272 test windows show on it)
         return _NoProc(), os.environ['BT_DISPLAY']
     n = free_display()
@@ -231,8 +257,28 @@ def walk_direct(g, ff_menus=4):
     raise RuntimeError('the battle never started (direct)')
 
 
+DIRECT_WALK = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tests', 'replays', 'quick_battle_walk.txt')
+MENU_WALK_OFF = ('the picture-by-picture menu walk is off: it takes ~100 s to reach the fight (and needs the HUD probes to match). '
+                 'Use the recorded walk instead (battle_test.py run/compare/actions/scan do by default; --direct FILE for another recording). '
+                 'Only when it is really needed (recording a walk for another character or stage, a runtime without direct_battle.cpp, '
+                 'a tool with no --direct): BT_MENU_WALK=1 or battle_test.py --menu-walk. docs/testing.md "Skipping the menu walk".')
+
+
+def direct_walk(a):
+    """the recorded walk a run replays (None = the menu walk, only with --menu-walk / BT_MENU_WALK=1)"""
+    if getattr(a, 'menu_walk', False) or (os.environ.get('BT_MENU_WALK') and not getattr(a, 'direct', None)):
+        os.environ['BT_MENU_WALK'] = '1'
+        return None
+    if not getattr(a, 'direct', None) and getattr(a, 'stage', 12) != 12:
+        print('[battle_test] note: the default recorded walk is stage 12; --stage %d needs a walk recorded for it (--direct FILE) '
+              'or --menu-walk' % a.stage, file=sys.stderr)
+    return getattr(a, 'direct', None) or DIRECT_WALK
+
+
 def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
-    """boot -> battle. Raises when a stage does not come up."""
+    """boot -> battle. Raises when a stage does not come up. Slow (~100 s): off unless BT_MENU_WALK=1 (see MENU_WALK_OFF)."""
+    if not os.environ.get('BT_MENU_WALK'):
+        raise RuntimeError(MENU_WALK_OFF)
     t_start = time.time()
     lap = lambda what: print('[battle_test]   +%5.1f s %s' % (time.time() - t_start, what), file=sys.stderr) if os.environ.get('BT_TRACE') else None
     g.wait_log(r'Debug socket listening', 60)
@@ -267,6 +313,8 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
     g.step('cross')
     g.step('cross')                                    # YES
     lap('char chosen')
+    for _ in range(int(os.environ.get('BT_CPU_RIGHT', '0'))):   # another opponent: cursor steps right from Lightning (1 = Vaan)
+        g.step('right', settle=False)
     g.step('cross')                                    # CPU Select: Lightning
     g.step('cross')                                    # YES
     time.sleep(2.0)
@@ -309,18 +357,28 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
     raise RuntimeError('the battle never started')
 
 
+def idle_script(out):
+    """a test script that does nothing: the runtime's test driver (and with it '[TEST] battle started', which every walk
+    waits for) only runs with PSPRECOMP_TEST_SCRIPT set, so a run with only --shots needs one"""
+    p = os.path.join(os.path.abspath(out), 'idle_script.txt')
+    with open(p, 'w') as f:
+        f.write('0 mark idle\n')
+    return p
+
+
 def run(a, fps=None):
     fps = fps or a.fps
     os.makedirs(a.out, exist_ok=True)
+    direct = direct_walk(a)
     xp, disp = start_xvfb()
-    g = Game(os.path.abspath(a.work), fps, a.out, disp, free_port(), script=os.path.abspath(a.script) if a.script else None,
+    g = Game(os.path.abspath(a.work), fps, a.out, disp, free_port(), script=os.path.abspath(a.script) if a.script else idle_script(a.out),
              record=os.path.abspath(a.record) if getattr(a, 'record', None) else None,
              extra_env=dict(({'PSPRECOMP_TEST_PLAYER_CHAR': str(CHAR_ID[a.char.lower()])} if a.char.lower() in CHAR_ID else {}),
-                            **dict(({'PSPRECOMP_TEST_DIRECT_BATTLE': os.path.abspath(a.direct)} if getattr(a, 'direct', None) else {}), **(getattr(a, 'env', None) or {}))))
+                            **dict(({'PSPRECOMP_TEST_DIRECT_BATTLE': os.path.abspath(direct)} if direct else {}), **(getattr(a, 'env', None) or {}))))
     try:
         g.start()
         t0 = time.time()
-        if getattr(a, 'direct', None):
+        if direct:
             walk_direct(g, ff_menus=4 if getattr(a, 'ff_menus', None) is None else a.ff_menus)
         else:
             walk_menus(g, a.char, stage=getattr(a, 'stage', 12), ff_menus=getattr(a, 'ff_menus', None) or 0)
@@ -607,13 +665,18 @@ def scan_run(a, fps):
     """one battle at `fps`; RAM snapshots at the game times of --at (ms); returns {gt: bytes}"""
     os.makedirs(a.out, exist_ok=True)
     lo, hi = (int(x, 16) for x in a.range.split('-'))
+    direct = direct_walk(a)
     xp, disp = start_xvfb()
     g = Game(os.path.abspath(a.work), fps, a.out, disp, free_port(), script=os.path.abspath(a.script) if a.script else None,
-             extra_env={'PSPRECOMP_TEST_PLAYER_CHAR': str(CHAR_ID[a.char.lower()])})
+             extra_env=dict({'PSPRECOMP_TEST_PLAYER_CHAR': str(CHAR_ID[a.char.lower()])},
+                            **({'PSPRECOMP_TEST_DIRECT_BATTLE': os.path.abspath(direct)} if direct else {})))
     snaps = {}
     try:
         g.start()
-        walk_menus(g, a.char, stage=a.stage)
+        if direct:
+            walk_direct(g)
+        else:
+            walk_menus(g, a.char, stage=a.stage)
         for t in [int(x) for x in a.at.split(',')]:
             end = time.time() + a.timeout
             while g.alive() and game_ms(g) < t and time.time() < end:
@@ -713,13 +776,15 @@ def main(argv):
         p.add_argument('--char', default='squall')
         p.add_argument('--stage', type=int, default=12, help='Quick Battle stage, 1-20 (1 = Random); default 12')
         p.add_argument('--timeout', type=int, default=240)
+        p.add_argument('--direct', nargs='?', const=DIRECT_WALK,
+                       help='the recorded walk to replay inside the game (the default: tests/replays/quick_battle_walk.txt, '
+                            'Squall vs Lightning, stage 12); needs a runtime with direct_battle.cpp')
+        p.add_argument('--menu-walk', dest='menu_walk', action='store_true',
+                       help='the slow (~100 s) picture-by-picture menu walk instead; only when really needed (recording a walk for another --char / --stage)')
+        p.add_argument('--ff-menus', dest='ff_menus', type=int, default=None, help='menu trip at N x real time (recorded walk default 4; the menu walk default 0)')
         if name == 'run':
             p.add_argument('--fps', type=int, default=30)
             p.add_argument('--record', help='write the pad input of this session as a test script')
-            p.add_argument('--direct', nargs='?', const=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tests', 'replays', 'quick_battle_walk.txt'),
-                           help='skip the menu walk: replay a recorded pad sequence inside the game (default tests/replays/quick_battle_walk.txt; '
-                                'records Squall vs Lightning, stage 12); needs a runtime with direct_battle.cpp')
-            p.add_argument('--ff-menus', dest='ff_menus', type=int, default=None, help='menu trip at N x real time (--direct default 4; the picture walk default 0)')
             p.add_argument('--ff', action='store_true', help='fast-forward the test script too (as fast as frames render)')
             p.add_argument('--shots', help='comma separated seconds after the fight starts at which to save a screenshot (battle_<renderer>_<s>.tga), then quit')
             p.add_argument('--watch', help='hex guest address: log which functions change it ([MEM_WATCH] lines)')
@@ -744,6 +809,7 @@ def main(argv):
     p.add_argument('--speed-tol', dest='speed_tol', type=float, default=1.35)
     p.add_argument('--dist-tol', dest='dist_tol', type=float, default=1.5)
     p.add_argument('--record', default=None)
+    p.add_argument('--menu-walk', dest='menu_walk', action='store_true', help='the slow picture-by-picture menu walk (see run --menu-walk)')
     p = sub.add_parser('analyze')
     p.add_argument('logs', nargs='+')
     p.add_argument('--tolerance', type=float, default=0.5)
@@ -759,6 +825,7 @@ def main(argv):
     p.add_argument('--timeout', type=int, default=120)
     p.add_argument('--ratio', type=float, default=1.5)
     p.add_argument('--min-rate', dest='min_rate', type=float, default=0.001)
+    p.add_argument('--menu-walk', dest='menu_walk', action='store_true', help='the slow picture-by-picture menu walk (see run --menu-walk)')
     p = sub.add_parser('gauge-drain', help='assist gauge idle drain takes the same time at every frame rate (parallel runs)')
     p.add_argument('--work', required=True)
     p.add_argument('--out', default=tempfile.mkdtemp(prefix='battle_test_'))

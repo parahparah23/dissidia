@@ -3,15 +3,21 @@
 Everything about the game itself, the native build and the modding tools, in one place. Paths in these docs are relative to `psprecomp/games/dissidia/` unless they say otherwise.
 
 ## Start here
-- [The top-level README](../../../../README.md#install-and-play): install and play (Steam Deck, Linux PC). The install steps are written there only.
-- [steamdeck.md](steamdeck.md): the Steam Deck in detail (`deck_setup.sh`, Steam entry, controls, troubleshooting).
+- [The top-level README](../../../../README.md#install): install and play with the setup app (Windows, Linux, Steam Deck, Android);
+  [building from source](../../../../README.md#building-from-source).
+- [installer.md](../../../docs/installer.md): design of the setup app, releases and update checks.
+- [android.md](../../../docs/android.md): Android: the setup app, building on the phone, what runs on the device, how the APK is put together.
+- [steamdeck.md](steamdeck.md): the Steam Deck in detail (Game Mode, controls, performance, the from-source `deck_setup.sh` route, troubleshooting).
 - [native-build.md](native-build.md): what each setup step does, the work folder, every runtime option (window, scaling, input, camera).
+- [settings-menu.md](settings-menu.md): the in-game Settings screen (from the title, start and pause menus): every page and row.
+- [frame-rate.md](frame-rate.md): frame rates above 30 (any multiple of 30 up to 240): how the game paces itself and what was patched.
 - [loose-file-mods.md](loose-file-mods.md): how loose files replace `PACKAGE.BIN` entries, the model size budget, package index internals.
-- [texture-packs.md](texture-packs.md): HD texture replacement: dumping, upscaling, the built-in upscaler.
+- [texture-packs.md](texture-packs.md): HD texture packs (LiinkPK's and the AI upscaled one): loading, dumping, upscaling.
 - [multiplayer.md](multiplayer.md): Communications mode over UDP (LAN, one machine, internet), options, how the ad-hoc stack is emulated.
 - [savedata.md](savedata.md): saves between regions: `savemgr` list / import / export.
 - [cloud-sync.md](cloud-sync.md): saves between devices through a folder, WebDAV or Google Drive.
-- [frame-rate.md](frame-rate.md): native 60 fps battles (how the game paces itself, what was patched), and the in-game settings menu.
+- [discord.md](discord.md): Discord Rich Presence (mode, fighters, stage, the other players on your Discord profile).
+- [testing.md](testing.md): the battle test harness, frame-rate parity tests, testing on a phone or a Deck.
 
 ## Making characters
 Short guides next to the tools, and the full reference here:
@@ -26,10 +32,11 @@ Short guides next to the tools, and the full reference here:
 - [spawned-objects.md](spawned-objects.md): the `wpnp` table and the objects `hold_prop` / `summon_object` spawn (Gilgamesh's swords, Yuna's aeons).
 - [effects.md](effects.md): how the game draws effects (placement, timing, colour and blending, every component), and corrections to the FEP notes.
 - [audio.md](audio.md): extra BGM tracks, voice banks.
-- [recomp-status.md](recomp-status.md): how the native build came together, and soak-test findings.
+- [recomp-status.md](recomp-status.md): how the native build came together (October 2026), and soak-test findings. Historical.
 - [character-lighting.md](character-lighting.md): live key and rim lighting on character bodies in the native build (`body.lighting`).
+- [spring-bones.md](spring-bones.md): how the game swings capes, hair, skirts and weapon chains, and giving a mod character a physics cape.
 - Custom effect shaders are an engine feature: [psprecomp/FX_SHADERS.md](../../../FX_SHADERS.md).
-- Engine docs: [ARCHITECTURE](../../../ARCHITECTURE.md), [DEBUGGING](../../../DEBUGGING.md), [ENV_FLAGS](../../../docs/ENV_FLAGS.md), [GRAPHICS](../../../docs/GRAPHICS.md), [TROUBLESHOOTING](../../../docs/TROUBLESHOOTING.md).
+- Engine docs: [ARCHITECTURE](../../../ARCHITECTURE.md), [DEBUGGING](../../../DEBUGGING.md), [ENV_FLAGS](../../../docs/ENV_FLAGS.md), [GRAPHICS](../../../docs/GRAPHICS.md), [VULKAN_PORT](../../../docs/VULKAN_PORT.md), [TROUBLESHOOTING](../../../docs/TROUBLESHOOTING.md).
 
 ## Archive
 Dated investigations kept for the record:

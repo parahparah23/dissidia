@@ -361,8 +361,12 @@ Two consequences of how this is implemented:
   framebuffer (software rendering, `sceGeEdram` writes) is invisible; only GE-rendered FBO
   content is shown. Double-buffer flips via `sceDisplaySetFrameBuf` all present the same FBO.
 - Frame pacing is driven by the *guest*, not the renderer: `sceDisplayWaitVblankStart` sleeps
-  16.667 ms on the game thread to simulate the 60 Hz vblank. No `SDL_GL_SetSwapInterval` is
-  called, so vsync is whatever the platform defaults to.
+  on the game thread to the next simulated vblank (60 Hz, or the battle frame rate above 60).
+  Whether the swap then waits for the display is the Vertical Sync setting
+  (`runtime/src/psp_present_sync.cpp`, `PSPRECOMP_VSYNC`): off = Vulkan IMMEDIATE / MAILBOX or
+  GL swap interval 0, on = FIFO / swap interval -1 or 1, which on a VRR display lets the refresh
+  follow the game. It can change while running: the Vulkan layer rebuilds its swapchain at the
+  next swap (the same path as the HDR switch), GL changes the swap interval on the presenting thread.
 
 ### Present-time post-processing
 
@@ -526,6 +530,11 @@ reflection 10/16/22 steps). `PSPRECOMP_FX_DEBUG=1` logs the GPU time (desktop) a
 - Contact shadows: ray length `PSPRECOMP_CONTACT_LEN` view units (2.5, a fighter is about 2.4 tall), `PSPRECOMP_CONTACT_THICK`
   (0.5); the light is mostly overhead in world space (`PSPRECOMP_LIGHT_X/Y/Z`, default 0.4 / 1 / 0.3; the game's own lights
   are not read) and only lights surfaces that face it.
+- Fighters do not shadow themselves (contact and ray-traced shadows): the low-poly models and their solid hair / fur / fringe cards
+  left blotches over faces and bodies. Skinned draws go into the mask list as material byte 1 (`fighter_capture`; a reflective byte is
+  always >= 32), so the mask marks visible fighter pixels; there the screen-space march skips samples on fighter pixels and the shadow
+  ray passes fighter triangles (low bit of their `rt_tri_col` coverage) within `PSPRECOMP_RT_SELF_LEN`. The stage and objects still
+  shadow fighters. `PSPRECOMP_SELF_SHADOW=1` restores the old self-shadowing.
 - Which surfaces reflect (issue #2): a per-texture reflectivity table (`psp_refl_table.h`, keyed by texture-pack id, 0..1; a texture
   not listed does not reflect). The game module supplies a built-in list (Dissidia: `games/dissidia/runtime/refl_materials.cpp`,
   134 stage textures: water, ice, crystal, marble, polished tiles, some metal), `reflectivity.txt` in the game folder

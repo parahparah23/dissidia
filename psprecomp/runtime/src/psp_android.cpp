@@ -240,7 +240,9 @@ void psp_android_init() {
     auto has_files = [&]() { bool h = false; DIR* dir = d0 ? opendir(d0) : nullptr; if (dir) { while (dirent* e = readdir(dir)) if (std::strcmp(e->d_name, ".") && std::strcmp(e->d_name, "..")) { h = true; break; } closedir(dir); } return h; };
     const bool partial = access((wd + "/.importing").c_str(), F_OK) == 0;   // an earlier side-load was cut short
     bool have = has_files() && !partial;
-    if (!have && import_from_host(wd)) have = has_files();
+    // the side-load also runs on a phone that has the game already when the property is set (a developer's adb setprop): it adds or
+    // replaces the files it is sent (e.g. a mods folder), the rest stays
+    if (import_from_host(wd)) have = has_files();
     if (!have) {
         const std::string msg = std::string("The game's files were not found.\n\nReinstall the game with the installer to copy them to:\n") + wd;
         std::fprintf(stderr, "[ANDROID] ERROR: %s\n", msg.c_str());

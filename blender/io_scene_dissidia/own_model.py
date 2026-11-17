@@ -459,6 +459,16 @@ def _base_image(mat):
     return imgs[0] if len(imgs) == 1 else None
 
 
+def _alpha_cutout(mat):
+    """the material draws its picture's alpha as opacity (its BSDF's Alpha is wired, as a glTF MASK / BLEND or an
+    FBX cut-out material imports): hair cards, lace. Elsewhere a picture's alpha is often a mask (specular, skin
+    shading), which as opacity would make the body see-through, so it is ignored."""
+    if not mat or not mat.use_nodes:
+        return False
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    return bsdf is not None and 'Alpha' in bsdf.inputs and bsdf.inputs['Alpha'].is_linked
+
+
 IMG_EXT = ('.png', '.jpg', '.jpeg', '.tga', '.bmp', '.dds', '.tif', '.tiff', '.webp', '.exr')
 NOT_COLOUR = ('norm', 'nrm', 'normal', 'roug', 'rough', 'occl', 'ao', 'meta', 'metal', 'mask', 'spec', 'height', 'disp', 'emis', 'opac', 'alph', 'shift', 'wet', 'refl', 'thic', 'tear', 'decal')   # 'alph' covers alpha too; thic: thickness
 
@@ -687,6 +697,7 @@ def one_texture(mesh, size=512, model_dir=''):
             if why:
                 notes.append(why)
     one_texture.notes = notes
+    one_texture.alpha = False
     used = {imgs.get(slot(p.material_index).name) if slot(p.material_index) else None for p in me.polygons} if mats else {None}
     if len(used) == 1 and None not in used and inside:
         img = next(iter(used))
@@ -694,6 +705,7 @@ def one_texture(mesh, size=512, model_dir=''):
             me.uv_layers.remove(me.uv_layers[-1])
         f = bpy.path.abspath(img.filepath) if img.filepath else ''
         path = f if f.lower().endswith(('.png', '.jpg', '.jpeg')) and os.path.isfile(f) else _save_png(img, os.path.join(tmp, 'body.png'))
+        one_texture.alpha = any(_alpha_cutout(slot(p.material_index)) for p in me.polygons)
         return path, 'its own texture (%s)' % img.name
     # several pictures: one atlas, a grid cell per material (its picture scaled into the cell, its UVs with it)
     slots = list(me.materials) or [None]
@@ -713,6 +725,8 @@ def one_texture(mesh, size=512, model_dir=''):
         if k not in cell_of:
             cell_of[k] = len(firsts); firsts.append(m)
         cell_of[i] = cell_of[k]
+    cutout = {cell_of[i] for i, m in enumerate(slots) if i in cell_of and _alpha_cutout(m)}
+    one_texture.alpha = bool(cutout)
     g = 1                                                        # columns; rows only as many as needed (5: 3 x 2),
     while g * g < len(firsts):                                   # the cells stretched to fill the texture
         g += 1
@@ -738,6 +752,8 @@ def one_texture(mesh, size=512, model_dir=''):
             bsdf = next((n for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None) if m and m.use_nodes else None
             rgba = list(bsdf.inputs['Base Color'].default_value) if bsdf else list(m.diffuse_color if m else (0.8, 0.8, 0.8, 1))
             block = np.tile(np.array(rgba, np.float32), (ch, cw, 1))
+        if k not in cutout:
+            block[..., 3] = 1.0                                  # alpha there is a mask, not opacity (_alpha_cutout)
         atlas[row * ch:(row + 1) * ch, col * cw:(col + 1) * cw] = block
     if not me.uv_layers:
         me.uv_layers.new(name='UVMap')
@@ -783,7 +799,8 @@ def _game_height(arm):
     return head.z, foot
 
 
-def fit(context, arm, path, girth=1.0, max_tris=2500, tex_size=512, bake=True, progress=None, hair_colour=(0.35, 0.25, 0.18)):
+def fit(context, arm, path, girth=1.0, max_tris=2500, tex_size=512, bake=True, progress=None, hair_colour=(0.35, 0.25, 0.18),
+        grade_colours=True):
     """Fit the model in `path` onto the game armature `arm` as its body. -> report dict"""
     say = progress or (lambda *_: None)
     if context.object and context.object.mode != 'OBJECT':
@@ -857,10 +874,12 @@ def fit(context, arm, path, girth=1.0, max_tris=2500, tex_size=512, bake=True, p
             weight_map = dict(FB.WEIGHT_MAP)
             say('fitting the body')
             r = FB.fit_core(src_arm, mesh, arm, maps, weight_map, tex_path, max_tris=max_tris, tex_size=tex_size,
+                            keep_alpha=getattr(one_texture, 'alpha', False), grade_colours=grade_colours,
                             bake=bake, tweak_eye=False)
         else:
             say('weighting automatically')
-            r = _auto_fit(context, arm, mesh, src_arm, tex_path, max_tris, tex_size, bake)
+            r = _auto_fit(context, arm, mesh, src_arm, tex_path, max_tris, tex_size, bake,
+                          keep_alpha=getattr(one_texture, 'alpha', False), grade_colours=grade_colours)
             rep.setdefault('skeleton', 'none in the file: weighted automatically')
         rep.update({k: r[k] for k in ('tris_in', 'tris', 'verts', 'lighting') if r.get(k)})
         rep['body'] = r.get('body')
@@ -910,7 +929,7 @@ BODY_BONES = ('hip', 'waist', 'chest', 'neck', 'head', 'l_clavicle', 'l_uparm', 
               'r_uparm', 'r_foarm', 'r_hand', 'l_femur', 'l_tibia', 'l_foot', 'r_femur', 'r_tibia', 'r_foot')
 
 
-def _auto_fit(context, arm, mesh, src_arm, tex_path, max_tris, tex_size, bake):
+def _auto_fit(context, arm, mesh, src_arm, tex_path, max_tris, tex_size, bake, keep_alpha=False, grade_colours=True):
     """No usable skeleton: stand the mesh on the game skeleton's feet at its height, weight it automatically to the
     body bones, then hand it to fit_core with identity maps."""
     top, foot = _game_height(arm)
@@ -948,6 +967,7 @@ def _auto_fit(context, arm, mesh, src_arm, tex_path, max_tris, tex_size, bake):
     holder = bpy.data.objects.new('dfx_own_tmp_arm', bpy.data.armatures.new('dfx_own_tmp_arm'))
     context.scene.collection.objects.link(holder)
     return FB.fit_core(holder, mesh, arm, maps, {g: g for g in groups}, tex_path, max_tris=max_tris, tex_size=tex_size,
+                       keep_alpha=keep_alpha, grade_colours=grade_colours,
                        bake=bake, tweak_eye=False)
 
 
@@ -1395,8 +1415,11 @@ class DFX_OT_own_model(bpy.types.Operator, ImportHelper):
                                      description='Hair made of strands with no colour picture (ripped game models) is made solid, in this colour')
     tex_size: EnumProperty(name='Texture', items=[('256', '256 x 256', ''), ('512', '512 x 512', 'The PSP\'s largest'),
                                                  ('1024', '1024 x 1024', 'HD: the model carries a 512 one, the native build draws this one (texture pack)'),
-                                                 ('2048', '2048 x 2048', 'HD: the model carries a 512 one, the native build draws this one (texture pack)')],
+                                                 ('2048', '2048 x 2048', 'HD: the model carries a 512 one, the native build draws this one (texture pack)'),
+                                                 ('4096', '4096 x 4096', 'HD for a model with many pictures (a modern game\'s: face, hair, body, outfit ...): each keeps about its own size in the one texture. The native build draws it; it costs 64 MB of video memory')],
                            default='2048')
+    grade: BoolProperty(name='Dissidia colour grade', default=True,
+                        description='Warmer skin, neutral blacks, more contrast, as the game\'s textures. Off for a model whose textures are already final (a modern game\'s): the grade takes any skin-coloured hue, so peach or blonde hair turns orange')
     bake: BoolProperty(name='Painted lighting', default=True,
                        description='Bake soft lighting into the texture, as the game\'s characters have (slower). Skipped by itself when much of the texture is shared by mirrored or repeated parts')
     use_in_game: BoolProperty(name='Use it in the game', default=True,
@@ -1421,7 +1444,7 @@ class DFX_OT_own_model(bpy.types.Operator, ImportHelper):
     def draw(self, context):
         L = self.layout
         L.label(text='Fitted onto this character\'s skeleton.')
-        for p in ('skin', 'detail', 'girth', 'max_tris', 'tex_size', 'bake', 'hair_colour'):
+        for p in ('skin', 'detail', 'girth', 'max_tris', 'tex_size', 'grade', 'bake', 'hair_colour'):
             if p == 'max_tris' and self.detail == 'FULL':
                 continue
             L.prop(self, p)
@@ -1442,7 +1465,7 @@ class DFX_OT_own_model(bpy.types.Operator, ImportHelper):
         wm.progress_begin(0, 3)
         try:
             rep = fit(context, arm, path, girth=self.girth, max_tris=self.max_tris if self.detail == 'PSP' else 0, tex_size=int(self.tex_size),
-                      bake=self.bake, progress=say, hair_colour=tuple(self.hair_colour))
+                      bake=self.bake, progress=say, hair_colour=tuple(self.hair_colour), grade_colours=self.grade)
             wm.progress_update(2)
             arm['dfx_own_model'] = os.path.basename(path)
             if self.costume:                                  # a costume: its own model files carry the body

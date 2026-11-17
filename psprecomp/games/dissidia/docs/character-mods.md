@@ -30,6 +30,61 @@ with the add-on 0.32+), Blender (Character mods > Model), or `charmod.py body cl
 duellum`. It goes on the first costume and its assist; the other costumes keep their own bodies. Weapons are not
 covered for retail characters yet.
 
+### New moves for a retail character
+
+A retail folder may also add abilities: `move_names` entries with `"copy"` (as an added character's, see *move_names
+fields*) become new 'ablt' records of the retail charId (`roster_mainbin.retail_named`); the retail entries in the same
+map are left alone. The build lists each such folder in `<mods>/retail_moves.txt`:
+
+```
+bartz-dff 9 0910,0911,0912,0913,0914,0915,0916,0917 nm=Bartz:_Dissidia_(2008)_moves
+```
+
+and the runtime (`roster.cpp`, retail moves) reads it at start:
+- **on**: the abilities are taught to the character's save record whenever the game fetches it (FUN_088CB164), so a save of
+  any level has them at once (AP still has to be earned to master them);
+- **off** (`#off# ` in front of the line; **Settings > Mods** switches it, at the next start): the records are hidden and
+  inert the way `"disabled"` makes them (owner 0xFE, command -2), so a save that learnt or equipped them stays valid (an
+  equipped slot shows empty). The folder's files stay installed: only the new commands use what they add.
+
+A rebuild keeps a line's `#off#`. A folder deleted or set `"enabled": false` keeps its new abilities as disabled records
+(from the previous `extra_abilities.json`), for the same reason. Settings > Mods shows one row per line instead of the
+folder's own row.
+
+**Bartz's Dissidia (2008) moves** (`mods/bartz-dff`, made by `tools/d1_moves.py` from your own two discs): Ascendant
+Lance, Climbarrel, Storm Shot, Slidehazzard, Soul Eater, Flood, Wind Shear and Paladin Force, the eight moves 012 took
+away, as abilities 0910..0917 next to his 012 kit.
+
+```
+tools/d1_moves.py --d1 "Dissidia Final Fantasy (USA).iso" --iso012 "Dissidia 012 (USA).iso"   # writes mods/bartz-dff
+```
+
+Releases: the wizard's Options page has **Bartz: Dissidia 1 moves**, which asks for the Dissidia 1 disc image and runs
+`d1_moves.py install`. Nothing from either disc ships: `games/dissidia/d1_moves/` holds patches (176 KB, the same
+NPD1 format as the online deltas) whose sources are the player's 012 files, their Dissidia 1 files and D1's moveset
+run through `d1_objx.py` there; every result is checked against `manifest.json` (SHA-256), D1's help texts are read
+from their disc at install. After a change to the mod, regenerate them from a built mods dir:
+`d1_moves.py patches --d1 D1.iso --mods work/mods --disc work/disc0` (and `netpack.py record` for online play). Tested 16
+Nov 2026: an install into an empty game folder rebuilt all files byte for byte as the dev build (3.5 s).
+
+It converts D1's moveset to the 012 layout (`tools/d1_objx.py`: action records 112 -> 116 bytes, the command table,
+hits 60 -> 68 bytes with 012's hit-stop bytes filled in, projectile parameters from floats to the float pool, effect
+placements 248 -> 260 bytes, and the six event ops whose value count grew, learnt from the moves both games share), then
+runs the Move Studio's copy-a-move headless (`tools/d1_moves_studio.js`: Node.js + playwright-core + Chrome) and adds the
+names, help texts, CP / AP, learn levels and D1's voice lines for the slots 012's bank left empty (same slot numbers in
+both banks). Tested 16 Nov 2026 on the USA discs: every move plays with its animation, hits, effects, banner and damage
+(test driver `action 3024..3039`), the Abilities screen lists them, a pressed Soul Eater plays in Quick Battle, and the
+switch hides and restores them.
+
+Online: players who don't have the mod receive it from the player who uses it, verified against a compiled-in list (see
+[multiplayer.md](multiplayer.md), *Mods that change a character*).
+
+Move Studio changes made for it (help every copy): the source's voices and face textures come along when it is the same
+character (a mod folder whose `character.based_on` is the target's code); an effect placement bound to the animation it
+belongs to (FEPA +0xC8, which the game plays and ends with that animation) is bound to the copied animation instead of
+cleared (cleared, a looping hand effect outlived its move), and every placement of the effect id bound to a copied
+animation comes along; copied animations get their whole name (`cpSetChunkName`).
+
 ## A character folder (`mods/<name>/`)
 
 | Path | What | Edit it to |

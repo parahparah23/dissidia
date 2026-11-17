@@ -1,13 +1,13 @@
-# 60 fps and the settings menu
+# Frame rates above 30 (60, 90, 120 ... 240 fps)
 
 ## Using it
 
-- **Settings menu**: Esc or F1 on a keyboard, Guide or L3 + R3 (both stick buttons) on a pad. The game pauses while it
-  is open. Rows: Display (Fullscreen / Window), Window Size (a whole multiple of 480x272, or 1280 x 800, the Deck's
-  screen, when the desktop is big enough; in fullscreen it is remembered for Window mode), Render Scale (1x to 4x),
-  Frame Rate (30 / 60), FPS Counter (a small transparent frames-per-second number in the top-right corner; saved as
-  `fps_counter`, `PSPRECOMP_FPS_COUNTER=1` turns it on without the menu), Quit Game (press twice). Left / right changes a value, Cross cycles it, Circle or Start closes.
-  It is drawn from the game's own menu textures, like the save dialog.
+- **Settings menu** (all pages and rows: [settings-menu.md](settings-menu.md)): Esc or F1 on a keyboard, Guide or L3 + R3
+  (both stick buttons) on a pad, or the Settings row in the title screen, start menu and battle pause menu. The game
+  pauses while it is open. **Frame Rate** is any multiple of 30 up to 240; the default follows the display's refresh
+  rate (60 on a 60 Hz screen, 90 on the OLED Steam Deck, 120 on a 120 Hz one). Menus stay at 30, battles run at the
+  chosen rate. **FPS Counter** shows a small frames-per-second number in the top-right corner (saved as `fps_counter`,
+  `PSPRECOMP_FPS_COUNTER=1` turns it on without the menu).
 - **Debug page**: L / R (shoulder buttons), or Q / E / Tab on a keyboard, switches between System and Debug:
   - Performance Overlay: for debugging. Frames per second, average and worst frame time over the last half second,
     presents per second (a gap to the fps means the presenter runs without new game frames), render scale and process
@@ -57,6 +57,40 @@ scaled for 60 Hz uses the same factor (`interval / 2` became `ticks / 2`), and t
 update run one update in `rate / 30` with dt 2. **Not yet tested in play**: expect the unknown, such as integer
 fades that truncate at a small dt. There is no vsync, so a rate above the monitor's refresh tears or drops frames.
 In multiplayer the lowest rate any player asked for wins, whatever the values.
+
+## 30 Hz logic (on by default; `PSPRECOMP_LOGIC30=0` or Debug > Developer options > Timing turns it off)
+
+Above 30 fps the battle can run its gameplay at the PSP's 30 updates a second instead of `rate` updates with a smaller step: every
+`rate / 30`-th frame is a gameplay frame (timer step 2); the frames between are drawn-only (step 0). Native high-rate play can never
+match 30 fps exactly, because a keyed event at 30 fps acts for a whole 33 ms frame; with 30 Hz logic every move plays as at 30 fps
+(docs/testing.md "30 Hz logic" for the parity results).
+
+- **Pacing** (`l30_decide_next`): in play a gameplay frame is due every 33.3 ms of real time (the frame shown nearest to it runs the
+  gameplay), and each frame is blended by the time actually passed since the last gameplay frame. Counting frames instead (every
+  rate / 30-th frame, phases k/n) looked jittery on the RP6 at 120 fps while moving: it drops ~7 % of frames, and a late frame then
+  showed the picture a quarter step on although more time had passed. Tests stay on frame counting (repeatable): parity runs, a test
+  script, `PSPRECOMP_VCLOCK`, or `PSPRECOMP_L30_PACE=frames`; `=clock` forces real time. `PSPRECOMP_L30_PACE_LOG=<n>` logs decisions,
+  `PSPRECOMP_L30_TIMING=1` frame times by position after the gameplay frame.
+- **Task tree** (framerate.cpp `task_run_hook` on the runner FUN_0888245C): on drawn-only frames the battle scene list runs with the
+  pause filter (flags mask/value 4/4 instead of 1/1), so the scene is still built and drawn, minus 11 tasks that change gameplay when
+  run that way (the skip list in framerate.cpp; `PSPRECOMP_L30_KEEP` keeps them, for checks).
+- **Clocks**: the timer's dt (`*(0x089D69E0)+0x18`, read directly by ~85 battle sites) is the current frame's step; the global step
+  (0x089D5EAC, copied a frame late by FUN_08864DD8) is made to show the step of the frame it will be used in (`global_step_hook`), and
+  the slow-motion clock only advances before gameplay frames.
+- **Input**: the pad changes only on gameplay frames; a press that comes and goes between two of them is latched and shown once.
+- **Camera**: the camera manager update (FUN_08B3CA24) is in the gameplay part of the battle list: it runs on gameplay frames only
+  (counted), and the renderer blends the view between them.
+- **Random sequences** (0x09AF84D0, 0x09AFB89C) are put back after drawn-only frames (measured: not drawn from there; a guard).
+- **Compensations for native high rates** (press latch, Jecht grid, EX Burst gating, gauges, UI step, steered moves, action start step,
+  exact steps, FX60) all stand down: they test for a step below 2 or for 30 Hz logic. A new one must too (FX60 did not at first:
+  it lengthened hitboxes, extra hits at 60 / 120 fps).
+- **Drawing the frames between** (runtime/src/psp_ge_draw.cpp, `PSPRECOMP_INTERP`): the game module tags each display list with
+  (gameplay generation, phase) via `ge_interp_set_frame`; the render queue hands the tag to the renderer per list. On gameplay frames the
+  world / view / projection / bone matrices, texture-gen matrix and texture scale / offset of every 3D draw are recorded, keyed by the
+  draw's identity and occurrence (with a looser key without the vertex / index addresses for double-buffered vertices such as weapons).
+  Drawn-only frames draw with those values blended between the last two gameplay frames by phase (1, default: smooth, up to one 30 Hz
+  frame behind) or extrapolated from them (2); 0 draws the last gameplay frame as is. 2D (through-mode) draws, moves over 3 m and camera
+  cuts (the eye jumps over 3 m) are not blended. Effects whose vertices the CPU writes each update still move at 30 Hz.
 
 ## What 60 fps means here
 
@@ -244,3 +278,9 @@ Measured with `tools/combo_timing.py combos --rates 30,60,120` (accepted press d
 
 Rush > Neutral 2 at 120 Hz was repeated 5 times at 358 ms (Neutral 2 each time) and 367 ms (the repeat move each time). Everything is identical at 60 Hz and within one 8 ms update at 120 Hz.
 Not measured: the air chain at 60 / 120 Hz, other fighters (their first update still gets the step, no grid).
+
+### Face animation (blinks, mouth shapes) above 60 Hz (16 Nov)
+
+The face texture animation (`FUN_0886E5D0`: the GMO TexAnm groups, eyes and mouth, and the `face_texture` event 0x0214) is stepped by its only caller, the actor update `FUN_0883C2E8`, with `trunc(actor step)` whole ticks: 2 per update at 30 Hz, 1 at 60 Hz, **0 at 90 / 120 Hz** (step 0.67 / 0.5).
+Above 60 Hz faces then only moved on the rare update with a whole-tick step (a move's first update): a blink that had closed the eyes stayed closed (cutscenes have no move starts, so for good), pattern switches waited, and a model could keep showing a wrong cell.
+Fix (`face_step_hook`, on by default, `PSPRECOMP_FACE_STEP=0` turns it off): above 30 Hz the fraction is carried per model and the face steps whole ticks as they add up (every 2nd update at 120 Hz), 2 ticks per 33 ms at every rate. 30 Hz is unchanged. `PSPRECOMP_FACE_LOG=1` logs, per model and 5 s of play time, the ticks stepped (60 per second at every rate) and how often an eye / mouth cell changed (`[FACESTAT]`).

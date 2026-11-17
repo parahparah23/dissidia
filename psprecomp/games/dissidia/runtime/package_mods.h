@@ -87,6 +87,11 @@ public:
                uint32_t index_capacity = kIndexBufferBytes,
                const std::vector<std::string>& extra_dirs = {});
 
+    /// Add (or replace) the override of an EXISTING index entry after build (a pack received online): the entry is
+    /// moved to fresh virtual sectors past every other override, so nothing already served moves. `out` gets the
+    /// entry as it must now read in the game's in-memory index. False if the asset is not in the index.
+    bool add_override(const std::string& asset, const std::string& file, uint32_t size, IndexEntry* out);
+
     bool empty() const { return overrides_.empty(); }
     const std::vector<Override>& overrides() const { return overrides_; }
     const std::vector<uint8_t>& patched_index() const { return patched_; }
@@ -99,6 +104,7 @@ public:
                       const BaseReader& base) const;
 
 private:
+    uint64_t package_size_ = 0;
     std::vector<Override> overrides_;   // sorted by start, non-overlapping
     std::vector<uint8_t> patched_;
 };

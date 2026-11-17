@@ -106,12 +106,23 @@ int main() {
     { std::ofstream f(tmp / "settings.ini"); f << "fps=60\n"; }
     CHECK(update_check_enabled(tmp.string()));
 
+    {   // Bartz's Dissidia 1 moves: a step only with the feature, the option and the disc image
+        Options e; e.hd_textures = false; e.d1_moves = true; e.d1_iso = "/d1.iso";
+        CHECK(plan_extras(l, "/w", e, true).empty());                     // feature off in this release
+        { std::ofstream f(tmp / "game" / "features.ini"); f << "hd_textures=1\njp_audio=0\nd1_moves=1\n"; }
+        auto dp = plan_extras(l, "/w", e, true);
+        CHECK(dp.size() == 1 && dp[0].argv.size() == 7 && dp[0].argv[2] == "install" && dp[0].argv[4] == "/d1.iso" && dp[0].argv[6] == "/w");
+        e.d1_iso.clear();
+        CHECK(plan_extras(l, "/w", e, true).empty());                     // no disc picked: nothing
+        { std::ofstream f(tmp / "game" / "features.ini"); f << "hd_textures=1\njp_audio=0\n"; }
+    }
+
     // state round trip
     State s;
-    s.workdir = "/a b/c"; s.iso = "/i.iso"; s.version = "1"; s.options.android = true; s.options.undub_iso = "/u.iso"; s.options.check_updates = false;
+    s.workdir = "/a b/c"; s.iso = "/i.iso"; s.version = "1"; s.options.android = true; s.options.undub_iso = "/u.iso"; s.options.check_updates = false; s.options.d1_moves = true;
     save_state((tmp / "state.ini").string(), s);
     State r = load_state((tmp / "state.ini").string());
-    CHECK(r.workdir == s.workdir && r.options.android && r.options.undub_iso == "/u.iso" && !r.options.check_updates);
+    CHECK(r.workdir == s.workdir && r.options.android && r.options.undub_iso == "/u.iso" && !r.options.check_updates && r.options.d1_moves);
 
 #ifndef _WIN32
     {   // the menu entry

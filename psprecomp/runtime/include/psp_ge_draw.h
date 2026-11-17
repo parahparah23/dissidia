@@ -43,6 +43,24 @@ void ge_draw_set_hud_zones(int top_rows, int bottom_rows, int bottom_visible);
 int ge_draw_hud_bottom_rows();   // the room kept for the HUD under the touch controls, PSP rows (0 = none)
 // Textures (tex_addr & 0xFFFFFF) whose 2D draws are never pinned: markers that follow a fighter (the lock-on ring) stay on the picture.
 void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n);
+// Test harnesses: 0 draw as usual, 1 rasterizer discard, 2 skip the draw calls (lists are still processed). Applied at the next present.
+void ge_draw_request_no_raster(int mode);
+
+/// Frame interpolation (a game that runs its logic at 30 Hz and re-issues its frame on the frames in between).
+/// Game thread, before each frame's lists are enqueued (a list takes the tag current when it is enqueued, so the game module must publish
+/// the tag of the frame whose list is about to be submitted: Dissidia submits a frame's list after its frame-end hook, see framerate.cpp):
+/// gen = number of the gameplay frame whose state the frame shows,
+/// phase = how far the frame is shown past that gameplay frame, in gameplay frames (0..1; k/n for the k-th of n-1 drawn-only frames
+/// when paced by frame count, measured time when paced by the clock; down to -0.5 for a gameplay frame shown early); -1 turns it off. record = this is the gameplay frame
+/// itself (its draws become the current table); seq numbers the frames.
+/// The renderer records every 3D draw's world / view / projection / bone matrices on gameplay frames and draws each frame with
+/// matrices between the last two gameplay frames (PSPRECOMP_INTERP=1, default: one gameplay frame behind) or projected ahead of
+/// the last one (=2); =0 off. A draw is matched with the one of the previous gameplay frame by what it draws (vertex / index / texture
+/// address, type, count, target) and its occurrence; unmatched draws and jumps (cuts, teleports) are drawn as issued.
+struct GeInterpTag { uint32_t gen = 0, seq = 0; float phase = -1.0f; bool record = false; };
+void ge_interp_set_frame(const GeInterpTag& tag);
+GeInterpTag ge_interp_current_tag();                // render queue: the tag a list gets at enqueue
+void ge_interp_list_tag(const GeInterpTag& tag);    // render thread: the tag of the list about to be processed
 // Height (PSP rows) of the displayed buffers: 272, or more on a tall window. The settings screen draws a canvas that tall; an overlay
 // canvas taller than 480:272 is drawn over the whole picture instead of the PSP's band.
 int ge_draw_tall_rows();
@@ -98,6 +116,11 @@ void ge_draw_flash(uint32_t rgb, int ms);
 /// player's chest) fades out to a see-through alpha, like the game's own wall fade does for its camera (the game computes that from its
 /// own eye, so a camera we move ourselves needs it done here). Call once per camera update (game thread).
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]);   // eye: the game camera's eye this update; only draws made from that view fade
+// Camera collision against the stage geometry the main view has drawn (static, non-skinned, depth-writing draws, cached in world
+// space per stage): ask for the segment from -> to (game thread); the answer, the fraction of the segment before its first hit
+// (1 = clear), comes from the render thread a frame later. Returns the latest answer and the id of the request it belongs to.
+void ge_draw_camera_probe_request(const float from[3], const float to[3], uint32_t id);
+float ge_draw_camera_probe_result(uint32_t* id);
 
 /// Game layer: a translucent RGBA image (straight alpha, byte order R,G,B,A, row 0 = top) that a game module draws over the game's
 /// picture, covering the PSP's 480x272 area (w x h = 480*s x 272*s), under dialogs, menus and touch controls. Used to add elements to

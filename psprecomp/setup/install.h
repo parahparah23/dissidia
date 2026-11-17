@@ -42,16 +42,18 @@ struct Options {
     bool hd_textures = true;            // pull an HD texture pack (which one: texture_pack)
     std::string texture_pack = "liink"; // "liink" = LiinkPK's hand-retouched pack, "ai" = Niosa's D012FFRT + our AI upscales
     bool jp_audio = false;              // undub (Japanese voices); needs undub_iso
+    bool d1_moves = false;              // Bartz's Dissidia 1 moves (tools/d1_moves.py install); needs d1_iso
     bool android = false;               // also build the Android version
     bool steam = false;                 // add the game to the Steam library (desktop; Steam is closed and reopened for a moment)
     std::string undub_iso;
+    std::string d1_iso;                 // a Dissidia Final Fantasy (2008) disc image, read once
     std::string import_saves;           // a SAVEDATA folder to copy the player's Dissidia 012 saves from (empty = none)
 };
 // Names and credits of the two texture packs the wizard offers (shown on the options page and in the download step).
 const char* texture_pack_title(const std::string& pack);
 const char* texture_pack_credit(const std::string& pack);
 // Optional features a release can offer: game/features.ini has one "name=1" line per implemented feature
-// (hd_textures, jp_audio, android). A missing file or line = not in this release yet (the wizard shows the option but
+// (hd_textures, jp_audio, d1_moves, android). A missing file or line = not in this release yet (the wizard shows the option but
 // does not let it be turned on).
 bool feature_available(const Layout& l, const std::string& name);
 

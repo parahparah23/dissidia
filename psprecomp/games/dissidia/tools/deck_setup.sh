@@ -80,6 +80,10 @@ if [ "$UPDATE" = 1 ]; then
   REST=(); for a in "${ARGS[@]}"; do [ "$a" = --update ] || REST+=("$a"); done
   echo "+ git -C $REPO pull --ff-only"
   if [ "$DRY" = 0 ]; then
+    # Checkouts made before 16 Nov 2026 cloned the dissidia-fan mirror, which no longer gets updates: move them to the project.
+    case "$(git -C "$REPO" remote get-url origin 2>/dev/null)" in
+      *github.com/dissidia-fan/dissidia*) git -C "$REPO" remote set-url origin https://github.com/schindlershadow/dissidia ;;
+    esac
     git -C "$REPO" pull --ff-only || die "git pull failed (local changes in $REPO? see 'git -C $REPO status')"
   fi
   exec bash "$HERE/deck_setup.sh" "${REST[@]}"

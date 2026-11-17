@@ -29,8 +29,12 @@ Then:
    Keep the device plugged in and awake.
 5. **Play.** Use the shortcut the setup made (Start Menu, application menu, Steam or your Android home screen).
 
-The game checks for updates when it starts and offers to install them, so you only ever download the setup once.
-On a Steam Deck, tick **Add to Steam** in step 3, then switch back to Game Mode and start the game from your library.
+- **Frame rates** above the PSP's 30: any multiple of 30 up to 240, with game logic, UI and EX Burst timing scaled to match ([docs/frame-rate.md](psprecomp/games/dissidia/docs/frame-rate.md)).
+- **HD textures** from community packs (on by default when present) and **undub audio** (Japanese voices and movies extracted from an undub disc) ([texture packs](psprecomp/games/dissidia/docs/texture-packs.md), [audio](psprecomp/games/dissidia/docs/audio.md)).
+- **Cloud save sync** between devices through a folder, WebDAV or Google Drive ([docs/cloud-sync.md](psprecomp/games/dissidia/docs/cloud-sync.md)).
+- **Discord Rich Presence**: your Discord profile shows the mode, the fighters and the stage ([docs/discord.md](psprecomp/games/dissidia/docs/discord.md)).
+- **Cross-region saves** and **internet multiplayer** (below).
+- A headless battle test harness for checking moves at different frame rates ([docs/testing.md](psprecomp/games/dissidia/docs/testing.md)).
 
 Something went wrong? The setup writes `setup.log` into the install folder: attach it to a
 [bug report](https://github.com/schindlershadow/dissidia/issues).

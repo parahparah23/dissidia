@@ -252,6 +252,20 @@ def _load_rgb(path, size, eyes=True):
         return a.reshape(size, size, 4)[..., :3].copy()
 
 
+def _load_alpha(path, size):
+    """the source texture's alpha (size, size), row 0 = bottom"""
+    try:
+        from PIL import Image
+        im = Image.open(path).convert('RGBA').resize((size, size), Image.LANCZOS)
+        return np.asarray(im, np.float32)[::-1, :, 3] / 255.0
+    except ImportError:
+        img = bpy.data.images.load(path, check_existing=False)
+        img.scale(size, size)
+        a = np.empty(size * size * 4, np.float32); img.pixels.foreach_get(a)
+        bpy.data.images.remove(img)
+        return a.reshape(size, size, 4)[..., 3].copy()
+
+
 def _rgb_to_hsv(c):
     mx, mn = c.max(-1), c.min(-1)
     d = mx - mn
@@ -370,9 +384,12 @@ def uv_shared_fraction(me, n=256):
     return float((cnt > 1).sum()) / used if used else 0.0
 
 
-def stylize(body, tex_path, size=512, bake=True, eyes=True):
-    """Build the body texture: graded source texture times baked soft lighting. Returns the Blender image."""
-    rgb = grade(_load_rgb(tex_path, size, eyes))
+def stylize(body, tex_path, size=512, bake=True, eyes=True, keep_alpha=False, grade_colours=True):
+    """Build the body texture: graded source texture times baked soft lighting. Returns the Blender image.
+    keep_alpha: the source's alpha is opacity (cut-out hair cards): kept, else the texture is opaque."""
+    rgb = _load_rgb(tex_path, size, eyes)
+    if grade_colours:
+        rgb = grade(rgb)
     if bake:
         L = bake_lighting(body, size)
         shade = np.clip(0.42 + 0.62 * L, 0.35, 1.12)             # shadows keep 40% of the colour; tops get a lift
@@ -382,7 +399,8 @@ def stylize(body, tex_path, size=512, bake=True, eyes=True):
     if img is not None:
         bpy.data.images.remove(img)
     img = bpy.data.images.new(name, size, size, alpha=True)
-    rgba = np.concatenate([rgb, np.ones(rgb.shape[:2] + (1,), np.float32)], -1)
+    alpha = _load_alpha(tex_path, size) if keep_alpha else np.ones(rgb.shape[:2], np.float32)
+    rgba = np.concatenate([rgb, alpha[..., None]], -1)
     img.pixels.foreach_set(rgba.reshape(-1).astype(np.float32))
     img.pack()
     return img
@@ -462,7 +480,7 @@ def run(fbx_path, tex_path, arm_name=None, max_tris=2500, tex_size=512, bake=Tru
 
 
 def fit_core(src_arm, src, arm, maps, weight_map, tex_path, max_tris=2500, tex_size=512, bake=True, eyes_from=None,
-             tweak_eye=True):
+             tweak_eye=True, keep_alpha=False, grade_colours=True):
     """Carry mesh `src` (weighted to `src_arm`'s bones) onto the game armature `arm` with the per-bone `maps`
     ({source bone: 4x4}), weights renamed by `weight_map` ({source bone: game bone}); make it the body (texture from
     tex_path, graded and lit), remove the source objects. The game armature must be in its rest pose."""
@@ -547,7 +565,7 @@ def fit_core(src_arm, src, arm, maps, weight_map, tex_path, max_tris=2500, tex_s
     if shared > SHARED_UV_LIMIT:                # mirrored / repeated parts: painted light would be one side's on both
         bake = False
         light_msg = 'lighting not painted: %d%% of the texture is drawn by several faces (mirrored or repeated parts)' % round(shared * 100)
-    img = stylize(body, tex_path, tex_size, bake=bake, eyes=tweak_eye)
+    img = stylize(body, tex_path, tex_size, bake=bake, eyes=tweak_eye, keep_alpha=keep_alpha, grade_colours=grade_colours)
     mat = me.materials[0]
     tex = next((n for n in mat.node_tree.nodes if n.type == 'TEX_IMAGE'), None)
     if tex is None:
