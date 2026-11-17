@@ -5,6 +5,7 @@ ray-traced lighting and reflections, Japanese voices, cloud saves, online multip
 
 You need **your own copy of the game** as an `.iso` or `.cso` file. Nothing from the game is included here or in the downloads: the
 installer builds the game on your device from your disc.
+<img width="3411" height="1233" alt="image-4" src="https://github.com/user-attachments/assets/ef26636b-42f1-4121-8e01-2cc1fe99d479" />
 
 ## Install
 
