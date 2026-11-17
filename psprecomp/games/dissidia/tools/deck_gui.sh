@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Dissidia Trēdecim on the Steam Deck without a terminal: a point-and-click front end for deck_setup.sh.
+# Dissidia 012 Duodecim Recompiled on the Steam Deck without a terminal: a point-and-click front end for deck_setup.sh.
 #
 # In Desktop Mode, double-click it in Dolphin and choose Execute. Everything is a dialog (zenity, or kdialog):
 #   * first run: if this file is on its own (downloaded from GitHub), it downloads the project into ~/dissidia/repo,
 #     asking for your GitHub login in a dialog if the repository is private;
 #   * Install: pick your game file (linked or copied to ~/dissidia/game.iso), build with a progress bar (the Deck is
-#     kept awake while it builds), and add "Dissidia Trēdecim" to Steam with its artwork;
+#     kept awake while it builds), and add "Dissidia 012 Duodecim Recompiled" to Steam with its artwork;
 #   * Update: pull the latest code and mods, rebuild what changed, refresh the Steam entry;
 #   * Look (Retro / Crisp), Check (deck_setup.sh --check) and the last log.
-# It puts a "Dissidia Trēdecim Setup" icon on the desktop and in the application menu (Games), so later runs are one
+# It puts a "Dissidia 012 Duodecim Recompiled Setup" icon on the desktop and in the application menu (Games), so later runs are one
 # double-click. Underneath it is deck_setup.sh with the usual flags; its output goes to ~/dissidia/work/setup.log.
 #
 # Options (mainly for testing): --repo-url URL (first download), --base DIR (default ~/dissidia).
 set -uo pipefail
 
-APP="Dissidia Trēdecim"
+APP="Dissidia 012 Duodecim Recompiled"
 BASE="$HOME/dissidia"
 REPO_URL="https://github.com/schindlershadow/dissidia"
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"

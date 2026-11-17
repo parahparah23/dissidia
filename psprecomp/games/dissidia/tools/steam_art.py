@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""steam_art.py - draw the Steam library artwork for the native build ("Dissidia Trēdecim").
+"""steam_art.py - draw the Steam library artwork for the native build ("Dissidia 012 Duodecim Recompiled").
 
     steam_art.py --pic1 <disc0>/PSP_GAME/PIC1.PNG [--out DIR]
 
@@ -15,7 +15,7 @@ The pictures are drawn once (on the Mac) and the results are committed; the Deck
 (steam_shortcut.py), so it needs no Pillow.
 
 Art: the game's own XMB background (PIC1.PNG, the crystal sea) with its "Duodecim 012" logo painted out, enlarged
-and softened, plus the DISSIDIA / TRĒDECIM title. Title font: Cinzel (SIL OFL, fonts/ next to the output folder).
+and softened, plus the DISSIDIA / DUODECIM RECOMPILED title. Title font: Cinzel (SIL OFL, fonts/ next to the output folder).
 Requires Pillow and numpy.
 """
 import argparse
@@ -33,7 +33,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEAM = os.path.normpath(os.path.join(HERE, "..", "steam"))
 FONTS = os.path.join(STEAM, "fonts")
-TITLE, SUBTITLE = "DISSIDIA", "TRĒDECIM"
+TITLE, SUBTITLE = "DISSIDIA", "DUODECIM RECOMPILED"
 
 # ------------------------------------------------------------------ background
 
@@ -139,7 +139,7 @@ def _spaced_w(text, font, tracking):
 
 
 def title_block(width, ss=3):
-    """The title as an RGBA image `width` px wide (height follows): DISSIDIA in a gold bevel over TRĒDECIM in silver,
+    """The title as an RGBA image `width` px wide (height follows): DISSIDIA in a gold bevel over the subtitle in silver,
     letterspaced between two fine rules. Drawn at `ss`x and reduced for clean edges."""
     W = width * ss
     big = _font("CinzelDecorative-Bold.ttf", 10)
@@ -153,11 +153,15 @@ def title_block(width, ss=3):
         px += 4
     big = _font("CinzelDecorative-Bold.ttf", px)
     sub_px = int(px * 0.34)
-    sub = _font("Cinzel-Bold.ttf", sub_px)
-    tr_sub = sub_px * 0.55
+    while True:                                                   # shrink a long subtitle until it and its rules fit
+        sub = _font("Cinzel-Bold.ttf", sub_px)
+        tr_sub = sub_px * 0.55
+        if _spaced_w(SUBTITLE, sub, tr_sub) + 2 * (sub_px * 0.9 + W * 0.16) <= W * 0.98 or sub_px <= 8:
+            break
+        sub_px -= 2
     asc_b = big.getbbox(TITLE)
-    asc_s = sub.getbbox("TREDECIM")
-    mac = sub.getbbox("Ē")
+    asc_s = sub.getbbox(SUBTITLE)
+    mac = asc_s
     top_pad = int(px * 0.12)
     h_big = asc_b[3] - asc_b[1]
     gap = int(px * 0.20)

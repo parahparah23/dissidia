@@ -1,18 +1,33 @@
-# Dissidia 012 Duodecim: native port and modding toolset
+# Dissidia 012 Duodecim Recompiled
 
-Dissidia 012 Duodecim (PSP) running natively on the Steam Deck and Linux, no emulator, plus modding tools for adding new characters, swapping character models and creating new effects and animations. The native build is called **Dissidia Trēdecim**.
+Dissidia 012 Duodecim (PSP) recompiled into a native PC and Android game: no emulator. It runs at up to 240 fps, with HD textures,
+ray-traced lighting and reflections, Japanese voices, cloud saves, online multiplayer and its own modding tools for new characters.
 
-You need your own copy of the game as an `.iso` or `.cso`. The European PSN release (`ULES01505`) is the one it was built against; the US UMD (`ULUS10566`) works too.
+You need **your own copy of the game** as an `.iso` or `.cso` file. Nothing from the game is included here or in the downloads: the
+installer builds the game on your device from your disc.
 
-**Put it at `~/dissidia/game.iso`**: make a `dissidia` folder in your home folder and copy the game into it, named `game.iso`. Every command below uses that path. A `.cso` can be named `game.iso` too; it is recognised by its contents.
+## Install
 
-## Install and play
+Download **one** file for your device. These links always point at the newest release.
 
-### Prebuilt release (Windows, Linux, Android)
+| Your device | Download |
+|---|---|
+| **Windows** PC | [DissidiaRecomp-Setup-windows-x86_64.exe](https://github.com/schindlershadow/dissidia/releases/latest/download/DissidiaRecomp-Setup-windows-x86_64.exe) |
+| **Linux** PC / **Steam Deck** | [DissidiaRecomp-Setup-linux-x86_64](https://github.com/schindlershadow/dissidia/releases/latest/download/DissidiaRecomp-Setup-linux-x86_64) |
+| **Android** phone / handheld | [DissidiaRecomp-Setup-android.apk](https://github.com/schindlershadow/dissidia/releases/latest/download/DissidiaRecomp-Setup-android.apk) |
 
-Download the latest **Dissidia Recomp** from the [Releases page](https://github.com/schindlershadow/dissidia/releases): a single-file setup (`DissidiaRecomp-Setup-...-windows-x86_64.exe` or `...-linux-x86_64`) that asks for your game file, builds nothing locally and installs the game, with in-app update checks against a signed manifest. Each release lists its changes. Installer details: [psprecomp/docs/installer.md](psprecomp/docs/installer.md). On Android, the release APK has touch controls with an editable layout. The steps below build from source instead.
+Then:
 
-### What the runtime adds
+1. **Run it.**
+   - Windows: double-click the `.exe`. If SmartScreen warns you, click **More info > Run anyway**.
+   - Linux / Steam Deck (Desktop Mode): right-click the file > Properties > Permissions > tick **Is executable**, then double-click it.
+     Or in a terminal: `chmod +x DissidiaRecomp-Setup-linux-x86_64 && ./DissidiaRecomp-Setup-linux-x86_64`
+   - Android: open the `.apk` and allow your browser or file manager to install apps when asked.
+2. **Pick your game file** (`.iso` or `.cso`) when the setup asks for it.
+3. **Choose your extras** (all optional): HD textures, Japanese voices (needs an undub disc image), importing saves, and **Add to Steam**.
+4. **Wait while it builds.** It translates your copy of the game and compiles it: a few minutes to half an hour depending on the machine.
+   Keep the device plugged in and awake.
+5. **Play.** Use the shortcut the setup made (Start Menu, application menu, Steam or your Android home screen).
 
 - **Frame rates** above the PSP's 30: any multiple of 30 up to 240, with game logic, UI and EX Burst timing scaled to match ([docs/frame-rate.md](psprecomp/games/dissidia/docs/frame-rate.md)).
 - **HD textures** from community packs (on by default when present) and **undub audio** (Japanese voices and movies extracted from an undub disc) ([texture packs](psprecomp/games/dissidia/docs/texture-packs.md), [audio](psprecomp/games/dissidia/docs/audio.md)).
@@ -21,107 +36,108 @@ Download the latest **Dissidia Recomp** from the [Releases page](https://github.
 - **Cross-region saves** and **internet multiplayer** (below).
 - A headless battle test harness for checking moves at different frame rates ([docs/testing.md](psprecomp/games/dissidia/docs/testing.md)).
 
-### Steam Deck
+Something went wrong? The setup writes `setup.log` into the install folder: attach it to a
+[bug report](https://github.com/schindlershadow/dissidia/issues).
 
-No terminal needed. In Desktop Mode (Steam button > Power > Switch to Desktop):
+All releases and their change notes: [Releases page](https://github.com/schindlershadow/dissidia/releases).
 
-1. On GitHub, open `psprecomp/games/dissidia/tools/deck_gui.sh` and click **Download raw file**. It lands in your Downloads folder.
-2. In Dolphin, right-click it > Properties > Permissions > tick **Is executable**. Then double-click it and choose **Execute**.
-3. Follow the dialogs. It downloads the project into `~/dissidia/repo`, asks for your game file (`.iso` or `.cso`, from the Deck, an SD card or a USB stick; it is placed at `~/dissidia/game.iso`), builds the game with a progress bar and adds **Dissidia Trēdecim** to Steam.
+### Which game file works
 
-Then switch back to Game Mode and start **Dissidia Trēdecim** from your library.
+The European PSN release (`ULES01505`) is the one the project is built against; the US UMD (`ULUS10566`) works too. `.iso` and `.cso`
+are read directly. Other formats (ZSO, DAX, `.bin`, PSN `.PBP`) need converting to `.iso` first, for example with
+`maxcso --decompress`.
 
-The tool leaves a **Dissidia Trēdecim Setup** icon on the desktop and in the application menu (Games). Double-click it to **Update** (latest code and mods, only what changed is rebuilt), change the look (Retro or Crisp), check the Deck is ready, or read the last log. If you already have `~/dissidia/repo` from before, the downloaded tool brings it up to date and carries on from there.
+## Features
 
-Prefer the terminal? `deck_gui.sh` is a front end for `deck_setup.sh`; the same in Konsole:
+- **High frame rates**: any multiple of 30 up to 240 fps, with game logic, UI and EX Burst timing scaled to match
+  ([details](psprecomp/games/dissidia/docs/frame-rate.md)).
+- **Any resolution and screen shape**: render scale, widescreen, ultrawide and tall / folding-phone screens with the HUD moved to the edges.
+- **HD textures**: LiinkPK's hand-retouched pack or an AI-upscaled pack, picked in the setup
+  ([texture packs](psprecomp/games/dissidia/docs/texture-packs.md)).
+- **Better lighting**: ray-traced shadows and reflections (Vulkan with a ray-tracing GPU), attacks that light up the stage, SSAO, HDR and anti-aliasing.
+- **Japanese voices and movies** from an undub disc ([audio](psprecomp/games/dissidia/docs/audio.md)).
+- **Cloud save sync** between your devices through a folder, WebDAV or Google Drive
+  ([cloud sync](psprecomp/games/dissidia/docs/cloud-sync.md)).
+- **Saves from any region**: a US, European or Japanese save works with any disc ([savedata](psprecomp/games/dissidia/docs/savedata.md)).
+- **Online multiplayer** (experimental), below.
+- **Controllers, keyboard and touch**: gamepads work out of the box; Android has touch controls with an editable layout.
+- **Settings in the game**: from the title screen, the start menu or the battle pause menu.
+- **New characters and moves**: the Move Studio and Blender add-on, below.
 
-```bash
-cd ~/dissidia
-git clone https://github.com/dissidia-fan/dissidia repo
-repo/psprecomp/games/dissidia/tools/deck_setup.sh ~/dissidia/game.iso --install-distrobox --add-to-steam
-```
+### Controls
 
-and to update: `~/dissidia/repo/psprecomp/games/dissidia/tools/deck_setup.sh ~/dissidia/game.iso --update`
-
-Controls, display options, troubleshooting: [docs/steamdeck.md](psprecomp/games/dissidia/docs/steamdeck.md).
-
-### Linux PC
-
-Ubuntu/Debian; about 8 GB of disk needed. First put your game at `~/dissidia/game.iso` (a folder called `dissidia` in your home folder, the file renamed `game.iso`). Then, in a terminal:
-
-```bash
-git clone https://github.com/dissidia-fan/dissidia ~/dissidia/repo
-~/dissidia/repo/psprecomp/games/dissidia/tools/install.sh ~/dissidia/game.iso
-```
-
-The last command does everything: installs the build tools (it asks for your password for `apt`) and Rust, extracts and decrypts the game, and compiles it. It takes a while (tens of minutes; add `--jobs 2` if it runs out of memory). If it stops part-way, run it again; finished steps are skipped. Then play with `~/dissidia/work/play.sh`.
-
-To update later: `~/dissidia/repo/psprecomp/games/dissidia/tools/install.sh ~/dissidia/game.iso --update`
-
-Gamepads work out of the box. Keyboard: arrows, X/Z/A/S for the face buttons, Q/W shoulders, Space = Start, Tab = Select. Saves are in `~/dissidia/work/ms0/PSP/SAVEDATA/`.
-
-### Mac
-
-Needs [Homebrew](https://brew.sh); about 8 GB of disk. First put your game at `~/dissidia/game.iso` (a folder called `dissidia` in your home folder, the file renamed `game.iso`). Then, in Terminal:
-
-```bash
-git clone https://github.com/dissidia-fan/dissidia ~/dissidia/repo
-~/dissidia/repo/psprecomp/games/dissidia/tools/install.sh ~/dissidia/game.iso
-```
-
-The last command does everything: installs the build tools with Homebrew and Rust, extracts and decrypts the game, and compiles it. If Apple's command line tools are missing it opens their installer first; run the command again when that finishes. It takes a while (tens of minutes). If it stops part-way, run it again; finished steps are skipped. Then play with `~/dissidia/work/play.sh`.
-
-To update later: `~/dissidia/repo/psprecomp/games/dissidia/tools/install.sh ~/dissidia/game.iso --update`
-
-Gamepads work out of the box. Keyboard: arrows, X/Z/A/S for the face buttons, Q/W shoulders, Space = Start, Tab = Select. Saves are in `~/dissidia/work/ms0/PSP/SAVEDATA/`.
-
-Character mod folders in `mods/` are built and loaded every time the game starts. What each step does and every runtime option: [docs/native-build.md](psprecomp/games/dissidia/docs/native-build.md).
+Gamepads work out of the box. Keyboard: arrow keys to move, **X / Z / A / S** for the face buttons, **Q / W** for the shoulders,
+**Space** = Start, **Tab** = Select, **Esc** = Settings (or **Guide** / **L3 + R3** on a pad).
 
 ## Multiplayer (experimental)
 
-Communications mode works over the internet instead of PSP ad-hoc WiFi. By default the game connects to a party server (`party.schindlershadow.com`), so there is nothing to forward: open Communications mode, and everyone in the same room appears in the lobby (the default is the public room; set a room name under Esc > Network to play with friends only). A LAN mode (players on one network, or listed by address) is on the same page. A full match has been played between two copies on one machine; it is untested with more than two players, on a real LAN between machines, and over the internet, and nothing here delays input, so high latency may make a match unplayable. In a session everyone runs at the lowest frame rate any player chose. Setup, options, the server and how it works: [docs/multiplayer.md](psprecomp/games/dissidia/docs/multiplayer.md).
+Communications mode works over the internet instead of PSP ad-hoc WiFi. The game connects to a party server, so there is no port to
+forward: open Communications mode and everyone in the same room shows up in the lobby. The default room is public; set your own room
+name under Settings > Network to play with friends only. A LAN mode is on the same page.
 
-## Saves from other regions
-
-A save from the US, European or Japanese disc works with any of them. `savemgr` lists the saves in a PSP memory stick or PPSSPP folder, imports them into your install under your disc's ID, and exports yours for another region: `savemgr import --from <PSP/SAVEDATA> --workdir ~/dissidia/work`. It only renames the folder and signs `PARAM.SFO` again; the game data is copied untouched. Details and the real-PSP caveat: [docs/savedata.md](psprecomp/games/dissidia/docs/savedata.md).
-
-## What is not in this repository
-No game data (bring your own ISO), no character mods (`mods/_template/` shows the layout), no texture packs (the loader works with the community packs credited below), no third-party mod ports, no game artwork.
+So far a full match has been played between two copies on one machine; more than two players, real LANs and long distances are untested,
+and high latency may make a match unplayable. Everyone in a session runs at the lowest frame rate any player chose.
+More: [multiplayer.md](psprecomp/games/dissidia/docs/multiplayer.md).
 
 ## Making characters
 
-A character is one folder in `mods/`: its menu pictures, moves and models as files you can read and edit. You need the native build working first (above), since added characters only run there; on a PSP or in PPSSPP only changes to the game's own characters work.
+A character is one folder in `mods/`: its menu pictures, moves and models as files you can read and edit. Added characters only run in
+this native build (on a PSP or in PPSSPP only changes to the game's own characters work).
 
-1. **Start in the Dissidia Move Studio.** Open `studio/index.html`, set the mods folder (the repo's `mods`) and your game ISO, then pick **+ New character…** at the top of the character list. Give them a name, a series and the retail character it is built on (its skeleton, animations, voice and moves are the starting point), and optionally a full-body picture for the menus.
-2. **Make their moves** in the Studio: copy moves from any retail or mod character, place events on the timeline, tune each hit's damage and knock-back, edit the effects, and press **Save**. The **Character** tab sets the name, slot and how the menu pictures are cropped.
-3. **Give them a body and animations** in Blender with the add-on: import the character from its mod folder, model or retarget, then **Save moves to folder**. Back in the Studio, **Reload** and point moves at the new animations.
-4. **Play.** Start the game: every folder in `mods/` is built in before it runs, and the new character is on the Quick Battle grid. Deleting a folder (or `"enabled": false` in its `mod.json`) takes the character out again.
-5. **Share** by zipping the folder. It holds data only, no scripts, and whoever gets it unzips it into their own `mods/`; anything it borrows from the retail game is read from their own disc.
+1. **Start in the Move Studio.** Open `studio/index.html`, set the mods folder and your game ISO, then pick **+ New character…**. Give
+   them a name, a series and the retail character they are built on (its skeleton, animations, voice and moves are the starting point).
+2. **Make their moves**: copy moves from any character, place events on the timeline, tune each hit's damage and knock-back, edit the
+   effects, and press **Save**. The **Character** tab sets the name, slot and menu pictures.
+3. **Give them a body and animations** in Blender with the add-on: import the character from its folder, model or retarget, then
+   **Save moves to folder**.
+4. **Play.** Every folder in `mods/` is built in when the game starts, and the new character is on the Quick Battle grid. Delete the
+   folder (or set `"enabled": false` in its `mod.json`) to take them out.
+5. **Share** by zipping the folder. It holds data only, no scripts; anything borrowed from the retail game is read from the other
+   player's own disc.
 
-To change one of the game's own characters instead, pick them in the Studio (with the ISO set), edit, and press **Save as mod**.
+To change one of the game's own characters, pick them in the Studio, edit, and press **Save as mod**. Up to 6 characters can be added.
 
-Up to 6 characters can be added: the character select screens have no room for a 7th for now.
+More: [mods/README.md](mods/README.md) (folder layout, command-line tools), [studio/README.md](studio/README.md) (the Move Studio),
+[blender/README.md](blender/README.md) (the Blender add-on), [docs/](psprecomp/games/dissidia/docs/README.md) (roster, formats, events,
+audio, how the build works).
 
-More detail:
-- [mods/README.md](mods/README.md): what is in a character folder, the command-line tools, sharing.
-- [studio/README.md](studio/README.md): the Move Studio, panel by panel.
-- [blender/README.md](blender/README.md): installing and using the Blender add-on.
-- [docs/](psprecomp/games/dissidia/docs/README.md): everything else (roster, formats, events, audio, how the native build was made).
+## Building from source
 
-## Layout
-`psprecomp/` is a fork of [PSPRecomp](https://github.com/wizardengineer/psprecomp) (static recompiler + runtime). Everything Dissidia-specific is in `psprecomp/games/dissidia/`.
+Most people should use the installer above. To build from a checkout instead (Linux or macOS, about 8 GB of disk), put your game at
+`~/dissidia/game.iso`, then:
 
-Findings in the docs carry a confidence (confirmed / inferred / medium / low); inferred ones are educated guesses from disassembly, not tested facts. Corrections welcome. The project was developed with heavy use of an AI assistant (Claude, by Anthropic), which did most of the reverse engineering and wrote most of the code, under my direction and testing.
+```bash
+git clone https://github.com/schindlershadow/dissidia ~/dissidia/repo
+~/dissidia/repo/psprecomp/games/dissidia/tools/install.sh ~/dissidia/game.iso
+```
+
+It installs the build tools (with `apt` or Homebrew, plus Rust), extracts and decrypts the game and compiles it; if it stops part-way, run
+it again. Play with `~/dissidia/work/play.sh`; update with the same command plus `--update`. Every step and runtime option:
+[native-build.md](psprecomp/games/dissidia/docs/native-build.md). The installer and release pipeline:
+[installer.md](psprecomp/docs/installer.md). Android builds: [android.md](psprecomp/docs/android.md).
+
+## About
+
+This started as a fork of [PSPRecomp](https://github.com/wizardengineer/psprecomp) (a static recompiler and runtime for PSP games) and has
+grown into its own project; everything Dissidia-specific lives in `psprecomp/games/dissidia/`. It was developed with heavy use of an AI
+assistant (Claude, by Anthropic), which did most of the reverse engineering and wrote most of the code, under my direction and testing.
+Findings in the docs carry a confidence (confirmed / inferred / medium / low); inferred ones are educated guesses from disassembly.
+
+Not in this repository: game data (bring your own disc), texture packs (downloaded by the setup from their authors' releases),
+third-party mod ports and game artwork.
 
 ## Credits
-- [PSPRecomp](https://github.com/wizardengineer/psprecomp): the recompiler and runtime this is forked from (GPL-2.0).
+
+- [PSPRecomp](https://github.com/wizardengineer/psprecomp): the recompiler and runtime this project grew from (GPL-2.0).
 - [PPSSPP](https://github.com/hrydgard/ppsspp): VFPU maths (`psprecomp/runtime/src/vfpu_ppsspp`, GPL-2.0+), and the emulator used for every comparison and trace.
 - [DissDlcToolkit](https://github.com/adriangl/DissDlcToolkit) (adriangl): the object-table format and the DLC route.
 - [dissidia-012-sora](https://github.com/MatNyaga/dissidia-012-sora) (MatNyaga): notes on effect-package ids and CPU AI.
-- D012FFRT and [LiinkPK/Dissidia-012-HD-Textures](https://github.com/LiinkPK/Dissidia-012-HD-Textures) (LiinkPK, ajb3art): HD texture packs. Not included.
+- D012FFRT and [LiinkPK/Dissidia-012-HD-Textures](https://github.com/LiinkPK/Dissidia-012-HD-Textures) (LiinkPK, ajb3art): HD texture packs.
 - [atracdenc](https://github.com/dcherednik/atracdenc): ATRAC3 encoding for new BGM.
 - Fonts: Cinzel and Crimson Text (SIL Open Font License).
 - Everyone in the Dissidia modding community without whom this work could never have happened.
 
 ## Licence
-`psprecomp/` is GPL-2.0 (see `psprecomp/LICENSE`), and so are the changes made to it here. Dissidia 012 Duodecim and Final Fantasy are trademarks of Square Enix; this project is not affiliated with or endorsed by Square Enix.
+
+GPL-2.0 (see `psprecomp/LICENSE`). Dissidia 012 Duodecim and Final Fantasy are trademarks of Square Enix; this project is not affiliated
+with or endorsed by Square Enix.
