@@ -37,10 +37,20 @@
 // 8-way bits, so a stick-steered fighter would replay elsewhere. PSPRECOMP_ANALOG_WALK=0 turns it off,
 // PSPRECOMP_ANALOG_WALK_BATTLE=1 also steers in battle (never while the pads are fed by the online exchange),
 // PSPRECOMP_ANALOG_WALK_LOG=<n> logs n replaced steps.
+//
+// Camera follow. The world map's free camera (ovl_battle FUN_08B3F7F4: a0 = yaw block, yaw at +8; a1 = camera, owner at +248)
+// turns its yaw toward the walker's facing (owner+0x90, through the atan2 FUN_089A457C) by up to the row's cap (0.05 rad) a frame,
+// with no dead zone. With the 8-way walk a push near straight up walked straight up; with the stick's own angle the facing is a few
+// degrees off, the camera turns, the camera-relative walk turns with it and the camera spins (VCKing101 measured 172 deg/s for a
+// 15 degree push, docs/port/analog-movement.md section 7). Fix, as theirs: while the follow runs for the walker whose last walk step
+// was ours, its atan2 result is moved so that the angle it turns toward is 0 within PSPRECOMP_ANALOG_FOLLOW_ZONE degrees of straight
+// ahead (default 22.5, 0 = the game's follow), rises to the cap over a ramp of half the zone, and is the game's beyond that. Straight
+// back, the sides and diagonals turn as in the game.
 
 #include "psp_game_module.h"
 #include "recomp.h"
 #include "hle/psp_hle.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -138,6 +148,8 @@ bool g_walk_battle = false;
 int g_walk_log = 0;
 uint32_t g_walk_sp = 0, g_walk_walker = 0;   // set only while an eligible FUN_08B38A0C runs
 float g_walk_dx = 0.f, g_walk_dy = 0.f;
+uint32_t g_last_walker = 0;          // walker of the last FUN_08B38A0C call, and whether its step was ours
+bool g_last_walk_analog = false;
 
 uint32_t rdw(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
 
@@ -156,6 +168,8 @@ bool walk_eligible(uint32_t pad) {
 
 void walk_input_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t pad = static_cast<uint32_t>(ctx->r[6]);
+    g_last_walker = static_cast<uint32_t>(ctx->r[5]);
+    g_last_walk_analog = false;
     if (!walk_eligible(pad)) { g_orig_walk(rdram, ctx); return; }
     const uint32_t prev_sp = g_walk_sp, prev_walker = g_walk_walker;
     const float pdx = g_walk_dx, pdy = g_walk_dy;
@@ -182,6 +196,54 @@ void walk_replace_step(const recomp_context* ctx) {
     wrf(v, nx);
     if (vertical) { wrf(v + 4, -nf); wrf(v + 8, 0.f); } else { wrf(v + 4, 0.f); wrf(v + 8, nf); }
     g_walk_sp = 0;   // once per walk call
+    g_last_walk_analog = true;
+}
+
+// ---- camera follow dead zone ----
+constexpr uint32_t FREE_CAM_INPUT = 0x08B3F7F4u;   // ovl_battle
+constexpr uint32_t ATAN2 = 0x089A457Cu;            // f0 = atan2(f12, f13)
+FuncPtr g_orig_free_input = nullptr, g_orig_atan2 = nullptr;
+float g_follow_zone = 22.5f * 0.017453293f;
+uint32_t g_follow_owner = 0, g_follow_yaw = 0;   // set while FUN_08B3F7F4 runs for that walker
+int g_follow_log = 0;
+
+void free_input_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t yaw_blk = static_cast<uint32_t>(ctx->r[4]), cam = static_cast<uint32_t>(ctx->r[5]);
+    const uint32_t owner = cam ? rdw(cam + 248u) : 0;
+    if (!owner || owner != g_last_walker || !g_last_walk_analog) { g_orig_free_input(rdram, ctx); return; }
+    g_follow_owner = owner; g_follow_yaw = yaw_blk;
+    g_orig_free_input(rdram, ctx);
+    g_follow_owner = 0; g_follow_yaw = 0;
+}
+
+float wrap_pi(float a) {
+    const float two_pi = 6.2831853f;
+    while (a > 3.14159265f) a -= two_pi;
+    while (a <= -3.14159265f) a += two_pi;
+    return a;
+}
+
+void atan2_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (!g_follow_owner) { g_orig_atan2(rdram, ctx); return; }
+    // Only the follow's own call: atan2(-facing.x, -facing.z) of the owner.
+    const float a = ctx->f[12], b = ctx->f[13];
+    const bool follow = a == -rdf(g_follow_owner + 0x90u) && b == -rdf(g_follow_owner + 0x98u);
+    g_orig_atan2(rdram, ctx);
+    if (!follow) return;
+    const float yaw = rdf(g_follow_yaw + 8u), target = ctx->f[0];
+    const float diff = wrap_pi(target - yaw), ad = std::fabs(diff);
+    float cap = rdf(static_cast<uint32_t>(ctx->r[18]) + 32u);   // the follow's per-frame cap (read the same way right after this call)
+    if (!(cap > 0.f && cap < 1.f)) cap = 0.05f;
+    const float ramp = std::max(g_follow_zone * 0.5f, cap);
+    float fed = diff;
+    if (ad <= g_follow_zone) fed = 0.f;
+    else if (ad < g_follow_zone + ramp) fed = std::copysign(cap * (ad - g_follow_zone) / ramp, diff);
+    if (g_follow_log > 0 && fed != diff) {
+        g_follow_log--;
+        std::fprintf(stderr, "[FOLLOW] yaw %.1f target %.1f diff %.2f -> %.2f deg (cap %.2f)\n", yaw * 57.29578f, target * 57.29578f,
+                     diff * 57.29578f, fed * 57.29578f, cap * 57.29578f);
+    }
+    ctx->f[0] = yaw + fed;
 }
 
 void cam_matrix_hook(uint8_t* rdram, recomp_context* ctx) { walk_replace_step(ctx); g_orig_cam_matrix(rdram, ctx); }
@@ -218,4 +280,15 @@ void dissidia_input_install(uint8_t* rdram) {
     psp_dispatch_register(CAM_MATRIX, cam_matrix_hook);
     psp_dispatch_register(VEC_COPY, vec_copy_hook);
     std::fprintf(stderr, "[INPUT] analogue walking direction (world map%s)\n", g_walk_battle ? " and battle" : "");
+
+    if ((e = std::getenv("PSPRECOMP_ANALOG_FOLLOW_ZONE"))) g_follow_zone = static_cast<float>(std::atof(e)) * 0.017453293f;
+    if (g_follow_zone > 60.f * 0.017453293f) g_follow_zone = 60.f * 0.017453293f;
+    if ((e = std::getenv("PSPRECOMP_ANALOG_FOLLOW_LOG"))) g_follow_log = std::atoi(e);
+    if (g_follow_zone <= 0.f) return;
+    g_orig_free_input = ovl_battle_lookup(FREE_CAM_INPUT);
+    g_orig_atan2 = psp_dispatch_probe_lookup(ATAN2);
+    if (!g_orig_free_input || !g_orig_atan2) { std::fprintf(stderr, "[INPUT] camera follow zone NOT installed\n"); return; }
+    psp_dispatch_register(FREE_CAM_INPUT, free_input_hook);
+    psp_dispatch_register(ATAN2, atan2_hook);
+    std::fprintf(stderr, "[INPUT] camera follow dead zone %.1f deg for the analogue walk\n", g_follow_zone * 57.29578f);
 }

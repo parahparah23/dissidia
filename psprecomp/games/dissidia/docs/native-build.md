@@ -145,3 +145,13 @@ straight push, 15, -15 and 30 degrees of stick turned the walk by 14.8, 15.0 and
 headings jump by 20 to 45 degrees. In battle the step is replaced too, but the fighter's heading moved only 2 to 6 degrees for a
 15 degree push and drifted back to the line to the opponent (battle_test, Squall, stage 12): battle movement has more steering after
 this step, so `PSPRECOMP_ANALOG_WALK_BATTLE` is experimental.
+
+Camera follow dead zone: the world map's free camera (`ovl_battle FUN_08B3F7F4`) turns toward the walker's facing by up to 0.05 rad a
+frame with no dead zone. With the walk at the stick's own angle, a push a few degrees off straight up then turns the camera, the
+camera-relative walk turns with it, and the camera spins (VCKing101's measurement; here with `PSPRECOMP_CAM_UNLOCK_HOLD=0` and no
+zone, a 15 degree push turned the walk 186 degrees in 1.75 s). `input.cpp` moves the follow's atan2 result (`FUN_089A457C`, only the
+call on the walker's facing) so the follow does not turn within `PSPRECOMP_ANALOG_FOLLOW_ZONE` degrees (default 22.5, 0 = the game's
+follow), ramps up to the cap over half the zone, and is the game's beyond that; only while the walker's last step was the analogue
+one. With it the same push walked straight. Normally `camera.cpp`'s hold camera is active on the world map too (no lock-on target):
+it keeps the view and turns the stick by the game camera's turn, which already hides the spin; the zone covers the cases without it
+(`PSPRECOMP_CAM_UNLOCK_HOLD=0`, `PSPRECOMP_CAM_FREE=0`). `PSPRECOMP_ANALOG_FOLLOW_LOG=<n>` logs reduced follow turns.
