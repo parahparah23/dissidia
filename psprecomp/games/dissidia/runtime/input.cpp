@@ -22,6 +22,21 @@
 //
 // PSPRECOMP_ANALOG_FULL=0 restores the original 8-way behaviour. PSPRECOMP_ANALOG_LOG=<n> logs n stick
 // updates (raw, game vector, replacement).
+//
+// Walking direction. The vector above is not what steers a walk: the walker's input, ovl_battle FUN_08B38A0C
+// (a0 = out, a1 = walker, a2 = its pad, a3 = camera; called each frame from FUN_08B36D2C on the world map and for the
+// player's fighter in battle), asks the pad for the four logical walk bits and builds a camera-space step from them
+// (sp+0x40: x = +-1, z = +-1, or y with walker+0x5B1 bit 0x20), then turns it by the inverted camera matrix
+// (FUN_0885EA88 .. FUN_089A3F40) or copies it (FUN_089A3BC8, walker+0x5B1 bit 0x40) and normalises it. So every walk goes
+// one of eight ways whatever the stick says. Found by VCKing101 (https://github.com/VCKing101/Dissidia012-pc,
+// docs/port/analog-movement.md, MIT); this is our own code from those notes.
+// Fix: while FUN_08B38A0C runs for the LogicalPad of raw[0] (the hardware pad) with the stick pushed, the first of FUN_0885EA88 / FUN_089A3BC8
+// called from its frame rewrites the step at sp+0x40 to the stick's own direction (the pad's +0x20 vector, the radial
+// one written above). Everything after it (camera, normalisation, walker+0x5B0 flags from the 8-way bits) is the game's.
+// The walk still starts when the game sees a walk bit. World map only by default: a battle replay records just the
+// 8-way bits, so a stick-steered fighter would replay elsewhere. PSPRECOMP_ANALOG_WALK=0 turns it off,
+// PSPRECOMP_ANALOG_WALK_BATTLE=1 also steers in battle (never while the pads are fed by the online exchange),
+// PSPRECOMP_ANALOG_WALK_LOG=<n> logs n replaced steps.
 
 #include "psp_game_module.h"
 #include "recomp.h"
@@ -112,7 +127,69 @@ void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
     wrf(out, ox); wrf(out + 4, oy); wrf(out + 8, 0.f); wrf(out + 12, w);
 }
 
+// ---- walking direction (see the top of the file) ----
+constexpr uint32_t WALK_INPUT = 0x08B38A0Cu;    // ovl_battle
+constexpr uint32_t CAM_MATRIX = 0x0885EA88u;    // first call after the step is built (camera path)
+constexpr uint32_t VEC_COPY = 0x089A3BC8u;      // first call after the step is built (no-camera path)
+constexpr uint32_t WALK_FRAME = 336u;           // FUN_08B38A0C's stack frame; the step is at sp+0x40
+constexpr uint32_t LOGICAL_PAD_VT = 0x089C96E8u, PAD_MGR = 0x08C15B90u, BATTLE_OBJ = 0x089D6A10u;
+FuncPtr g_orig_walk = nullptr, g_orig_cam_matrix = nullptr, g_orig_vec_copy = nullptr;
+bool g_walk_battle = false;
+int g_walk_log = 0;
+uint32_t g_walk_sp = 0, g_walk_walker = 0;   // set only while an eligible FUN_08B38A0C runs
+float g_walk_dx = 0.f, g_walk_dy = 0.f;
+
+uint32_t rdw(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
+
+bool walk_eligible(uint32_t pad) {
+    if (!pad || rdw(pad + 0x34u) != LOGICAL_PAD_VT) return false;           // a CPU brain's or the null pad: the game's way
+    if ((rdw(pad + 0x44u) & 1u) || !rdw(pad + 0x4Cu)) return false;         // disabled, or no action map
+    if (rdw(PAD_MGR + 0x264u) & 3u) return false;                           // replay playback / muted
+    const uint32_t src = rdw(pad + 0x40u);
+    if (src != PAD_MGR) return false;                                       // only the pad read from the hardware (raw[0]): not a CPU's
+    if (rdw(src + 0x50u) == 1u) return false;                               // raw[0] fed by the online exchange or a replay
+    const uint32_t bo = rdw(BATTLE_OBJ);
+    const bool battle = bo && (rdw(bo + 0x38u) || rdw(bo + 0x3Cu));         // the world map's battle object has no fighters
+    if (battle && !g_walk_battle) return false;
+    return rdf(pad + 0x2Cu) > 0.f;                                          // stick past the radial dead zone
+}
+
+void walk_input_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t pad = static_cast<uint32_t>(ctx->r[6]);
+    if (!walk_eligible(pad)) { g_orig_walk(rdram, ctx); return; }
+    const uint32_t prev_sp = g_walk_sp, prev_walker = g_walk_walker;
+    const float pdx = g_walk_dx, pdy = g_walk_dy;
+    g_walk_sp = static_cast<uint32_t>(ctx->r[29]) - WALK_FRAME;
+    g_walk_walker = static_cast<uint32_t>(ctx->r[5]);
+    g_walk_dx = rdf(pad + 0x20u); g_walk_dy = rdf(pad + 0x24u);
+    g_orig_walk(rdram, ctx);
+    g_walk_sp = prev_sp; g_walk_walker = prev_walker; g_walk_dx = pdx; g_walk_dy = pdy;
+}
+
+// Called at the first of FUN_0885EA88 / FUN_089A3BC8 from the walk's own frame: the step is complete at sp+0x40.
+void walk_replace_step(const recomp_context* ctx) {
+    if (!g_walk_sp || static_cast<uint32_t>(ctx->r[29]) != g_walk_sp) return;
+    const uint32_t v = g_walk_sp + 0x40u;
+    const float x = rdf(v), y = rdf(v + 4), z = rdf(v + 8);
+    if (x == 0.f && y == 0.f && z == 0.f) return;                            // not walking this frame
+    const bool vertical = (g_ram[(g_walk_walker + 0x5B1u) & 0x07FFFFFFu] & 0x20u) != 0;
+    const float nx = g_walk_dx, nf = g_walk_dy;                              // stick: x right, y down = towards the camera
+    if (g_walk_log > 0) {
+        g_walk_log--;
+        std::fprintf(stderr, "[WALK] walker=%08X step (%.0f,%.0f,%.0f) -> (%.3f,%.3f,%.3f) stick angle %.1f\n", g_walk_walker, x, y, z,
+                     nx, vertical ? -nf : 0.f, vertical ? 0.f : nf, std::atan2(nx, -nf) * 57.29578f);
+    }
+    wrf(v, nx);
+    if (vertical) { wrf(v + 4, -nf); wrf(v + 8, 0.f); } else { wrf(v + 4, 0.f); wrf(v + 8, nf); }
+    g_walk_sp = 0;   // once per walk call
+}
+
+void cam_matrix_hook(uint8_t* rdram, recomp_context* ctx) { walk_replace_step(ctx); g_orig_cam_matrix(rdram, ctx); }
+void vec_copy_hook(uint8_t* rdram, recomp_context* ctx) { walk_replace_step(ctx); g_orig_vec_copy(rdram, ctx); }
+
 }  // namespace
+
+extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 
 void dissidia_input_install(uint8_t* rdram) {
     const char* e = std::getenv("PSPRECOMP_ANALOG_FULL");
@@ -129,4 +206,16 @@ void dissidia_input_install(uint8_t* rdram) {
     if (!g_orig) { std::fprintf(stderr, "[INPUT] stick hook NOT installed\n"); return; }
     psp_dispatch_register(STICK_PROCESS, dissidia_stick_process);
     std::fprintf(stderr, "[INPUT] continuous analogue stick direction (dead zone %.2f)\n", g_dz);
+
+    if ((e = std::getenv("PSPRECOMP_ANALOG_WALK")) && e[0] == '0') { std::fprintf(stderr, "[INPUT] walking: original 8 ways\n"); return; }
+    if ((e = std::getenv("PSPRECOMP_ANALOG_WALK_BATTLE"))) g_walk_battle = e[0] == '1';
+    if ((e = std::getenv("PSPRECOMP_ANALOG_WALK_LOG"))) g_walk_log = std::atoi(e);
+    g_orig_walk = ovl_battle_lookup(WALK_INPUT);
+    g_orig_cam_matrix = psp_dispatch_probe_lookup(CAM_MATRIX);
+    g_orig_vec_copy = psp_dispatch_probe_lookup(VEC_COPY);
+    if (!g_orig_walk || !g_orig_cam_matrix || !g_orig_vec_copy) { std::fprintf(stderr, "[INPUT] walk hook NOT installed\n"); return; }
+    psp_dispatch_register(WALK_INPUT, walk_input_hook);
+    psp_dispatch_register(CAM_MATRIX, cam_matrix_hook);
+    psp_dispatch_register(VEC_COPY, vec_copy_hook);
+    std::fprintf(stderr, "[INPUT] analogue walking direction (world map%s)\n", g_walk_battle ? " and battle" : "");
 }

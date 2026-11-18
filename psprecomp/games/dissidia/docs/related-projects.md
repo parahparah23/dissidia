@@ -26,6 +26,9 @@ comment it lands in. Use a link to the repo and the file it came from.
 
 ### 1. Analogue walking: the direction is still 8-way (bug in ours)
 
+**Done for the world map** (18 November 2026, `runtime/input.cpp`, [native-build.md](native-build.md)); battle is opt-in and only
+partly steered. The camera follow dead zone below is not done.
+
 Source: [docs/port/analog-movement.md](https://github.com/VCKing101/Dissidia012-pc/blob/main/docs/port/analog-movement.md).
 
 Our `input.cpp` replaces the stick vector that `FUN_08872138` writes. Their notes show that **nothing in the walk

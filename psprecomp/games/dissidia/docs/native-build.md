@@ -132,3 +132,16 @@ axes, so in battle the original runs on a square-gate version of the stick with 
 (`PSPRECOMP_ANALOG_DPAD_ZONE`, default 0.35 of travel; `PSPRECOMP_ANALOG_8WAY=0` turns it off). `PSPRECOMP_ANALOG_FULL=0` restores the
 original 8-way behaviour, `PSPRECOMP_ANALOG_DEADZONE` (default 0.20 of travel) sets the radial dead zone,
 `PSPRECOMP_ANALOG_LOG=<n>` logs raw / game / replacement vectors.
+
+Walking direction: the stick vector above is not what steers a walk. The walker's input (`ovl_battle FUN_08B38A0C`, on the world map
+and for the player's fighter in battle) builds its step from the four walk bits only, so even with the changes above every walk went one
+of eight ways (found by VCKing101, [related-projects.md](related-projects.md)). `input.cpp` turns that step to the stick's own direction
+just before the game applies the camera to it, for a human pad with the stick past the dead zone; when the walk starts, the walk speed
+and everything after it stay the game's. World map only by default: a battle replay stores just the 8-way bits, so a stick-steered
+fighter would play back elsewhere. `PSPRECOMP_ANALOG_WALK=0` turns it off, `PSPRECOMP_ANALOG_WALK_BATTLE=1` also steers in battle (never
+while the pads are fed by the game's online exchange), `PSPRECOMP_ANALOG_WALK_LOG=<n>` logs n replaced steps.
+Measured 18 November 2026 (Story Mode prologue field, debug socket `A` pushes of 0.4 s, walker position at `+0x110`): relative to a
+straight push, 15, -15 and 30 degrees of stick turned the walk by 14.8, 15.0 and 30.2 degrees; with `PSPRECOMP_ANALOG_WALK=0` the
+headings jump by 20 to 45 degrees. In battle the step is replaced too, but the fighter's heading moved only 2 to 6 degrees for a
+15 degree push and drifted back to the line to the opponent (battle_test, Squall, stage 12): battle movement has more steering after
+this step, so `PSPRECOMP_ANALOG_WALK_BATTLE` is experimental.
