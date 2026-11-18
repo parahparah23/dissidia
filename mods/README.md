@@ -50,6 +50,13 @@ A mod folder is data only: JSON, models, skins, pictures, sounds. The build refu
 `install/textures/...`). It shows up in *Settings > Mods* and turns on and off from there (next start). Details:
 [docs/loose-file-mods.md](../psprecomp/games/dissidia/docs/loose-file-mods.md), "Installed mod folders".
 
+## ISO patches (.xdelta)
+
+A mod shared as an `.xdelta` patch for the disc image installs as a folder here too:
+`psprecomp/games/dissidia/tools/xdelta_mod.py import Mod.xdelta --work <workdir>` (or *ISO patch* in the setup), then a
+rebuild if it changes the game's code. Settings > Mods turns it off and on. Details:
+[docs/xdelta-mods.md](../psprecomp/games/dissidia/docs/xdelta-mods.md).
+
 ## Everything else
 
 Field by field: `mod.json`, the moveset files, every avatar, bodies, weapons (the model and weapons a character wants), every timeline event and how a move fits together: [docs/character-mods.md](../psprecomp/games/dissidia/docs/character-mods.md). What every event does in the game: [docs/moves-and-events.md](../psprecomp/games/dissidia/docs/moves-and-events.md).

@@ -48,18 +48,21 @@ struct Options {
     std::string undub_iso;
     std::string d1_iso;                 // a Dissidia Final Fantasy (2008) disc image, read once
     std::string import_saves;           // a SAVEDATA folder to copy the player's Dissidia 012 saves from (empty = none)
+    std::string xdelta_patch;           // an xdelta ISO patch to install as a mod (tools/xdelta_mod.py import; before the build,
+                                        // which compiles the code it changes). Applied once, not remembered.
 };
 // Names and credits of the two texture packs the wizard offers (shown on the options page and in the download step).
 const char* texture_pack_title(const std::string& pack);
 const char* texture_pack_credit(const std::string& pack);
 // Optional features a release can offer: game/features.ini has one "name=1" line per implemented feature
-// (hd_textures, jp_audio, d1_moves, android). A missing file or line = not in this release yet (the wizard shows the option but
+// (hd_textures, jp_audio, d1_moves, xdelta, android). A missing file or line = not in this release yet (the wizard shows the option but
 // does not let it be turned on).
 bool feature_available(const Layout& l, const std::string& name);
 
 std::vector<Step> plan_install(const Layout& l, const std::string& iso, const std::string& workdir, const Options& o);
 // The game build only (rebuild / repair): analysis, recompile, compile (+ the Android build when chosen).
-// Only the extras of `o` (HD textures unless skip_textures, Japanese voices, saves, the Android build) on an installed game: no rebuild.
+// Only the extras of `o` (HD textures unless skip_textures, Japanese voices, saves, the Android build) on an installed game: no rebuild,
+// except with an xdelta patch (o.xdelta_patch): it is imported and the game rebuilt, so the code it changes is compiled in.
 std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures);
 // Adds the installed game to the Steam library as a non-Steam shortcut (steam_shortcut.py; the launcher is the program itself with --launch).
 std::vector<Step> plan_steam(const Layout& l, const std::string& workdir);

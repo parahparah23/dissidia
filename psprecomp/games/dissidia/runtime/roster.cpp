@@ -42,9 +42,9 @@
 #include <vector>
 
 extern std::string dissidia_mods_dir();   // hooks_io.cpp
-extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
-extern FuncPtr ovl_battle_lookup(uint32_t vaddr);   // generated menu overlay function set
-extern FuncPtr ovl_extra_lookup(uint32_t vaddr);    // extra overlay (cpu_forward)
+extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_battle_lookup(uint32_t vaddr);   // generated menu overlay function set
+extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);    // extra overlay (cpu_forward)
 extern thread_local uint32_t g_func_ring[32];      // psp_dispatch.cpp: last 32 function entries of this thread
 extern thread_local uint32_t g_func_ring_pos;
 // hitcam= (camera.cpp reads these): the attacker of a hit-confirmed follow-up, its framing length in ticks, and a
@@ -1682,10 +1682,10 @@ void grid_init_hook(uint8_t* rdram, recomp_context* ctx) {
 void grid40_install() {
     if (std::getenv("PSPRECOMP_GRID40_OFF")) return;
     g40_log = std::getenv("PSPRECOMP_GRID40_LOG") != nullptr;
-    g_grid_init = ovl_menu_lookup(FN_GRID_INIT); g_layout = ovl_menu_lookup(FN_LAYOUT); g_posnode = ovl_menu_lookup(FN_POSNODE);
-    g_selanim = ovl_menu_lookup(FN_SELANIM); g_teardown = ovl_menu_lookup(FN_TEARDOWN); g_afterplace = ovl_menu_lookup(FN_AFTERPLACE);
-    g_layout_tail = ovl_menu_lookup(FN_LAYOUT_TAIL); g_reccheck = ovl_menu_lookup(FN_RECCHECK); g_cell_of = ovl_menu_lookup(FN_CELL_OF);
-    g_defcursor = ovl_menu_lookup(FN_DEFCURSOR);
+    g_grid_init = dissidia_ovl_menu_lookup(FN_GRID_INIT); g_layout = dissidia_ovl_menu_lookup(FN_LAYOUT); g_posnode = dissidia_ovl_menu_lookup(FN_POSNODE);
+    g_selanim = dissidia_ovl_menu_lookup(FN_SELANIM); g_teardown = dissidia_ovl_menu_lookup(FN_TEARDOWN); g_afterplace = dissidia_ovl_menu_lookup(FN_AFTERPLACE);
+    g_layout_tail = dissidia_ovl_menu_lookup(FN_LAYOUT_TAIL); g_reccheck = dissidia_ovl_menu_lookup(FN_RECCHECK); g_cell_of = dissidia_ovl_menu_lookup(FN_CELL_OF);
+    g_defcursor = dissidia_ovl_menu_lookup(FN_DEFCURSOR);
     g_node_new = psp_dispatch_probe_lookup(EF_NODE_NEW); g_node_free = psp_dispatch_probe_lookup(EF_NODE_FREE);
     g_node_show = psp_dispatch_probe_lookup(EF_NODE_SHOW); g_node_hide = psp_dispatch_probe_lookup(EF_NODE_HIDE);
     g_node_anim = psp_dispatch_probe_lookup(EF_NODE_ANIM); g_sheet_new = psp_dispatch_probe_lookup(EF_SHEET_NEW);
@@ -1944,7 +1944,7 @@ void trace_install() {
             // wrapped EBOOT address is what broke the first trace of 0x0887B3EC (menu came up without text, then hung).
             g_trace_menu[n] = g_trace_batt[n] = psp_dispatch_probe_lookup(a);
         } else {
-            g_trace_menu[n] = ovl_menu_lookup(a); g_trace_batt[n] = ovl_battle_lookup(a);
+            g_trace_menu[n] = dissidia_ovl_menu_lookup(a); g_trace_batt[n] = dissidia_ovl_battle_lookup(a);
             if (!g_trace_menu[n]) g_trace_menu[n] = psp_dispatch_probe_lookup(a);
         }
         if (g_trace_menu[n] || g_trace_batt[n]) psp_dispatch_register(a, fns[n]);
@@ -1978,7 +1978,7 @@ void dash_move_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(DASH_MOVE) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(DASH_MOVE) : nullptr) f(rdram, ctx);
         return;
     }
     g_dash_batt(rdram, ctx);
@@ -1997,7 +1997,7 @@ void dash_install() {
     bool any = false;
     for (const Entry& e : g_entries) if (e.dash != 1.0f) { any = true; std::fprintf(stderr, "[ROSTER] charId %d: dash x%.2f\n", e.charId, e.dash); }
     if (!any) return;
-    g_dash_batt = ovl_battle_lookup(DASH_MOVE);
+    g_dash_batt = dissidia_ovl_battle_lookup(DASH_MOVE);
     if (!g_dash_batt) { std::fprintf(stderr, "[ROSTER] dash speed hook NOT installed (no battle overlay function at %08X)\n", DASH_MOVE); return; }
     psp_dispatch_register(DASH_MOVE, dash_move_hook);
 }
@@ -2563,7 +2563,7 @@ void land_install() {
     g_land_log = std::getenv("PSPRECOMP_LAND_LOG") != nullptr;
     g_touchdown = psp_dispatch_probe_lookup(TOUCHDOWN);
     g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
-    g_start_action = ovl_battle_lookup(START_ACTION);
+    g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_touchdown || !g_start_action || !g_plya_select) {
         std::fprintf(stderr, "[ROSTER] touchdown action hook NOT installed (touchdown %s, start action %s, selector %s)\n",
                      g_touchdown ? "ok" : "missing", g_start_action ? "ok" : "missing", g_plya_select ? "ok" : "missing");
@@ -2618,7 +2618,7 @@ void chain_add_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(CHAIN_ADD) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(CHAIN_ADD) : nullptr) f(rdram, ctx);
         return;
     }
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]), rec = static_cast<uint32_t>(ctx->r[5]);
@@ -2805,7 +2805,7 @@ void hit_spawn_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(MAGI_SPAWN) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(MAGI_SPAWN) : nullptr) f(rdram, ctx);
         return;
     }
     int id = static_cast<int>(static_cast<uint32_t>(ctx->r[4]) & 0xFFFFu);
@@ -2836,7 +2836,7 @@ bool pick_wanted() {
 void spawn_hook_install(bool hit_any) {     // FUN_08AD0978: hitact= and magipick= share the one wrapper
     const bool pick_any = pick_wanted();
     if (!hit_any && !pick_any) return;
-    g_magi_spawn = ovl_battle_lookup(MAGI_SPAWN);
+    g_magi_spawn = dissidia_ovl_battle_lookup(MAGI_SPAWN);
     if (!g_magi_spawn) { std::fprintf(stderr, "[ROSTER] magi spawn hook (hitact= / magipick=) NOT installed (no battle overlay function at %08X)\n", MAGI_SPAWN); return; }
     psp_dispatch_register(MAGI_SPAWN, hit_spawn_hook);
     for (const Entry& e : g_entries) {
@@ -2851,8 +2851,8 @@ void spawn_hook_install(bool hit_any) {     // FUN_08AD0978: hitact= and magipic
 void chain_install() {
     if (!chain_wanted()) { if (pick_wanted()) spawn_hook_install(false); return; }
     g_chain_log = std::getenv("PSPRECOMP_CHAIN_LOG") != nullptr;
-    g_chain_add = ovl_battle_lookup(CHAIN_ADD);
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    g_chain_add = dissidia_ovl_battle_lookup(CHAIN_ADD);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     if (!g_chain_add || !g_start_action || !g_plya_select) {
         std::fprintf(stderr, "[ROSTER] chain window hook NOT installed (chain add %s, start action %s, selector %s)\n",
@@ -2965,8 +2965,8 @@ void charge_tick(uint8_t* rdram, recomp_context* ctx, uint32_t actor) {
 void charge_install() {
     if (!charge_wanted()) return;
     g_chain_log = g_chain_log || std::getenv("PSPRECOMP_CHAIN_LOG") != nullptr;
-    g_hp_held = ovl_battle_lookup(HP_HELD);
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    g_hp_held = dissidia_ovl_battle_lookup(HP_HELD);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     if (!g_start_action || !g_plya_select) {
         std::fprintf(stderr, "[ROSTER] charge hook NOT installed (start action %s, selector %s)\n",
@@ -3576,7 +3576,7 @@ void apoc_fxdir_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(APOC_FXDIR) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(APOC_FXDIR) : nullptr) f(rdram, ctx);
         return;
     }
     g_apoc_fxdir(rdram, ctx);
@@ -3850,7 +3850,7 @@ void apoc_install() {
                          e.pin_spin[i].bone, e.pin_spin[i].deg, e.pin_spin[i].ax[0], e.pin_spin[i].ax[1], e.pin_spin[i].ax[2]);
     }
     g_apoc_log = std::getenv("PSPRECOMP_APOC_LOG") != nullptr;
-    g_apoc_fxdir = ovl_battle_lookup(APOC_FXDIR);
+    g_apoc_fxdir = dissidia_ovl_battle_lookup(APOC_FXDIR);
     if (!g_apoc_fxdir) { std::fprintf(stderr, "[ROSTER] Apocalypsis arms hook NOT installed (no battle overlay function at %08X)\n", APOC_FXDIR); return; }
     psp_dispatch_register(APOC_FXDIR, apoc_fxdir_hook);
 }
@@ -4089,7 +4089,7 @@ void dash13_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(DASH13_START) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(DASH13_START) : nullptr) f(rdram, ctx);
         return;
     }
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]), ra = static_cast<uint32_t>(ctx->r[31]);
@@ -4113,7 +4113,7 @@ void dash_start_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, "[WARPDASH] FUN_08A50C08 reached: actor %08X kind %d overlay id %u, called from %08X\n", actor, kind, ovl, ra);
     }
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(DASH_START) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(DASH_START) : nullptr) f(rdram, ctx);
         return;
     }
     if (wd_entry(rdram, actor)) {
@@ -4290,19 +4290,19 @@ void warpdash_install() {
         }
     if (!any) return;
     g_wd_log = std::getenv("PSPRECOMP_WARPDASH_LOG") != nullptr;
-    g_dash_start = ovl_battle_lookup(DASH_START);
-    g_dash_target = ovl_battle_lookup(DASH_TARGET);
-    g_lock_target = ovl_battle_lookup(LOCK_TARGET);
-    g_enemy_of = ovl_battle_lookup(ENEMY_OF);
-    g_slot_ability = ovl_battle_lookup(SLOT_ABILITY);
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    g_dash_start = dissidia_ovl_battle_lookup(DASH_START);
+    g_dash_target = dissidia_ovl_battle_lookup(DASH_TARGET);
+    g_lock_target = dissidia_ovl_battle_lookup(LOCK_TARGET);
+    g_enemy_of = dissidia_ovl_battle_lookup(ENEMY_OF);
+    g_slot_ability = dissidia_ovl_battle_lookup(SLOT_ABILITY);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     g_airborne = psp_dispatch_probe_lookup(AIRBORNE);
     g_sel_context = psp_dispatch_probe_lookup(SEL_CONTEXT);
     g_hit_land = psp_dispatch_probe_lookup(HIT_LAND);
     g_state_set = psp_dispatch_probe_lookup(STATE_SET);
     g_script_play = psp_dispatch_probe_lookup(SCRIPT_PLAY);
-    g_dash13 = ovl_battle_lookup(DASH13_START);
-    g_control = ovl_battle_lookup(CONTROL_FN);
+    g_dash13 = dissidia_ovl_battle_lookup(DASH13_START);
+    g_control = dissidia_ovl_battle_lookup(CONTROL_FN);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     if (!g_dash_start || !g_dash_target || !g_lock_target || !g_slot_ability || !g_start_action || !g_airborne || !g_sel_context ||
         !g_plya_select || !g_hit_land || !g_state_set) {
@@ -5221,7 +5221,7 @@ uint32_t cpu_ovl_id(const uint8_t* rdram) { uint32_t o; std::memcpy(&o, rdram + 
 bool cpu_forward(uint8_t* rdram, recomp_context* ctx, uint32_t addr) {
     const uint32_t id = cpu_ovl_id(rdram);
     if (id == 1u) return false;
-    FuncPtr f = id == 2u ? ovl_menu_lookup(addr) : id == 3u ? ovl_extra_lookup(addr) : nullptr;
+    FuncPtr f = id == 2u ? dissidia_ovl_menu_lookup(addr) : id == 3u ? dissidia_ovl_extra_lookup(addr) : nullptr;
     if (f) f(rdram, ctx);
     return true;
 }
@@ -5409,9 +5409,9 @@ void cpu_install() {
                  g_cpu_ps_lookup ? "ok" : "missing", g_cpu_str_src ? "ok" : "missing", g_cpu_str ? "ok" : "missing",
                  g_cpu_ps_copy ? "ok" : "missing", g_cpu_log ? ", CPU log on" : "");
     if (!g_cpu_log) return;
-    g_cpu_tick = ovl_battle_lookup(CPU_TICK);
-    g_cpu_pick = ovl_battle_lookup(CPU_PICK);
-    for (int k = 0; k < 8; k++) g_cpu_fn[k] = ovl_battle_lookup(CPU_ADDRS[k]);
+    g_cpu_tick = dissidia_ovl_battle_lookup(CPU_TICK);
+    g_cpu_pick = dissidia_ovl_battle_lookup(CPU_PICK);
+    for (int k = 0; k < 8; k++) g_cpu_fn[k] = dissidia_ovl_battle_lookup(CPU_ADDRS[k]);
     if (g_cpu_tick) psp_dispatch_register(CPU_TICK, cpu_tick_hook);
     bool all = g_cpu_pick != nullptr;
     for (int k = 0; k < 8; k++) all = all && g_cpu_fn[k] != nullptr;
@@ -5435,9 +5435,9 @@ void dissidia_roster_grid_install() {
     // follows the retail table.
     psp_dispatch_register(0x08A85ECCu, grid_table_hook);
     if (!g_enabled || extras().empty()) return;
-    g_orig_placer = ovl_menu_lookup(0x08A7FB54u);
+    g_orig_placer = dissidia_ovl_menu_lookup(0x08A7FB54u);
     if (g_orig_placer) psp_dispatch_register(0x08A7FB54u, placer_wrap);
-    g_orig_cursor = ovl_menu_lookup(0x08A84458u);
+    g_orig_cursor = dissidia_ovl_menu_lookup(0x08A84458u);
     if (g_orig_cursor) psp_dispatch_register(0x08A84458u, cursor_wrap);
     g_orig_setframe = psp_dispatch_probe_lookup(0x088D0984u);
     if (g_orig_setframe) psp_dispatch_register(0x088D0984u, setframe_hook);
@@ -5445,7 +5445,7 @@ void dissidia_roster_grid_install() {
         static const uint32_t addr[4] = { 0x08AA43ECu, 0x08AA44ACu, 0x08AA46DCu, 0x08AA6148u };
         static const FuncPtr wrap[4] = { binder_wrap<0>, binder_wrap<1>, binder_wrap<2>, binder_wrap<3> };
         for (int i = 0; i < 4; i++) {
-            g_orig_binder[i] = ovl_menu_lookup(addr[i]);
+            g_orig_binder[i] = dissidia_ovl_menu_lookup(addr[i]);
             if (g_orig_binder[i]) psp_dispatch_register(addr[i], wrap[i]);
         }
     }
@@ -5461,7 +5461,7 @@ void dissidia_roster_grid_install() {
         static const FuncPtr wrap[3] = { cust_wrap<0, 7, 3u>, cust_wrap<1, 8, 4u>, cust_wrap<2, 6, 3u> };
         int n = 0;
         for (int i = 0; i < 3; i++) {
-            g_orig_cust[i] = g_orig_setframe ? ovl_menu_lookup(addr[i]) : nullptr;
+            g_orig_cust[i] = g_orig_setframe ? dissidia_ovl_menu_lookup(addr[i]) : nullptr;
             if (g_orig_cust[i]) { psp_dispatch_register(addr[i], wrap[i]); n++; }
         }
         g_orig_setframe_cust = g_orig_setframe;
@@ -5496,7 +5496,7 @@ void dissidia_roster_grid_install() {
     }
     g_orig_charinfo = psp_dispatch_probe_lookup(0x088B3B20u);
     if (g_orig_charinfo) psp_dispatch_register(0x088B3B20u, charinfo_hook);
-    g_orig_vsload = ovl_battle_lookup(0x08AF6B70u);
+    g_orig_vsload = dissidia_ovl_battle_lookup(0x08AF6B70u);
     if (g_orig_vsload && std::getenv("PSPRECOMP_ROSTER_DEBUG")) psp_dispatch_register(0x08AF6B70u, vsload_dbg);
     if (std::getenv("PSPRECOMP_ROSTER_LOADLOG")) {
         g_orig_loadreq = psp_dispatch_probe_lookup(0x088D0810u);
@@ -5806,7 +5806,7 @@ int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, in
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u || !guest_ok(actor, 0x1070u)) return -1;
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     static bool hooked = false;
     if (!hooked && g_plya_select) { psp_dispatch_register(PLYA_SELECT, plya_select_hook); hooked = true; }

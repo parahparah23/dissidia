@@ -34,6 +34,11 @@ mods/nt-lightning/install/textures/fc0807432147e17e.png
 The log says `[MODS] mod folder on: ...` / `[MODS] mod folder <name>: off` and `[TEXPACK] mod folder pack ...`. (`hooks_io.cpp`
 `mod_roots`, `package_mods.cpp` `walk`, `hooks_models.cpp` `prescan_mods_for_budget`, `psp_tex_pack.cpp` extra dirs.)
 
+**ISO patch (xdelta) mods:** a community mod shared as an `.xdelta` patch for the disc image is installed as one of
+these folders by `tools/xdelta_mod.py import` (or the setup's *ISO patch* option): the changed `PACKAGE.BIN` entries
+go into `install/`, data appended to `PACKAGE.BIN` into `package_tail.bin` (served past the retail end), and changed
+game code is recompiled at build time and swapped in while the mod is on. Details: [xdelta-mods.md](xdelta-mods.md).
+
 **Blender add-on:** `blender/` holds the Dissidia character add-on (import from the ISO, model, animate, edit move events, export); `python3 blender/build_addon.py` builds the installable zip. Guide: [blender/README.md](../../../../blender/README.md).
 
 **Move Studio:** `studio/index.html` (open in Chrome): one place for a character's moves: the animation in 3D, its events on a timeline, each hit's damage and knock-back, saved straight into the mod folder. Guide: [studio/README.md](../../../../studio/README.md). What every event does: [docs/moves-and-events.md](moves-and-events.md).

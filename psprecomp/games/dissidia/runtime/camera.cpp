@@ -38,9 +38,9 @@
 #include <cstdlib>
 #include <cstring>
 
-extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
-extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
-extern FuncPtr ovl_extra_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_battle_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);
 bool dissidia_nearest_fighter(const float eye[3], float pos[3]);   // framerate.cpp
 extern uint32_t g_dissidia_cine_actor, g_dissidia_cine_seq;   // roster.cpp (hitcam=)
 extern int g_dissidia_cine_ticks;
@@ -194,7 +194,7 @@ bool pl_pos(float* P) {
 void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
     uint32_t id = overlay_id();
     if (id != 1) {
-        FuncPtr f = id == 2 ? ovl_menu_lookup(CAM_UPDATE) : id == 3 ? ovl_extra_lookup(CAM_UPDATE) : nullptr;
+        FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(CAM_UPDATE) : id == 3 ? dissidia_ovl_extra_lookup(CAM_UPDATE) : nullptr;
         if (f) f(rdram, ctx);
         return;
     }
@@ -502,8 +502,8 @@ void dissidia_camera_install(uint8_t* rdram) {
     if ((e = std::getenv("PSPRECOMP_CAMLOCK_LOG"))) g_lock_logs = std::atoi(e);
     if ((e = std::getenv("PSPRECOMP_CAM_HOLD_ARM"))) g_arm_ticks = static_cast<float>(std::atof(e));
     if ((e = std::getenv("PSPRECOMP_CAM_FORCE_UNLOCK"))) g_force_unlock_s = std::atof(e);
-    g_lock_fn = ovl_battle_lookup(LOCK_TARGET);
-    g_orig_update = ovl_battle_lookup(CAM_UPDATE);
+    g_lock_fn = dissidia_ovl_battle_lookup(LOCK_TARGET);
+    g_orig_update = dissidia_ovl_battle_lookup(CAM_UPDATE);
     g_orig_seteye = psp_dispatch_probe_lookup(CAM_SETEYE);
     if (!g_orig_update || !g_orig_seteye) {
         std::fprintf(stderr, "[CAM] hooks NOT installed (update %p seteye %p)\n", (void*)g_orig_update, (void*)g_orig_seteye);

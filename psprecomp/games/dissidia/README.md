@@ -27,7 +27,7 @@ The tools need Python 3.11+ and nothing else: the first run sets up numpy, Pillo
 2. `pipeline.sh` translates the game to C++ and compiles it with the runtime into `<workdir>/build/psprecomp_runtime`. Re-running is safe.
 3. `run.sh` starts it. First it builds every folder in the repo's `mods/` into `<workdir>/mods` (`PSPRECOMP_CHARMOD=0` skips that). Files there replace the matching entries of the game's `PACKAGE.BIN` at load time, so there is never an ISO rebuild.
 
-Details: [the native build](docs/native-build.md) (each step, the work folder, window and scaling, input, camera), [loose-file mods](docs/loose-file-mods.md) (how overrides work, model budget), [texture packs](docs/texture-packs.md).
+Details: [the native build](docs/native-build.md) (each step, the work folder, window and scaling, input, camera), [loose-file mods](docs/loose-file-mods.md) (how overrides work, model budget), [ISO patch mods](docs/xdelta-mods.md) (.xdelta patches as toggleable mods), [texture packs](docs/texture-packs.md).
 
 ## Status
 

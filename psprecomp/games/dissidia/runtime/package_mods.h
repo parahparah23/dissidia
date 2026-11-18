@@ -92,6 +92,11 @@ public:
     /// entry as it must now read in the game's in-memory index. False if the asset is not in the index.
     bool add_override(const std::string& asset, const std::string& file, uint32_t size, IndexEntry* out);
 
+    /// Serve the bytes [start, start+size) of PACKAGE.BIN from `file` without an index entry (data an xdelta mod
+    /// appended past the last entry, which its code reads by offset). Call after build() with a package_size that
+    /// already included the region, so relocated entries were placed past it. False if it overlaps an override.
+    bool add_region(uint64_t start, const std::string& file, uint32_t size);
+
     bool empty() const { return overrides_.empty(); }
     const std::vector<Override>& overrides() const { return overrides_; }
     const std::vector<uint8_t>& patched_index() const { return patched_; }

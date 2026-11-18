@@ -36,8 +36,8 @@
 
 std::string dissidia_package_dir();   // hooks_io.cpp
 std::string dissidia_mods_dir();
-extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
-extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_battle_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
 void dissidia_presence_title();            // discord_presence.cpp: where the player is
 void dissidia_presence_main(uint32_t state);
 void dissidia_presence_sub(uint32_t state);
@@ -92,7 +92,7 @@ int32_t call(FuncPtr f, uint8_t* rdram, recomp_context* ctx, std::initializer_li
 }
 
 void pause_build_hook(uint8_t* rdram, recomp_context* ctx) {
-    if (overlay_id() != 1) { if (FuncPtr f = ovl_menu_lookup(PAUSE_BUILD)) f(rdram, ctx); return; }
+    if (overlay_id() != 1) { if (FuncPtr f = dissidia_ovl_menu_lookup(PAUSE_BUILD)) f(rdram, ctx); return; }
     g_in_pause_build = true;
     g_orig_build(rdram, ctx);
     g_in_pause_build = false;
@@ -288,7 +288,7 @@ void draw_settings_row(float ox, float oy, bool selected, float alpha) {
 }
 
 void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
-    if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(MAIN_TICK)) f(rdram, ctx); return; }
+    if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(MAIN_TICK)) f(rdram, ctx); return; }
     const uint32_t state = r32(static_cast<uint32_t>(ctx->r[4]) + 320);
     const uint32_t cur = state + 0xA28u;
     if (state && r32(cur + 32) == 0 && r32(cur + 36) == 6) {   // the top level's range: one more row
@@ -324,7 +324,7 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
 constexpr uint32_t SUB_TICK = 0x089E4A60u;
 FuncPtr g_orig_sub_tick = nullptr;
 void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
-    if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(SUB_TICK)) f(rdram, ctx); return; }
+    if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(SUB_TICK)) f(rdram, ctx); return; }
     const uint32_t menu = static_cast<uint32_t>(ctx->r[4]);
     dissidia_presence_sub(r32(menu + 320));
     g_orig_sub_tick(rdram, ctx);
@@ -450,7 +450,7 @@ void draw_title_row(float nx, float ny, float srcx, float srcy) {
 }
 
 void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
-    if (overlay_id() != 2) { if (FuncPtr f = ovl_battle_lookup(TITLE_TICK)) f(rdram, ctx); return; }
+    if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(TITLE_TICK)) f(rdram, ctx); return; }
     dissidia_presence_title();
     const uint32_t title = static_cast<uint32_t>(ctx->r[4]);
     const uint32_t st = r32(title + 476);
@@ -518,7 +518,7 @@ void dissidia_menu_settings_install(uint8_t* rdram) {
     psp_texpack_watch(kUiSheetTexId);
     psp_texpack_watch(kTitleSheetTexId);
     if (const char* e = std::getenv("PSPRECOMP_MENU_SETTINGS")) if (e[0] == '0') return;
-    g_orig_build = ovl_battle_lookup(PAUSE_BUILD);
+    g_orig_build = dissidia_ovl_battle_lookup(PAUSE_BUILD);
     g_orig_open = psp_dispatch_probe_lookup(LIST_OPEN);
     g_list_add = psp_dispatch_probe_lookup(LIST_ADD);
     g_orig_core_update = psp_dispatch_probe_lookup(CORE_UPDATE);
@@ -534,10 +534,10 @@ void dissidia_menu_settings_install(uint8_t* rdram) {
     psp_dispatch_register(PAUSE_BUILD, pause_build_hook);
     psp_dispatch_register(LIST_OPEN, list_open_hook);
 
-    g_orig_main_tick = ovl_menu_lookup(MAIN_TICK);
+    g_orig_main_tick = dissidia_ovl_menu_lookup(MAIN_TICK);
     g_pad_obj = psp_dispatch_probe_lookup(PAD_OBJ);
     g_play_se = psp_dispatch_probe_lookup(PLAY_SE);
-    g_orig_title_tick = ovl_menu_lookup(TITLE_TICK);
+    g_orig_title_tick = dissidia_ovl_menu_lookup(TITLE_TICK);
     g_pad_obj2 = psp_dispatch_probe_lookup(PAD_OBJ2);
     g_pad_obj = psp_dispatch_probe_lookup(PAD_OBJ);
     g_play_se = psp_dispatch_probe_lookup(PLAY_SE);
@@ -550,7 +550,7 @@ void dissidia_menu_settings_install(uint8_t* rdram) {
     if (g_orig_main_tick && g_pad_obj && g_play_se) {
         dissidia_add_asset_patch(kStartSeq, edit_start_seq);
         psp_dispatch_register(MAIN_TICK, main_tick_hook);
-        g_orig_sub_tick = ovl_menu_lookup(SUB_TICK);
+        g_orig_sub_tick = dissidia_ovl_menu_lookup(SUB_TICK);
         if (g_orig_sub_tick) psp_dispatch_register(SUB_TICK, sub_tick_hook);
     } else {
         std::fprintf(stderr, "[MENUSET] start menu hooks not installed (a function is missing)\n");

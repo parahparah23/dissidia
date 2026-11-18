@@ -119,6 +119,27 @@ int main() {
 
     // state round trip
     State s;
+    {   // an xdelta patch: imported before the build on an install; imported + rebuilt from "Change extras"
+        fs::path tmp = fs::temp_directory_path() / "setup_test_xdelta";
+        fs::create_directories(tmp / "game");
+        { std::ofstream f(tmp / "game" / "features.ini"); f << "hd_textures=1\nxdelta=1\n"; }
+        Layout l = find_layout(tmp.string());
+        Options o; o.hd_textures = false; o.xdelta_patch = "/p/Mod.xdelta";
+        auto p = plan_install(l, "/g.iso", "/w", o);
+        CHECK(p.size() >= 3 && p[1].label == "Applying the ISO patch" && p[2].is_build);
+        bool has_import = false;
+        for (auto& a : p[1].argv) has_import |= a == "import";
+        CHECK(has_import && p[1].argv.back() == "/w");
+        auto e = plan_extras(l, "/w", o, true);
+        CHECK(e.size() >= 2 && e[0].label == "Applying the ISO patch" && e[1].is_build);
+        o.xdelta_patch.clear();
+        CHECK(plan_install(l, "/g.iso", "/w", o)[1].is_build);
+        CHECK(plan_extras(l, "/w", o, true).empty());
+        { std::ofstream f(tmp / "game" / "features.ini"); f << "hd_textures=1\n"; }   // not in this release: ignored
+        o.xdelta_patch = "/p/Mod.xdelta";
+        CHECK(plan_extras(l, "/w", o, true).empty());
+        fs::remove_all(tmp);
+    }
     s.workdir = "/a b/c"; s.iso = "/i.iso"; s.version = "1"; s.options.android = true; s.options.undub_iso = "/u.iso"; s.options.check_updates = false; s.options.d1_moves = true;
     save_state((tmp / "state.ini").string(), s);
     State r = load_state((tmp / "state.ini").string());

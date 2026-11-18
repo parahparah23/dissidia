@@ -47,6 +47,11 @@ extern int dissidia_roster_overlay_of(const char* lower_path);
 extern void dissidia_roster_patch_overlay(int mod, int64_t off, uint32_t size, uint8_t* dest);
 std::string dissidia_mods_dir();
 std::vector<std::string> dissidia_mod_roots();
+// xdelta_mods.cpp: installed xdelta (ISO patch) mods
+bool dissidia_xmod_folder_usable(const std::string& folder_dir, bool say);
+std::string dissidia_xmod_overlay_file(int ovl);
+std::string dissidia_xmod_package_tail();
+std::string dissidia_xmod_usrdir_file(const std::string& rel_upper);
 extern uint32_t dissidia_model_budget_request(uint32_t bytes);
 extern uint32_t dissidia_model_budget();
 
@@ -232,6 +237,7 @@ std::vector<std::string> mod_roots() {
         const std::string root = dir + "/" + n;
         if (::stat((root + "/mod.json").c_str(), &st) != 0 || ::stat((root + "/install").c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
         if (mod_json_off(root + "/mod.json")) { if (say) std::fprintf(stderr, "[MODS] mod folder %s: off\n", n.c_str()); continue; }
+        if (!dissidia_xmod_folder_usable(root, say)) continue;   // an xdelta mod whose code is not in this build
         out.push_back(root + "/install");
     }
     return out;
@@ -253,7 +259,30 @@ std::string work_parent() {
 bool is_dir(const std::string& d) { struct stat st; return ::stat(d.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
 
 // DATA/MOVIE/X.PMF of the disc -> movie_jp/X.PMF when the voice is Japanese and that file exists
+// A disc file under PSP_GAME/USRDIR that an xdelta mod that is on replaces: its patched overlay (code/OVL_*_APP.ELF) or
+// another changed file (<mod>/usrdir/<PATH>). PACKAGE.BIN / PACKAGE_INFO.BIN are never replaced whole.
+std::string xmod_disc_path(const std::string& host) {
+    std::string up = host;
+    for (char& c : up) c = (char)std::toupper((unsigned char)c);
+    const size_t u = up.rfind("/USRDIR/");
+    if (u == std::string::npos) return "";
+    const std::string rel = up.substr(u + 8);
+    if (rel == "DATA/PACKAGE.BIN" || rel == "DATA/PACKAGE_INFO.BIN") return "";
+    if (rel == "DATA/OVL_BATTLE_APP.ELF") return dissidia_xmod_overlay_file(1);
+    if (rel == "DATA/OVL_MENU_APP.ELF") return dissidia_xmod_overlay_file(2);
+    if (rel == "DATA/OVL_EXTRA_APP.ELF") return dissidia_xmod_overlay_file(3);
+    return dissidia_xmod_usrdir_file(rel);
+}
+
 std::string remap_disc_path(const std::string& host) {
+    {
+        std::string x = xmod_disc_path(host);
+        if (!x.empty()) {
+            static int said = 0;
+            if (said++ < 16) std::fprintf(stderr, "[XMOD] %s -> %s\n", host.c_str(), x.c_str());
+            return x;
+        }
+    }
     if (!voice_jp_on() || !ends_with_nocase(host, ".pmf")) return "";
     const size_t slash = host.find_last_of('/');
     if (slash == std::string::npos) return "";
@@ -277,7 +306,8 @@ void ensure_built(const std::string& host_info_path) {
         if (is_dir(vd)) { extra.push_back(vd); jp_dir = vd; std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
         else std::fprintf(stderr, "[VOICE] Japanese voice selected but %s does not exist (run tools/jp_audio.py): English voices\n", vd.c_str());
     }
-    if (!is_dir(dir) && extra.empty() && !g_net_possible) {
+    const std::string tail = dissidia_xmod_package_tail();   // data an xdelta mod appended to PACKAGE.BIN
+    if (!is_dir(dir) && extra.empty() && !g_net_possible && tail.empty()) {
         std::fprintf(stderr, "[MODS] no mods directory (%s): loose-file overrides off\n", dir.c_str());
         return;
     }
@@ -322,9 +352,25 @@ void ensure_built(const std::string& host_info_path) {
         }
         if (banks) { first = merged; rest.insert(rest.begin(), dir); }
     }
-    if (!g_mods.build(orig, (uint64_t)pst.st_size, first, &log, &err, g_index_capacity, rest)) {
+    uint64_t tail_size = 0;
+    if (!tail.empty()) {
+        struct stat tst;
+        if (::stat(tail.c_str(), &tst) == 0 && pst.st_size % dissidia::kSectorSize == 0 && tst.st_size > 0 && tst.st_size < (1ll << 31))
+            tail_size = (uint64_t)tst.st_size;
+        else
+            std::fprintf(stderr, "[XMOD] %s cannot be served (PACKAGE.BIN %lld B)\n", tail.c_str(), (long long)pst.st_size);
+    }
+    if (!g_mods.build(orig, (uint64_t)pst.st_size + (tail_size + dissidia::kSectorSize - 1) / dissidia::kSectorSize * dissidia::kSectorSize, first, &log, &err,
+                      g_index_capacity, rest)) {
         std::fprintf(stderr, "[MODS] cannot parse %s: %s (overrides off)\n", host_info_path.c_str(), err.c_str());
         return;
+    }
+    if (tail_size) {
+        if (g_mods.add_region((uint64_t)pst.st_size, tail, (uint32_t)tail_size))
+            std::fprintf(stderr, "[XMOD] PACKAGE.BIN bytes 0x%llX.. (%llu B appended by an xdelta mod) served from %s\n",
+                         (unsigned long long)pst.st_size, (unsigned long long)tail_size, tail.c_str());
+        else
+            std::fprintf(stderr, "[XMOD] %s overlaps a loose-file override: not served\n", tail.c_str());
     }
     std::fputs(log.c_str(), stderr);
     std::fprintf(stderr, "[MODS] %s: %zu override(s) active\n", dir.c_str(), g_mods.overrides().size());

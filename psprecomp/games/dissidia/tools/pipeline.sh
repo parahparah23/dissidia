@@ -230,6 +230,11 @@ done
 printf '%s\n' "$FP" > "$STAMP"
 fi
 
+# xdelta (ISO patch) mods that change code: their functions go into overlays/xmods (always written, empty without such
+# mods: the runtime links its table). Quick, and only changed files are rewritten.
+step "xdelta mods: recompiling the code they change"
+python3 "$GAME/tools/xdelta_mod.py" build-code --work "$WORK" --psprecomp "$PSPRECOMP" --game "$GAME" || die "xdelta_mod.py build-code failed"
+
 # ---------------------------------------------------------------- 4. cmake build
 step "Configuring runtime build ($WORK/build)"
 # A build dir configured from another checkout (repo moved, re-cloned, or a second clone sharing
@@ -244,7 +249,7 @@ if [ -f "$WORK/build/CMakeCache.txt" ]; then
 fi
 cmake -B "$WORK/build" -S "$REPO/runtime" -DCMAKE_BUILD_TYPE=Release $(command -v ccache >/dev/null && echo -DCMAKE_CXX_COMPILER_LAUNCHER=ccache) \
   -DPSPRECOMP_GAME=dissidia -DPSPRECOMP_OUTPUT_DIR="$WORK/output" \
-  "-DPSPRECOMP_OVERLAY_DIRS=$WORK/overlays/battle;$WORK/overlays/menu;$WORK/overlays/extra;$WORK/overlays/supacc"
+  "-DPSPRECOMP_OVERLAY_DIRS=$WORK/overlays/battle;$WORK/overlays/menu;$WORK/overlays/extra;$WORK/overlays/supacc;$WORK/overlays/xmods"
 
 step "Building psprecomp_runtime with -j$JOBS (long; ~1.5 GB RAM per job)"
 cmake --build "$WORK/build" -j "$JOBS" --target psprecomp_runtime

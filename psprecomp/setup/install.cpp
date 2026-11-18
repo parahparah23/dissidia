@@ -128,6 +128,19 @@ static Step build_step(const Layout& l, const std::string& workdir, bool android
     return b;
 }
 
+// An xdelta ISO patch becomes a mod folder (tools/xdelta_mod.py import, from the extracted game files: the disc image is not
+// needed again). Runs before the build: build-code (psp_build.py) compiles the code the patch changes into the game.
+static Step xdelta_step(const Layout& l, const std::string& workdir, const Options& o) {
+    Step x;
+    x.label = "Applying the ISO patch";
+    x.explain = "Applies " + fs::path(o.xdelta_patch).filename().string() + " to the game files and keeps what it changes as a mod (Settings > Mods turns it off and on).";
+    x.argv = {l.python, join(l.game_dir, "tools/xdelta_mod.py"), "import", o.xdelta_patch, "--work", workdir};
+    x.env = {{"PYTHONUNBUFFERED", "1"}};
+    x.weight = 0.03;
+    return x;
+}
+static bool want_xdelta(const Layout& l, const Options& o) { return !o.xdelta_patch.empty() && feature_available(l, "xdelta"); }
+
 static void finish_plan(std::vector<Step>& plan) {
     double total = 0;
     for (auto& s : plan) total += s.weight;
@@ -198,9 +211,11 @@ std::vector<Step> plan_install(const Layout& l, const std::string& iso, const st
     x.env = {{"PSPRECOMP_TOOLCHAIN", l.toolchain}, {"PYTHONUNBUFFERED", "1"}};
     x.weight = 0.08;
     std::vector<Step> p{x};
+    const size_t first_build = want_xdelta(l, o) ? 2 : 1;
+    if (want_xdelta(l, o)) p.push_back(xdelta_step(l, workdir, o));
     for (auto& s : plan_rebuild(l, workdir, o)) p.push_back(s);   // weights are renormalised below
     // plan_rebuild() normalised its own steps; restore their relative sizes
-    for (size_t i = 1; i < p.size(); i++) p[i].weight = i == 1 ? 0.84 : 0.60;
+    for (size_t i = first_build; i < p.size(); i++) p[i].weight = i == first_build ? 0.84 : 0.60;
     append_extras(p, l, workdir, o, false);
     if (o.steam && feature_available(l, "steam")) for (auto& st : plan_steam(l, workdir)) { st.weight = 0.03; p.push_back(st); }
     finish_plan(p);
@@ -209,6 +224,12 @@ std::vector<Step> plan_install(const Layout& l, const std::string& iso, const st
 
 std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
     std::vector<Step> p;
+    if (want_xdelta(l, o)) {   // the patch, then a rebuild (incremental: only its code is compiled)
+        p.push_back(xdelta_step(l, workdir, o));
+        Step b = build_step(l, workdir, false);
+        b.weight = 0.5;
+        p.push_back(b);
+    }
     append_extras(p, l, workdir, o, skip_textures);
     if (o.android && feature_available(l, "android")) {
         Step a = build_step(l, workdir, true);
@@ -308,6 +329,11 @@ std::vector<Step> plan_rebuild_android(const Layout& l, const std::string& workd
 }
 
 static void append_extras_android(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
+    if (want_xdelta(l, o)) {
+        Step x = xdelta_step(l, workdir, o);
+        x.env = android_env(l, workdir);
+        p.push_back(x);
+    }
     if (!skip_textures && o.hd_textures && feature_available(l, "hd_textures")) {
         const std::string mods = join(workdir, "mods");
         std::error_code mk;
@@ -390,6 +416,16 @@ std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdi
     fs::create_directories(join(workdir, "tmp"), ec);
     std::vector<Step> p;
     append_extras_android(p, l, workdir, o, skip_textures);
+    if (want_xdelta(l, o)) {   // the code it changes is compiled into the game: rebuild before the files are copied
+        Step b;
+        b.label = "Building the game on this device";
+        b.explain = "Builds the game again with the patch's code (only what changed is compiled).";
+        b.is_build = true;
+        b.argv = {l.python, l.build_script, workdir, "--android", l.android_dir, "--psprecomp", l.recompiler, "--game", l.game_dir, "--progress"};
+        b.env = android_env(l, workdir);
+        b.weight = 0.5;
+        p.push_back(b);
+    }
     Step c;
     c.label = "Putting the game files where the game can read them";
     c.explain = "Copies the files to where the game reads them.";

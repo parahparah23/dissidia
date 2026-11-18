@@ -325,6 +325,18 @@ bool PackageMods::add_override(const std::string& asset, const std::string& file
     return true;
 }
 
+bool PackageMods::add_region(uint64_t start, const std::string& file, uint32_t size) {
+    if (size == 0 || start % kSectorSize) return false;
+    const uint64_t span = (uint64_t)((size + kSectorSize - 1) / kSectorSize) * kSectorSize;
+    for (const auto& o : overrides_)
+        if (o.start < start + span && start < o.start + o.span) return false;
+    Override ov;
+    ov.asset = "<appended data>"; ov.file = file; ov.size = size; ov.start = start; ov.span = span;
+    overrides_.push_back(ov);
+    std::sort(overrides_.begin(), overrides_.end(), [](const Override& a, const Override& b) { return a.start < b.start; });
+    return true;
+}
+
 bool PackageMods::read_index(int64_t off, uint32_t size, uint8_t* dest, uint32_t* nread) const {
     if (off < 0 || (uint64_t)off >= patched_.size()) { *nread = 0; return true; }
     uint32_t n = (uint32_t)std::min<uint64_t>(size, patched_.size() - (uint64_t)off);
