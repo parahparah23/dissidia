@@ -98,6 +98,7 @@ struct Link {
     int64_t started_us = 0, heard_us = 0, sent_us = 0;
     uint32_t newest_mine = 0;           // highest frame of mine filled (frames < delay are neutral)
     uint32_t waits = 0, agreed = 0;
+    std::deque<int64_t> recent_waits;   // when the game last had to wait (warning)
     uint32_t latched = 0;               // buttons seen pressed between two logic frames (dissidia_comm_note_pad)
 };
 Link g_link;
@@ -184,6 +185,7 @@ uint32_t call_check(uint8_t* rdram, recomp_context* ctx, uint32_t net) {
 
 void quit(recomp_context* ctx, uint32_t net, const char* why) {
     std::fprintf(stderr, "[NETLINK] battle ends at frame %u: %s\n", g_link.frame, why);
+    psp_net_notice("link_end", 0, "Online: %s. The battle ends.", why);
     w32(net + N_FLAGS, r32(net + N_FLAGS) | F_QUIT);
     w32(net + N_QUIT_FRAME, g_link.frame);
     send(K_LEAVE);
@@ -250,6 +252,7 @@ void handler_hook(uint8_t* rdram, recomp_context* ctx) {
         if (g_link.state == Link::ANNOUNCING) {
             if (now_us() - g_link.started_us > 5000000) {
                 std::fprintf(stderr, "[NETLINK] no answer from the other copy in 5 s (an older build?): the game's own exchange\n");
+                psp_net_notice("link_old", 30, "Online: the other player's game is an older version, so this fight uses the game's own netcode (8-way stick).");
                 g_link.state = Link::GAME;
                 g_orig(rdram, ctx);
                 return;
@@ -296,6 +299,12 @@ void handler_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     if (!g_link.theirs.count(frame)) {
         g_link.waits++;
+        // Waiting often: tell the player why the fight stutters (more than 5 waited frames within 2 s).
+        const int64_t now = now_us();
+        g_link.recent_waits.push_back(now);
+        while (!g_link.recent_waits.empty() && now - g_link.recent_waits.front() > 2000000) g_link.recent_waits.pop_front();
+        if (g_link.recent_waits.size() > 5)
+            psp_net_notice("link_wait", 15, "Online: waiting for the other player's input (slow or lossy connection). Ping %d ms.", psp_adhoc_ping_ms());
         if (now_us() - g_link.heard_us > 10000000) return quit(ctx, net, "nothing from the other copy for 10 s");
         ctx->r[2] = 1;
         return;

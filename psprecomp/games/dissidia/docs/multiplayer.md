@@ -65,9 +65,39 @@ Tailscale or WireGuard). Both players should list each other; a third and later 
 because beacons carry the addresses of the peers each player hears (unknown addresses are probed for 15 s and dropped
 if they do not answer).
 
+**UPnP.** Turn on UPnP Port Forward on the Network page (LAN mode; or `PSPRECOMP_ADHOC_UPNP=1`) and the game asks the router to
+forward its UDP port to this machine (`runtime/src/hle/psp_upnp.cpp`: SSDP discovery, the router's WANIPConnection or
+WANPPPConnection service, AddPortMapping with a one-hour lease renewed every 30 minutes). The UPnP row then shows the public address
+(`1.2.3.4:27312`) to give to friends for their Direct Peers. The forward is removed when UPnP is turned off or the game quits. Most
+routers have UPnP off by default (UniFi among them); when no router answers or it refuses, the game says so and the port has to be
+forwarded by hand. Only the router on the local network is contacted.
+
 **Expect latency to matter.** The game runs a lock-step battle over reliable streams, and nothing here delays or
 predicts input. It was built for a few milliseconds of WiFi latency. A relay adds the trip to the server on top of the
 direct path; how much round-trip time the game tolerates has not been measured, so try a nearby partner first.
+
+## Ping and network warnings
+
+Each copy pings the players in its group once a second (a PDP datagram to a reserved port, which the relay forwards like any other;
+older builds do not answer and show `--`). **Show Ping** on the Network page (off by default; `PSPRECOMP_PING_OVERLAY=1`) puts the
+round trip to the slowest other player at the top right while you are in a group, next to the frame rate if that is shown.
+
+Network trouble is shown on screen for six seconds (and logged as `[NET]`), each kind at most every 10 to 60 s:
+
+| Message | When |
+|---|---|
+| no answer from the party server | Internet mode, 6 s after Communications mode started without an answer |
+| lost the connection to the party server | nothing from the server for 6 s (it answers every second) |
+| nothing from *player* for N s (unstable connection) | a player in your group silent for 2.5 s |
+| lost *player* (nothing received for 4 s) | the player is dropped |
+| high latency to *player*: N ms | the round trip over 150 ms for 3 s |
+| packet loss to *player*: N % | 15 % or more of the last pings unanswered |
+| waiting for the other player's input | the fight had to wait more than 5 frames within 2 s (battle link) |
+| the other player's game is an older version | the battle link fell back to the game's exchange |
+| *reason*. The battle ends. | the battle link ended a fight (the other player left, out of sync, nothing for 10 s) |
+| UPnP: ... | the router forwarded the port (with your public address), or why not |
+
+A network warning is not replaced by the frame-rate note when a session ends, so the reason stays on screen.
 
 ## Settings menu
 

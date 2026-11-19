@@ -1073,7 +1073,7 @@ void note_negotiated_rate(int cap, bool own_rate) {
         std::snprintf(msg, sizeof msg, "Online session ended: back to %d fps", own);
     }
     std::fprintf(stderr, "[FPS] negotiated frame rate %d (own setting %d)\n", cap, own);
-    ge_draw_toast(msg, 5000);
+    if (!psp_net_notice_showing()) ge_draw_toast(msg, 5000);   // a network warning (why the session ended) stays on screen
     shown = cap;
 }
 
