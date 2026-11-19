@@ -562,6 +562,21 @@ void ensure_built(const std::string& host_info_path) {
                 txt += p.used_key + "\tConflict: " + p.unused + " also change" + (p.unused.find("files") != std::string::npos ? "" : "s") + " " + list +
                        "; this mod's version is used.\n";
         }
+        // An ISO patch mod that brings its own main.bin (its own characters: Emendatus's Aerith is charId 33) and characters
+        // added through roster.txt (charIds from 33 on) claim the same character slots.
+        if (roster_has_characters(dir))
+            for (const std::string& root : extra) {
+                const size_t sl = root.find_last_of('/');
+                if (sl == std::string::npos || root.compare(sl, std::string::npos, "/install") != 0) continue;
+                std::ifstream mj(root.substr(0, sl) + "/mod.json");
+                const std::string js((std::istreambuf_iterator<char>(mj)), std::istreambuf_iterator<char>());
+                if (js.find("\"xdelta\"") == std::string::npos) continue;
+                if (!is_file(root + "/by_crc/93307c1c.bin") && !is_file(root + "/general_archive/main/main.bin")) continue;
+                const std::string folder = root.substr(0, sl).substr(root.substr(0, sl).find_last_of('/') + 1);
+                std::fprintf(stderr, "[MODS] conflict: %s brings its own characters and roster.txt adds characters: they use the same character slots\n", folder.c_str());
+                txt += folder + "\tConflict: the added characters (roster.txt) use the same character slots as this mod's own characters. Turn this mod or the added characters off.\n";
+                txt += "roster.txt\tConflict: an ISO patch mod (" + folder + ") brings characters of its own in the slots the added characters use. Turn one of them off.\n";
+            }
         std::ofstream cf(dir + "/.conflicts.txt", std::ios::trunc);
         cf << txt;
     }

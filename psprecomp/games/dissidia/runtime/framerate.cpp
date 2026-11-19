@@ -1142,9 +1142,13 @@ void global_step_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 void task_dump_frame();
+}  // namespace
+void dissidia_xmods_frame();
+namespace {
 void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t timer = static_cast<uint32_t>(ctx->r[4]);
     g_tick++;
+    dissidia_xmods_frame();   // xdelta_mods.cpp: code a mod rewrote while running
     ge_draw_perf_set_gameplay(battle_running());   // the performance overlay's average / 1% low count battle frames only
     if (ok(timer)) {
         // In an ad-hoc session every player runs at the lowest rate any of them asked for, so the

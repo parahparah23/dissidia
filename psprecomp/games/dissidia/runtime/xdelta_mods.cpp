@@ -332,6 +332,9 @@ const TailRead* read_at(uint32_t vaddr) {   // newest read that covers vaddr (ca
     return nullptr;
 }
 
+bool ref_word(int module, uint32_t a, uint32_t* w);   // below: the word the compiled code of `module` was made from
+bool fn_of(int m, uint32_t a, uint32_t* start, uint32_t* size);   // below: the compiled function covering a
+
 // <mod>/code/dynamic.txt: "blob <tail offset> <size> <addr> <file>" and "write <module> <addr> <word>" lines.
 // `overlay_only`: an overlay that was not resident at the first record is now: only its calls are added.
 void learn(TailRead& r, bool overlay_only = false, bool rescan = false) {
@@ -373,7 +376,13 @@ void learn(TailRead& r, bool overlay_only = false, bool rescan = false) {
             std::memcpy(&w, g_rdram + (a & 0x07FFFFFFu), 4);
             if ((w >> 26) != 2 && (w >> 26) != 3) continue;
             const uint32_t t = ((a + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2);
-            if (t < r.addr || t >= r.addr + r.size) continue;
+            // into this code, or anywhere else when it replaced an instruction of a compiled function that was no jump (the code
+            // also points game code at the patch's own code in an overlay: Emendatus's Aerith moves). Memory the runtime itself
+            // writes (import stubs) is neither.
+            uint32_t rw = 0, fs = 0, fz = 0;
+            const bool rewritten = ref_word(module, a, &rw) && rw != w && (rw >> 26) != 2 && (rw >> 26) != 3 &&
+                                   fn_of(module, a, &fs, &fz);
+            if ((t < r.addr || t >= r.addr + r.size) && !rewritten) continue;
             std::snprintf(buf, sizeof buf, "write %d %u %u %llu %u", module, a, w, (unsigned long long)r.off, r.size);
             lines.insert(buf);
             writes++;
@@ -900,7 +909,18 @@ void dissidia_xmods_overlay_loaded(int ovl) {
     if (!g_watch || ovl < 1 || ovl > 3) return;
     load_ovl_ref(ovl);
     scan(ovl, kOvlLo, kOvlHi, g_static_compiled[ovl] ? "changed after loading" : "the mod's overlay changes are not in this build");
+    scan(0, kEbootLo, kEbootHi, "run-time code changed it");   // a mod's code patches the EBOOT when an overlay loads, too
     if (g_force[ovl]) wrap_all(ovl);
+}
+
+// framerate.cpp, every frame: about once a second compare all game code again. Run-time code of a mod rewrites game
+// instructions whenever it likes, not always with a cache flush (Emendatus points two EBOOT calls at Aerith's movement code
+// in the battle overlay at the start of a battle); comparing 2 MB costs well under a millisecond.
+void dissidia_xmods_frame() {
+    if (!g_watch) return;
+    static unsigned n = 0;
+    if (++n % 60) return;
+    scan_all_periodic();
 }
 
 // a call into game code that nothing compiled answers (a patch's new code in a former data area or after an overlay's
