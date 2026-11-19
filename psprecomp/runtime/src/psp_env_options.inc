@@ -63,7 +63,7 @@ const EnvOpt k_env_opts[] = {
     {"ANALOG_DPAD_ZONE", EC_INPUT, 'c', "0.25|0.45|0.55", "Stick travel at which a direction counts as a D-pad press in battle (default 0.35)."},
     {"ANALOG_WALK", EC_INPUT, 'k', "", "Move in the stick's own direction on the world map and in battle. Off: one of eight ways, as on the PSP."},
     {"ANALOG_WALK_BATTLE", EC_INPUT, 'k', "", "In battle too. Off: fighters move one of eight ways (saved battle replays then play back exactly)."},
-    {"ANALOG_FOLLOW_ZONE", EC_INPUT, 'c', "0|10|35", "World map camera: degrees either side of straight ahead in which it does not turn after the walker (default 22.5; 0 = the game's follow)."},
+    {"ANALOG_FOLLOW_ZONE", EC_INPUT, 'c', "0|22.5|60", "World map camera: degrees either side of straight ahead in which it does not turn after a walk with the stick (default 180 = never, the right stick turns it; 0 = the game's follow)."},
     {"RSTICK_DPAD", EC_INPUT, 'k', "", "Right stick presses the D-pad (menus, selecting). Off: it does nothing."},
     {"RSTICK_DEADZONE", EC_INPUT, 'c', "0.1|0.3|0.4", "Right stick dead zone, as a fraction of full travel (default 0.20)."},
     {"ARROWS_DPAD_ONLY", EC_INPUT, 'e', "", "Keyboard arrow keys press only the D-pad, not the left stick as well."},

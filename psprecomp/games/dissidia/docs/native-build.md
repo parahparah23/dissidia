@@ -152,8 +152,9 @@ Camera follow dead zone: the world map's free camera (`ovl_battle FUN_08B3F7F4`)
 frame with no dead zone. With the walk at the stick's own angle, a push a few degrees off straight up then turns the camera, the
 camera-relative walk turns with it, and the camera spins (VCKing101's measurement; here with `PSPRECOMP_CAM_UNLOCK_HOLD=0` and no
 zone, a 15 degree push turned the walk 186 degrees in 1.75 s). `input.cpp` moves the follow's atan2 result (`FUN_089A457C`, only the
-call on the walker's facing) so the follow does not turn within `PSPRECOMP_ANALOG_FOLLOW_ZONE` degrees (default 22.5, 0 = the game's
-follow), ramps up to the cap over half the zone, and is the game's beyond that; only while the walker's last step was the analogue
-one. With it the same push walked straight. Normally `camera.cpp`'s hold camera is active on the world map too (no lock-on target):
+call on the walker's facing) so the follow does not turn within `PSPRECOMP_ANALOG_FOLLOW_ZONE` degrees, ramps up to the cap over half the zone, and is
+the game's beyond that; only while the walker's last step was the analogue one. Default 180: the camera does not follow a walk with
+the stick at all, since the right stick turns it (asked for 19 November 2026: the left stick also swung the camera left and right);
+22.5 is VCKing101's zone, 0 the game's follow. Walking with the D-pad keeps the game's follow. With it the same push walked straight. Normally `camera.cpp`'s hold camera is active on the world map too (no lock-on target):
 it keeps the view and turns the stick by the game camera's turn, which already hides the spin; the zone covers the cases without it
 (`PSPRECOMP_CAM_UNLOCK_HOLD=0`, `PSPRECOMP_CAM_FREE=0`). `PSPRECOMP_ANALOG_FOLLOW_LOG=<n>` logs reduced follow turns.

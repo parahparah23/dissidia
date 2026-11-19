@@ -44,8 +44,9 @@
 // degrees off, the camera turns, the camera-relative walk turns with it and the camera spins (VCKing101 measured 172 deg/s for a
 // 15 degree push, docs/port/analog-movement.md section 7). Fix, as theirs: while the follow runs for the walker whose last walk step
 // was ours, its atan2 result is moved so that the angle it turns toward is 0 within PSPRECOMP_ANALOG_FOLLOW_ZONE degrees of straight
-// ahead (default 22.5, 0 = the game's follow), rises to the cap over a ramp of half the zone, and is the game's beyond that. Straight
-// back, the sides and diagonals turn as in the game.
+// ahead, rises to the cap over a ramp of half the zone, and is the game's beyond that. Default 180: the camera does not follow the
+// analogue walk at all (the right stick turns it; walking with the D-pad keeps the game's follow). 22.5 is VCKing101's zone (straight
+// back, the sides and diagonals turn as in the game), 0 the game's follow.
 
 #include "psp_game_module.h"
 #include "recomp.h"
@@ -216,7 +217,7 @@ void walk_replace_step(const recomp_context* ctx) {
 constexpr uint32_t FREE_CAM_INPUT = 0x08B3F7F4u;   // ovl_battle
 constexpr uint32_t ATAN2 = 0x089A457Cu;            // f0 = atan2(f12, f13)
 FuncPtr g_orig_free_input = nullptr, g_orig_atan2 = nullptr;
-float g_follow_zone = 22.5f * 0.017453293f;
+float g_follow_zone = 180.f * 0.017453293f;   // default: no follow at all (the right stick turns the camera)
 uint32_t g_follow_owner = 0, g_follow_yaw = 0;   // set while FUN_08B3F7F4 runs for that walker
 int g_follow_log = 0;
 
@@ -296,7 +297,7 @@ void dissidia_input_install(uint8_t* rdram) {
     std::fprintf(stderr, "[INPUT] analogue walking direction (world map%s)\n", g_walk_battle ? " and battle" : "");
 
     if ((e = std::getenv("PSPRECOMP_ANALOG_FOLLOW_ZONE"))) g_follow_zone = static_cast<float>(std::atof(e)) * 0.017453293f;
-    if (g_follow_zone > 60.f * 0.017453293f) g_follow_zone = 60.f * 0.017453293f;
+    if (g_follow_zone > 180.f * 0.017453293f) g_follow_zone = 180.f * 0.017453293f;
     if ((e = std::getenv("PSPRECOMP_ANALOG_FOLLOW_LOG"))) g_follow_log = std::atoi(e);
     if (g_follow_zone <= 0.f) return;
     g_orig_free_input = ovl_battle_lookup(FREE_CAM_INPUT);
@@ -304,5 +305,6 @@ void dissidia_input_install(uint8_t* rdram) {
     if (!g_orig_free_input || !g_orig_atan2) { std::fprintf(stderr, "[INPUT] camera follow zone NOT installed\n"); return; }
     psp_dispatch_register(FREE_CAM_INPUT, free_input_hook);
     psp_dispatch_register(ATAN2, atan2_hook);
-    std::fprintf(stderr, "[INPUT] camera follow dead zone %.1f deg for the analogue walk\n", g_follow_zone * 57.29578f);
+    if (g_follow_zone >= 3.14159f) std::fprintf(stderr, "[INPUT] world map camera does not follow the analogue walk (right stick turns it)\n");
+    else std::fprintf(stderr, "[INPUT] camera follow dead zone %.1f deg for the analogue walk\n", g_follow_zone * 57.29578f);
 }
