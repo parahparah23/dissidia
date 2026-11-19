@@ -2463,12 +2463,22 @@ bool dissidia_fighter_human(uint32_t a) {
 float dissidia_frame_ticks() { return g_ticks; }
 // 30 Hz logic applies once the fight is past its intro (7 s of battle: the intro sequence did not finish with drawn-only frames in it)
 namespace {
+// A fight, not the Story Mode world map: the world map runs on the battle overlay too, with its walker as an actor, but its battle
+// object (*0x089D6A10) has no fighters at +0x38 / +0x3C (VCKing101's notes, github.com/VCKing101/Dissidia012-pc,
+// docs/port/analog-movement.md). With 30 Hz logic there, going from the world map into its menu overlay hung on a dark blue screen
+// at every rate above 30 (19 Nov 2026: "Depart on a journey" in Story Mode).
+bool in_fight() {
+    const uint32_t bo = r32(0x089D6A10u);
+    return ok(bo) && (r32(bo + 0x38u) || r32(bo + 0x3Cu));
+}
 bool l30_active() {
     static bool on = false;
     static const bool from_clock = std::getenv("PSPRECOMP_L30_FROM_CLOCK") != nullptr;   // experiment: only from the test clock on
-    const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && (from_clock ? g_gt_started : battle_running());
+    const bool want = g_logic30 && g_rate > 30 && overlay_id() == 1 && (from_clock ? g_gt_started : battle_running()) && in_fight();
     if (want && !on) { g_l30_frame = 0; g_l30_logic_now = true; g_l30_dec_frame = ~0ull; g_l30_due_ms = 0; g_l30_end_ms = 0; }
-    on = want || (on && g_logic30 && g_rate > 30 && overlay_id() == 1 && battle_running());
+    const bool was = on;
+    on = want || (on && g_logic30 && g_rate > 30 && overlay_id() == 1 && battle_running() && in_fight());
+    if (on != was) std::fprintf(stderr, "[FPS] 30 Hz logic %s\n", on ? "on (fight)" : "off");
     return on;
 }
 }  // namespace
