@@ -9,7 +9,13 @@
 #include <sstream>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
+#include <cstdint>
+#include <cstring>
+#include <vector>
+#include "third_party/miniz.h"
 
 namespace fs = std::filesystem;
 
@@ -96,6 +102,204 @@ const char* texture_pack_title(const std::string& pack) {
 const char* texture_pack_credit(const std::string& pack) {
     return pack == "ai" ? "Credits: D012FFRT by Niosa (github.com/Niosa/D012FFRT); AI upscales by schindlershadow made with Real-ESRGAN (Xintao Wang et al.)."
                         : "Credits: Dissidia 012 HD Project by LiinkPK (github.com/LiinkPK/Dissidia-012-HD-Textures); artwork also by ajb3art.";
+}
+
+// ---- disc identity: which game a picked disc image is (before anything is installed with it) ----
+namespace {
+// A disc image read in place: plain ISO or CSO (CISO v1, raw deflate blocks; the wizard's undub pick accepts both).
+struct DiscReader {
+    int fd = -1;               // "fd:N": pread, so the build tools that inherit the descriptor find it where it was
+    std::ifstream f;
+    bool cso = false;
+    uint32_t block = 0, align = 0;
+    uint64_t total = 0;
+    std::vector<uint32_t> index;
+    int64_t cached = -1;
+    std::string cache;
+    explicit DiscReader(const std::string& path) {
+        if (path.compare(0, 3, "fd:") == 0) fd = std::atoi(path.c_str() + 3);
+        else f.open(fs::u8path(path), std::ios::binary);
+        std::string h;
+        if (!ok() || !raw(0, 24, &h) || h.compare(0, 4, "CISO") != 0) return;
+        block = (uint32_t)(uint8_t)h[16] | (uint32_t)(uint8_t)h[17] << 8 | (uint32_t)(uint8_t)h[18] << 16 | (uint32_t)(uint8_t)h[19] << 24;
+        for (int i = 7; i >= 0; i--) total = total << 8 | (uint8_t)h[8 + i];
+        align = (uint8_t)h[21];
+        if ((uint8_t)h[20] > 1 || block < 2048 || (block & (block - 1)) || total == 0 || total > (1ull << 40)) { fd = -1; f.close(); return; }
+        const uint64_t n = (total + block - 1) / block + 1;
+        std::string ix;
+        if (!raw(24, (size_t)n * 4, &ix)) { fd = -1; f.close(); return; }
+        index.resize((size_t)n);
+        for (size_t i = 0; i < n; i++)
+            index[i] = (uint32_t)(uint8_t)ix[4 * i] | (uint32_t)(uint8_t)ix[4 * i + 1] << 8 | (uint32_t)(uint8_t)ix[4 * i + 2] << 16 | (uint32_t)(uint8_t)ix[4 * i + 3] << 24;
+        cso = true;
+    }
+    bool ok() const { return fd >= 0 || f.is_open(); }
+    bool raw(uint64_t off, size_t n, std::string* out) {
+        out->assign(n, '\0');
+        if (n == 0) return true;
+#ifndef _WIN32
+        if (fd >= 0) {
+            size_t got = 0;
+            while (got < n) {
+                const ssize_t r = ::pread(fd, &(*out)[got], n - got, static_cast<off_t>(off + got));
+                if (r <= 0) return false;
+                got += static_cast<size_t>(r);
+            }
+            return true;
+        }
+#endif
+        if (!f.is_open()) return false;
+        f.clear();
+        f.seekg(static_cast<std::streamoff>(off));
+        f.read(&(*out)[0], static_cast<std::streamsize>(n));
+        return static_cast<size_t>(f.gcount()) == n;
+    }
+    bool cso_block(uint64_t i) {
+        if ((int64_t)i == cached) return true;
+        if (i + 1 >= index.size()) return false;
+        const uint64_t a = (uint64_t)(index[i] & 0x7FFFFFFFu) << align, b = (uint64_t)(index[i + 1] & 0x7FFFFFFFu) << align;
+        if (b < a || b - a > (uint64_t)block * 2 + 64) return false;
+        std::string src;
+        if (!raw(a, (size_t)(b - a), &src)) return false;
+        if (index[i] & 0x80000000u) { src.resize(std::min<size_t>(src.size(), block)); cache.swap(src); }
+        else {
+            cache.assign(block, '\0');
+            const size_t got = tinfl_decompress_mem_to_mem(&cache[0], block, src.data(), src.size(), 0);
+            if (got == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) return false;
+            cache.resize(got);
+        }
+        cached = (int64_t)i;
+        return true;
+    }
+    bool read(uint64_t off, size_t n, std::string* out) {   // `n` bytes of the disc at `off`
+        if (!cso) return raw(off, n, out);
+        out->clear();
+        if (off + n > total) return false;
+        while (out->size() < n) {
+            const uint64_t p = off + out->size(), bi = p / block, in = p % block;
+            if (!cso_block(bi) || in >= cache.size()) return false;
+            out->append(cache, (size_t)in, std::min<size_t>(cache.size() - (size_t)in, n - out->size()));
+        }
+        return true;
+    }
+};
+uint32_t le32(const std::string& s, size_t o) {
+    return o + 4 <= s.size() ? (uint32_t)(uint8_t)s[o] | (uint32_t)(uint8_t)s[o + 1] << 8 | (uint32_t)(uint8_t)s[o + 2] << 16 | (uint32_t)(uint8_t)s[o + 3] << 24 : 0;
+}
+uint16_t le16(const std::string& s, size_t o) { return o + 2 <= s.size() ? (uint16_t)((uint8_t)s[o] | (uint8_t)s[o + 1] << 8) : 0; }
+// an ISO 9660 file or folder by its path ("PSP_GAME/PARAM.SFO"): extent and size
+bool iso_find(DiscReader& r, const std::string& path, uint32_t* out_lba, uint32_t* out_size) {
+    std::string pvd;
+    if (!r.read(16u * 2048u, 2048, &pvd) || pvd.compare(1, 5, "CD001") != 0) return false;
+    uint32_t lba = le32(pvd, 156 + 2), size = le32(pvd, 156 + 10);
+    size_t from = 0;
+    while (from <= path.size()) {
+        size_t to = path.find('/', from);
+        if (to == std::string::npos) to = path.size();
+        const std::string want = path.substr(from, to - from);
+        from = to + 1;
+        if (size == 0 || size > (1u << 20)) return false;
+        std::string d;
+        if (!r.read((uint64_t)lba * 2048u, size, &d)) return false;
+        bool found = false;
+        for (size_t p = 0; p < d.size();) {
+            const uint8_t len = (uint8_t)d[p];
+            if (len == 0) { p = (p / 2048 + 1) * 2048; continue; }          // records do not cross a sector
+            if (p + 33 > d.size() || p + len > d.size()) break;
+            const size_t nl = (uint8_t)d[p + 32];
+            std::string nm = d.substr(p + 33, std::min(nl, d.size() - p - 33));
+            if (size_t semi = nm.find(';'); semi != std::string::npos) nm.resize(semi);
+            for (char& ch : nm) ch = (char)std::toupper((unsigned char)ch);
+            if (nm == want) { lba = le32(d, p + 2); size = le32(d, p + 10); found = true; break; }
+            p += len;
+        }
+        if (!found) return false;
+    }
+    *out_lba = lba; *out_size = size;
+    return true;
+}
+bool disc_id(DiscReader& r, std::string* id, std::string* title) {
+    id->clear(); title->clear();
+    uint32_t lba = 0, size = 0;
+    if (!r.ok() || !iso_find(r, "PSP_GAME/PARAM.SFO", &lba, &size) || size < 20 || size > 65536) return false;
+    std::string s;
+    if (!r.read((uint64_t)lba * 2048u, size, &s) || s.compare(0, 4, std::string("\0PSF", 4)) != 0) return false;
+    const uint32_t keys = le32(s, 8), data = le32(s, 12), n = le32(s, 16);
+    for (uint32_t i = 0; i < n && 20 + 16 * (i + 1) <= s.size(); i++) {
+        const size_t e = 20 + 16 * i;
+        const size_t ko = keys + le16(s, e), dofs = data + le32(s, e + 12), dl = le32(s, e + 4);
+        if (ko >= s.size() || dofs > s.size() || le16(s, e + 2) == 0x404) continue;   // 0x404: integers, not needed
+        const std::string key = s.c_str() + ko;
+        std::string v = s.substr(dofs, std::min<size_t>(dl, s.size() - dofs));
+        if (size_t z = v.find('\0'); z != std::string::npos) v.resize(z);
+        if (key == "DISC_ID") *id = v;
+        else if (key == "TITLE") *title = v;
+    }
+    return !id->empty();
+}
+std::string lower(std::string s) { for (char& ch : s) ch = (char)std::tolower((unsigned char)ch); return s; }
+bool is_012(const std::string& id, const std::string& title) {
+    return lower(title).find("duodecim") != std::string::npos || id == "ULUS10566" || id == "ULES01505" || id == "ULJM05814" || id == "NPJH50377";
+}
+bool is_d1(const std::string& id, const std::string& title) {
+    return id == "ULUS10437" || (!is_012(id, title) && lower(title).find("dissidia") != std::string::npos);
+}
+std::string disc_words(const std::string& id, const std::string& title) { return (title.empty() ? std::string("this disc") : title) + " (" + id + ")"; }
+}  // namespace
+
+bool read_disc_id(const std::string& path, std::string* id, std::string* title) {
+    DiscReader r(path);
+    return disc_id(r, id, title);
+}
+
+std::string d1_disc_problem(const std::string& path) {
+    std::string id, title;
+    DiscReader r(path);
+    if (!disc_id(r, &id, &title))
+        return "This file is not a PSP disc image that can be read. Pick an uncompressed .iso of Dissidia Final Fantasy (USA); "
+               "unpack a .zip / .7z first.";
+    if (id == "ULUS10437") return "";
+    const std::string what = disc_words(id, title);
+    if (is_012(id, title))
+        return "This is Dissidia 012, " + what + ". The moves come from the first game: pick your Dissidia Final Fantasy "
+               "(2008, USA, ULUS-10437) disc image instead.";
+    if (is_d1(id, title))
+        return "This is another release of the first Dissidia, " + what + ". The moves are made from the US release only: "
+               "pick Dissidia Final Fantasy (USA, ULUS-10437).";
+    return "This is not Dissidia Final Fantasy: the disc is " + what + ". Pick Dissidia Final Fantasy (2008, USA, ULUS-10437).";
+}
+
+// The English battle voice bank of Bartz (voice/en/battle/voice_p_fiv100_00.scd, package CRC 0x4300D781) as the EU and US
+// discs have it: an image whose bank is this one has the English voices, so it is not an undub.
+constexpr uint32_t kVoiceProbeCrc = 0x4300D781u, kVoiceProbeEnSize = 302368u, kVoiceProbeEnCrc32 = 0x6EE2B876u;
+std::string undub_disc_problem(const std::string& path) {
+    std::string id, title;
+    DiscReader r(path);
+    if (!disc_id(r, &id, &title))
+        return "This file is not a PSP disc image that can be read. Pick a .iso or .cso of Dissidia 012 with Japanese voices; "
+               "unpack a .zip / .7z first.";
+    const std::string what = disc_words(id, title);
+    if (!is_012(id, title))
+        return (is_d1(id, title) ? "This is the first Dissidia, " : "This is not Dissidia 012: the disc is ") + what +
+               ". The Japanese voices come from a Dissidia 012 disc image that has them (an undub or the Japanese release).";
+    uint32_t il = 0, is = 0, pl = 0, ps = 0;
+    std::string info;
+    if (!iso_find(r, "PSP_GAME/USRDIR/DATA/PACKAGE_INFO.BIN", &il, &is) || !iso_find(r, "PSP_GAME/USRDIR/DATA/PACKAGE.BIN", &pl, &ps) ||
+        is < 16 || is > (4u << 20) || !r.read((uint64_t)il * 2048u, is, &info) || info.compare(4, 4, "pack") != 0)
+        return "The voice files of this disc image cannot be read (" + what + "). Pick another image of the undub or Japanese release.";
+    const uint32_t count = le32(info, 8);
+    for (uint32_t i = 0; i < count && 16 + 12 * (i + 1) <= info.size(); i++) {
+        if (le32(info, 16 + 12 * i) != kVoiceProbeCrc) continue;
+        const uint64_t off = (uint64_t)pl * 2048u + (uint64_t)le32(info, 16 + 12 * i + 4) * 2048u;
+        const uint32_t size = le32(info, 16 + 12 * i + 8) & 0x0FFFFFFFu;
+        std::string bank;
+        if (size == kVoiceProbeEnSize && r.read(off, size, &bank) &&
+            mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(bank.data()), bank.size()) == kVoiceProbeEnCrc32)
+            return "This disc has the English voices, " + what + ": it is a regular Dissidia 012, like your own. Pick the undub "
+                   "(a patched copy with the Japanese voices) or the Japanese release.";
+        return "";
+    }
+    return "";   // no English bank to compare with (a release that names its files differently): not refused here
 }
 
 bool feature_available(const Layout& l, const std::string& name) {

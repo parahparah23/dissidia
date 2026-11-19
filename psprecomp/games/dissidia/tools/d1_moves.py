@@ -101,6 +101,9 @@ def mark_d1(desc):
     return desc
 
 
+D1_DISC_ID = 'ULUS10437'   # Dissidia Final Fantasy (2008), USA: the release the shipped patches are made from
+
+
 class IsoPackage(pe.Package):
     """PACKAGE.BIN / PACKAGE_INFO.BIN read in place from an ISO 9660 image."""
 
@@ -144,6 +147,22 @@ class IsoPackage(pe.Package):
                 raise SystemExit('%s not found in the ISO' % path)
             rec = found
         return struct.unpack_from('<I', rec, 2)[0], struct.unpack_from('<I', rec, 10)[0]
+
+    def disc_id(self):
+        """(DISC_ID, TITLE) from PSP_GAME/PARAM.SFO, e.g. ('ULUS10437', 'DISSIDIA FINAL FANTASY')."""
+        lba, size = self._find('PSP_GAME/PARAM.SFO')
+        self.iso.seek(lba * 2048)
+        s = self.iso.read(size)
+        if s[:4] != b'\0PSF':
+            return '', ''
+        keys, data, n = struct.unpack_from('<III', s, 8)
+        out = {}
+        for i in range(n):
+            ko, fmt, ln, _mx, do = struct.unpack_from('<HHIII', s, 20 + 16 * i)
+            if fmt != 0x404:
+                k = s[keys + ko:s.index(b'\0', keys + ko)].decode('latin1')
+                out[k] = s[data + do:data + do + ln].split(b'\0')[0].decode('utf8', 'replace')
+        return out.get('DISC_ID', ''), out.get('TITLE', '')
 
     def read_crc(self, crc):
         sector, size, _ = self.entries[crc]
@@ -309,6 +328,12 @@ def cmd_install(a):
     man = json.load(open(os.path.join(PATCH_DIR, 'manifest.json')))
     d12 = pe.Package(os.path.join(a.work, 'disc0'))
     d1 = IsoPackage(a.d1)
+    disc, title = d1.disc_id()        # Dissidia 012 has obj/p_fiv100.objx too: the disc's own id tells the games apart
+    if disc != D1_DISC_ID:
+        what = '%s (%s)' % (title or 'this disc', disc or 'no PARAM.SFO')
+        if 'duodecim' in title.lower():
+            raise SystemExit('%s is Dissidia 012, %s: the moves need the first Dissidia (USA, ULUS-10437)' % (a.d1, what))
+        raise SystemExit('%s is %s, not Dissidia Final Fantasy (USA, ULUS-10437)' % (a.d1, what))
     if pe.package_crc('obj/p_fiv100.objx') not in d1.entries:
         raise SystemExit('%s is not a Dissidia Final Fantasy (2008) disc image' % a.d1)
     mods = os.path.join(a.work, 'mods')

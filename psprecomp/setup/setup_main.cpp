@@ -23,6 +23,7 @@
 
 #ifdef __ANDROID__
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 #include <algorithm>
 #include <chrono>
@@ -249,6 +250,8 @@ struct App {
     int64_t check_start = 0;
     std::string check_result;
     std::string msg_title, msg_text;
+    Screen msg_back = Screen::Welcome;   // where the Message page's OK goes (then back to Welcome for the next message)
+    Pick msg_pick = Pick::Iso;           // msg_back PickInfo: the file to choose again
 
     // native (system) file dialogs; the built-in browser is the fallback
     std::unique_ptr<pfd::open_file> file_dlg;
@@ -430,7 +433,7 @@ struct App {
                 p.title = "THE UNDUB FILE";
                 p.tab = "Japanese voices";
                 p.rows = {row("A second disc image", "The Japanese voices and movies come from a Japanese or undub version of Dissidia 012, as a disc image: a .iso or .cso. It is only read once; your own disc stays the base of the game.", ".iso or .cso"),
-                          row("Valid: the undub / Japanese disc", "A Dissidia 012 image that has the Japanese voices, for example the Japanese release or an undub patch of the game. The same game as your own disc, just with different voice and movie files.", "Japanese / undub"),
+                          row("Valid: the undub / Japanese disc", "A Dissidia 012 image that has the Japanese voices, for example the Japanese release or an undub patch of the game. The same game as your own disc, just with different voice and movie files. A disc with the English voices, or another game, is refused with a message.", "Japanese / undub"),
                           row("Choose the file", how),
                           row("Back")};
             }
@@ -1037,6 +1040,21 @@ struct App {
             workdir = path;
             if (before_pick == Screen::Options) go(Screen::Options, 0); else go(Screen::InstallDir);
         } else if (pick == Pick::Undub || pick == Pick::D1) {
+            {                                    // the right game, before anything is installed with it
+                const std::string why = pick == Pick::D1 ? setup::d1_disc_problem(path) : setup::undub_disc_problem(path);
+                if (!why.empty()) {
+#ifdef __ANDROID__
+                    if (path.compare(0, 3, "fd:") == 0) ::close(std::atoi(path.c_str() + 3));   // the picker's descriptor of the refused file
+#endif
+                    (pick == Pick::D1 ? opt.d1_iso : opt.undub_iso).clear();
+                    msg_title = "WRONG DISC";
+                    msg_text = why;
+                    msg_back = Screen::PickInfo;   // OK: choose that file again (msg_pick)
+                    msg_pick = pick;
+                    go(Screen::Message);
+                    return;
+                }
+            }
             (pick == Pick::Undub ? opt.undub_iso : opt.d1_iso) = path;
             go_options();
             start_install_or_ask();
@@ -1320,9 +1338,12 @@ struct App {
             else if (launch_mode) play();
             else go(Screen::Welcome);
             break;
-        case Screen::Message:
-            go(Screen::Welcome);
+        case Screen::Message: {
+            const Screen back = msg_back;
+            msg_back = Screen::Welcome;
+            if (back == Screen::PickInfo) begin_pick(msg_pick, Screen::Options); else go(back);
             break;
+        }
         case Screen::Done:
 #ifdef __ANDROID__
             if (sel == 0) {
@@ -1393,9 +1414,12 @@ struct App {
             quit = true;
             break;
         case Screen::Failed:
-        case Screen::Message:
-            go(Screen::Welcome);
+        case Screen::Message: {
+            const Screen back = msg_back;
+            msg_back = Screen::Welcome;
+            if (back == Screen::PickInfo) begin_pick(msg_pick, Screen::Options); else go(back);
             break;
+        }
         case Screen::UpdateAvail:
             if (launch_mode) play(); else go(Screen::Welcome);
             break;
@@ -1886,6 +1910,10 @@ int main(int argc, char** argv) {
         app.pick = Pick::Iso; app.go(Screen::PickInfo, 0); shot("2c_pick_info");
         app.pick = Pick::Undub; app.go(Screen::PickInfo, 0); shot("2d_pick_info_undub");
         app.pick = Pick::D1; app.go(Screen::PickInfo, 0); shot("2e_pick_info_d1");
+        app.msg_title = "WRONG DISC";   // a refused pick (setup::d1_disc_problem's words for a Dissidia 012 image)
+        app.msg_text = "This is Dissidia 012, DISSIDIA duodecim FINAL FANTASY (ULUS10566). The moves come from the first game: pick your "
+                       "Dissidia Final Fantasy (2008, USA, ULUS-10437) disc image instead.";
+        app.go(Screen::Message, 0); shot("2f_refused_d1");
         app.pick = Pick::Iso;
         app.go(Screen::InstallDir); shot("3_install_dir");
         app.go(Screen::Options, 0); shot("4_options");

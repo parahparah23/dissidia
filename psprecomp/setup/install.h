@@ -57,6 +57,16 @@ const char* texture_pack_credit(const std::string& pack);
 // does not let it be turned on).
 bool feature_available(const Layout& l, const std::string& name);
 
+// A PSP disc image's (.iso or .cso) PSP_GAME/PARAM.SFO: DISC_ID (e.g. "ULUS10437") and TITLE. `path` may be "fd:N" (Android picker);
+// the descriptor's file offset is not moved. false = not readable as an ISO 9660 PSP disc image.
+bool read_disc_id(const std::string& path, std::string* id, std::string* title);
+// The Bartz moves need Dissidia Final Fantasy (2008), USA (ULUS-10437). "" when `path` is that disc, else what is wrong
+// with it, in words for the player (e.g. a Dissidia 012 image picked by mistake).
+std::string d1_disc_problem(const std::string& path);
+// The Japanese voices need a Dissidia 012 image whose voices are Japanese (an undub, or the Japanese release; .iso or .cso).
+// "" when `path` is one, else what is wrong with it (another game, the first Dissidia, or a regular English 012).
+std::string undub_disc_problem(const std::string& path);
+
 std::vector<Step> plan_install(const Layout& l, const std::string& iso, const std::string& workdir, const Options& o);
 // The game build only (rebuild / repair): analysis, recompile, compile (+ the Android build when chosen).
 // Only the extras of `o` (HD textures unless skip_textures, Japanese voices, saves, the Android build) on an installed game: no rebuild.
