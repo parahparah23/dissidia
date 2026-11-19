@@ -243,16 +243,22 @@ def main():
                     hash_range(iso.f, r["extent"] * SECTOR, 0, r["size"]) == file_md5(mine_path):
                 continue
             dest = os.path.join(out_movie, r["name"])
-            want = os.path.getsize(mine_path) if mine_path else r["size"]
-            if os.path.isfile(dest) and os.path.getsize(dest) == want:
-                n_skip += 1
-                continue
-            n_movie += 1
             spliced = None
             if mine_path:
                 iso.f.seek(r["extent"] * SECTOR)
                 with open(mine_path, "rb") as mf:
                     spliced = splice_movie_audio(mf.read(), iso.f.read(r["size"]))
+            if os.path.isfile(dest):
+                # by content, not size: an earlier version copied the undub's movie whole, and UP_GIL's is the same size
+                if spliced is not None:
+                    with open(dest, "rb") as df:
+                        same = df.read() == spliced
+                else:
+                    same = os.path.getsize(dest) == r["size"]
+                if same:
+                    n_skip += 1
+                    continue
+            n_movie += 1
             if a.dry_run:
                 say("  would write movie %s (%s)" % (r["name"], "your picture, Japanese sound" if spliced else "whole undub movie"))
             elif spliced is not None:
