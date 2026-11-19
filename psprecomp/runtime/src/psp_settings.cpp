@@ -390,6 +390,15 @@ void edit_append(char c) {
     g_dirty = true;
 }
 void edit_backspace() { if (!g_edit.buf.empty()) { g_edit.buf.pop_back(); g_dirty = true; } }
+// The clipboard's text into the field (the Paste key, Ctrl+V): printable ASCII only, line breaks dropped, up to the field's length.
+void edit_paste() {
+    char* clip = SDL_GetClipboardText();
+    if (!clip) return;
+    for (const char* q = clip; *q; ++q)
+        if (*q != '\r' && *q != '\n') edit_append(*q);
+    SDL_free(clip);
+    g_dirty = true;
+}
 // The on-screen keyboard's key `row`, `col` under the current layer (shift / symbols).
 void edit_clamp_focus() {
     const auto keys = psp_sddialog::settings_keyboard(g_edit.shift, g_edit.symbols);
@@ -404,6 +413,7 @@ void edit_press(const psp_sddialog::SetKey& k) {
     case 4: edit_backspace(); break;
     case 5: edit_commit(); return;
     case 6: edit_end(); return;
+    case 7: edit_paste(); break;
     default: break;
     }
     edit_clamp_focus();
@@ -2561,6 +2571,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
             case SDLK_LEFT: edit_move(0, -1, g); break;
             case SDLK_RIGHT: edit_move(0, 1, g); break;
             case SDLK_BACKSPACE: edit_backspace(); break;
+            case SDLK_v: if (ev.key.keysym.mod & (KMOD_CTRL | KMOD_GUI)) edit_paste(); break;   // Ctrl+V (Cmd+V on a Mac)
             case SDLK_RETURN: case SDLK_KP_ENTER: if (!ev.key.repeat) edit_commit(); break;
             default: break;
             }

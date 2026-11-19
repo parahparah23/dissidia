@@ -19,7 +19,7 @@ Debug), the rows of the category (some open a sub-menu: Image > HDR, Effects > R
 A long description scrolls by itself. The chip next to a description's title says how the choice is kept: **Saved**, **Next start**
 (restart the game to apply) or **This session**.
 
-Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard.
+Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard. Its **Paste** key (or Ctrl+V) types the clipboard's text in: printable characters only, line breaks dropped, up to the field's length. The game's own name entry (Data Config > Player Name) has a Paste key and Ctrl+V too.
 
 ## Categories, restart and mods
 
