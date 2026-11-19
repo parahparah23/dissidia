@@ -31,6 +31,7 @@
 #include "recomp.h"
 #include "hle/psp_hle.h"
 #include "psp_ge_draw.h"
+#include "psp_ge.h"
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -190,6 +191,34 @@ bool pl_pos(float* P) {
     return a && rdvec(a + ACT_POS, P);
 }
 
+// Field-of-view setting (Display > Field of View). The camera object keeps its vertical FOV at +0xC0 (radians or degrees: told apart by size);
+// the game builds the render projection, culls objects and places the lock-on ring from it, so changing it here keeps all of them in
+// step (a wider picture drawn by the GE alone would cull at the edges and leave the ring off its target). The game may rewrite the field
+// (zoom effects): a value that is not the one we wrote last is taken as the new base.
+float g_fov_written = 0.f, g_fov_base = 0.f;
+void apply_fov(uint8_t* rdram) {
+    uint8_t* p = rdram + ((g_mgr + 0xC0u) & 0x07FFFFFFu);
+    float f; std::memcpy(&f, p, sizeof f);
+    const int off = ge_fov_offset();
+    if (g_fov_written != 0.f && f == g_fov_written) f = g_fov_base;   // still ours: back to the game's value
+    const bool deg = f > 3.2f;
+    const float lo = deg ? 10.f : 0.17f, hi = deg ? 170.f : 2.97f;
+    if (!(f >= lo && f <= hi)) { g_fov_written = 0.f; return; }       // not a plausible FOV: leave it alone
+    g_fov_base = f;
+    static bool logged = false;
+    if (!logged) { logged = true; std::fprintf(stderr, "[CAMFOV] camera fov field %g (%s), offset %d\n", f, deg ? "degrees" : "radians", off); }
+    ge_fov_use_projection(false);   // this module owns the setting now (psp_ge.h)
+    float n = deg ? f + float(off) : f + float(off) * 3.14159265f / 180.f;
+    n = std::fmin(std::fmax(n, lo), hi);
+    if (off == 0) n = f;
+    std::memcpy(p, &n, sizeof n);
+    g_fov_written = n;
+    {   // the lock-on ring is placed by the game with its own FOV: tell the drawing the ratio of focal lengths
+        const float d2r = deg ? 3.14159265f / 180.f : 1.f;
+        ge_draw_set_hud_follow_scale(std::tan(f * d2r * 0.5f) / std::tan(n * d2r * 0.5f));
+    }
+}
+
 // CAM_UPDATE is a battle-overlay address; the menu/extra overlays map other code there.
 void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
     uint32_t id = overlay_id();
@@ -284,6 +313,7 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
         g_cine_seen = g_dissidia_cine_seq;
         g_cine_actor = g_dissidia_cine_actor; g_cine_t0 = t; g_cine_len = g_dissidia_cine_ticks / 60.0; g_cine_side = 0.f;
     }
+    apply_fov(rdram);   // the update (lock-on ring placement) sees the wider view too
     g_in_update = true; g_eye_calls = 0; g_cc_done = false;
     g_orig_update(rdram, ctx);
     g_in_update = false;
@@ -302,6 +332,7 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
         if (ours) P[1] += 1.0f;
         ge_draw_set_view_blocker(ours, P, g_final_eye);
     }
+    apply_fov(rdram);   // the render camera copy, culling and the GE projection use it
     if (set_wide) set_aspect(static_cast<float>(ge_draw_widescreen_width()) / 272.0f);
 }
 

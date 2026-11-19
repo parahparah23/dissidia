@@ -188,3 +188,12 @@ GeState& ge_get_state_mut();
 /// Bumped by every GE command that can change something a draw's batch key reads (everything except VADDR / IADDR / PRIM / BASE /
 /// OFFSETADDR / ORIGIN / flow control), and wherever the state is swapped by hand. Equal values between two draws mean the same key.
 extern uint32_t g_ge_state_gen;
+
+// Field-of-view offset in degrees (vertical), applied to every perspective projection the game uploads. 0 = the game's own.
+// PSPRECOMP_FOV / settings 'fov'; -20..40.
+int ge_fov_offset();
+void ge_set_fov_offset(int deg);
+void ge_apply_fov(float* proj16);   // scales a perspective projection's focal lengths by the offset (psp_ge_viewport.cpp)
+// The FOV offset is applied to the GE projection by default (generic runtime). A game module that changes the game's own camera FOV
+// instead (Dissidia: games/dissidia/runtime/camera.cpp) switches this off so the two do not stack.
+void ge_fov_use_projection(bool on);

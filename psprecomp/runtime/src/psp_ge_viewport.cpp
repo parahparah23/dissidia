@@ -1,3 +1,8 @@
+#include "psp_ge.h"
+#include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include "psp_ge_draw.h"
 
 #include <cmath>
@@ -54,4 +59,30 @@ GeViewportDepth ge_compute_viewport_depth(
     out.near_z = near_z;
     out.far_z = far_z;
     return out;
+}
+
+// Field-of-view setting: a perspective projection (clip w = -z) has its focal scales (x, y) changed so its vertical FOV is the game's
+// plus the offset; aspect (y / x) is unchanged. Orthographic and degenerate matrices are left alone.
+static std::atomic<int> g_fov_off{-1000};
+int ge_fov_offset() {
+    int v = g_fov_off.load();
+    if (v == -1000) {
+        const char* e = std::getenv("PSPRECOMP_FOV");
+        v = e && e[0] ? std::atoi(e) : 0;
+        v = std::clamp(v, -20, 40);
+        g_fov_off.store(v);
+    }
+    return v;
+}
+void ge_set_fov_offset(int deg) { g_fov_off.store(std::clamp(deg, -20, 40)); }
+static std::atomic<bool> g_fov_proj{true};
+void ge_fov_use_projection(bool on) { g_fov_proj.store(on); }
+void ge_apply_fov(float* p) {
+    const int off = ge_fov_offset();
+    if (off == 0 || !g_fov_proj.load() || !(p[11] < -0.5f && p[11] > -1.5f) || p[15] != 0.0f || !(p[5] > 1e-3f) || !(p[0] > 1e-3f)) return;
+    const float kPi = 3.14159265f;
+    const float fov0 = 2.0f * std::atan(1.0f / p[5]);
+    const float fov = std::clamp(fov0 + float(off) * kPi / 180.0f, 10.0f * kPi / 180.0f, 150.0f * kPi / 180.0f);
+    const float k = std::tan(fov0 * 0.5f) / std::tan(fov * 0.5f);
+    p[0] *= k; p[5] *= k;
 }

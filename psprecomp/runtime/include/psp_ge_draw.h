@@ -43,6 +43,7 @@ void ge_draw_set_hud_zones(int top_rows, int bottom_rows, int bottom_visible);
 int ge_draw_hud_bottom_rows();   // the room kept for the HUD under the touch controls, PSP rows (0 = none)
 // Textures (tex_addr & 0xFFFFFF) whose 2D draws are never pinned: markers that follow a fighter (the lock-on ring) stay on the picture.
 void ge_draw_set_hud_fixed_tex(const uint32_t* addrs, int n);
+void ge_draw_set_hud_follow_scale(float k);   // 2D follow marks: move their centre about the screen centre by k (FOV change on the game side); 1 = off
 // Test harnesses: 0 draw as usual, 1 rasterizer discard, 2 skip the draw calls (lists are still processed). Applied at the next present.
 void ge_draw_request_no_raster(int mode);
 

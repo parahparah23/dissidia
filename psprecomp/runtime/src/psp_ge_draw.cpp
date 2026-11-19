@@ -134,6 +134,15 @@ static bool hud_fixed_tex(const GeState& st) {
     for (int i = 0; i < g_hud_fixed_n; i++) if (g_hud_fixed[i] == a) return true;
     return false;
 }
+// Field of view changed on the game's side (psp_ge_draw.h): the 2D marks that follow a fighter (lock-on ring, target pointer) were placed by
+// the game with its own FOV. Their centre is moved about the screen centre by the ratio of the focal lengths; their size is kept.
+static std::atomic<float> g_hud_follow_k{1.0f};
+void ge_draw_set_hud_follow_scale(float k) { g_hud_follow_k.store(k > 0.1f && k < 10.f ? k : 1.0f); }
+bool ge_draw_hud_follow_scale(const GeState& st, float* k) {
+    const float v = g_hud_follow_k.load();
+    if (v == 1.0f || !hud_fixed_tex(st)) return false;
+    *k = v; return true;
+}
 static uint32_t g_main_keys[8];
 static int g_main_n = 0;
 static const bool g_scale_all = [] { const char* e = std::getenv("PSPRECOMP_RENDER_SCALE_ALL"); return e && e[0] && e[0] != '0'; }();

@@ -751,6 +751,7 @@ GeListResult ge_process_display_list(
                 g_ge_state.proj_matrix[
                     g_ge_state.proj_mtx_num++] =
                     data_to_float(data);
+                if (g_ge_state.proj_mtx_num == 16) ge_apply_fov(g_ge_state.proj_matrix);
             }
             break;
 
