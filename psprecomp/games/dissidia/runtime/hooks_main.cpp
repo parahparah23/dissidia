@@ -65,6 +65,7 @@ extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
 extern void dissidia_direct_battle_install(uint8_t* rdram);
 // input.cpp: continuous analogue stick direction (the game's own processing is 8-way).
 extern void dissidia_input_install(uint8_t* rdram);
+extern void dissidia_comm_battle_install(uint8_t* rdram);
 // framerate.cpp: native 60 Hz battle logic (PSPRECOMP_FPS / settings menu).
 extern void dissidia_framerate_install(uint8_t* rdram);
 
@@ -361,6 +362,7 @@ void dissidia_register_hooks(uint8_t* rdram) {
     dissidia_menu_settings_install(rdram);   // menu_settings.cpp: Settings entries in the title / start menu / pause menu
     dissidia_discord_install(rdram);         // discord_presence.cpp: Discord Rich Presence
     dissidia_input_install(rdram);    // input.cpp
+    dissidia_comm_battle_install(rdram);   // comm_battle.cpp: online battles on our pad link
     dissidia_framerate_install(rdram);   // framerate.cpp (wraps a battle-overlay function too)
 
     supacc_init_dispatch_table();

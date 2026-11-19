@@ -59,6 +59,7 @@
 #include <cstring>
 
 float dissidia_camera_turn();   // camera.cpp
+bool dissidia_comm_link_active();   // comm_battle.cpp
 
 namespace {
 
@@ -87,7 +88,15 @@ void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
     float lx = rdf(in), ly = rdf(in + 4);
     uint32_t id = 0;
     std::memcpy(&id, g_ram + (OVL_BASE & 0x07FFFFFFu), 4);
-    if (g_move_rel && id == 1) {
+    // An injected pad (an online battle: raw pad +0x50 == 1) is the same bytes on every copy. It must come out the same on every
+    // copy too: it is never turned by this copy's camera (the sender turns its own stick before sending, comm_battle.cpp) and,
+    // while our pad link runs, it is processed with the default constants whatever this copy's settings say.
+    uint32_t mode = 0;
+    std::memcpy(&mode, g_ram + ((out - 0x20u + 0x50u) & 0x07FFFFFFu), 4);
+    const bool injected = mode == 1u;
+    const bool fixed = injected && dissidia_comm_link_active();
+    const float dz = fixed ? 0.20f : g_dz, dpad_zone = fixed ? 0.35f : g_dpad_zone;
+    if (g_move_rel && id == 1 && !injected) {
         // The free camera (camera.cpp) turns the view away from the game's own camera, but the game still reads the stick
         // in its own frame (behind the fighter, towards the opponent): without this "up" would not go into the screen.
         // The stick is turned by the same angle the view was turned to the right (right and forward are the stick's x and -y).
@@ -101,7 +110,7 @@ void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
             wrf(in, lx); wrf(in + 4, ly);
         }
     }
-    if (g_8way && id == 1) {
+    if ((g_8way || fixed) && id == 1) {
         const float dx = lx - 127.5f, dy = ly - 127.5f;
         const float ax = std::fabs(dx), ay = std::fabs(dy), linf = ax > ay ? ax : ay;
         float sx = dx, sy = dy;
@@ -114,7 +123,7 @@ void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t dz_addr = out - 0x20u + PAD_DEADZONE;
         const float dz_was = rdf(dz_addr);
         wrf(in, 127.5f + sx); wrf(in + 4, 127.5f + sy);
-        wrf(dz_addr, g_dpad_zone * 127.5f);
+        wrf(dz_addr, dpad_zone * 127.5f);
         g_orig(rdram, ctx);
         wrf(dz_addr, dz_was);
         wrf(in, lx); wrf(in + 4, ly);
@@ -125,9 +134,9 @@ void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
     const float len = std::sqrt(dx * dx + dy * dy);
     const float m = len / 127.5f;
     float ox = 0.f, oy = 0.f, w = 0.f;
-    if (m >= g_dz && len > 1e-3f) {
+    if (m >= dz && len > 1e-3f) {
         ox = dx / len; oy = dy / len;
-        w = (m - g_dz) / (1.f - g_dz);
+        w = (m - dz) / (1.f - dz);
         if (w > 1.f) w = 1.f;
     }
     if (g_log > 0 && (std::fabs(dx) > 3.f || std::fabs(dy) > 3.f)) {
@@ -159,8 +168,12 @@ bool walk_eligible(uint32_t pad) {
     if ((rdw(pad + 0x44u) & 1u) || !rdw(pad + 0x4Cu)) return false;         // disabled, or no action map
     if (rdw(PAD_MGR + 0x264u) & 3u) return false;                           // replay playback / muted
     const uint32_t src = rdw(pad + 0x40u);
-    if (src != PAD_MGR) return false;                                       // only the pad read from the hardware (raw[0]): not a CPU's
-    if (rdw(src + 0x50u) == 1u) return false;                               // raw[0] fed by the online exchange or a replay
+    if (src != PAD_MGR && src != PAD_MGR + 0x60u) return false;             // a player's raw pad (raw[0] / raw[1]), not a CPU's
+    if (rdw(src + 0x50u) == 1u) {                                           // injected: an online battle or a replay
+        if (!dissidia_comm_link_active()) return false;                     // the game's exchange (8-way words) or a replay
+    } else if (src != PAD_MGR) {
+        return false;                                                       // raw[1] reads no hardware
+    }
     const uint32_t bo = rdw(BATTLE_OBJ);
     const bool battle = bo && (rdw(bo + 0x38u) || rdw(bo + 0x3Cu));         // the world map's battle object has no fighters
     if (battle && !g_walk_battle) return false;
@@ -264,6 +277,23 @@ void cam_matrix_hook(uint8_t* rdram, recomp_context* ctx) { walk_replace_step(ct
 void vec_copy_hook(uint8_t* rdram, recomp_context* ctx) { walk_replace_step(ctx); g_orig_vec_copy(rdram, ctx); }
 
 }  // namespace
+
+// The free camera's turn applied to a stick sample (the same turn dissidia_stick_process gives this copy's own pad): for the
+// online pad link, which turns this copy's stick before sending it so every copy injects the same bytes.
+void dissidia_input_turn_stick(uint8_t* lx, uint8_t* ly) {
+    if (!g_ram || !g_move_rel) return;
+    uint32_t id = 0;
+    std::memcpy(&id, g_ram + (OVL_BASE & 0x07FFFFFFu), 4);
+    if (id != 1) return;
+    const float psi = dissidia_camera_turn();
+    if (psi == 0.f) return;
+    const float sx = (*lx - 127.5f) / 127.5f, sf = -(*ly - 127.5f) / 127.5f;
+    const float c = std::cos(psi), sn = std::sin(psi);
+    const float mx = sx * c + sf * sn, mf = -sx * sn + sf * c;
+    const float x = 127.5f + mx * 127.5f, y = 127.5f - mf * 127.5f;
+    *lx = static_cast<uint8_t>(std::lround(std::fmin(255.f, std::fmax(0.f, x))));
+    *ly = static_cast<uint8_t>(std::lround(std::fmin(255.f, std::fmax(0.f, y))));
+}
 
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
 
