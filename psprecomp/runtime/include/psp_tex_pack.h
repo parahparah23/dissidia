@@ -80,6 +80,20 @@ struct PspPpssppTex {
 };
 bool psp_texpack_ppsspp_active();
 bool psp_texpack_ppsspp_lookup(const PspPpssppTex& t, std::vector<uint8_t>& rgba, int& w, int& h);
+/// The texture's PPSSPP replacement key without its address (24 hex digits, "00000000" + palette/size + xxh64 content hash), as
+/// PPSSPP's Dump textures names files (default hash, ignoreAddress): the same on every run and disc region. Needs no pack.
+std::string psp_texpack_ppsspp_key(const PspPpssppTex& t);
+/// A game module may redraw chosen textures as they load (the game's button symbols in the player's controller style): `keyed`
+/// says whether a texture of that size might be one (cheap, before the key is hashed); `edit` gets the decoded RGBA pixels and
+/// the key, and returns true with a replacement (any size, drawn with the original's texture coordinates).
+using PspTexEditKeyedFn = bool (*)(int w, int h);
+using PspTexEditFn = bool (*)(const std::string& key, const uint8_t* rgba, int w, int h, std::vector<uint8_t>& out, int& ow, int& oh);
+void psp_texpack_set_editor(PspTexEditKeyedFn keyed, PspTexEditFn edit);
+PspTexEditKeyedFn psp_texpack_editor_keyed();
+PspTexEditFn psp_texpack_editor();
+/// What the editor draws changed (e.g. another controller style): every texture is decoded again at its next use.
+void psp_texpack_editor_changed();
+unsigned psp_texpack_editor_epoch();
 /// The two hashes, exposed for tests: XXH32 and the PPSSPP content hash of a texture's raw bytes (kind 3 = quick, 2 = xxh64, 1 = xxh32).
 uint32_t psp_texpack_xxh32(const uint8_t* p, size_t len, uint32_t seed);
 uint32_t psp_texpack_ppsspp_content_hash(const uint8_t* mem, size_t mem_len, int fmt, int w, int h, int bufw, int kind, uint32_t guest_addr = 0);

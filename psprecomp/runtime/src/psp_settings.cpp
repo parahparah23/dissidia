@@ -158,7 +158,7 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -170,7 +170,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_ENV0, ROW_ENV_END = ROW_ENV0 + 63,               // a developer-options category page: one row per environment variable
            ROW_MOD0, ROW_MOD_END = ROW_MOD0 + 31, ROW_MODS_NONE,   // Mods page: one toggle per mod folder, or a note when there are none
            ROW_SEC_WINDOW, ROW_SEC_PERF, ROW_SEC_QUALITY, ROW_SEC_AA, ROW_SEC_TEX, ROW_SEC_ENGINE, ROW_SEC_COLOUR, ROW_SEC_HDR, ROW_SEC_LIGHT,
-           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD,   // section captions (not selectable)
+           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD,   // section captions (not selectable)
            ROW_COUNT };
 static_assert(ROW_COUNT < psp_sddialog::SET_MAX_IDS, "row ids are animation slots");
 bool is_section(Row r) { return r >= ROW_SEC_WINDOW && r < ROW_COUNT; }
@@ -188,12 +188,12 @@ int g_sub = -1;                        // the open sub-menu page, -1 = none
 int g_sel_page[PAGES] = {};
 bool g_touch_ui = false;               // a touch screen is present (or the on-screen controls are forced on): the Controls tab is shown
 // The categories this device shows: Drivers (custom GPU drivers) only where they can be used (an Adreno phone with the Android build),
-// Controls only with a touch screen.
+// Controls on every device (its touch section only with a touch screen).
 std::vector<int> g_pages;
 const std::vector<int>& page_list() {
     if (g_pages.empty()) {
         g_pages = {PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS};
-        if (g_touch_ui) g_pages.push_back(PAGE_CONTROLS);
+        g_pages.push_back(PAGE_CONTROLS);   // controller settings everywhere; its touch rows only with a touch screen
         g_pages.push_back(PAGE_NETWORK); g_pages.push_back(PAGE_CLOUD); g_pages.push_back(PAGE_MODS); g_pages.push_back(PAGE_SYSTEM);
         if (psp_gpu::supported(nullptr)) g_pages.push_back(PAGE_GPU);
         g_pages.push_back(PAGE_DEBUG);
@@ -807,6 +807,16 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "On-screen buttons (touch screens)\nAuto: shown when you touch the screen, hidden when a controller button is pressed. On: always shown. Off: never. Saved.";
             break;
         }
+        case ROW_PROMPTS: {
+            static const char* const names[6] = {"Automatic", "PSP", "Xbox", "PlayStation", "Nintendo", "Keyboard"};
+            const int v = psp_input_prompt_setting() + 1;
+            m.label = "Button Prompts";
+            m.value = names[std::clamp(v, 0, 5)];
+            m.can_dec = v > 0;
+            m.can_inc = v < 5;
+            m.help = "Button prompts\nThe game's button symbols drawn as the buttons you press. Automatic: the controller you used last (Xbox, PlayStation or Nintendo, a Steam Deck's A B X Y and L1 / R1) or the keyboard's keys; the PSP's own when there is neither. Saved.";
+            break;
+        }
         case ROW_TOUCH_EDIT:
             m.label = "Edit Touch Controls";
             m.help = "Touch layout editor\nMove, resize or hide each on-screen control and add combination buttons (for example L+R, or R+Triangle). Press Cross to open it; the layout is saved.";
@@ -1036,6 +1046,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_SEC_LIGHT: m.label = "Lighting"; break;
         case ROW_SEC_RT: m.label = "Hardware"; break;
         case ROW_SEC_TOUCH: m.label = "Touch screen"; break;
+        case ROW_SEC_PAD: m.label = "Controller"; break;
         case ROW_SEC_GAME: m.label = "Game"; break;
         case ROW_SEC_SESSION: m.label = "Session"; break;
         case ROW_SEC_REFL: m.label = "Reflections"; break;
@@ -1355,6 +1366,7 @@ bool slider_of(Row r, int* steps, int* cur) {
     case ROW_FPS: if (g_fps.get && g_fps.count > 1) { *steps = g_fps.count; *cur = fps_index(); return true; } return false;
     case ROW_SYNC: *steps = 5; *cur = std::clamp(ge_draw_sync_mode(), 0, 4); return true;
     case ROW_TOUCH: *steps = 3; *cur = std::clamp(psp_touch_mode(), 0, 2); return true;
+    case ROW_PROMPTS: *steps = 6; *cur = std::clamp(psp_input_prompt_setting() + 1, 0, 5); return true;
     default: return false;
     }
 }
@@ -1655,6 +1667,13 @@ void change(int d) {   // left / right on the selected row
     case ROW_TEXPACK: apply_texpack(d > 0); break;
     case ROW_UPDATES: apply_updates(d > 0); break;
     case ROW_DISCORD: apply_discord(d > 0); break;
+    case ROW_PROMPTS: {
+        const int v = std::clamp(psp_input_prompt_setting() + 1 + d, 0, 5);
+        psp_input_set_prompt_setting(v - 1);
+        static const char* const keys[6] = {"auto", "psp", "xbox", "playstation", "nintendo", "keyboard"};
+        save("button_prompts", keys[v]);
+        break;
+    }
     case ROW_NET_UPNP: apply_upnp(d > 0); break;
     case ROW_NET_PING: apply_ping(d > 0); break;
     case ROW_TOUCH: {
@@ -1911,7 +1930,8 @@ void build_rows() {
         add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
         break;
     case PAGE_CONTROLS:
-        add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT);
+        add(ROW_SEC_PAD); add(ROW_PROMPTS);
+        if (g_touch_ui) { add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT); }
         break;
     case PAGE_GPU:
         add(ROW_SEC_DRIVER); add(ROW_GPU); add(ROW_GPU_GET); add(ROW_GPU_DEL);
@@ -2209,6 +2229,7 @@ void confirm_row() {
     case ROW_NET_PING: apply_ping(!ge_draw_ping_overlay()); break;
     case ROW_DISCORD_STATUS: break;
     case ROW_TOUCH: change(psp_touch_mode() >= 2 ? -2 : 1); return;
+    case ROW_PROMPTS: change(psp_input_prompt_setting() >= PSP_PROMPT_KEYBOARD ? -5 : 1); return;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
     case ROW_NET_MODE: change(g_net_internet ? 1 : -1); return;
     case ROW_NET_SERVER: edit_begin(0); return;
@@ -2564,6 +2585,7 @@ void psp_settings_load_early() {
         if (it->second.empty()) psp_plat::unsetenv_("PSPRECOMP_GPU_DRIVER");
         else put("PSPRECOMP_GPU_DRIVER", it->second);
     }
+    if ((it = g_saved.find("button_prompts")) != g_saved.end()) put("PSPRECOMP_BUTTON_PROMPTS", it->second);
     if ((it = g_saved.find("touch")) != g_saved.end() && (it->second == "auto" || it->second == "on" || it->second == "off"))
         put("PSPRECOMP_TOUCH", it->second);
     if ((it = g_saved.find("window_size")) != g_saved.end() && g_saved.count("display") && g_saved["display"] == "window"
