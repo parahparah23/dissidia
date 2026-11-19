@@ -1,4 +1,7 @@
 #pragma once
+#include <string>
+#include <utility>
+#include <vector>
 #include <atomic>
 #include <thread>
 #include <cstdint>
@@ -109,4 +112,13 @@ void psp_input_set_prompt_setting(int setting);
 int psp_input_prompt_setting();
 /// What to draw now (thread-safe; any thread).
 PspPrompts psp_input_prompts();
+/// Controls > L / R Buttons: false shoulders (LB / RB press L / R, as the triggers do unless PSPRECOMP_PAD_L2 / R2 say otherwise),
+/// true triggers (LT / RT press L / R, the shoulders nothing; the prompts name the triggers).
+void psp_input_set_lr_triggers(bool on);
+bool psp_input_lr_triggers();
+/// Connected controllers (GUID, name) and Controls > Player 1 Controller: "" (or "any") every controller, "keyboard" keyboard only,
+/// else one controller's GUID; the others are ignored.
+std::vector<std::pair<std::string, std::string>> psp_input_pads();
+void psp_input_set_p1_controller(const std::string& choice);
+std::string psp_input_p1_controller();
 

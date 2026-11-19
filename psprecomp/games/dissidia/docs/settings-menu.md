@@ -29,6 +29,17 @@ VCKing101's, MIT), through the runtime's texture editor (`psp_texpack_set_editor
 pack's own image for the same texture overrides). `PSPRECOMP_NO_TEXTURE_EDITS=1` keeps the PSP's symbols, `PSPRECOMP_PROMPTS_LOG=1`
 logs each redraw. The Controls page is now on every device; its Touch screen rows only with a touch screen.
 
+**Controls > L / R Buttons** (Shoulders, Triggers; `lr_buttons`, `PSPRECOMP_LR_TRIGGERS=1`): Shoulders (the default) is as before,
+the shoulder buttons press L and R and so do the triggers. Triggers: only the triggers press L and R, the shoulders nothing, and the
+prompts name the triggers (LT / RT, L2 / R2, ZL / ZR). **Player 1 Controller** (`p1_controller`, `PSPRECOMP_P1_CONTROLLER=any|keyboard|<GUID>`):
+Any Controller (the default), one connected controller by name (the others are ignored: a Steam Deck with a pad plugged in, a pad
+someone else holds), or Keyboard Only. A saved controller that is not connected stays a choice, marked "(not connected)".
+**Keyboard > Move Keys**: one key for each move that takes two buttons, both going down in the same pad read as the game needs
+(R held first makes a block instead): D dodge (R + Cross), F dash (R + Triangle), E EX Mode (R + Square), V summon (R + Circle),
+1 Brave assist (L + Circle), 2 HP assist (L + Square). Holding R or L and pressing the face button still works. (VCKing101's idea,
+`docs/port/keyboard-controls.md`; our keys, as our keyboard layout is fixed.) `PSPRECOMP_KEY_LOG=1` logs every change of the buttons
+the game reads.
+
 Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard. Its **Paste** key (or Ctrl+V) types the clipboard's text in: printable characters only, line breaks dropped, up to the field's length. The game's own name entry (Data Config > Player Name) has a Paste key and Ctrl+V too.
 
 ## Categories, restart and mods
