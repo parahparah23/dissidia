@@ -74,7 +74,7 @@ def main(argv):
     cmd = argv[1]
     if cmd == "list":
         sub = argv[2].lower()
-        for line in open(PATHS):
+        for line in open(PATHS, encoding="utf-8"):
             p = line.strip()
             if sub in p.lower():
                 c = package_crc(p)

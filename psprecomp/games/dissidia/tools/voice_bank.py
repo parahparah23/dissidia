@@ -421,7 +421,7 @@ def cmd_dump(a):
         man["slots"].append(s)
     if vold:
         man["vold"] = vold
-    json.dump(man, open(os.path.join(a.outdir, "manifest.json"), "w"), indent=1)
+    json.dump(man, open(os.path.join(a.outdir, "manifest.json"), "w", encoding="utf-8"), indent=1)
     nd = sum(1 for e in bank.entries if e["kind"] == "data")
     print("%s: %d slots (%d clips, %d aliases, %d links, %d empty) -> %s"
           % (src, len(bank.entries), nd, sum(e["kind"] == "alias" for e in bank.entries),
@@ -472,7 +472,7 @@ def pcm_for_slot(path, rate_opt, template_rate):
 def cmd_build(a):
     d = a.dir
     mpath = os.path.join(d, "manifest.json")
-    man = json.load(open(mpath)) if os.path.exists(mpath) else None
+    man = json.load(open(mpath, encoding="utf-8")) if os.path.exists(mpath) else None
     like = None
     if a.like:
         like, _ = load_bank_file(a.like)
@@ -683,7 +683,7 @@ def cmd_alias(a):
     import package_extract as pe
     pkg = pe.Package(a.disc)
     like, code = a.like.lower(), a.code.lower()
-    paths = [l.strip().lower() for l in open(os.path.join(HERE, "..", "package_paths.txt"))]
+    paths = [l.strip().lower() for l in open(os.path.join(HERE, "..", "package_paths.txt"), encoding="utf-8")]
     want = []
     for n in range(10):
         for suf in ("", "_a"):

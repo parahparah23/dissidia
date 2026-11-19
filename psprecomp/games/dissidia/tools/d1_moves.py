@@ -173,7 +173,7 @@ class IsoPackage(pe.Package):
 def prepare(src, d1, d12):
     """<src>/d1bartz (D1, 012 layout) and <src>/bartz (retail Bartz) for the Studio."""
     os.makedirs(src + '/_template')
-    with open(src + '/_template/mod.json', 'w') as f:
+    with open(src + '/_template/mod.json', 'w', encoding="utf-8") as f:
         f.write('{}')
     gmo = d1.read('obj/p_fiv100_1p.gmo')
     os.makedirs(src + '/d1bartz/models')
@@ -182,7 +182,7 @@ def prepare(src, d1, d12):
     co.unpack(d1_objx.convert(d1.read('obj/p_fiv100.objx')), src + '/d1bartz/moveset/p_d1b', bones=G.Model(gmo).bone_names())
     names = {'%02X' % (0x60 + i): {'cmd': '0x%X' % c, 'name': n, 'type': t, 'phase': ph}
              for i, (c, n, t, ph, *_r) in enumerate(MOVES)}
-    with open(src + '/d1bartz/mod.json', 'w') as f:      # based_on = this character: voices and face textures come along
+    with open(src + '/d1bartz/mod.json', 'w', encoding="utf-8") as f:      # based_on = this character: voices and face textures come along
         json.dump({'character': {'name': 'Bartz (DFF)', 'code': 'd1b', 'based_on': 'fiv100'}, 'move_names': names, 'files': {}}, f, indent=1)
     os.makedirs(src + '/bartz/models')
     files = {}
@@ -193,13 +193,13 @@ def prepare(src, d1, d12):
         co.unpack(d12.read('obj/%s.objx' % ms), '%s/bartz/moveset/%s' % (src, ms), bones=G.Model(g).bone_names())
         files['obj/%s.objx' % ms] = 'moveset/' + ms
         files['obj/%s.gmo' % rig] = 'models/%s.gmo' % rig
-    with open(src + '/bartz/mod.json', 'w') as f:      # move_names: the retail abilities, filled in by the page from the ISO
+    with open(src + '/bartz/mod.json', 'w', encoding="utf-8") as f:      # move_names: the retail abilities, filled in by the page from the ISO
         json.dump({'kind': 'retail', 'character': {'name': 'Bartz', 'code': 'fiv100'}, 'move_names': {}, 'files': files}, f, indent=1)
 
 
 def finish(mod, d1, d12):
     """Names, help, costs, learn levels; D1's voice lines in the slots 012's bank left empty."""
-    with open(mod + '/mod.json') as f:
+    with open(mod + '/mod.json', encoding="utf-8") as f:
         m = json.load(f)
     by_name = {mv[1]: mv for mv in MOVES}
     helps = d1_help(d1)
@@ -214,7 +214,7 @@ def finish(mod, d1, d12):
         e['_note'] = 'Dissidia (2008) Bartz move, command 0x%X there (tools/d1_moves.py)' % cmd
     m['display'] = 'Bartz: Dissidia (2008) moves'
     ms = mod + '/moveset/p_fiv100'
-    rj = lambda p: json.load(open(p))  # noqa: E731
+    rj = lambda p: json.load(open(p, encoding="utf-8"))  # noqa: E731
     acts = {a['action']: a['script'] for a in rj(ms + '/actions.json')['actions']}
     rows = rj(ms + '/motion_map.json')['rows']
     new_cmds = {int(e['cmd'], 16) for e in m['move_names'].values() if 'copy' in e}
@@ -240,7 +240,7 @@ def finish(mod, d1, d12):
         with open(p, 'wb') as f:
             f.write(b12.to_bytes())
         m['files'][VOICE_012] = 'files/' + VOICE_012
-    with open(mod + '/mod.json', 'w') as f:
+    with open(mod + '/mod.json', 'w', encoding="utf-8") as f:
         json.dump(m, f, indent=1, ensure_ascii=False)
         f.write('\n')
     print('voice lines from Dissidia (2008) in slots %s' % ', '.join(map(str, filled)))
@@ -287,8 +287,8 @@ def cmd_patches(a):
     import netpack as npk
     npk.BLOCK = 8
     d1, d12 = IsoPackage(a.d1), pe.Package(a.disc)
-    m = json.load(open(os.path.join(REPO, 'mods', 'bartz-dff', 'mod.json')))
-    owner = json.load(open(os.path.join(a.mods, 'readme_charmod_retail.json')))
+    m = json.load(open(os.path.join(REPO, 'mods', 'bartz-dff', 'mod.json'), encoding="utf-8"))
+    owner = json.load(open(os.path.join(a.mods, 'readme_charmod_retail.json'), encoding="utf-8"))
     os.makedirs(PATCH_DIR, exist_ok=True)
     for f in os.listdir(PATCH_DIR):
         if f.endswith('.npd'):
@@ -314,7 +314,7 @@ def cmd_patches(a):
             e = {x: v for x, v in e.items() if x != 'help'}
             e['help_d1_cmd'] = next(mv[0] for mv in MOVES if mv[1] == e['name'])   # D1's own text, read at install
             man['move_names'][k] = e
-    with open(os.path.join(PATCH_DIR, 'manifest.json'), 'w') as f:
+    with open(os.path.join(PATCH_DIR, 'manifest.json'), 'w', encoding="utf-8") as f:
         json.dump(man, f, indent=1)
         f.write('\n')
     print('wrote', os.path.normpath(PATCH_DIR))
@@ -325,7 +325,7 @@ def cmd_install(a):
     byte for byte (SHA-256); the new abilities into main.bin (roster_mainbin.py), the Settings switch (retail_moves.txt)
     and the online deltas (netpack.py)."""
     import netpack as npk
-    man = json.load(open(os.path.join(PATCH_DIR, 'manifest.json')))
+    man = json.load(open(os.path.join(PATCH_DIR, 'manifest.json'), encoding="utf-8"))
     d12 = pe.Package(os.path.join(a.work, 'disc0'))
     d1 = IsoPackage(a.d1)
     disc, title = d1.disc_id()        # Dissidia 012 has obj/p_fiv100.objx too: the disc's own id tells the games apart
@@ -363,22 +363,29 @@ def cmd_install(a):
         rm.expand_help(e['help'], '')
         names[k] = e
     ab_p = os.path.join(mods, 'extra_abilities.json')
-    ab = json.load(open(ab_p)) if os.path.exists(ab_p) else {}
+    ab = {}
+    if os.path.exists(ab_p):
+        try:
+            ab = json.load(open(ab_p, encoding="utf-8"))
+        except ValueError:      # cut short by a crash of an earlier install (v0.1.18 on Windows wrote it in cp1252 and stopped)
+            os.replace(ab_p, ab_p + '.bad')
+            print('%s could not be read (kept as %s.bad): written again' % (ab_p, os.path.basename(ab_p)), flush=True)
     ab[man['code']] = names
-    with open(ab_p, 'w') as fh:
+    with open(ab_p + '.tmp', 'w', encoding="utf-8") as fh:     # whole or not at all
         json.dump(ab, fh, indent=2, ensure_ascii=False)
         fh.write('\n')
+    os.replace(ab_p + '.tmp', ab_p)
     ids = ','.join('%04X' % ((9 << 8) | int(k, 16)) for k in sorted(names))
     line = '%s 9 %s nm=%s' % (man['folder'], ids, man['display'].replace(' ', '_'))
     rt = os.path.join(mods, 'retail_moves.txt')
-    lines = open(rt).read().splitlines() if os.path.exists(rt) else []
+    lines = open(rt, encoding="utf-8").read().splitlines() if os.path.exists(rt) else []
     off = any(l.startswith('#off# ' + man['folder'] + ' ') for l in lines)
     lines = [l for l in lines if not (l.split() and l.replace('#off# ', '').split()[0] == man['folder'])]
     lines.append(('#off# ' if off else '') + line)
-    with open(rt, 'w') as fh:
+    with open(rt, 'w', encoding="utf-8") as fh:
         fh.write('\n'.join(lines) + '\n')
     if not os.path.exists(os.path.join(mods, 'roster.txt')):
-        open(os.path.join(mods, 'roster.txt'), 'w').close()       # (roster_mainbin would make up a character without one)
+        open(os.path.join(mods, 'roster.txt'), 'w', encoding="utf-8").close()       # (roster_mainbin would make up a character without one)
     print('PROGRESS 75', flush=True)
     if subprocess.call([sys.executable, os.path.join(HERE, 'roster_mainbin.py'), os.path.join(a.work, 'disc0'), mods]):
         raise SystemExit('roster_mainbin.py failed')

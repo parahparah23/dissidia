@@ -420,7 +420,7 @@ def hit_encode(d):
 # ---------------------------------------------------------------- json helpers
 def wj(path, obj, compact=True):
     """compact: every item of a top-level list on one line (events, hits, commands ...)."""
-    with open(path, 'w') as f:
+    with open(path, 'w', encoding='utf-8') as f:
         if not compact or not isinstance(obj, dict):
             json.dump(obj, f, indent=1, ensure_ascii=False)
         else:
@@ -437,7 +437,7 @@ def wj(path, obj, compact=True):
 
 
 def rj(path):
-    with open(path) as f:
+    with open(path, encoding='utf-8') as f:
         return json.load(f)
 
 
