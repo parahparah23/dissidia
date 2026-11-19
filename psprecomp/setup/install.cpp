@@ -360,7 +360,7 @@ static Step build_step(const Layout& l, const std::string& workdir, bool android
     b.argv = {l.python, l.build_script, workdir, "--sdk", l.sdk, "--toolchain", l.toolchain, "--psprecomp", l.recompiler,
               "--game", l.game_dir, "--progress"};
     if (android) b.argv.push_back("--android");
-    b.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+    b.env = {{"PYTHONUNBUFFERED", "1"}};
     return b;
 }
 
@@ -394,7 +394,7 @@ static void append_extras(std::vector<Step>& p, const Layout& l, const std::stri
         t.label = ai ? "Downloading the AI upscaled textures" : "Downloading the HD textures";
         t.explain = ai ? "Downloads the AI upscaled HD textures (about 1.3 GB)." : "Downloads LiinkPK's HD textures (about 0.8 GB).";
         t.argv = {l.python, join(l.game_dir, "tools/fetch_textures.py"), workdir, "--pack", ai ? "ai" : "liink"};
-        t.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+        t.env = {{"PYTHONUNBUFFERED", "1"}};
         t.weight = 0.06;
         p.push_back(t);
     }
@@ -403,7 +403,7 @@ static void append_extras(std::vector<Step>& p, const Layout& l, const std::stri
         j.label = "Extracting the Japanese voices";
         j.explain = "Adds the Japanese voices and movies from the undub disc.";
         j.argv = {l.python, join(l.game_dir, "tools/jp_audio.py"), "--iso", o.undub_iso, "--work", workdir};
-        j.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+        j.env = {{"PYTHONUNBUFFERED", "1"}};
         j.weight = 0.05;
         p.push_back(j);
     }
@@ -412,7 +412,7 @@ static void append_extras(std::vector<Step>& p, const Layout& l, const std::stri
         d.label = "Adding Bartz's Dissidia 1 moves";
         d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
         d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
-        d.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+        d.env = {{"PYTHONUNBUFFERED", "1"}};
         d.weight = 0.01;
         p.push_back(d);
     }
@@ -431,7 +431,7 @@ std::vector<Step> plan_install(const Layout& l, const std::string& iso, const st
     x.label = "Reading your game file";
     x.explain = "Reads the game's files out of your disc image. Nothing is uploaded.";
     x.argv = {l.python, l.setup_script, iso, workdir};
-    x.env = {{"PSPRECOMP_TOOLCHAIN", l.toolchain}, {"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+    x.env = {{"PSPRECOMP_TOOLCHAIN", l.toolchain}, {"PYTHONUNBUFFERED", "1"}};
     x.weight = 0.08;
     std::vector<Step> p{x};
     for (auto& s : plan_rebuild(l, workdir, o)) p.push_back(s);   // weights are renormalised below
@@ -468,7 +468,7 @@ std::vector<Step> plan_steam(const Layout& l, const std::string& workdir) {
     st.argv = {l.python, join(l.game_dir, "tools/steam_shortcut.py"), exe, "--name", "Dissidia 012 Duodecim Final Fantasy",
                "--launch-options=--launch", "--yes", "--icon", join(l.game_dir, "icon/icon.png"),
                "--pic1", join(workdir, "disc0/PSP_GAME/PIC1.PNG")};
-    st.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+    st.env = {{"PYTHONUNBUFFERED", "1"}};
     st.weight = 0.03;
     st.optional = true;
     std::vector<Step> p{st};
@@ -481,7 +481,7 @@ std::vector<Step> plan_android_install(const Layout& l, const std::string& workd
     x.label = "Installing on your device";
     x.explain = "Installs the app over adb and copies the game files (about 2 GB).";
     x.argv = {l.python, join(l.game_dir, "tools/android_install.py"), workdir};
-    x.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+    x.env = {{"PYTHONUNBUFFERED", "1"}};
     x.weight = 1;
     std::vector<Step> p{x};
     finish_plan(p);
@@ -519,7 +519,7 @@ std::vector<std::string> android_verify_argv(const Layout& l, const std::string&
 std::string android_game_dir() { return std::string("/sdcard/Android/media/") + kGamePackage + "/game"; }
 
 EnvList android_env(const Layout& l, const std::string& workdir) {
-    return {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}, {"PYTHONDONTWRITEBYTECODE", "1"}, {"PYTHONHOME", join(l.root, "python")},
+    return {{"PYTHONUNBUFFERED", "1"}, {"PYTHONDONTWRITEBYTECODE", "1"}, {"PYTHONHOME", join(l.root, "python")},
             {"PSPRECOMP_ANDROID_DEVICE", "1"}, {"PSPRECOMP_ZIG", l.zig}, {"HOME", workdir},
             {"TMPDIR", join(workdir, "tmp")}, {"ZIG_LIB_DIR", join(l.android_dir, "zig-lib")}};
 }
@@ -675,7 +675,7 @@ std::vector<Step> plan_update(const Layout& l, const std::string& workdir, const
     d.explain = "Downloads the new release and replaces the program files. Your saves are untouched.";
     d.argv = {l.python, l.update_script, "apply", "--root", l.root};
     if (const char* m = std::getenv("PSPRECOMP_MANIFEST_URL")) { d.argv.push_back("--manifest"); d.argv.push_back(m); }
-    d.env = {{"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}};
+    d.env = {{"PYTHONUNBUFFERED", "1"}};
     d.weight = u.rebuild ? 0.10 : 0.60;
     std::vector<Step> p{d};
     if (u.rebuild || u.relink) {
