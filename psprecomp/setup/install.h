@@ -67,6 +67,10 @@ std::string d1_disc_problem(const std::string& path);
 // "" when `path` is one, else what is wrong with it (another game, the first Dissidia, or a regular English 012).
 std::string undub_disc_problem(const std::string& path);
 
+// Opens `path` with the desktop's default program (show_in_folder = false), or the folder that holds it with the file
+// selected where the platform can (Windows Explorer /select, macOS Finder -R; Linux opens the folder). Not on Android.
+bool open_on_desktop(const std::string& path, bool show_in_folder, std::string* error);
+
 std::vector<Step> plan_install(const Layout& l, const std::string& iso, const std::string& workdir, const Options& o);
 // The game build only (rebuild / repair): analysis, recompile, compile (+ the Android build when chosen).
 // Only the extras of `o` (HD textures unless skip_textures, Japanese voices, saves, the Android build) on an installed game: no rebuild.

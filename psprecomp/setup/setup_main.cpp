@@ -647,12 +647,26 @@ struct App {
         case Screen::Failed:
             p.title = "NOT FINISHED";
             p.tab = "Stopped";
-            p.rows = {row("Try again", fail_msg + " Trying again continues where it stopped."), row("Back to the start"), row("Quit")};
+            p.rows = {row("Try again", fail_msg + " Trying again continues where it stopped.")};
+            if (can_open_log()) {
+                p.rows.push_back(row("Open setup.log", "The log of this install: every step's output and why it stopped. " + log_path));
+                p.rows.push_back(row("Show setup.log in its folder", "Opens the install folder with setup.log selected, e.g. to send the file. " + log_path));
+            }
+            p.rows.push_back(row("Back to the start"));
+            p.rows.push_back(row("Quit"));
             break;
         }
         return p;
     }
 
+    bool can_open_log() const {   // a desktop with a setup.log to show (Android: the app's storage, not reachable from here)
+#ifdef __ANDROID__
+        return false;
+#else
+        std::error_code ec;
+        return !log_path.empty() && std::filesystem::is_regular_file(log_path, ec);
+#endif
+    }
     std::string cur_workdir() const { return !state.workdir.empty() ? state.workdir : workdir; }
     bool is_browser() const { return screen == Screen::PickIso || screen == Screen::PickUndub || screen == Screen::BrowseDir; }
     int row_count() { return is_browser() ? (int)br.list.size() : (int)page().rows.size(); }
@@ -745,11 +759,13 @@ struct App {
 
     // setup.log in the install folder: every build line plus the failure reason (the wizard has no console on Windows)
     FILE* logf = nullptr;
+    std::string log_path;   // setup.log of this run (the failure page opens it)
     void log_open(const std::string& dir) {
         if (logf) { std::fclose(logf); logf = nullptr; }
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        logf = std::fopen((std::filesystem::path(dir) / "setup.log").string().c_str(), "ab");
+        log_path = (std::filesystem::path(dir) / "setup.log").string();
+        logf = std::fopen(log_path.c_str(), "ab");
         if (logf) { std::fprintf(logf, "\n===== psprecomp_setup run =====\n"); std::fflush(logf); }
     }
     void log_line(const std::string& l) {
@@ -1363,11 +1379,23 @@ struct App {
             else if (sel == 1 && setup::android_build_exists(cur_workdir())) start_plan(false, false, true);
             else quit = true;
             break;
-        case Screen::Failed:
+        case Screen::Failed: {
+            const int extra = can_open_log() ? 2 : 0;   // rows 1 and 2: open setup.log / show it in its folder
             if (sel == 0) { if (!plan.empty()) start_plan(rebuild_only && !updating && !android_inst, updating, android_inst); else go(Screen::Welcome); }
-            else if (sel == 1) go(Screen::Welcome);
+            else if (sel <= extra) {
+                if (logf) std::fflush(logf);
+                std::string err;
+                if (!setup::open_on_desktop(log_path, sel == 2, &err)) {
+                    msg_title = "SETUP LOG";
+                    msg_text = "Could not open it (" + err + "). The file is " + log_path;
+                    msg_back = Screen::Failed;
+                    go(Screen::Message);
+                }
+            }
+            else if (sel == extra + 1) go(Screen::Welcome);
             else quit = true;
             break;
+        }
         case Screen::TypePath:
             break;
         }
@@ -1929,8 +1957,11 @@ int main(int argc, char** argv) {
         app.prog.start_ms = (long long)now_ms() - 7 * 60 * 1000; app.prog.compile_i = 183; app.prog.compile_n = 474; app.prog.compile_start_ms = (long long)now_ms() - 4 * 60 * 1000;
         app.go(Screen::Build, 3); shot("5_build");
         app.go(Screen::Done); shot("6_done");
-        app.fail_msg = "The installation was cancelled.";
-        app.go(Screen::Failed); shot("7_failed");
+        app.fail_msg = "A step failed (exit code 1); see setup.log in the install folder.";
+        app.log_path = (std::filesystem::path(shots) / "setup.log").string();   // a log to offer (the rows need the file)
+        { std::ofstream(app.log_path) << "example\n"; }
+        app.go(Screen::Failed, 1); shot("7_failed");
+        { std::error_code ec; std::filesystem::remove(app.log_path, ec); }
         app.osk.begin(u"Folder path", u"/home/player", 200, true);
         app.go(Screen::TypePath); shot("8_type_path");
         std::printf("%d screenshots in %s\n", n, shots.c_str());

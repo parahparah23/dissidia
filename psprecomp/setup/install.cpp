@@ -9,6 +9,7 @@
 #include <sstream>
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <unistd.h>
 #endif
@@ -300,6 +301,37 @@ std::string undub_disc_problem(const std::string& path) {
         return "";
     }
     return "";   // no English bank to compare with (a release that names its files differently): not refused here
+}
+
+bool open_on_desktop(const std::string& path, bool show_in_folder, std::string* error) {
+#if defined(__ANDROID__)
+    (void)path; (void)show_in_folder;
+    if (error) *error = "not available on Android";
+    return false;
+#elif defined(_WIN32)
+    auto wide = [](const std::string& s) {
+        std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0), L'\0');
+        if (!w.empty()) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], (int)w.size());
+        if (!w.empty() && w.back() == L'\0') w.pop_back();
+        return w;
+    };
+    std::string p = path;
+    for (char& ch : p) if (ch == '/') ch = '\\';
+    HINSTANCE r;
+    if (show_in_folder) {
+        const std::wstring args = L"/select,\"" + wide(p) + L"\"";
+        r = ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+    } else {
+        r = ShellExecuteW(nullptr, L"open", wide(p).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    if ((INT_PTR)r <= 32) { if (error) *error = "Windows could not open " + p; return false; }
+    return true;
+#elif defined(__APPLE__)
+    return spawn_detached(show_in_folder ? std::vector<std::string>{"open", "-R", path} : std::vector<std::string>{"open", path}, {}, "", error);
+#else
+    const std::string target = show_in_folder ? fs::path(path).parent_path().string() : path;
+    return spawn_detached({"xdg-open", target}, {}, "", error);
+#endif
 }
 
 bool feature_available(const Layout& l, const std::string& name) {
