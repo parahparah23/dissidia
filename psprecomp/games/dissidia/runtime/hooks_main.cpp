@@ -65,6 +65,8 @@ extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
 extern void dissidia_direct_battle_install(uint8_t* rdram);
 // input.cpp: continuous analogue stick direction (the game's own processing is 8-way).
 extern void dissidia_input_install(uint8_t* rdram);
+extern void dissidia_button_prompts_install();
+extern void dissidia_comm_battle_install(uint8_t* rdram);
 // framerate.cpp: native 60 Hz battle logic (PSPRECOMP_FPS / settings menu).
 extern void dissidia_framerate_install(uint8_t* rdram);
 // xdelta_mods.cpp: recompiled code of installed xdelta (ISO patch) mods.
@@ -318,9 +320,9 @@ void dissidia_register_hooks(uint8_t* rdram) {
     psp_set_pickup_lights_provider(dissidia_ex_cores);
     psp_settings_add_debug_toggle({"Light Editor", "Stage light editor (debug)\nShows a marker at every light of the stage and turns on the keys: F6 drop a light, F7 remove the selected one, J/L I/K U/O move it, , . radius, - = intensity, [ ] or P select (P = the one closest to you), T copy the colour of the surface the light touches, G mark the stage piece nearest the light as glowing (breakable crystals), Shift = faster. Needs Ray-Traced Shadows on. The lights are saved in stage_lights.txt in the game folder (the file has the full key list). This session only.",
                                    +[]() { return psp_stage_light_edit_get(); }, +[](bool on) { psp_stage_light_edit_set(on); }});
-    // One save set for every region: US, EU, JP.
-    static const char* const kIds[] = {"ULUS10566", "ULES01505", "ULJM05681"};
-    psp_savedata_set_shared_ids(kIds, 3);
+    // One save set for every region: US, EU, JP (UMD and PSN; ULJM05681 kept from before the JP IDs were checked).
+    static const char* const kIds[] = {"ULUS10566", "ULES01505", "ULJM05814", "NPJH50377", "ULJM05681"};
+    psp_savedata_set_shared_ids(kIds, 5);
     psp_set_window_title("Dissidia 012 Duodecim Final Fantasy");
     psp_set_window_icon(k_app_icon_rgba, k_app_icon_w, k_app_icon_h);
     dissidia_xmods_install();    // xdelta mods' code first: the hooks below wrap the mod's version (xdelta_mods.cpp)
@@ -375,6 +377,8 @@ void dissidia_register_hooks(uint8_t* rdram) {
     dissidia_menu_settings_install(rdram);   // menu_settings.cpp: Settings entries in the title / start menu / pause menu
     dissidia_discord_install(rdram);         // discord_presence.cpp: Discord Rich Presence
     dissidia_input_install(rdram);    // input.cpp
+    dissidia_button_prompts_install();   // button_prompts.cpp: the game's button symbols in the controller's style
+    dissidia_comm_battle_install(rdram);   // comm_battle.cpp: online battles on our pad link
     dissidia_framerate_install(rdram);   // framerate.cpp (wraps a battle-overlay function too)
 
     supacc_init_dispatch_table();

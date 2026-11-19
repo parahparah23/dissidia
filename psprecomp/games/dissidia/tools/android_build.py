@@ -149,7 +149,7 @@ def pack_apk(adir, work, libmain, run, say, env):
         strip = os.path.join(adir, "ndk", "toolchains", "llvm", "prebuilt", v["ndk"]["files"][host_key()]["prebuilt"], "bin", "llvm-strip" + exe)
         run([strip, "-o", stripped, libmain], env=env)
     abi = v["abi"]
-    run([sys.executable, os.path.join(adir, "apk", "apk_pack.py"), "--skeleton", os.path.join(adir, "apk", "skeleton.apk"),
+    run(([os.environ["PSPRECOMP_PY_LOADER"]] if os.environ.get("PSPRECOMP_PY_LOADER") else []) + [sys.executable, os.path.join(adir, "apk", "apk_pack.py"), "--skeleton", os.path.join(adir, "apk", "skeleton.apk"),
          "--key", os.path.join(adir, "apk", "debug_key.json"),
          "--lib", "lib/%s/libmain.so=%s" % (abi, stripped),
          "--lib", "lib/%s/libSDL2.so=%s" % (abi, os.path.join(adir, "deps", "deps", "lib", "libSDL2.so")),

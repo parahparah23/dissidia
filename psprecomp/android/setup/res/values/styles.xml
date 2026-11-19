@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The setup app's window: dark from the first frame (no white flash before the pages draw), transparent system bars (the app draws behind them). -->
+<resources>
+    <style name="SetupTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/setup_bg</item>
+        <item name="android:colorBackground">@color/setup_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">@color/setup_gold</item>
+        <item name="android:colorControlActivated">@color/setup_gold</item>
+        <item name="android:textColorHighlight">#66E2C47A</item>
+    </style>
+    <color name="setup_bg">#FF070B1C</color>
+    <color name="setup_gold">#FFE2C47A</color>
+</resources>

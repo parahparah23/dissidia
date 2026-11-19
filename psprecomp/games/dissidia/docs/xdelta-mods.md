@@ -30,8 +30,8 @@ tools/xdelta_mod.py import Emendatus11.11.26.xdelta --work <workdir>     # -> <w
 games/dissidia/tools/pipeline.sh <workdir>                                # compiles the patch's code (optional)
 ```
 
-In the setup program: *Options > ISO patch (xdelta)* on a new install, or *Change extras* on an installed game (the
-game is then rebuilt; only the patch's code is compiled).
+The setup program has no patch option (its extras moved to the shared list in `setup/extras.cpp`); install a patch from
+Settings > Mods, and a later rebuild compiles its code.
 
 ## Which patches work
 

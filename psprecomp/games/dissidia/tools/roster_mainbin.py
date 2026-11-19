@@ -219,7 +219,7 @@ def parse_arc(d, base):    # {tag: (offset, size)}
 def read_roster(path, min_id=FIRST_NEW):
     """[(charId, code, like)] for charId >= min_id (default FIRST_NEW) from a roster.txt ('<id> <code> [like] [k=v...]')."""
     out = []
-    for line in open(path):
+    for line in open(path, encoding="utf-8"):
         line = line.split("#")[0].split()
         if len(line) < 2 or not line[0].isdigit():
             continue
@@ -245,7 +245,7 @@ def parse_objs(spec):
 def read_roster_objs(path):
     """(objs, charId of the line that declares the first objs= token) from a roster.txt; objs = every `objs=new:src,...` pair."""
     out, char = [], None
-    for line in open(path):
+    for line in open(path, encoding="utf-8"):
         toks = line.split("#")[0].split()
         for tok in toks:
             if tok.startswith("objs="):

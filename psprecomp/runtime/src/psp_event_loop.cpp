@@ -7,6 +7,7 @@
 #include "psp_scheduler.h"
 #include "psp_ge_draw.h"
 #include "psp_settings.h"
+#include "psp_tex_pack.h"
 #include "hle/psp_savedata_dialog.h"   // on-screen keyboard: host typing
 #include "hle/psp_cloud_service.h"      // cloud sync sign-in helper
 
@@ -51,6 +52,7 @@ static void gl_debug_install() {
 #include <vector>
 #include <thread>
 #include <map>
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -141,6 +143,7 @@ int16_t  g_lx_raw = 0, g_ly_raw = 0;  // left stick (SDL range)
 std::map<SDL_JoystickID, SDL_GameController*> g_pads;
 
 uint32_t g_trig_l_mask = P_L, g_trig_r_mask = P_R;  // PSPRECOMP_PAD_L2 / _R2
+bool g_lr_triggers = false;   // Controls > L / R Buttons = Triggers: LT/RT press L/R, the shoulders nothing (prompts say LT/RT)
 bool g_trig_l_down = false, g_trig_r_down = false;
 
 // "R+CROSS" -> P_R | P_CROSS. Returns fallback if unset/empty or nothing parses.
@@ -175,9 +178,20 @@ uint32_t parse_button_set(const char* env, uint32_t fallback) {
 }
 
 void update_triggers() {
-    g_pad_triggers = (g_trig_l_down ? g_trig_l_mask : 0) | (g_trig_r_down ? g_trig_r_mask : 0);
+    const uint32_t lm = g_lr_triggers ? P_L : g_trig_l_mask, rm = g_lr_triggers ? P_R : g_trig_r_mask;
+    g_pad_triggers = (g_trig_l_down ? lm : 0) | (g_trig_r_down ? rm : 0);
 }
 
+// ---- Button prompts (psp_input_prompts) ----
+std::mutex g_prompt_mu;
+PspPrompts g_prompts{PSP_PROMPT_PSP, PSP_POS_SOUTH, PSP_POS_EAST, PSP_POS_WEST, PSP_POS_NORTH, false, false, {}};
+int g_prompt_setting = -1;    // -1 Automatic
+int g_last_device = 0;        // 0 none (touch or nothing yet), 1 keyboard, 2 gamepad
+std::string g_p1_pad;         // Controls > Player 1 Controller: "" any, "keyboard" keyboard only, else the pad's GUID
+std::map<SDL_Keycode, uint32_t> g_kb_held;   // the keys held and what each presses (a move key presses two buttons)
+bool pad_allowed(SDL_JoystickID which);
+SDL_JoystickID g_last_pad = -1;
+void prompts_update();
 uint32_t key_to_psp_button(SDL_Keycode key) {
     switch (key) {
         case SDLK_UP:     return P_UP;
@@ -193,6 +207,14 @@ uint32_t key_to_psp_button(SDL_Keycode key) {
         case SDLK_w:      return P_R;
         case SDLK_SPACE:  return P_START;
         case SDLK_TAB:    return P_SELECT;
+        // One key for a move that takes two buttons at once (both go down in the same pad read, which the game needs:
+        // R held first blocks instead). The design is VCKing101's (docs/port/keyboard-controls.md); the keys are ours.
+        case SDLK_d:      return P_R | P_CROSS;    // dodge
+        case SDLK_f:      return P_R | P_TRI;      // dash
+        case SDLK_e:      return P_R | P_SQUARE;   // EX Mode (EX Revenge when hit)
+        case SDLK_v:      return P_R | P_CIRCLE;   // summon
+        case SDLK_1:      return P_L | P_CIRCLE;   // Brave assist
+        case SDLK_2:      return P_L | P_SQUARE;   // HP assist
         default:          return 0;
     }
 }
@@ -203,8 +225,8 @@ uint32_t pad_button_to_psp(uint8_t b) {
         case SDL_CONTROLLER_BUTTON_B: return g_swap_ab ? P_CROSS : P_CIRCLE;
         case SDL_CONTROLLER_BUTTON_X: return P_SQUARE;
         case SDL_CONTROLLER_BUTTON_Y: return P_TRI;
-        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return P_L;
-        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return P_R;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return g_lr_triggers ? 0 : P_L;   // L / R Buttons = Triggers: the shoulders are free
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return g_lr_triggers ? 0 : P_R;
         case SDL_CONTROLLER_BUTTON_DPAD_UP:    return P_UP;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return P_RIGHT;
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return P_DOWN;
@@ -212,6 +234,82 @@ uint32_t pad_button_to_psp(uint8_t b) {
         case SDL_CONTROLLER_BUTTON_START: return P_START;
         case SDL_CONTROLLER_BUTTON_BACK:  return P_SELECT;
         default: return 0;  // GUIDE etc. ignored
+    }
+}
+
+// What the game's button symbols should look like: the setting, or (Automatic) the device player 1 used last, and where on the pad
+// the button that sends each PSP face button is. Main thread; the result is read by the renderer (psp_input_prompts).
+int pad_prompt_style(SDL_GameController* gc, bool* numbered) {
+    *numbered = false;
+    if (!gc) return PSP_PROMPT_PSP;
+    const char* name = SDL_GameControllerName(gc);
+    if (name && std::strstr(name, "Steam Deck")) { *numbered = true; return PSP_PROMPT_XBOX; }   // A B X Y, L1 / R1
+    switch (SDL_GameControllerGetType(gc)) {
+    case SDL_CONTROLLER_TYPE_PS3: case SDL_CONTROLLER_TYPE_PS4: case SDL_CONTROLLER_TYPE_PS5: return PSP_PROMPT_PLAYSTATION;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT: case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+        return PSP_PROMPT_NINTENDO;
+    default: return PSP_PROMPT_XBOX;
+    }
+}
+std::string pad_guid(SDL_GameController* gc) {
+    char guid[40] = "";
+    if (gc) SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(gc)), guid, sizeof guid);
+    return guid;
+}
+bool pad_allowed(SDL_JoystickID which) {
+    if (g_p1_pad.empty()) return true;
+    if (g_p1_pad == "keyboard") return false;
+    auto it = g_pads.find(which);
+    return it != g_pads.end() && pad_guid(it->second) == g_p1_pad;
+}
+void prompts_update() {
+    SDL_GameController* gc = nullptr;
+    if (g_last_pad >= 0 && g_pads.count(g_last_pad) && pad_allowed(g_last_pad)) gc = g_pads[g_last_pad];
+    else for (auto& pr : g_pads) if (pad_allowed(pr.first)) { gc = pr.second; break; }
+    PspPrompts p{};
+    bool numbered = false;
+    const int pad_style = pad_prompt_style(gc, &numbered);
+    int style = g_prompt_setting;
+    if (style < 0) style = g_last_device == 1 ? PSP_PROMPT_KEYBOARD : gc ? pad_style : PSP_PROMPT_PSP;
+    p.style = style;
+    p.numbered_shoulders = style == PSP_PROMPT_PLAYSTATION || (style == pad_style && numbered);
+    p.lr_on_triggers = g_lr_triggers;
+    // SDL names a Nintendo pad's buttons by their labels unless told otherwise: its A (Cross by default) is the right button.
+    const bool labels = pad_style == PSP_PROMPT_NINTENDO && gc &&
+                        SDL_GetHintBoolean(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, SDL_TRUE);
+    auto pos = [&](uint8_t sdl) {
+        switch (sdl) {
+        case SDL_CONTROLLER_BUTTON_A: return labels ? PSP_POS_EAST : PSP_POS_SOUTH;
+        case SDL_CONTROLLER_BUTTON_B: return labels ? PSP_POS_SOUTH : PSP_POS_EAST;
+        case SDL_CONTROLLER_BUTTON_X: return labels ? PSP_POS_NORTH : PSP_POS_WEST;
+        default: return labels ? PSP_POS_WEST : PSP_POS_NORTH;
+        }
+    };
+    p.cross = pos(g_swap_ab ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A);
+    p.circle = pos(g_swap_ab ? SDL_CONTROLLER_BUTTON_A : SDL_CONTROLLER_BUTTON_B);
+    p.square = pos(SDL_CONTROLLER_BUTTON_X);
+    p.triangle = pos(SDL_CONTROLLER_BUTTON_Y);
+    // keyboard style: the first key bound to each button
+    static const uint32_t order[8] = {P_CROSS, P_CIRCLE, P_SQUARE, P_TRI, P_L, P_R, P_START, P_SELECT};
+    static const SDL_Keycode keys[] = {SDLK_x, SDLK_z, SDLK_a, SDLK_s, SDLK_q, SDLK_w, SDLK_SPACE, SDLK_TAB, SDLK_RETURN};
+    for (int i = 0; i < 8; i++)
+        for (SDL_Keycode k : keys)
+            if (key_to_psp_button(k) == order[i]) { std::snprintf(p.key_names[i], sizeof p.key_names[i], "%s", SDL_GetKeyName(k)); break; }
+    bool changed;
+    {
+        std::lock_guard<std::mutex> lk(g_prompt_mu);
+        changed = std::memcmp(&p, &g_prompts, sizeof p) != 0;
+        g_prompts = p;
+    }
+    if (changed) {
+        static const char* const names[] = {"PSP", "Xbox", "PlayStation", "Nintendo", "Keyboard"};
+        std::fprintf(stderr, "[RT] button prompts: %s%s%s\n", names[p.style], p.numbered_shoulders ? ", L1/R1" : "",
+                     p.lr_on_triggers ? ", L and R on the triggers" : "");
+        psp_texpack_editor_changed();
     }
 }
 
@@ -250,6 +348,12 @@ void publish_input() {
     }
     g_host_buttons.store(g_kb_buttons | pad_buttons | pad_triggers,
                          std::memory_order_relaxed);
+    {   // PSPRECOMP_KEY_LOG=1: every change of the buttons the game will read (keyboard move keys: both bits in one change)
+        static const bool key_log = env_flag("PSPRECOMP_KEY_LOG");
+        static uint32_t last = 0;
+        const uint32_t now = g_kb_buttons | pad_buttons | pad_triggers;
+        if (key_log && now != last) { std::fprintf(stderr, "[KEYS] buttons 0x%04x\n", now); last = now; }
+    }
     g_host_ranalog.store(static_cast<uint32_t>(axis_to_psp_raw(rx_raw)) |
                          (static_cast<uint32_t>(axis_to_psp_raw(ry_raw)) << 8),
                          std::memory_order_relaxed);
@@ -349,9 +453,24 @@ static void steam_keyboard(bool show) {
     const int rc = std::system(cmd.c_str());
     std::fprintf(stderr, "[OSK] Steam keyboard %s (%s, rc %d)\n", show ? "open" : "close", in_box ? "host" : "local", rc);
 }
+// The clipboard's text into the game's on-screen keyboard (its Paste key, Ctrl+V), as typed keys; line breaks dropped.
+static void osk_paste() {
+    char* clip = SDL_GetClipboardText();
+    if (!clip) return;
+    const unsigned char* t = reinterpret_cast<const unsigned char*>(clip);
+    for (size_t i = 0; t[i];) {
+        uint32_t cp = t[i];
+        int n = cp < 0x80 ? 1 : (cp >> 5) == 6 ? 2 : (cp >> 4) == 14 ? 3 : (cp >> 3) == 30 ? 4 : 1;
+        if (n > 1) { cp &= 0xFFu >> (n + 1); for (int k = 1; k < n && t[i + k]; ++k) cp = (cp << 6) | (t[i + k] & 63u); }
+        if (cp != '\r' && cp != '\n') psp_sddialog::osk_push_key(cp);
+        i += size_t(n);
+    }
+    SDL_free(clip);
+}
 static void osk_tick() {
     static bool was = false;
     const bool now = psp_sddialog::osk_active();
+    if (now && psp_sddialog::osk_take_paste_request()) osk_paste();
     if (now == was) return;
     was = now;
     if (now) SDL_StartTextInput(); else SDL_StopTextInput();
@@ -383,6 +502,7 @@ static void handle_sdl_event(const SDL_Event& ev) {
             }
             return;
         }
+        if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_v && (ev.key.keysym.mod & (KMOD_CTRL | KMOD_GUI))) { osk_paste(); return; }
         if (ev.type == SDL_KEYDOWN && !(ev.key.keysym.mod & (KMOD_ALT | KMOD_GUI | KMOD_CTRL))) {
             const SDL_Keycode k = ev.key.keysym.sym;
             if (k == SDLK_BACKSPACE || k == SDLK_DELETE) { psp_sddialog::osk_push_key(8); return; }
@@ -449,29 +569,39 @@ static void handle_sdl_event(const SDL_Event& ev) {
             if (down) g_kb_arrows |= arrow; else g_kb_arrows &= ~arrow;
         }
         uint32_t bit = key_to_psp_button(k);
-        if (bit) {
-            if (down) g_kb_buttons |= bit; else g_kb_buttons &= ~bit;
+        if (bit) {   // what every held key presses (a move key's R must not let go while W still holds R)
+            if (down) g_kb_held[k] = bit; else g_kb_held.erase(k);
+            g_kb_buttons = 0;
+            for (const auto& h : g_kb_held) g_kb_buttons |= h.second;
         }
         if (bit || arrow) publish_input();
+        if (down && (bit || arrow) && g_last_device != 1) { g_last_device = 1; prompts_update(); }
         if (down && k == SDLK_c && !psp_settings_menu_open() && !(ev.key.keysym.mod & (KMOD_ALT | KMOD_GUI | KMOD_CTRL)))
             g_recenter_request.store(true);
         return;
     }
     case SDL_CONTROLLERDEVICEADDED:
         pad_open(ev.cdevice.which);  // 'which' is a device index here
+        prompts_update();
         return;
     case SDL_CONTROLLERDEVICEREMOVED:
         pad_close(ev.cdevice.which);  // instance id here
+        if (g_last_pad == ev.cdevice.which) { g_last_pad = -1; if (g_last_device == 2) g_last_device = 0; }
         publish_input();
+        prompts_update();
         return;
     case SDL_CONTROLLERBUTTONDOWN:
     case SDL_CONTROLLERBUTTONUP: {
+        if (!pad_allowed(ev.cbutton.which)) return;   // Controls > Player 1 Controller: another pad
         {   // R3 / L3: camera re-center request (see g_recenter_request)
             static bool l3 = false;
             if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK) l3 = ev.type == SDL_CONTROLLERBUTTONDOWN;
             if (ev.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK && ev.type == SDL_CONTROLLERBUTTONDOWN && !l3 &&
                 !psp_settings_menu_open() && (env_flag("PSPRECOMP_PAD_BACKGROUND") || SDL_GetKeyboardFocus() != nullptr))
                 g_recenter_request.store(true);
+        }
+        if (ev.type == SDL_CONTROLLERBUTTONDOWN && (g_last_device != 2 || g_last_pad != ev.cbutton.which)) {
+            g_last_device = 2; g_last_pad = ev.cbutton.which; prompts_update();
         }
         uint32_t bit = pad_button_to_psp(ev.cbutton.button);
         static const bool pad_log = env_flag("PSPRECOMP_PAD_LOG");
@@ -486,6 +616,10 @@ static void handle_sdl_event(const SDL_Event& ev) {
         return;
     }
     case SDL_CONTROLLERAXISMOTION:
+        if (!pad_allowed(ev.caxis.which)) return;
+        if ((ev.caxis.value > 16000 || ev.caxis.value < -16000) && (g_last_device != 2 || g_last_pad != ev.caxis.which)) {
+            g_last_device = 2; g_last_pad = ev.caxis.which; prompts_update();
+        }
         pad_axis(ev.caxis.axis, ev.caxis.value);
         publish_input();
         return;
@@ -500,6 +634,7 @@ static void handle_sdl_event(const SDL_Event& ev) {
             // KEYUP is not delivered after focus loss; release keyboard
             // state so no key sticks. Pads are muted by publish_input() while unfocused.
             g_kb_buttons = 0;
+            g_kb_held.clear();
             g_kb_arrows = 0;
             publish_input();
         }
@@ -552,6 +687,13 @@ int psp_runtime_init_sdl() {
 
     // 1. Initialize SDL video subsystem
     g_swap_ab          = env_flag("PSPRECOMP_SWAP_AB");
+    if (const char* bp = std::getenv("PSPRECOMP_BUTTON_PROMPTS")) {   // auto | psp | xbox | playstation | nintendo | keyboard
+        static const char* const keys[6] = {"auto", "psp", "xbox", "playstation", "nintendo", "keyboard"};
+        for (int i = 0; i < 6; i++) if (!std::strcmp(bp, keys[i])) g_prompt_setting = i - 1;
+    }
+    g_lr_triggers = env_flag("PSPRECOMP_LR_TRIGGERS");
+    if (const char* pc = std::getenv("PSPRECOMP_P1_CONTROLLER")) g_p1_pad = std::strcmp(pc, "any") == 0 ? "" : pc;
+    prompts_update();   // the style to draw from the start (a pad connected at start-up updates it again)
     g_arrows_dpad_only = env_flag("PSPRECOMP_ARROWS_DPAD_ONLY");
     g_trig_l_mask      = parse_button_set("PSPRECOMP_PAD_L2", P_L);
     g_trig_r_mask      = parse_button_set("PSPRECOMP_PAD_R2", P_R);
@@ -560,6 +702,21 @@ int psp_runtime_init_sdl() {
     // Text input is only wanted while the on-screen keyboard is open, and SDL must not summon the
     // Steam Deck keyboard by itself (SDL_StartTextInput does on a Deck): steam_keyboard() below does it.
     SDL_SetHint("SDL_ENABLE_SCREEN_KEYBOARD", "0");
+#if defined(__linux__) && !defined(__ANDROID__)
+    // SDL2 tries X11 before Wayland, so on a Wayland desktop (GNOME, KDE) the game opened through XWayland, which has no HDR: the surface
+    // offered no HDR format and HDR Output read "Unavailable" with HDR on in the system settings. With the Vulkan renderer ask for a
+    // native Wayland window first (X11 stays the fallback). Not under gamescope, which shows only X11 windows, and never over a
+    // SDL_VIDEODRIVER the user set. Reads PSPRECOMP_RENDERER (the settings file is already in the environment) instead of calling
+    // vk_renderer_requested(): its Vulkan probe starts SDL's video layer, which would pick X11 before this hint exists.
+    {
+        const char* wl = std::getenv("WAYLAND_DISPLAY");
+        const char* drv = std::getenv("SDL_VIDEODRIVER");
+        const char* rr = std::getenv("PSPRECOMP_RENDERER");
+        const bool want_vk = rr && (!std::strcmp(rr, "vulkan") || !std::strcmp(rr, "vk"));
+        if (want_vk && wl && wl[0] && !(drv && drv[0]) && !std::getenv("GAMESCOPE_WAYLAND_DISPLAY"))
+            SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+    }
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr,
             "[RT] SDL_Init failed: %s\n", SDL_GetError());
@@ -877,3 +1034,29 @@ void psp_runtime_shutdown() {
 
     std::fprintf(stderr, "[RT] Shutdown complete\n");
 }
+
+void psp_input_set_prompt_setting(int setting) { g_prompt_setting = setting < -1 || setting > PSP_PROMPT_KEYBOARD ? -1 : setting; prompts_update(); }
+int psp_input_prompt_setting() { return g_prompt_setting; }
+PspPrompts psp_input_prompts() { std::lock_guard<std::mutex> lk(g_prompt_mu); return g_prompts; }
+
+void psp_input_set_lr_triggers(bool on) { g_lr_triggers = on; update_triggers(); prompts_update(); publish_input(); }
+bool psp_input_lr_triggers() { return g_lr_triggers; }
+std::vector<std::pair<std::string, std::string>> psp_input_pads() {
+    std::vector<std::pair<std::string, std::string>> v;
+    for (auto& pr : g_pads) {
+        const std::string g = pad_guid(pr.second);
+        bool dup = false;
+        for (auto& e : v) dup |= e.first == g;
+        if (!dup) v.emplace_back(g, SDL_GameControllerName(pr.second) ? SDL_GameControllerName(pr.second) : "Controller");
+    }
+    return v;
+}
+void psp_input_set_p1_controller(const std::string& choice) {
+    g_p1_pad = choice == "any" ? "" : choice;
+    g_pad_buttons = 0; g_pad_triggers = 0; g_trig_l_down = g_trig_r_down = false;   // nothing stays held from a pad that no longer counts
+    g_lx_raw = g_ly_raw = g_rx_raw = g_ry_raw = 0;
+    publish_input();
+    prompts_update();
+}
+std::string psp_input_p1_controller() { return g_p1_pad; }
+

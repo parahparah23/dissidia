@@ -85,19 +85,10 @@ void psp_ctrl_last_sample(uint32_t* buttons, uint32_t* analog) {
     *analog = g_last_analog.load(std::memory_order_relaxed);
 }
 
-static void write_ctrl_data(
-    uint8_t* rdram, uint32_t ptr
-) {
-    // Timestamp: microseconds since boot
+// The pad as a read now would give it (buttons, analog x | y << 8), without writing a sample: the same sources and order
+// as write_ctrl_data (host pad / keyboard, debug-socket injections, right-stick D-pad, test script, button filter).
+static void current_pad(uint32_t* out_buttons, uint32_t* out_analog) {
     auto now = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<
-        std::chrono::microseconds>(
-            now.time_since_epoch()).count();
-    psp_mem_write<uint32_t>(rdram, ptr,
-        static_cast<uint32_t>(us & 0xFFFFFFFF));
-
-    // Buttons: host keyboard mask OR debug-socket injected mask
-    // (injected mask only while its deadline has not expired).
     uint32_t buttons =
         g_host_buttons.load(std::memory_order_relaxed);
     auto now_ms = std::chrono::duration_cast<
@@ -112,8 +103,6 @@ static void write_ctrl_data(
     const bool scripted = g_script_on.load(std::memory_order_relaxed);
     if (scripted) buttons = g_script_buttons.load(std::memory_order_relaxed);
     if (auto f = g_button_filter.load(std::memory_order_relaxed)) buttons = f(buttons);
-    psp_mem_write<uint32_t>(rdram, ptr + 4, buttons);
-    g_last_buttons.store(buttons, std::memory_order_relaxed);
 
     // Analog stick: host pad/keyboard stick (128 = centre)
     uint32_t analog = g_host_analog.load(std::memory_order_relaxed);
@@ -122,6 +111,27 @@ static void write_ctrl_data(
         analog = g_injected_analog.load(std::memory_order_relaxed);
     }
     if (scripted) analog = g_script_analog.load(std::memory_order_relaxed);
+    *out_buttons = buttons;
+    *out_analog = analog;
+}
+
+void psp_ctrl_sample_now(uint32_t* buttons, uint32_t* analog) { current_pad(buttons, analog); }
+
+static void write_ctrl_data(
+    uint8_t* rdram, uint32_t ptr
+) {
+    // Timestamp: microseconds since boot
+    auto now = std::chrono::steady_clock::now();
+    auto us = std::chrono::duration_cast<
+        std::chrono::microseconds>(
+            now.time_since_epoch()).count();
+    psp_mem_write<uint32_t>(rdram, ptr,
+        static_cast<uint32_t>(us & 0xFFFFFFFF));
+
+    uint32_t buttons = 0, analog = 0x8080;
+    current_pad(&buttons, &analog);
+    psp_mem_write<uint32_t>(rdram, ptr + 4, buttons);
+    g_last_buttons.store(buttons, std::memory_order_relaxed);
     g_last_analog.store(analog, std::memory_order_relaxed);
     psp_mem_write<uint8_t>(rdram, ptr + 8,
         static_cast<uint8_t>(analog & 0xFF));

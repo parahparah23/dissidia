@@ -132,3 +132,29 @@ axes, so in battle the original runs on a square-gate version of the stick with 
 (`PSPRECOMP_ANALOG_DPAD_ZONE`, default 0.35 of travel; `PSPRECOMP_ANALOG_8WAY=0` turns it off). `PSPRECOMP_ANALOG_FULL=0` restores the
 original 8-way behaviour, `PSPRECOMP_ANALOG_DEADZONE` (default 0.20 of travel) sets the radial dead zone,
 `PSPRECOMP_ANALOG_LOG=<n>` logs raw / game / replacement vectors.
+
+Walking direction: the stick vector above is not what steers a walk. The walker's input (`ovl_battle FUN_08B38A0C`, on the world map
+and for the player's fighter in battle) builds its step from the four walk bits only, so even with the changes above every walk went one
+of eight ways (found by VCKing101, [related-projects.md](related-projects.md)). `input.cpp` turns that step to the stick's own direction
+just before the game applies the camera to it, for the hardware pad's walker with the stick past the dead zone; when the walk starts, the
+walk speed and everything after it stay the game's. On the world map and in battle; never while the pads are fed by the game's online
+exchange or a replay. A saved battle replay stores just the 8-way bits, so a fight steered by the stick can play back a little
+differently; `PSPRECOMP_ANALOG_WALK_BATTLE=0` keeps battle 8-way (and replays exact). `PSPRECOMP_ANALOG_WALK=0` turns it all off,
+`PSPRECOMP_ANALOG_WALK_LOG=<n>` logs n replaced steps, `PSPRECOMP_ANALOG_WALK_OUTLOG=<n>` the walk's world-space output.
+Measured 18-19 November 2026: on the prologue field (debug socket `A` pushes of 0.4 s, walker position at `+0x110`) 15, -15 and 30
+degrees of stick turned the walk by 14.8, 15.0 and 30.2 degrees against a straight push, where the 8-way walk jumps by 20 to 45. In
+battle (battle_test, Squall, stage 12, stick 0 then 15 degrees) the walk's world direction turned 15.6 degrees and the fighter moved
+along it to within 1 to 3 degrees a frame (more while the body turns); with the 8-way walk it stayed on one direction for 0, 15 and -15.
+Comparing world headings between separate battle runs does not work: the lock-on camera orbits the opponent, and the dummy stands
+somewhere else each run.
+
+Camera follow dead zone: the world map's free camera (`ovl_battle FUN_08B3F7F4`) turns toward the walker's facing by up to 0.05 rad a
+frame with no dead zone. With the walk at the stick's own angle, a push a few degrees off straight up then turns the camera, the
+camera-relative walk turns with it, and the camera spins (VCKing101's measurement; here with `PSPRECOMP_CAM_UNLOCK_HOLD=0` and no
+zone, a 15 degree push turned the walk 186 degrees in 1.75 s). `input.cpp` moves the follow's atan2 result (`FUN_089A457C`, only the
+call on the walker's facing) so the follow does not turn within `PSPRECOMP_ANALOG_FOLLOW_ZONE` degrees, ramps up to the cap over half the zone, and is
+the game's beyond that; only while the walker's last step was the analogue one. Default 180: the camera does not follow a walk with
+the stick at all, since the right stick turns it (asked for 19 November 2026: the left stick also swung the camera left and right);
+22.5 is VCKing101's zone, 0 the game's follow. Walking with the D-pad keeps the game's follow. With it the same push walked straight. Normally `camera.cpp`'s hold camera is active on the world map too (no lock-on target):
+it keeps the view and turns the stick by the game camera's turn, which already hides the spin; the zone covers the cases without it
+(`PSPRECOMP_CAM_UNLOCK_HOLD=0`, `PSPRECOMP_CAM_FREE=0`). `PSPRECOMP_ANALOG_FOLLOW_LOG=<n>` logs reduced follow turns.

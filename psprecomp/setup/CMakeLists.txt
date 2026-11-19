@@ -25,8 +25,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${FONT_FILES} ${R
 execute_process(COMMAND ${CMAKE_COMMAND} -DFONT_DIR=${RT}/assets/fonts -DOUT=${FONTS_CPP} -P ${RT}/assets/embed_fonts.cmake)
 
 add_executable(psprecomp_setup
-    setup_main.cpp install.cpp proc.cpp payload.cpp third_party/miniz.c
-    ${RT}/src/hle/psp_savedata_dialog.cpp ${RT}/src/hle/psp_savemgr.cpp ${RT}/src/hle/psp_savedata_crypto.cpp
+    setup_main.cpp install.cpp extras.cpp proc.cpp payload.cpp third_party/miniz.c
+    ${RT}/src/hle/psp_savedata_dialog.cpp ${RT}/src/hle/psp_savemgr.cpp ${RT}/src/hle/psp_savebackup.cpp ${RT}/src/hle/psp_savedata_crypto.cpp
     ${FONTS_CPP})
 target_include_directories(psprecomp_setup PRIVATE ${RT}/include ${RT}/src/hle)
 target_link_libraries(psprecomp_setup PRIVATE PkgConfig::SDL2 PkgConfig::FREETYPE
@@ -55,7 +55,7 @@ install(TARGETS psprecomp_setup RUNTIME DESTINATION . COMPONENT setup)
 option(PSPRECOMP_SETUP_TESTS "Build the setup wizard's unit tests" OFF)
 if(PSPRECOMP_SETUP_TESTS)
     enable_testing()
-    add_executable(test_setup_install tests/test_install.cpp install.cpp proc.cpp)
+    add_executable(test_setup_install tests/test_install.cpp install.cpp extras.cpp proc.cpp third_party/miniz.c)
     target_link_libraries(test_setup_install PRIVATE $<$<NOT:$<PLATFORM_ID:Windows>>:pthread>)
     add_test(NAME setup_install COMMAND test_setup_install)
     add_executable(test_payload tests/test_payload.cpp payload.cpp third_party/miniz.c)

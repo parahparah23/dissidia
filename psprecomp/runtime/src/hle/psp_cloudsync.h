@@ -6,7 +6,8 @@
 // What is stored: per save, keyed by its REGION-NEUTRAL SUFFIX ("GameData00", "FCard03", so a US and an EU install
 // sync with each other):
 //   <suffix>.save   the files that travel with the save folder, in one container (pack/unpack below)
-//   <suffix>.meta   text: content hash, container checksum, PARAM.SFO mtime, the device that wrote it, the disc ID it was saved under
+//   <suffix>.meta   text: content hash, container checksum, PARAM.SFO mtime, the device that wrote it (ID and name), the disc ID it
+//                   was saved under, the save's own title / detail line
 // The blob is written first and the meta last, so a half-finished upload is never seen as a newer save.
 //
 // Deciding what to do (three-way): each install remembers the hash of every save as of its last sync (the "base").
@@ -15,6 +16,8 @@
 //   remote == base             only local changed  -> push
 //   local  == base             only remote changed -> pull
 //   otherwise                  both changed (or no base to tell): a CONFLICT, which is never resolved silently
+// A save deleted with the save manager leaves a deletion marker in the cloud (delete_remote): a device whose copy is unchanged since
+// its last sync moves it into its backups; one that changed it since uploads it again.
 // The content hash covers the data files but not PARAM.SFO (its folder name differs between regions); the data
 // files change whenever the game saves. Pulling retargets and re-signs PARAM.SFO (psp_savemgr::copy_save), and the
 // save it replaces is moved to the backup folder; the remote copy a push replaces in a conflict is kept as
@@ -73,6 +76,10 @@ struct Meta {
     std::string device;
     std::string disc;
     time_t mtime = 0;
+    std::string device_name;   // "steamdeck", "Pixel 9", ... (the uploading device's Options::device_name; "" = older meta)
+    std::string savetitle;     // SAVEDATA_TITLE / SAVEDATA_DETAIL of the uploaded save (one line each; for the conflict screen)
+    std::string detail;
+    bool deleted = false;      // a deletion marker: the save was deleted on `device` (hash = its last content); no .save goes with it
     bool valid() const { return !hash.empty(); }
 };
 std::string meta_to_text(const Meta& m);
@@ -85,6 +92,7 @@ enum class Action {
     Pulled,      // downloaded (the old local save went to the backup folder)
     Conflict,    // both changed: nothing was done, see Item::local / Item::remote
     Skipped,     // the user chose to leave it alone for now
+    Removed,     // deleted here because it was deleted on another device (moved into the backup folder)
     Error,       // Item::note says why
 };
 
@@ -103,6 +111,7 @@ struct Options {
     std::string backup_root;     // where a replaced local save goes (not inside saves_root: the game lists that)
     std::string state_path;      // the file that remembers the base hashes and this device's ID (created)
     std::string disc_id;         // disc ID under which a pulled save is created locally
+    std::string device_name;     // this device's name, written into the metadata of uploads (shown to the other devices)
     // The local folder name already holding `suffix` under any shared region's ID ("" = none). Null: disc_id+suffix.
     std::function<std::string(const std::string& suffix)> existing;
     // Conflicts: null = report them (Action::Conflict) and do nothing; else decide here.
@@ -120,6 +129,11 @@ std::vector<Item> sync_all(Provider& p, const Options& o, std::string* error = n
 
 // Applies a user's choice to one save of an earlier sync_all that reported a conflict. Returns the finished Item.
 Item resolve_conflict(Provider& p, const Options& o, const std::string& suffix, Choice c);
+
+// The user deleted `suffix` on this device (already gone from saves_root): the cloud copy becomes a deletion marker (its .save is kept
+// as <suffix>.bak), so the other devices move theirs into their backups at their next sync instead of this device getting it
+// back. Refused (Action::Skipped) when the cloud copy changed since this device's last sync: then it comes back.
+Item delete_remote(Provider& p, const Options& o, const std::string& suffix);
 
 // This device's ID (generated into the state file on first use).
 std::string device_id(const std::string& state_path);

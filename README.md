@@ -13,9 +13,9 @@ Download **one** file for your device. These links always point at the newest re
 
 | Your device | Download |
 |---|---|
-| **Windows** PC | [DissidiaRecomp-Setup-windows-x86_64.exe](https://github.com/schindlershadow/dissidia/releases/download/v0.1.18/DissidiaRecomp-Setup-0.1.18-windows-x86_64.exe) |
-| **Linux** PC / **Steam Deck** | [DissidiaRecomp-Setup-linux-x86_64](https://github.com/schindlershadow/dissidia/releases/download/v0.1.18/DissidiaRecomp-Setup-0.1.18-linux-x86_64) |
-| **Android** phone / handheld | [DissidiaRecomp-Setup-android.apk](https://github.com/schindlershadow/dissidia/releases/download/v0.1.18/DissidiaRecomp-Setup-0.1.18-android.apk) |
+| **Windows** PC | [DissidiaRecomp-Setup-windows-x86_64.exe](https://github.com/schindlershadow/dissidia/releases/download/v0.1.19/DissidiaRecomp-Setup-0.1.19-windows-x86_64.exe) |
+| **Linux** PC / **Steam Deck** | [DissidiaRecomp-Setup-linux-x86_64](https://github.com/schindlershadow/dissidia/releases/download/v0.1.19/DissidiaRecomp-Setup-0.1.19-linux-x86_64) |
+| **Android** phone / handheld | [DissidiaRecomp-Setup-android.apk](https://github.com/schindlershadow/dissidia/releases/download/v0.1.19/DissidiaRecomp-Setup-0.1.19-android.apk) |
 
 Then:
 

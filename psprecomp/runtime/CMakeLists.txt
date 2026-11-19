@@ -92,6 +92,10 @@ set(PSP_CLOUD_SOURCES
     src/hle/psp_cloudsync.cpp src/hle/psp_cloud_providers.cpp src/hle/psp_cloud_service.cpp src/hle/psp_cloud_glue.cpp
     src/hle/psp_http.cpp ${PSP_CACERT_CPP})
 
+# Save management: folders across regions, backups, archives, the Settings > Saves page, the system's file dialog.
+set(PSP_SAVE_SOURCES
+    src/hle/psp_savemgr.cpp src/hle/psp_savebackup.cpp src/hle/psp_savearchive.cpp src/hle/psp_saves_page.cpp src/psp_file_dialog.cpp)
+
 # Savedata-dialog fonts (OFL: Cinzel + Crimson Text) are embedded in the binary.
 set(PSP_UI_FONTS_CPP ${CMAKE_CURRENT_BINARY_DIR}/gen/psp_ui_fonts.cpp)
 file(GLOB PSP_UI_FONT_FILES ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/*.ttf)
@@ -251,10 +255,10 @@ set(RUNTIME_SOURCES
     src/hle/psp_hle_ctrl.cpp
     src/hle/psp_hle_utility.cpp
     src/hle/psp_hle_adhoc.cpp
+    src/hle/psp_upnp.cpp
     src/hle/psp_savedata_crypto.cpp
     src/hle/psp_savedata_dialog.cpp
-    src/hle/psp_savemgr.cpp
-    src/hle/psp_savemgr_ui.cpp
+    ${PSP_SAVE_SOURCES}
     ${PSP_CLOUD_SOURCES}
     ${PSP_UI_FONTS_CPP}
     src/hle/psp_hle_font.cpp
@@ -502,20 +506,20 @@ target_link_libraries(test_settings_ui PRIVATE PkgConfig::FREETYPE)
 add_test(NAME settings_ui COMMAND test_settings_ui)
 add_executable(test_savedata_hle tests/test_savedata_hle.cpp
     src/hle/psp_savedata_crypto.cpp src/hle/psp_savedata_dialog.cpp
-    src/hle/psp_savemgr.cpp src/hle/psp_savemgr_ui.cpp ${PSP_CLOUD_SOURCES} ${PSP_UI_FONTS_CPP})
+    ${PSP_SAVE_SOURCES} ${PSP_CLOUD_SOURCES} ${PSP_UI_FONTS_CPP})
 target_include_directories(test_savedata_hle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src/hle ${PSPRECOMP_OUTPUT_DIR}/include)
-target_link_libraries(test_savedata_hle PRIVATE pthread PkgConfig::FREETYPE)
+target_link_libraries(test_savedata_hle PRIVATE pthread PkgConfig::FREETYPE ZLIB::ZLIB)
 if(TARGET PkgConfig::MBEDTLS)
     target_compile_definitions(test_savedata_hle PRIVATE PSPRECOMP_HAVE_MBEDTLS)
     target_link_libraries(test_savedata_hle PRIVATE PkgConfig::MBEDTLS)
 endif()
 add_test(NAME savedata_hle COMMAND test_savedata_hle)
-add_executable(test_savemgr tests/test_savemgr.cpp src/hle/psp_savemgr.cpp src/hle/psp_savemgr_ui.cpp
+add_executable(test_savemgr tests/test_savemgr.cpp ${PSP_SAVE_SOURCES}
     src/hle/psp_savedata_crypto.cpp src/hle/psp_savedata_dialog.cpp ${PSP_UI_FONTS_CPP})
 target_include_directories(test_savemgr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src/hle)
-target_link_libraries(test_savemgr PRIVATE PkgConfig::FREETYPE)
+target_link_libraries(test_savemgr PRIVATE pthread PkgConfig::FREETYPE ZLIB::ZLIB)
 add_test(NAME savemgr COMMAND test_savemgr)
-add_executable(test_cloudsync tests/test_cloudsync.cpp src/hle/psp_cloudsync.cpp src/hle/psp_savemgr.cpp
+add_executable(test_cloudsync tests/test_cloudsync.cpp src/hle/psp_cloudsync.cpp src/hle/psp_savemgr.cpp src/hle/psp_savebackup.cpp
     src/hle/psp_savedata_crypto.cpp)
 add_test(NAME cloud_providers_and_service COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cloud.sh)
 target_include_directories(test_cloudsync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src/hle)

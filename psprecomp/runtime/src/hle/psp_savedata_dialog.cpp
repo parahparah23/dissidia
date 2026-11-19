@@ -777,7 +777,7 @@ void themed_hint(Painter& P, FT_Face f, float size, float x, float base, const s
 }
 
 void render_themed(const SdTheme& T, Canvas& c, Kind kind, const std::vector<SaveEntry>& entries, int sel,
-                   int top, bool confirm_cross, bool manage) {
+                   int top, bool confirm_cross, bool manage, const std::string& manage_label) {
     const Fonts& F = fonts();
     ThemeFaces& TF = theme_faces(T);
     FT_Face body = TF.reg ? TF.reg : F.body;
@@ -885,7 +885,7 @@ void render_themed(const SdTheme& T, Canvas& c, Kind kind, const std::vector<Sav
         const SaveEntry* e = (sel >= 0 && sel < int(entries.size())) ? &entries[size_t(sel)] : nullptr;
         if (!e) {
             P.text(bodyb, 9.5f * fs, px + pw / 2, py + 19.f, "No save data found.", pt, 0, 2);
-            if (manage) P.text(body, 8.f * fs, px + pw / 2, py + 31.f, "Triangle: import saves from PPSSPP or a memory stick", pt, 0, 2);
+            if (manage) P.text(body, 8.f * fs, px + pw / 2, py + 31.f, "Triangle: import saves (a folder, a .zip, PPSSPP, a memory stick)", pt, 0, 2);
         } else {
             std::string a, b;
             if (e->exists) {
@@ -922,7 +922,7 @@ void render_themed(const SdTheme& T, Canvas& c, Kind kind, const std::vector<Sav
         themed_hint(P, bodyb, 8.8f * fs, x, base, "Back", wh);
         if (manage) {
             x += P.text_width(bodyb, 8.8f * fs, "Back") + 18;
-            themed_hint(P, bodyb, 8.8f * fs, x, base, "Triangle: Manage saves", wh);
+            themed_hint(P, bodyb, 8.8f * fs, x, base, manage_label.c_str(), wh);
         }
         const float rx = bx + bw - 28;
         const float tw = P.text_width(bodyb, 8.8f * fs, "Choose");
@@ -944,7 +944,7 @@ void render_themed(const SdTheme& T, Canvas& c, Kind kind, const std::vector<Sav
 // ---------------------------------------------------------------------------
 void ListDialog::render(Canvas& c) const {
     if (std::shared_ptr<const SdTheme> th = theme()) {
-        render_themed(*th, c, kind_, entries_, sel_, top_, confirm_cross_, manage_);
+        render_themed(*th, c, kind_, entries_, sel_, top_, confirm_cross_, manage_, manage_label_);
         return;
     }
     const Fonts& F = fonts();
@@ -994,7 +994,7 @@ void ListDialog::render(Canvas& c) const {
 
     if (entries_.empty()) {
         P.text(F.body, 15.f, PANEL_X + PANEL_W / 2, PANEL_Y + PANEL_H / 2 + 4, "No save data found.", INK_DIM, 0, 2);
-        if (manage_) P.text(F.body, 11.f, PANEL_X + PANEL_W / 2, PANEL_Y + PANEL_H / 2 + 24, "Press Triangle to import saves from PPSSPP or a memory stick.", INK_DIM, 0, 2);
+        if (manage_) P.text(F.body, 11.f, PANEL_X + PANEL_W / 2, PANEL_Y + PANEL_H / 2 + 24, "Press Triangle to import saves (a folder, a .zip, PPSSPP, a memory stick).", INK_DIM, 0, 2);
     }
 
     const float ry0 = PANEL_Y + 4;
@@ -1080,7 +1080,7 @@ void ListDialog::render(Canvas& c) const {
         draw_btn_glyph(P, !confirm_cross_, x + 5.5f, by + bh / 2, wh);
         x += 14;
         x += P.text(F.cinzel, 10.5f, x, base, "Back", wh) + 18;
-        if (manage_) P.text(F.cinzel, 10.5f, x, base, "Triangle: Manage saves", wh);
+        if (manage_) P.text(F.cinzel, 10.5f, x, base, manage_label_.c_str(), wh);
         // D-pad hint on the right
         const float rx = PANEL_X + PANEL_W - 26;
         float tw = P.text_width(F.cinzel, 10.5f, "Choose");
@@ -1517,10 +1517,11 @@ namespace {
 constexpr uint32_t K_START = 0x0008, K_TRIANGLE = 0x1000, K_SQUARE = 0x8000;
 constexpr int OSK_COLS = 10, OSK_CHAR_ROWS = 4, OSK_ROWS = 5;
 const char* const k_osk_rows[OSK_CHAR_ROWS] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL'", "ZXCVBNM-.!"};
-// Bottom row: four wide keys over the ten columns.
-enum { SK_CASE, SK_SPACE, SK_DELETE, SK_DONE };
-const int k_sk_first[4] = {0, 2, 7, 9}, k_sk_span[4] = {2, 5, 2, 1};
-int special_of(int col) { return col < 2 ? SK_CASE : col < 7 ? SK_SPACE : col < 9 ? SK_DELETE : SK_DONE; }
+// Bottom row: five wide keys over the ten columns.
+enum { SK_CASE, SK_SPACE, SK_PASTE, SK_DELETE, SK_DONE, SK_COUNT };
+const int k_sk_first[SK_COUNT] = {0, 2, 5, 7, 9}, k_sk_span[SK_COUNT] = {2, 3, 2, 2, 1};
+int special_of(int col) { return col < 2 ? SK_CASE : col < 5 ? SK_SPACE : col < 7 ? SK_PASTE : col < 9 ? SK_DELETE : SK_DONE; }
+std::atomic<bool> g_osk_paste{false};   // Paste pressed: the event loop (main thread) reads the clipboard and types it
 
 std::mutex g_osk_mu;
 std::vector<uint32_t> g_osk_keys;
@@ -1544,6 +1545,7 @@ void osk_set_active(bool on) {
     g_osk_keys.clear();
 }
 bool osk_active() { return g_osk_active.load(std::memory_order_relaxed); }
+bool osk_take_paste_request() { return g_osk_paste.exchange(false); }
 void osk_push_key(uint32_t cp) {
     if (!g_osk_active.load()) return;
     std::lock_guard<std::mutex> g(g_osk_mu);
@@ -1584,7 +1586,7 @@ void KeyboardDialog::move(int dr, int dc) {
         if (row_ == OSK_CHAR_ROWS) col_ = k_sk_first[special_of(col_)];
     }
     if (dc) {
-        if (row_ == OSK_CHAR_ROWS) col_ = k_sk_first[(special_of(col_) + dc + 4) % 4];
+        if (row_ == OSK_CHAR_ROWS) col_ = k_sk_first[(special_of(col_) + dc + SK_COUNT) % SK_COUNT];
         else col_ = (col_ + dc + OSK_COLS) % OSK_COLS;
     }
     ++rev_;
@@ -1600,6 +1602,7 @@ void KeyboardDialog::press() {
     switch (special_of(col_)) {
     case SK_CASE: lower_ = !lower_; ++rev_; break;
     case SK_SPACE: type(u' '); break;
+    case SK_PASTE: g_osk_paste = true; break;
     case SK_DELETE: erase(); break;
     case SK_DONE: done_ = true; break;
     }
@@ -1716,8 +1719,8 @@ void KeyboardDialog::render(Canvas& c) const {
             key(gx + float(col) * (kw + gap), gy + float(r) * (kh + gap), kw, std::string(1, ch),
                 row_ == r && col_ == col, false);
         }
-    static const char* const sk_label[4] = {"Aa", "Space", "Delete", "Done"};
-    for (int k = 0; k < 4; ++k) {
+    static const char* const sk_label[SK_COUNT] = {"Aa", "Space", "Paste", "Delete", "Done"};
+    for (int k = 0; k < SK_COUNT; ++k) {
         const float x = gx + float(k_sk_first[k]) * (kw + gap);
         const float w = float(k_sk_span[k]) * kw + float(k_sk_span[k] - 1) * gap;
         key(x, gy + float(OSK_CHAR_ROWS) * (kh + gap), w, k == SK_CASE ? (lower_ ? "abc" : "ABC") : sk_label[k],

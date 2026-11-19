@@ -2,6 +2,7 @@
 #include "psp_quit.h"
 #include "hle/psp_savedata_dialog.h"
 #include "psp_ge_draw.h"
+#include "hle/psp_hle_adhoc.h"
 #include "psp_post.h"
 #include "psp_screenfx.h"
 #include "psp_rt.h"
@@ -1337,6 +1338,7 @@ static int g_ring_mode = 0;
 static int g_sync_mode = 0;
 static bool g_sync_each = false;
 static std::atomic<bool> g_fx_live{true};     // settings menu Debug page: FX shaders on/off (this session)
+static std::atomic<bool> g_ping_overlay{false};   // ping to the other players, next to the fps number (settings menu Network page / PSPRECOMP_PING_OVERLAY=1)
 static std::atomic<bool> g_fps_counter{false};   // simple transparent fps number (settings menu Display page / PSPRECOMP_FPS_COUNTER=1)
 static std::atomic<bool> g_perf_hud{false};   // settings menu Debug page / PSPRECOMP_PERF_HUD=1
 static Stream g_s2d, g_s3d;
@@ -1859,6 +1861,8 @@ void ge_draw_set_sync_mode(int mode) {
 int ge_draw_ring_mode() { return g_ring_mode; }
 bool ge_draw_perf_overlay() { return g_perf_hud.load(); }
 bool ge_draw_fps_counter() { return g_fps_counter.load(); }
+bool ge_draw_ping_overlay() { return g_ping_overlay.load(); }
+void ge_draw_set_ping_overlay(bool on) { g_ping_overlay = on; }
 void ge_draw_set_fps_counter(bool on) {
     g_fps_counter = on;
     std::fprintf(stderr, "[DRAW] fps counter %s\n", on ? "on" : "off");
@@ -2585,6 +2589,7 @@ void ge_draw_init() {
     g_cpu_xform = std::getenv("PSPRECOMP_GE_CPU3D") != nullptr;
     if (const char* ph = std::getenv("PSPRECOMP_PERF_HUD")) { g_perf_hud = ph[0] && ph[0] != '0'; perf_overlay_apply(g_perf_hud.load()); }
     if (const char* fc = std::getenv("PSPRECOMP_FPS_COUNTER")) g_fps_counter = fc[0] && fc[0] != '0';
+    if (const char* po = std::getenv("PSPRECOMP_PING_OVERLAY")) g_ping_overlay = po[0] && po[0] != '0';
     g_nobatch = std::getenv("PSPRECOMP_GE_NOBATCH") != nullptr;
     if (const char* sm = std::getenv("PSPRECOMP_GE_SYNC")) {
         g_sync_mode = !std::strcmp(sm, "flush") ? 4 : std::atoi(sm);
@@ -5752,8 +5757,24 @@ static void present_blend_hud(HudBlend& st, const std::string& text, bool& text_
 
 static void present_fps_counter(const PresentRect& pr) {
     static HudBlend st;
-    if (!g_fps_counter.load(std::memory_order_relaxed)) return;
-    present_blend_hud(st, g_perf.fps_text, g_perf.fps_dirty, false, 0.95f, pr);
+    static std::string shown, ping_text;
+    static bool dirty = false;
+    static std::chrono::steady_clock::time_point ping_next{};
+    const bool fps = g_fps_counter.load(std::memory_order_relaxed), ping = g_ping_overlay.load(std::memory_order_relaxed);
+    if (!fps && !ping) return;
+    if (ping) {   // read four times a second (it takes the ad-hoc lock); only while in an online group
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= ping_next) {
+            ping_next = now + std::chrono::milliseconds(250);
+            const int ms = psp_adhoc_connected() ? psp_adhoc_ping_ms() : -2;
+            ping_text = ms == -2 ? "" : ms < 0 ? "Ping --" : "Ping " + std::to_string(ms) + " ms";
+        }
+    }
+    std::string text = fps ? g_perf.fps_text : std::string();
+    if (ping && !ping_text.empty()) text += (text.empty() ? "" : "  ") + ping_text;
+    if (text != shown) { shown = text; dirty = true; }
+    if (g_perf.fps_dirty) { g_perf.fps_dirty = false; dirty = true; }
+    present_blend_hud(st, shown, dirty, false, 0.95f, pr);
 }
 static void present_perf_hud(const PresentRect& pr) {
     static HudBlend st;

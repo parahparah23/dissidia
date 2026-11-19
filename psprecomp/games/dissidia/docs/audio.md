@@ -160,10 +160,25 @@ No per-action attribution was made.
 option of the installed game (the installer wizard runs it when "Japanese voices (undub)" is switched on). It compares the undub disc's
 `DATA/PACKAGE.BIN` with the installed one and extracts only audio that differs: the `voice/en/*` entries into `<work>/voice_jp/` (same
 asset paths: the game asks for the English path and the loose-file layer serves the Japanese file), audio entries whose path is not in
-`package_paths.txt` (RIFF / SSCF data) into `<work>/voice_jp/by_crc/<crc>.bin`, and the `DATA/MOVIE/*.PMF` that differ into
-`<work>/movie_jp/`. Menus, text and other languages stay as they are. Checked on the EU image with the USA undub: 5,663 voice files
+`package_paths.txt` (RIFF / SSCF data) into `<work>/voice_jp/by_crc/<crc>.bin`, and for the `DATA/MOVIE/*.PMF` that differ, the
+installed movie with the undub's sound spliced in, into `<work>/movie_jp/`. Menus, text and other languages stay as they are. Checked on the EU image with the USA undub: 5,663 voice files
 (177 MB), 316 by-CRC audio entries and 34 movies (488 MB); a second run extracts nothing new.
 
 In the game: Settings > System > Voice (appears once `voice_jp/` exists; `voice=jp|en` in settings.ini, `PSPRECOMP_VOICE=jp|en`), applied at the
 next start. The runtime side is `games/dissidia/runtime/hooks_io.cpp` (`extra_dirs` voice pack in `PackageMods::build`, `remap_disc_path`
 for movies). Built and linked 2026-11-10; **not yet heard in game**.
+
+**Movies keep the player's picture** (since 18 November 2026, `splice_movie_audio`). The USA undub has another picture in six of its 34
+differing movies (`END`, `UP_END`, `UP_GIL`, `UP_OPN`, `UP_PRI`, `DES01_010`), so a whole copy showed it with Japanese voices on. A PMF is
+2,048-byte packs of whole PES packets; the sound is private stream 1 (`0xBD`): a 4-byte header (stream number, where the first frame
+starts) then 752-byte ATRAC3plus frames, contiguous from the first sound byte on both discs. So the undub's sound byte n goes where the
+installed movie's sound byte n is, and every header stays right. `DES01_010`'s undub sound is one frame longer: the last frame is left
+out. A movie whose streams do not have that layout is copied whole, as before. Method from VCKing101's port
+(https://github.com/VCKing101/Dissidia012-pc, `docs/port/japanese-voices.md`, "Movies"). Checked on the EU disc with the USA undub:
+all 34 have the installed picture byte for byte and the undub's sound byte for byte.
+
+**Story scenes are not fixed.** The undub disc changes only sound files: no `talkevent/*.evex` scene script differs from retail. Each
+line of a scene waits a fixed time tuned to its own release's recording, and 302 voiced scenes have other scripts on the Japanese disc
+(55 with other voice lists, 247 with other waits; VCKing101, same doc, "Story scenes"). On the undub, as on a PSP running it, Japanese
+lines play on the English scripts: some are cut off, a few play under the wrong line (012 Chapter 2, Vaan and Terra), and 013's
+narrations mix English-only recordings into the Japanese ones. Fixing that needs the Japanese disc (NPJH-50377) for its scripts.

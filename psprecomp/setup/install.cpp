@@ -1,4 +1,5 @@
 #include "install.h"
+#include "extras.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9,7 +10,14 @@
 #include <sstream>
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
+#else
+#include <unistd.h>
 #endif
+#include <cstdint>
+#include <cstring>
+#include <vector>
+#include "third_party/miniz.h"
 
 namespace fs = std::filesystem;
 
@@ -90,12 +98,233 @@ std::string Layout::problem() const {
     return "";
 }
 
-const char* texture_pack_title(const std::string& pack) {
-    return pack == "ai" ? "AI upscaled (D012FFRT + upscales)" : "LiinkPK's HD Project (hand-retouched)";
+// ---- disc identity: which game a picked disc image is (before anything is installed with it) ----
+namespace {
+// A disc image read in place: plain ISO or CSO (CISO v1, raw deflate blocks; the wizard's undub pick accepts both).
+struct DiscReader {
+    int fd = -1;               // "fd:N": pread, so the build tools that inherit the descriptor find it where it was
+    std::ifstream f;
+    bool cso = false;
+    uint32_t block = 0, align = 0;
+    uint64_t total = 0;
+    std::vector<uint32_t> index;
+    int64_t cached = -1;
+    std::string cache;
+    explicit DiscReader(const std::string& path) {
+        if (path.compare(0, 3, "fd:") == 0) fd = std::atoi(path.c_str() + 3);
+        else f.open(fs::u8path(path), std::ios::binary);
+        std::string h;
+        if (!ok() || !raw(0, 24, &h) || h.compare(0, 4, "CISO") != 0) return;
+        block = (uint32_t)(uint8_t)h[16] | (uint32_t)(uint8_t)h[17] << 8 | (uint32_t)(uint8_t)h[18] << 16 | (uint32_t)(uint8_t)h[19] << 24;
+        for (int i = 7; i >= 0; i--) total = total << 8 | (uint8_t)h[8 + i];
+        align = (uint8_t)h[21];
+        if ((uint8_t)h[20] > 1 || block < 2048 || (block & (block - 1)) || total == 0 || total > (1ull << 40)) { fd = -1; f.close(); return; }
+        const uint64_t n = (total + block - 1) / block + 1;
+        std::string ix;
+        if (!raw(24, (size_t)n * 4, &ix)) { fd = -1; f.close(); return; }
+        index.resize((size_t)n);
+        for (size_t i = 0; i < n; i++)
+            index[i] = (uint32_t)(uint8_t)ix[4 * i] | (uint32_t)(uint8_t)ix[4 * i + 1] << 8 | (uint32_t)(uint8_t)ix[4 * i + 2] << 16 | (uint32_t)(uint8_t)ix[4 * i + 3] << 24;
+        cso = true;
+    }
+    bool ok() const { return fd >= 0 || f.is_open(); }
+    bool raw(uint64_t off, size_t n, std::string* out) {
+        out->assign(n, '\0');
+        if (n == 0) return true;
+#ifndef _WIN32
+        if (fd >= 0) {
+            size_t got = 0;
+            while (got < n) {
+                const ssize_t r = ::pread(fd, &(*out)[got], n - got, static_cast<off_t>(off + got));
+                if (r <= 0) return false;
+                got += static_cast<size_t>(r);
+            }
+            return true;
+        }
+#endif
+        if (!f.is_open()) return false;
+        f.clear();
+        f.seekg(static_cast<std::streamoff>(off));
+        f.read(&(*out)[0], static_cast<std::streamsize>(n));
+        return static_cast<size_t>(f.gcount()) == n;
+    }
+    bool cso_block(uint64_t i) {
+        if ((int64_t)i == cached) return true;
+        if (i + 1 >= index.size()) return false;
+        const uint64_t a = (uint64_t)(index[i] & 0x7FFFFFFFu) << align, b = (uint64_t)(index[i + 1] & 0x7FFFFFFFu) << align;
+        if (b < a || b - a > (uint64_t)block * 2 + 64) return false;
+        std::string src;
+        if (!raw(a, (size_t)(b - a), &src)) return false;
+        if (index[i] & 0x80000000u) { src.resize(std::min<size_t>(src.size(), block)); cache.swap(src); }
+        else {
+            cache.assign(block, '\0');
+            const size_t got = tinfl_decompress_mem_to_mem(&cache[0], block, src.data(), src.size(), 0);
+            if (got == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) return false;
+            cache.resize(got);
+        }
+        cached = (int64_t)i;
+        return true;
+    }
+    bool read(uint64_t off, size_t n, std::string* out) {   // `n` bytes of the disc at `off`
+        if (!cso) return raw(off, n, out);
+        out->clear();
+        if (off + n > total) return false;
+        while (out->size() < n) {
+            const uint64_t p = off + out->size(), bi = p / block, in = p % block;
+            if (!cso_block(bi) || in >= cache.size()) return false;
+            out->append(cache, (size_t)in, std::min<size_t>(cache.size() - (size_t)in, n - out->size()));
+        }
+        return true;
+    }
+};
+uint32_t le32(const std::string& s, size_t o) {
+    return o + 4 <= s.size() ? (uint32_t)(uint8_t)s[o] | (uint32_t)(uint8_t)s[o + 1] << 8 | (uint32_t)(uint8_t)s[o + 2] << 16 | (uint32_t)(uint8_t)s[o + 3] << 24 : 0;
 }
-const char* texture_pack_credit(const std::string& pack) {
-    return pack == "ai" ? "Credits: D012FFRT by Niosa (github.com/Niosa/D012FFRT); AI upscales by schindlershadow made with Real-ESRGAN (Xintao Wang et al.)."
-                        : "Credits: Dissidia 012 HD Project by LiinkPK (github.com/LiinkPK/Dissidia-012-HD-Textures); artwork also by ajb3art.";
+uint16_t le16(const std::string& s, size_t o) { return o + 2 <= s.size() ? (uint16_t)((uint8_t)s[o] | (uint8_t)s[o + 1] << 8) : 0; }
+// an ISO 9660 file or folder by its path ("PSP_GAME/PARAM.SFO"): extent and size
+bool iso_find(DiscReader& r, const std::string& path, uint32_t* out_lba, uint32_t* out_size) {
+    std::string pvd;
+    if (!r.read(16u * 2048u, 2048, &pvd) || pvd.compare(1, 5, "CD001") != 0) return false;
+    uint32_t lba = le32(pvd, 156 + 2), size = le32(pvd, 156 + 10);
+    size_t from = 0;
+    while (from <= path.size()) {
+        size_t to = path.find('/', from);
+        if (to == std::string::npos) to = path.size();
+        const std::string want = path.substr(from, to - from);
+        from = to + 1;
+        if (size == 0 || size > (1u << 20)) return false;
+        std::string d;
+        if (!r.read((uint64_t)lba * 2048u, size, &d)) return false;
+        bool found = false;
+        for (size_t p = 0; p < d.size();) {
+            const uint8_t len = (uint8_t)d[p];
+            if (len == 0) { p = (p / 2048 + 1) * 2048; continue; }          // records do not cross a sector
+            if (p + 33 > d.size() || p + len > d.size()) break;
+            const size_t nl = (uint8_t)d[p + 32];
+            std::string nm = d.substr(p + 33, std::min(nl, d.size() - p - 33));
+            if (size_t semi = nm.find(';'); semi != std::string::npos) nm.resize(semi);
+            for (char& ch : nm) ch = (char)std::toupper((unsigned char)ch);
+            if (nm == want) { lba = le32(d, p + 2); size = le32(d, p + 10); found = true; break; }
+            p += len;
+        }
+        if (!found) return false;
+    }
+    *out_lba = lba; *out_size = size;
+    return true;
+}
+bool disc_id(DiscReader& r, std::string* id, std::string* title) {
+    id->clear(); title->clear();
+    uint32_t lba = 0, size = 0;
+    if (!r.ok() || !iso_find(r, "PSP_GAME/PARAM.SFO", &lba, &size) || size < 20 || size > 65536) return false;
+    std::string s;
+    if (!r.read((uint64_t)lba * 2048u, size, &s) || s.compare(0, 4, std::string("\0PSF", 4)) != 0) return false;
+    const uint32_t keys = le32(s, 8), data = le32(s, 12), n = le32(s, 16);
+    for (uint32_t i = 0; i < n && 20 + 16 * (i + 1) <= s.size(); i++) {
+        const size_t e = 20 + 16 * i;
+        const size_t ko = keys + le16(s, e), dofs = data + le32(s, e + 12), dl = le32(s, e + 4);
+        if (ko >= s.size() || dofs > s.size() || le16(s, e + 2) == 0x404) continue;   // 0x404: integers, not needed
+        const std::string key = s.c_str() + ko;
+        std::string v = s.substr(dofs, std::min<size_t>(dl, s.size() - dofs));
+        if (size_t z = v.find('\0'); z != std::string::npos) v.resize(z);
+        if (key == "DISC_ID") *id = v;
+        else if (key == "TITLE") *title = v;
+    }
+    return !id->empty();
+}
+std::string lower(std::string s) { for (char& ch : s) ch = (char)std::tolower((unsigned char)ch); return s; }
+bool is_012(const std::string& id, const std::string& title) {
+    return lower(title).find("duodecim") != std::string::npos || id == "ULUS10566" || id == "ULES01505" || id == "ULJM05814" || id == "NPJH50377";
+}
+bool is_d1(const std::string& id, const std::string& title) {
+    return id == "ULUS10437" || (!is_012(id, title) && lower(title).find("dissidia") != std::string::npos);
+}
+std::string disc_words(const std::string& id, const std::string& title) { return (title.empty() ? std::string("this disc") : title) + " (" + id + ")"; }
+}  // namespace
+
+bool read_disc_id(const std::string& path, std::string* id, std::string* title) {
+    DiscReader r(path);
+    return disc_id(r, id, title);
+}
+
+std::string d1_disc_problem(const std::string& path) {
+    std::string id, title;
+    DiscReader r(path);
+    if (!disc_id(r, &id, &title))
+        return "This file is not a PSP disc image that can be read. Pick an uncompressed .iso of Dissidia Final Fantasy (USA); "
+               "unpack a .zip / .7z first.";
+    if (id == "ULUS10437") return "";
+    const std::string what = disc_words(id, title);
+    if (is_012(id, title))
+        return "This is Dissidia 012, " + what + ". The moves come from the first game: pick your Dissidia Final Fantasy "
+               "(2008, USA, ULUS-10437) disc image instead.";
+    if (is_d1(id, title))
+        return "This is another release of the first Dissidia, " + what + ". The moves are made from the US release only: "
+               "pick Dissidia Final Fantasy (USA, ULUS-10437).";
+    return "This is not Dissidia Final Fantasy: the disc is " + what + ". Pick Dissidia Final Fantasy (2008, USA, ULUS-10437).";
+}
+
+// The English battle voice bank of Bartz (voice/en/battle/voice_p_fiv100_00.scd, package CRC 0x4300D781) as the EU and US
+// discs have it: an image whose bank is this one has the English voices, so it is not an undub.
+constexpr uint32_t kVoiceProbeCrc = 0x4300D781u, kVoiceProbeEnSize = 302368u, kVoiceProbeEnCrc32 = 0x6EE2B876u;
+std::string undub_disc_problem(const std::string& path) {
+    std::string id, title;
+    DiscReader r(path);
+    if (!disc_id(r, &id, &title))
+        return "This file is not a PSP disc image that can be read. Pick a .iso or .cso of Dissidia 012 with Japanese voices; "
+               "unpack a .zip / .7z first.";
+    const std::string what = disc_words(id, title);
+    if (!is_012(id, title))
+        return (is_d1(id, title) ? "This is the first Dissidia, " : "This is not Dissidia 012: the disc is ") + what +
+               ". The Japanese voices come from a Dissidia 012 disc image that has them (an undub or the Japanese release).";
+    uint32_t il = 0, is = 0, pl = 0, ps = 0;
+    std::string info;
+    if (!iso_find(r, "PSP_GAME/USRDIR/DATA/PACKAGE_INFO.BIN", &il, &is) || !iso_find(r, "PSP_GAME/USRDIR/DATA/PACKAGE.BIN", &pl, &ps) ||
+        is < 16 || is > (4u << 20) || !r.read((uint64_t)il * 2048u, is, &info) || info.compare(4, 4, "pack") != 0)
+        return "The voice files of this disc image cannot be read (" + what + "). Pick another image of the undub or Japanese release.";
+    const uint32_t count = le32(info, 8);
+    for (uint32_t i = 0; i < count && 16 + 12 * (i + 1) <= info.size(); i++) {
+        if (le32(info, 16 + 12 * i) != kVoiceProbeCrc) continue;
+        const uint64_t off = (uint64_t)pl * 2048u + (uint64_t)le32(info, 16 + 12 * i + 4) * 2048u;
+        const uint32_t size = le32(info, 16 + 12 * i + 8) & 0x0FFFFFFFu;
+        std::string bank;
+        if (size == kVoiceProbeEnSize && r.read(off, size, &bank) &&
+            mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(bank.data()), bank.size()) == kVoiceProbeEnCrc32)
+            return "This disc has the English voices, " + what + ": it is a regular Dissidia 012, like your own. Pick the undub "
+                   "(a patched copy with the Japanese voices) or the Japanese release.";
+        return "";
+    }
+    return "";   // no English bank to compare with (a release that names its files differently): not refused here
+}
+
+bool open_on_desktop(const std::string& path, bool show_in_folder, std::string* error) {
+#if defined(__ANDROID__)
+    (void)path; (void)show_in_folder;
+    if (error) *error = "not available on Android";
+    return false;
+#elif defined(_WIN32)
+    auto wide = [](const std::string& s) {
+        std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0), L'\0');
+        if (!w.empty()) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], (int)w.size());
+        if (!w.empty() && w.back() == L'\0') w.pop_back();
+        return w;
+    };
+    std::string p = path;
+    for (char& ch : p) if (ch == '/') ch = '\\';
+    HINSTANCE r;
+    if (show_in_folder) {
+        const std::wstring args = L"/select,\"" + wide(p) + L"\"";
+        r = ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+    } else {
+        r = ShellExecuteW(nullptr, L"open", wide(p).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    if ((INT_PTR)r <= 32) { if (error) *error = "Windows could not open " + p; return false; }
+    return true;
+#elif defined(__APPLE__)
+    return spawn_detached(show_in_folder ? std::vector<std::string>{"open", "-R", path} : std::vector<std::string>{"open", path}, {}, "", error);
+#else
+    const std::string target = show_in_folder ? fs::path(path).parent_path().string() : path;
+    return spawn_detached({"xdg-open", target}, {}, "", error);
+#endif
 }
 
 bool feature_available(const Layout& l, const std::string& name) {
@@ -128,19 +357,6 @@ static Step build_step(const Layout& l, const std::string& workdir, bool android
     return b;
 }
 
-// An xdelta ISO patch becomes a mod folder (tools/xdelta_mod.py import, from the extracted game files: the disc image is not
-// needed again). Runs before the build: build-code (psp_build.py) compiles the code the patch changes into the game.
-static Step xdelta_step(const Layout& l, const std::string& workdir, const Options& o) {
-    Step x;
-    x.label = "Applying the ISO patch";
-    x.explain = "Applies " + fs::path(o.xdelta_patch).filename().string() + " to the game files and keeps what it changes as a mod (Settings > Mods turns it off and on).";
-    x.argv = {l.python, join(l.game_dir, "tools/xdelta_mod.py"), "import", o.xdelta_patch, "--work", workdir};
-    x.env = {{"PYTHONUNBUFFERED", "1"}};
-    x.weight = 0.03;
-    return x;
-}
-static bool want_xdelta(const Layout& l, const Options& o) { return !o.xdelta_patch.empty() && feature_available(l, "xdelta"); }
-
 static void finish_plan(std::vector<Step>& plan) {
     double total = 0;
     for (auto& s : plan) total += s.weight;
@@ -162,37 +378,9 @@ std::vector<Step> plan_rebuild(const Layout& l, const std::string& workdir, cons
     return p;
 }
 
-// The optional extras after the game is built: the HD texture pack, the Japanese voices, the saves. `textures` = fetch the pack
-// (false when it is already installed and only the other extras are wanted).
-static void append_extras(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
-    if (!skip_textures && o.hd_textures && feature_available(l, "hd_textures")) {
-        Step t;
-        const bool ai = o.texture_pack == "ai";
-        t.label = ai ? "Downloading the AI upscaled textures" : "Downloading the HD textures";
-        t.explain = ai ? "Downloads the AI upscaled HD textures (about 1.3 GB)." : "Downloads LiinkPK's HD textures (about 0.8 GB).";
-        t.argv = {l.python, join(l.game_dir, "tools/fetch_textures.py"), workdir, "--pack", ai ? "ai" : "liink"};
-        t.env = {{"PYTHONUNBUFFERED", "1"}};
-        t.weight = 0.06;
-        p.push_back(t);
-    }
-    if (o.jp_audio && feature_available(l, "jp_audio") && !o.undub_iso.empty()) {
-        Step j;
-        j.label = "Extracting the Japanese voices";
-        j.explain = "Adds the Japanese voices and movies from the undub disc.";
-        j.argv = {l.python, join(l.game_dir, "tools/jp_audio.py"), "--iso", o.undub_iso, "--work", workdir};
-        j.env = {{"PYTHONUNBUFFERED", "1"}};
-        j.weight = 0.05;
-        p.push_back(j);
-    }
-    if (o.d1_moves && feature_available(l, "d1_moves") && !o.d1_iso.empty()) {
-        Step d;
-        d.label = "Adding Bartz's Dissidia 1 moves";
-        d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
-        d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
-        d.env = {{"PYTHONUNBUFFERED", "1"}};
-        d.weight = 0.01;
-        p.push_back(d);
-    }
+// The optional extras after the game is built (the shared list in extras.cpp; prev = what is installed for Change extras), then the saves.
+static void append_extras(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, const Options* prev) {
+    plan_extra_steps(p, ExtraCtx{l, workdir, false}, o, prev);
     if (!o.import_saves.empty()) {
         Step v;
         v.label = "Importing your saves";
@@ -211,26 +399,18 @@ std::vector<Step> plan_install(const Layout& l, const std::string& iso, const st
     x.env = {{"PSPRECOMP_TOOLCHAIN", l.toolchain}, {"PYTHONUNBUFFERED", "1"}};
     x.weight = 0.08;
     std::vector<Step> p{x};
-    const size_t first_build = want_xdelta(l, o) ? 2 : 1;
-    if (want_xdelta(l, o)) p.push_back(xdelta_step(l, workdir, o));
     for (auto& s : plan_rebuild(l, workdir, o)) p.push_back(s);   // weights are renormalised below
     // plan_rebuild() normalised its own steps; restore their relative sizes
-    for (size_t i = first_build; i < p.size(); i++) p[i].weight = i == first_build ? 0.84 : 0.60;
-    append_extras(p, l, workdir, o, false);
+    for (size_t i = 1; i < p.size(); i++) p[i].weight = i == 1 ? 0.84 : 0.60;
+    append_extras(p, l, workdir, o, nullptr);
     if (o.steam && feature_available(l, "steam")) for (auto& st : plan_steam(l, workdir)) { st.weight = 0.03; p.push_back(st); }
     finish_plan(p);
     return p;
 }
 
-std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
+std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& prev, const Options& o) {
     std::vector<Step> p;
-    if (want_xdelta(l, o)) {   // the patch, then a rebuild (incremental: only its code is compiled)
-        p.push_back(xdelta_step(l, workdir, o));
-        Step b = build_step(l, workdir, false);
-        b.weight = 0.5;
-        p.push_back(b);
-    }
-    append_extras(p, l, workdir, o, skip_textures);
+    append_extras(p, l, workdir, o, &prev);
     if (o.android && feature_available(l, "android")) {
         Step a = build_step(l, workdir, true);
         a.weight = 0.60;
@@ -319,65 +499,13 @@ std::string android_payload_fingerprint(const Layout& l) {
 
 std::vector<Step> plan_rebuild_android(const Layout& l, const std::string& workdir) {
     Options none;
-    none.hd_textures = false;
+    for (const Extra& e : extras()) none.set(e.key, "0");   // the build only
     std::vector<Step> all = plan_install_android(l, "", workdir, none);
     std::vector<Step> p(all.begin() + 1, all.end());   // without "Reading your game file": the disc is already extracted
     for (auto& s : p) { s.base = 0; }
     p[0].weight = 0.88; p[1].weight = 0.12;
     finish_plan(p);
     return p;
-}
-
-static void append_extras_android(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
-    if (want_xdelta(l, o)) {
-        Step x = xdelta_step(l, workdir, o);
-        x.env = android_env(l, workdir);
-        p.push_back(x);
-    }
-    if (!skip_textures && o.hd_textures && feature_available(l, "hd_textures")) {
-        const std::string mods = join(workdir, "mods");
-        std::error_code mk;
-        fs::create_directories(mods, mk);
-        const bool ai = o.texture_pack == "ai";
-        Step d;
-        d.label = ai ? "Downloading the AI upscaled textures" : "Downloading the HD textures";
-        d.explain = ai ? "Downloads the AI upscaled textures (about 1.3 GB). WiFi is best." : "Downloads LiinkPK's HD textures (about 0.8 GB). WiFi is best.";
-        Step t;
-        t.label = "Unpacking the HD textures";
-        t.explain = "Unpacks the textures into the mods folder.";
-        t.argv = {l.python, join(l.game_dir, "tools/fetch_textures.py"), workdir, "--pack", ai ? "ai" : "liink", "--consume-zips"};
-        if (ai) {
-            d.downloads = {{"https://codeload.github.com/Niosa/D012FFRT/zip/main", join(mods, ".d012ffrt.zip")},
-                           {"https://codeload.github.com/schindlershadow/dissidia-hd-textures/zip/main", join(mods, ".hdtextures.zip")}};
-            t.argv.insert(t.argv.end(), {"--zip", join(mods, ".d012ffrt.zip"), "--ids-zip", join(mods, ".hdtextures.zip")});
-        } else {
-            d.downloads = {{"https://codeload.github.com/LiinkPK/Dissidia-012-HD-Textures/zip/master", join(mods, ".liink.zip")}};
-            t.argv.insert(t.argv.end(), {"--zip", join(mods, ".liink.zip")});
-        }
-        t.env = android_env(l, workdir);
-        d.weight = 0.25;
-        t.weight = 0.06;
-        p.push_back(d);
-        p.push_back(t);
-    }
-    if (o.jp_audio && feature_available(l, "jp_audio") && !o.undub_iso.empty()) {
-        Step j;
-        j.label = "Extracting the Japanese voices";
-        j.explain = "Adds the Japanese voices and movies from the undub disc.";
-        j.argv = {l.python, join(l.game_dir, "tools/jp_audio.py"), "--iso", o.undub_iso, "--work", workdir};
-        j.env = android_env(l, workdir);
-        j.weight = 0.05;
-        p.push_back(j);
-    }
-    if (o.d1_moves && feature_available(l, "d1_moves") && !o.d1_iso.empty()) {
-        Step d;
-        d.label = "Adding Bartz's Dissidia 1 moves";
-        d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
-        d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
-        d.env = android_env(l, workdir);
-        d.weight = 0.01;
-        p.push_back(d);
-    }
 }
 
 std::vector<Step> plan_install_android(const Layout& l, const std::string& iso, const std::string& workdir, const Options& o) {
@@ -404,28 +532,18 @@ std::vector<Step> plan_install_android(const Layout& l, const std::string& iso, 
     c.weight = 0.10;
     std::vector<Step> p{x};
     // the extras go in before the files are copied to the game's folder
-    append_extras_android(p, l, workdir, o, false);
+    plan_extra_steps(p, ExtraCtx{l, workdir, true}, o, nullptr);
     p.push_back(b);
     p.push_back(c);
     finish_plan(p);
     return p;
 }
 
-std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
+std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdir, const Options& prev, const Options& o) {
     std::error_code ec;
     fs::create_directories(join(workdir, "tmp"), ec);
     std::vector<Step> p;
-    append_extras_android(p, l, workdir, o, skip_textures);
-    if (want_xdelta(l, o)) {   // the code it changes is compiled into the game: rebuild before the files are copied
-        Step b;
-        b.label = "Building the game on this device";
-        b.explain = "Builds the game again with the patch's code (only what changed is compiled).";
-        b.is_build = true;
-        b.argv = {l.python, l.build_script, workdir, "--android", l.android_dir, "--psprecomp", l.recompiler, "--game", l.game_dir, "--progress"};
-        b.env = android_env(l, workdir);
-        b.weight = 0.5;
-        p.push_back(b);
-    }
+    plan_extra_steps(p, ExtraCtx{l, workdir, true}, o, &prev);
     Step c;
     c.label = "Putting the game files where the game can read them";
     c.explain = "Copies the files to where the game reads them.";
@@ -610,12 +728,9 @@ State load_state(const std::string& file) {
         else if (k == "version") s.version = v;
         else if (k == "built_fp") s.built_fp = v;
         else if (k == "check_updates") s.options.check_updates = v != "0";
-        else if (k == "hd_textures") s.options.hd_textures = v == "1";
-        else if (k == "texture_pack") s.options.texture_pack = v == "ai" ? "ai" : "liink";
-        else if (k == "jp_audio") s.options.jp_audio = v == "1";
-        else if (k == "d1_moves") s.options.d1_moves = v == "1";
         else if (k == "android") s.options.android = v == "1";
-        else if (k == "undub_iso") s.options.undub_iso = v;
+        else if (find_extra(k)) s.options.set(k, v);   // the extras (extras.cpp), whatever they are
+        else for (const Extra& e : extras()) if (!e.disc.key.empty() && e.disc.key == k) s.options.set(k, v);
     }
     return s;
 }
@@ -624,8 +739,12 @@ bool save_state(const std::string& file, const State& s) {
     std::ofstream f(file, std::ios::trunc);
     if (!f) return false;
     f << "workdir=" << s.workdir << "\niso=" << s.iso << "\nversion=" << s.version << "\n"
-      << "check_updates=" << s.options.check_updates << "\nhd_textures=" << s.options.hd_textures << "\ntexture_pack=" << s.options.texture_pack << "\njp_audio=" << s.options.jp_audio << "\nd1_moves=" << s.options.d1_moves
-      << "\nandroid=" << s.options.android << "\nundub_iso=" << s.options.undub_iso << "\nbuilt_fp=" << s.built_fp << "\n";
+      << "check_updates=" << s.options.check_updates << "\nandroid=" << s.options.android << "\n";
+    for (const Extra& e : extras()) {
+        f << e.key << "=" << s.options.get(e.key) << "\n";
+        if (!e.disc.key.empty()) f << e.disc.key << "=" << s.options.get(e.disc.key) << "\n";
+    }
+    f << "built_fp=" << s.built_fp << "\n";
     return (bool)f;
 }
 

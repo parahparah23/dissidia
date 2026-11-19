@@ -12,7 +12,11 @@
 #include "psp_ge_texture.h"
 #include "hle/psp_savedata_dialog.h"
 #include "hle/psp_hle_adhoc.h"
+#include "hle/psp_upnp.h"
 #include "hle/psp_cloud_service.h"
+#include "hle/psp_cloud_glue.h"
+#include "hle/psp_saves_page.h"
+#include "psp_file_dialog.h"
 #include "psp_gpu_driver.h"
 #include "psp_gl_window.h"
 #include "psp_discord.h"
@@ -165,8 +169,8 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_UPDATES, ROW_QUIT,
-           ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
+           ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
@@ -178,18 +182,29 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_MOD0, ROW_MOD_END = ROW_MOD0 + 31, ROW_MODS_NONE,   // Mods page: one toggle per mod folder, or a note when there are none
            ROW_MOD_INSTALL, ROW_MOD_INSTALL_STATUS,                // Mods page: install a mod from a file (a game module's PspModInstaller)
            ROW_MOD_UNINSTALL,                                       // Mods page: delete an installed mod folder (pick, then confirm twice)
+           ROW_CLOUD_CONFLICTS,                 // Cloud page: saves waiting for a choice (opens Saves)
+           ROW_EXT0, ROW_EXT_END = ROW_EXT0 + 219,   // Saves page: the rows psp_saves::Page builds (headers included)
            ROW_SEC_WINDOW, ROW_SEC_PERF, ROW_SEC_QUALITY, ROW_SEC_AA, ROW_SEC_TEX, ROW_SEC_ENGINE, ROW_SEC_COLOUR, ROW_SEC_HDR, ROW_SEC_LIGHT,
-           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD,   // section captions (not selectable)
+           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD, ROW_SEC_KEYBOARD,   // section captions (not selectable)
            ROW_COUNT };
 static_assert(ROW_COUNT < psp_sddialog::SET_MAX_IDS, "row ids are animation slots");
-bool is_section(Row r) { return r >= ROW_SEC_WINDOW && r < ROW_COUNT; }
+// Settings > Saves (psp_saves_page.h): its rows are ROW_EXT0 + i.
+psp_saves::Page g_saves;
+bool g_saves_env = false;               // the page has the game's folders (known once the game booted)
+bool is_ext_row(int r) { return r >= ROW_EXT0 && r <= ROW_EXT_END; }
+bool is_section(Row r) {
+    if (is_ext_row(r)) { const auto& v = g_saves.rows(); const size_t i = size_t(r - ROW_EXT0); return i < v.size() && v[i].kind == psp_sddialog::SetKind::Header; }
+    return r >= ROW_SEC_WINDOW && r < ROW_COUNT;
+}
 std::vector<Row> g_rows;
+std::vector<std::pair<std::string, std::string>> p1_choices();
+int p1_index(const std::vector<std::pair<std::string, std::string>>& v);
 int g_sel = 0;
 // Pages: the categories shown in the sidebar, and the sub-menus a row can open (PAGE_HDR under Image, PAGE_RT under Effects).
 enum Page { PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS, PAGE_CONTROLS, PAGE_NETWORK, PAGE_CLOUD, PAGE_SYSTEM, PAGE_GPU, PAGE_DEBUG, PAGE_MODS,
-            PAGE_HDR, PAGE_RT, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
+            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
 constexpr int k_env_cats = 11;   // = EC_COUNT (psp_env_options.inc)
-const char* const k_page_names[PAGES] = {"Display", "Graphics", "Image", "Effects", "Controls", "Network", "Cloud", "System", "Drivers", "Debug", "Mods",
+const char* const k_page_names[PAGES] = {"Display", "Graphics", "Image", "Effects", "Controls", "Network", "Cloud", "System", "Drivers", "Debug", "Mods", "Saves",
                                          "HDR", "Ray Tracing",
                                          "Camera", "Input", "Timing", "Graphics", "Effects tuning", "Vulkan", "Textures", "Audio / video", "Game data", "Game logs", "Engine logs"};
 int g_page = 0;                        // the category (an index into page_list()): L / R, Q / E or Tab, the sidebar
@@ -197,13 +212,13 @@ int g_sub = -1;                        // the open sub-menu page, -1 = none
 int g_sel_page[PAGES] = {};
 bool g_touch_ui = false;               // a touch screen is present (or the on-screen controls are forced on): the Controls tab is shown
 // The categories this device shows: Drivers (custom GPU drivers) only where they can be used (an Adreno phone with the Android build),
-// Controls only with a touch screen.
+// Controls on every device (its touch section only with a touch screen).
 std::vector<int> g_pages;
 const std::vector<int>& page_list() {
     if (g_pages.empty()) {
         g_pages = {PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS};
-        if (g_touch_ui) g_pages.push_back(PAGE_CONTROLS);
-        g_pages.push_back(PAGE_NETWORK); g_pages.push_back(PAGE_CLOUD); g_pages.push_back(PAGE_MODS); g_pages.push_back(PAGE_SYSTEM);
+        g_pages.push_back(PAGE_CONTROLS);   // controller settings everywhere; its touch rows only with a touch screen
+        g_pages.push_back(PAGE_NETWORK); g_pages.push_back(PAGE_SAVES); g_pages.push_back(PAGE_CLOUD); g_pages.push_back(PAGE_MODS); g_pages.push_back(PAGE_SYSTEM);
         if (psp_gpu::supported(nullptr)) g_pages.push_back(PAGE_GPU);
         g_pages.push_back(PAGE_DEBUG);
     }
@@ -211,7 +226,7 @@ const std::vector<int>& page_list() {
 }
 int page_id() { return g_sub >= 0 ? g_sub : page_list()[size_t(g_page)]; }
 // Sidebar icon of a page (settings_render.inc draw_icon).
-int page_icon(int page) { return page <= PAGE_MODS ? page : (page == PAGE_HDR ? PAGE_IMAGE : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
+int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
 int g_ring_next = -1;                  // vertex upload mode saved for the next launch (-1 = unchanged)
 bool g_quit_armed = false;
 bool g_dirty = true;
@@ -314,7 +329,7 @@ constexpr int k_max_rs = 16;   // 16x = 7680x4352 (8K); the draw layer clamps to
 // ---- Network page --------------------------------------------------------------------------------------
 constexpr const char* NET_DEFAULT_SERVER = "party.schindlershadow.com:27500";
 bool g_net_internet = true;
-std::string g_net_server = NET_DEFAULT_SERVER, g_net_room, g_net_peers, g_net_status, g_discord_status;
+std::string g_net_server = NET_DEFAULT_SERVER, g_net_room, g_net_peers, g_net_status, g_discord_status, g_upnp_status;
 bool g_net_loaded = false;
 int64_t g_status_next = 0;
 
@@ -322,17 +337,18 @@ int64_t g_status_next = 0;
 // the settings view) is driven by pad, mouse or touch.
 struct Edit {
     bool active = false;
-    int field = 0;          // 0 server, 1 room, 2 peers, 3 sync folder, 4 WebDAV address, 5 WebDAV user, 6 WebDAV password
+    int field = 0;          // 0 server, 1 room, 2 peers, 3 sync folder, 4 WebDAV address, 5 WebDAV user, 6 WebDAV password, 7 a Saves page question
     std::string buf;
     int row = 1, col = 0;   // the focused key of the on-screen keyboard
     bool shift = false, symbols = false;
 } g_edit;
 const char* edit_label() {
     static const char* const n[] = {"Server", "Room", "Direct Peers", "Sync Folder", "WebDAV Address", "WebDAV User", "WebDAV Password"};
+    if (g_edit.field == 7) { static std::string t; psp_saves::TextAsk a; g_saves.text(&a); t = a.title; return t.c_str(); }
     return n[g_edit.field];
 }
 size_t edit_max() {
-    static const size_t m[] = {63, 31, 127, 255, 255, 63, 63};
+    static const size_t m[] = {63, 31, 127, 255, 255, 63, 63, 400};
     return m[g_edit.field];
 }
 
@@ -364,8 +380,10 @@ void net_apply() {   // use and remember the Network page's values
     save("net_peers", g_net_peers);
     g_status_next = 0;
 }
+std::string g_ext_text;   // field 7
 std::string& edit_target() {
     switch (g_edit.field) {
+    case 7: return g_ext_text;
     case 0: return g_net_server;
     case 1: return g_net_room;
     case 2: return g_net_peers;
@@ -383,9 +401,20 @@ void edit_begin(int field) {
     SDL_StartTextInput();
     g_dirty = true;
 }
-void edit_end() { g_edit.active = false; SDL_StopTextInput(); g_dirty = true; }
+void saves_sync(int depth_dir);
+void edit_end() {
+    const bool ext = g_edit.active && g_edit.field == 7;
+    g_edit.active = false; SDL_StopTextInput(); g_dirty = true;
+    if (ext) { g_saves.text_done(false, ""); saves_sync(0); }   // cancelled
+}
 void edit_commit() {
     std::string v = g_edit.buf;
+    if (g_edit.field == 7) {   // a Saves page question: hand the text over (paths keep their spaces)
+        g_edit.active = false; SDL_StopTextInput(); g_dirty = true;
+        g_saves.text_done(true, v);
+        saves_sync(1);
+        return;
+    }
     while (!v.empty() && v.back() == ' ') v.pop_back();
     while (!v.empty() && v.front() == ' ') v.erase(v.begin());
     if (g_edit.field == 0 && v.empty()) v = NET_DEFAULT_SERVER;
@@ -400,6 +429,15 @@ void edit_append(char c) {
     g_dirty = true;
 }
 void edit_backspace() { if (!g_edit.buf.empty()) { g_edit.buf.pop_back(); g_dirty = true; } }
+// The clipboard's text into the field (the Paste key, Ctrl+V): printable ASCII only, line breaks dropped, up to the field's length.
+void edit_paste() {
+    char* clip = SDL_GetClipboardText();
+    if (!clip) return;
+    for (const char* q = clip; *q; ++q)
+        if (*q != '\r' && *q != '\n') edit_append(*q);
+    SDL_free(clip);
+    g_dirty = true;
+}
 // The on-screen keyboard's key `row`, `col` under the current layer (shift / symbols).
 void edit_clamp_focus() {
     const auto keys = psp_sddialog::settings_keyboard(g_edit.shift, g_edit.symbols);
@@ -414,6 +452,7 @@ void edit_press(const psp_sddialog::SetKey& k) {
     case 4: edit_backspace(); break;
     case 5: edit_commit(); return;
     case 6: edit_end(); return;
+    case 7: edit_paste(); break;
     default: break;
     }
     edit_clamp_focus();
@@ -849,6 +888,40 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "On-screen buttons (touch screens)\nAuto: shown when you touch the screen, hidden when a controller button is pressed. On: always shown. Off: never. Saved.";
             break;
         }
+        case ROW_PROMPTS: {
+            static const char* const names[6] = {"Automatic", "PSP", "Xbox", "PlayStation", "Nintendo", "Keyboard"};
+            const int v = psp_input_prompt_setting() + 1;
+            m.label = "Button Prompts";
+            m.value = names[std::clamp(v, 0, 5)];
+            m.can_dec = v > 0;
+            m.can_inc = v < 5;
+            m.help = "Button prompts\nThe game's button symbols drawn as the buttons you press. Automatic: the controller you used last (Xbox, PlayStation or Nintendo, a Steam Deck's A B X Y and L1 / R1) or the keyboard's keys; the PSP's own when there is neither. Saved.";
+            break;
+        }
+        case ROW_LR_BUTTONS: {
+            const bool t = psp_input_lr_triggers();
+            m.label = "L / R Buttons";
+            m.value = t ? "Triggers" : "Shoulders";
+            m.can_dec = t;
+            m.can_inc = !t;
+            m.help = "L and R on the controller\nShoulders: the shoulder buttons (LB / RB, L1 / R1) press the PSP's L and R, as the triggers do. Triggers: the triggers (LT / RT, L2 / R2) press L and R and the shoulders do nothing; the game's prompts then show the triggers. Saved.";
+            break;
+        }
+        case ROW_P1_PAD: {
+            const auto v = p1_choices();
+            const int i = p1_index(v);
+            m.label = "Player 1 Controller";
+            m.value = v[size_t(i)].second;
+            m.can_dec = i > 0;
+            m.can_inc = i + 1 < int(v.size());
+            m.help = "Which controller plays\nAny Controller: every connected controller (the default). A controller by name: only that one, the others are ignored (a Steam Deck with a pad plugged in, a second pad for someone else). Keyboard Only: controllers are ignored. Saved.";
+            break;
+        }
+        case ROW_KEYS_INFO:
+            m.label = "Move Keys";
+            m.value = "D F E V 1 2";
+            m.help = "Keyboard keys for moves that take two buttons\nD: dodge (R + Cross). F: dash (R + Triangle). E: EX Mode (R + Square). V: summon (R + Circle). 1: Brave assist (L + Circle). 2: HP assist (L + Square). Both buttons go down together, as the game needs. The rest: arrows, X / Z / A / S for Cross / Circle / Square / Triangle, Q / W for L / R, Space START, Tab SELECT.";
+            break;
         case ROW_TOUCH_EDIT:
             m.label = "Edit Touch Controls";
             m.help = "Touch layout editor\nMove, resize or hide each on-screen control and add combination buttons (for example L+R, or R+Triangle). Press Cross to open it; the layout is saved.";
@@ -889,6 +962,29 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = g_net_status.empty() ? "..." : g_net_status;
             m.help = "Network status\nWhether the server answers and how many players are in your room (or nearby, on a LAN). Communications mode starts the connection.";
             break;
+        case ROW_NET_UPNP: {
+            const bool on = psp_upnp_enabled();
+            m.label = "UPnP Port Forward";
+            m.value = on ? "On" : "Off";
+            m.can_dec = on;
+            m.can_inc = !on;
+            m.help = "UPnP port forwarding\nFor direct play without the party server (LAN mode with Direct Peers across the internet): asks your router to forward this game's UDP port to this machine, and shows your public address to give to friends. Needs UPnP on in the router. The forward is removed when you turn this off or quit. Saved.";
+            break;
+        }
+        case ROW_NET_UPNP_STATUS:
+            m.label = "UPnP";
+            m.value = g_upnp_status.empty() ? "..." : g_upnp_status;
+            m.help = "UPnP status\nWhether the router forwards the port, and your public address (address:port) for friends to put under their Direct Peers.";
+            break;
+        case ROW_NET_PING: {
+            const bool on = ge_draw_ping_overlay();
+            m.label = "Show Ping";
+            m.value = on ? "On" : "Off";
+            m.can_dec = on;
+            m.can_inc = !on;
+            m.help = "Show ping\nWhile you are in an online group, the round trip to the slowest other player in milliseconds, at the top right (next to the frame rate if that is shown). \"--\" when the others run an older version. Saved.";
+            break;
+        }
         case ROW_DISCORD: {
             const bool on = psp_discord::enabled();
             m.label = "Discord Status";
@@ -908,7 +1004,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = psp_cloud_svc::provider_name(g_cloud.provider);
             m.can_dec = g_cloud.provider != psp_cloud_svc::Provider::Off;
             m.can_inc = g_cloud.provider != psp_cloud_svc::Provider::Google;
-            m.help = "Keep saves in step between devices\nLeft / right (or Cross) choose: Off, Folder, WebDAV, Google Drive. Folder: a synced (Syncthing, a Drive / OneDrive folder, a NAS), a WebDAV server (Nextcloud and most NAS boxes) or Google Drive. Saves from every region sync with each other. On the save list, Triangle > Cloud sync shows the status and lets you choose when both sides changed.";
+            m.help = "Keep saves in step between devices\nLeft / right (or Cross) choose: Off, Folder, WebDAV, Google Drive. Folder: a synced (Syncthing, a Drive / OneDrive folder, a NAS), a WebDAV server (Nextcloud and most NAS boxes) or Google Drive. Saves from every region sync with each other. Settings > Saves shows the status, lets you choose when both sides changed and keeps backups of every save a sync replaced.";
             break;
         case ROW_CLOUD_FOLDER:
             m.label = "Sync Folder";
@@ -975,7 +1071,14 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = st.state == psp_cloud_svc::Status::Syncing ? "working..." : st.state == psp_cloud_svc::Status::Error ? "problem" :
                       st.state == psp_cloud_svc::Status::NeedsChoice ? "needs choice" : st.state == psp_cloud_svc::Status::SigningIn ? "signing in" :
                       st.state == psp_cloud_svc::Status::Off ? "off" : "ok";
-            m.help = "Cloud sync status\n" + st.text + (st.conflicts ? "\nChoose which save to keep on the save list: Triangle > Cloud sync." : "");
+            m.help = "Cloud sync status\n" + st.text + (st.conflicts ? "\nSome saves changed on two devices: choose which to keep in Settings > Saves." : "");
+            break;
+        }
+        case ROW_CLOUD_CONFLICTS: {
+            const int n = psp_cloud_svc::status().conflicts;
+            m.label = "Choose which saves to keep";
+            m.value = std::to_string(n) + (n == 1 ? " save" : " saves");
+            m.help = "Saves changed on two devices\nCloud sync never picks for you when a save changed here and on another device since the last sync. Opens Settings > Saves, which shows both sides of each.";
             break;
         }
         case ROW_GPU: {
@@ -1055,6 +1158,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_SEC_LIGHT: m.label = "Lighting"; break;
         case ROW_SEC_RT: m.label = "Hardware"; break;
         case ROW_SEC_TOUCH: m.label = "Touch screen"; break;
+        case ROW_SEC_PAD: m.label = "Controller"; break;
+        case ROW_SEC_KEYBOARD: m.label = "Keyboard"; break;
         case ROW_SEC_GAME: m.label = "Game"; break;
         case ROW_SEC_SESSION: m.label = "Session"; break;
         case ROW_SEC_REFL: m.label = "Reflections"; break;
@@ -1374,17 +1479,21 @@ bool slider_of(Row r, int* steps, int* cur) {
     case ROW_FPS: if (g_fps.get && g_fps.count > 1) { *steps = g_fps.count; *cur = fps_index(); return true; } return false;
     case ROW_SYNC: *steps = 5; *cur = std::clamp(ge_draw_sync_mode(), 0, 4); return true;
     case ROW_TOUCH: *steps = 3; *cur = std::clamp(psp_touch_mode(), 0, 2); return true;
+    case ROW_PROMPTS: *steps = 6; *cur = std::clamp(psp_input_prompt_setting() + 1, 0, 5); return true;
+    case ROW_P1_PAD: { const auto v = p1_choices(); *steps = int(v.size()); *cur = p1_index(v); return true; }
     default: return false;
     }
 }
 psp_sddialog::SetKind row_kind(Row r) {
     using K = psp_sddialog::SetKind;
+    if (is_ext_row(r)) { const auto& v = g_saves.rows(); const size_t i = size_t(r - ROW_EXT0); return i < v.size() ? v[i].kind : K::Info; }
+    if (r == ROW_CLOUD_CONFLICTS) return K::Submenu;
     if (is_mod_row(r)) return K::Toggle;
     if (r >= ROW_SUB_ENV0 && r <= ROW_SUB_ENV_END) return K::Submenu;
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
-    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
+    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_LR_BUTTONS: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
@@ -1394,7 +1503,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_QUIT: return K::Danger;
     case ROW_SUB_HDR: case ROW_SUB_RT: return K::Submenu;
     case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_CLOUD_FOLDER: case ROW_CLOUD_URL: case ROW_CLOUD_USER: case ROW_CLOUD_PASS: return K::Text;
-    case ROW_NET_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: case ROW_MOD_INSTALL_STATUS: return K::Info;
+    case ROW_NET_STATUS: case ROW_NET_UPNP_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: case ROW_KEYS_INFO: case ROW_MOD_INSTALL_STATUS: return K::Info;
     default: return is_section(r) ? K::Header : K::Choice;
     }
 }
@@ -1467,6 +1576,18 @@ std::vector<psp_sddialog::SetRow> make_set_rows() {
     std::vector<psp_sddialog::SetRow> out;
     for (size_t i = 0; i < src.size() && i < g_rows.size(); ++i) {
         const Row r = g_rows[i];
+        if (is_ext_row(r)) {   // Settings > Saves: the page's own row
+            const auto& v = g_saves.rows();
+            const size_t k = size_t(r - ROW_EXT0);
+            if (k < v.size()) { psp_sddialog::SetRow o = v[k]; o.id = int(r); out.push_back(std::move(o)); }
+            else {
+                psp_sddialog::SetRow o; o.id = int(r); o.kind = psp_sddialog::SetKind::Info;
+                o.label = "Available once the game has started";
+                o.help = "Saves\nThe save manager needs the game's save folder, which is known once the game has started.";
+                out.push_back(std::move(o));
+            }
+            continue;
+        }
         const psp_sddialog::MenuRow& m = src[i];
         psp_sddialog::SetRow o;
         o.id = int(r);
@@ -1593,6 +1714,39 @@ bool updates_choice() {
 }
 void apply_updates(bool on) { save("check_updates", on ? "1" : "0"); }
 // Discord Rich Presence: applies at once (psp_discord), saved as discord=0|1 (exported as PSPRECOMP_DISCORD at the next start).
+// Controls > Player 1 Controller: "any", each connected controller (by GUID), "keyboard"; a saved controller that is not connected
+// stays a choice ("(not connected)") until another is picked.
+std::vector<std::pair<std::string, std::string>> p1_choices() {
+    std::vector<std::pair<std::string, std::string>> v{{"any", "Any Controller"}};
+    for (auto& pd : psp_input_pads()) v.push_back(pd);
+    const std::string cur = psp_input_p1_controller();
+    if (!cur.empty() && cur != "keyboard") {
+        bool found = false;
+        for (auto& e : v) found |= e.first == cur;
+        if (!found) {
+            auto it = g_saved.find("p1_controller_name");
+            v.emplace_back(cur, (it != g_saved.end() ? it->second : std::string("Controller")) + " (not connected)");
+        }
+    }
+    v.emplace_back("keyboard", "Keyboard Only");
+    return v;
+}
+int p1_index(const std::vector<std::pair<std::string, std::string>>& v) {
+    const std::string cur = psp_input_p1_controller().empty() ? "any" : psp_input_p1_controller();
+    for (size_t i = 0; i < v.size(); i++) if (v[i].first == cur) return int(i);
+    return 0;
+}
+void apply_upnp(bool on) {
+    if (on == psp_upnp_enabled()) return;
+    psp_upnp_set_enabled(on);
+    save("net_upnp", on ? "1" : "0");
+    g_upnp_status = psp_upnp_status();
+}
+void apply_ping(bool on) {
+    if (on == ge_draw_ping_overlay()) return;
+    ge_draw_set_ping_overlay(on);
+    save("net_ping", on ? "1" : "0");
+}
 void apply_discord(bool on) {
     if (on == psp_discord::enabled()) return;
     psp_discord::set_enabled(on);
@@ -1604,6 +1758,13 @@ void build_rows();
 
 void change(int d) {   // left / right on the selected row
     if (g_sel < 0 || g_sel >= int(g_rows.size())) return;
+    if (is_ext_row(g_rows[size_t(g_sel)])) {
+        if (!g_saves_env) return;
+        g_saves.set_sel(g_sel);
+        g_saves.change(g_sel, d);
+        saves_sync(0);
+        return;
+    }
     NextStartNote note_;
     if (g_rows[size_t(g_sel)] == ROW_MOD_UNINSTALL) {   // pick another mod folder (and disarm)
         const int n = int(uninstallable().size());
@@ -1671,6 +1832,27 @@ void change(int d) {   // left / right on the selected row
     case ROW_TEXPACK: apply_texpack(d > 0); break;
     case ROW_UPDATES: apply_updates(d > 0); break;
     case ROW_DISCORD: apply_discord(d > 0); break;
+    case ROW_LR_BUTTONS:
+        if ((d > 0) != psp_input_lr_triggers()) { psp_input_set_lr_triggers(d > 0); save("lr_buttons", d > 0 ? "triggers" : "shoulders"); }
+        break;
+    case ROW_P1_PAD: {
+        const auto v = p1_choices();
+        const int i = std::clamp(p1_index(v) + d, 0, int(v.size()) - 1);
+        psp_input_set_p1_controller(v[size_t(i)].first);
+        save("p1_controller", v[size_t(i)].first);
+        if (v[size_t(i)].first != "any" && v[size_t(i)].first != "keyboard") save("p1_controller_name", v[size_t(i)].second);
+        break;
+    }
+    case ROW_KEYS_INFO: break;
+    case ROW_PROMPTS: {
+        const int v = std::clamp(psp_input_prompt_setting() + 1 + d, 0, 5);
+        psp_input_set_prompt_setting(v - 1);
+        static const char* const keys[6] = {"auto", "psp", "xbox", "playstation", "nintendo", "keyboard"};
+        save("button_prompts", keys[v]);
+        break;
+    }
+    case ROW_NET_UPNP: apply_upnp(d > 0); break;
+    case ROW_NET_PING: apply_ping(d > 0); break;
     case ROW_TOUCH: {
         const int t = std::clamp(psp_touch_mode() + d, 0, 2);
         psp_touch_set_mode(t);
@@ -1686,7 +1868,7 @@ void change(int d) {   // left / right on the selected row
             build_rows();   // the rows differ: server and room, or direct peers
         }
         break;
-    case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_NET_STATUS: case ROW_DISCORD_STATUS: break;
+    case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_NET_STATUS: case ROW_NET_UPNP_STATUS: case ROW_DISCORD_STATUS: break;
     case ROW_CLOUD_PROVIDER: {
         const int cur = int(g_cloud.provider), nx = std::clamp(cur + d, 0, 3);
         if (nx != cur) {
@@ -1925,7 +2107,9 @@ void build_rows() {
         add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
         break;
     case PAGE_CONTROLS:
-        add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT);
+        add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_P1_PAD);
+        add(ROW_SEC_KEYBOARD); add(ROW_KEYS_INFO);
+        if (g_touch_ui) { add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT); }
         break;
     case PAGE_GPU:
         add(ROW_SEC_DRIVER); add(ROW_GPU); add(ROW_GPU_GET); add(ROW_GPU_DEL);
@@ -1934,8 +2118,10 @@ void build_rows() {
         net_load();
         add(ROW_SEC_SERVER); add(ROW_NET_MODE);
         if (g_net_internet) { add(ROW_NET_SERVER); add(ROW_NET_ROOM); }
-        else add(ROW_NET_PEERS);
+        else { add(ROW_NET_PEERS); }
         add(ROW_NET_STATUS);
+        if (!g_net_internet) { add(ROW_NET_UPNP); add(ROW_NET_UPNP_STATUS); }   // direct play needs the port reachable
+        add(ROW_NET_PING);
         if (psp_discord::available()) { add(ROW_SEC_DISCORD); add(ROW_DISCORD); add(ROW_DISCORD_STATUS); }
         break;
     case PAGE_CLOUD:
@@ -1948,8 +2134,20 @@ void build_rows() {
             else if (g_cloud.provider == P::Google) add(ROW_CLOUD_GOOGLE);
             if (g_cloud.provider != P::Off) { add(ROW_CLOUD_AUTO); add(ROW_CLOUD_REPLAYS); add(ROW_CLOUD_NOW); }
             add(ROW_CLOUD_STATUS);
+            if (psp_cloud_svc::status().conflicts > 0) add(ROW_CLOUD_CONFLICTS);
         } else add(ROW_CLOUD_STATUS);     // cloud sync is not running in this session (PSPRECOMP_CLOUD=0)
         break;
+    case PAGE_SAVES: {
+        if (!g_saves_env) {
+            const psp_saves::Env e = psp_cloud_glue_saves_env();
+            if (!e.saves_root.empty()) { g_saves.set_env(e); g_saves.reset(); g_saves_env = true; }
+        }
+        if (!g_saves_env) { add(ROW_EXT0); break; }   // an Info row: the game has not started yet
+        const size_t n = std::min<size_t>(g_saves.rows().size(), size_t(ROW_EXT_END - ROW_EXT0 + 1));
+        for (size_t i = 0; i < n; i++) g_rows.push_back(Row(ROW_EXT0 + int(i)));
+        g_sel_page[PAGE_SAVES] = g_saves.sel();
+        break;
+    }
     case PAGE_MODS:
         mods_load();
         if (g_installer.label) {
@@ -1981,6 +2179,7 @@ void build_rows() {
         break;
     }
     g_sel = std::clamp(g_sel_page[page_id()], 0, std::max(0, int(g_rows.size()) - 1));
+    if (page_id() == PAGE_SAVES) { g_built_page = page_id(); while (g_sel + 1 < int(g_rows.size()) && is_section(g_rows[size_t(g_sel)])) ++g_sel; return; }
     if (had) for (size_t i = 0; i < g_rows.size(); ++i) if (g_rows[i] == keep) { g_sel = int(i); break; }   // same row, wherever it moved to
     g_built_page = page_id();
     while (g_sel + 1 < int(g_rows.size()) && is_section(g_rows[size_t(g_sel)])) ++g_sel;   // never rest on a caption
@@ -1998,6 +2197,8 @@ int g_dlg_sel = 0, g_dlg_hover = -1;
 bool g_focus_tabs = true;              // the category list (left) has the focus; Confirm / Right open the category, Back returns here
 bool g_closing = false;                // the close animation is running (the game stays paused until it ends)
 std::atomic<bool> g_request_open{false};
+std::atomic<bool> g_request_saves{false};   // open on Settings > Saves (the save list's Triangle)
+std::atomic<unsigned> g_open_serial{0};
 std::atomic<bool> g_gate_dirty{false};
 
 void set_open(bool open);
@@ -2041,6 +2242,23 @@ void dialog_choose(int i) {
     g_restart_pending = false;   // asked once
     set_open(false);
 }
+// The Saves page's dialogs share the restart question's dialog slot (the restart question wins).
+bool saves_dlg(psp_saves::Dialog* d = nullptr) { return page_id() == PAGE_SAVES && !g_dlg_open && g_saves_env && g_saves.dialog(d); }
+bool any_dlg() { return g_dlg_open || saves_dlg(); }
+int dlg_n() {
+    if (g_dlg_open) return int(dialog_buttons().size());
+    psp_saves::Dialog d;
+    return saves_dlg(&d) ? int(d.buttons.size()) : 0;
+}
+void dlg_pick(int i) {
+    if (g_dlg_open) { dialog_choose(i); return; }
+    if (!saves_dlg()) return;
+    g_dlg_hover = -1;
+    g_saves.dialog_choose(i);
+    g_dlg_sel = 0;
+    saves_sync(0);
+}
+
 void enter_sub(int page);
 void go_back();
 
@@ -2053,11 +2271,18 @@ void rebuild(int dir) {   // a different page is shown
     g_dirty = true;
     g_rows_next = 0;
 }
+size_t g_saves_depth = 0;              // the Saves page's level shown last (to animate going in and out)
 void goto_category(int idx) {
     const int n = int(page_list().size());
     idx = std::clamp(idx, 0, n - 1);
     if (idx == g_page && g_sub < 0) return;
     g_sel_page[page_id()] = g_sel;
+    if (g_saves_env && (page_id() == PAGE_SAVES || page_list()[size_t(idx)] == PAGE_SAVES)) {   // into or out of Saves: back to its top, file window closed
+        if (page_id() == PAGE_SAVES) g_saves.set_sel(g_sel);
+        g_saves.reset();
+        g_saves_depth = 0;
+        g_sel_page[PAGE_SAVES] = g_saves.sel();
+    }
     const int dir = idx > g_page ? 1 : idx < g_page ? -1 : 0;
     g_page = idx;
     g_sub = -1;
@@ -2078,9 +2303,39 @@ void leave_sub() {
     g_sub = -1;
     rebuild(-1);
 }
+// After the Saves page acted: its rows, level and questions may have changed.
+void saves_sync(int) {
+    if (page_id() != PAGE_SAVES || !g_saves_env) return;
+    psp_saves::TextAsk a;
+    if (g_saves.text(&a) && !g_edit.active) { g_ext_text = a.text; edit_begin(7); }
+    const size_t d = g_saves.crumbs().size();
+    g_sel_page[PAGE_SAVES] = g_saves.sel();
+    build_rows();
+    if (d != g_saves_depth) {
+        g_view.page_changed(d > g_saves_depth ? 1 : -1);
+        g_saves_depth = d;
+        g_hover_row = -1; g_press_row = -1;
+    }
+    g_dirty = true;
+    g_rows_next = 0;
+}
+int category_index(int page) {
+    const auto& pl = page_list();
+    for (size_t i = 0; i < pl.size(); ++i) if (pl[i] == page) return int(i);
+    return -1;
+}
+void open_category(int page) {   // jump to a category and into its rows
+    const int i = category_index(page);
+    if (i < 0) return;
+    goto_category(i);
+    g_focus_tabs = false;
+    g_dirty = true;
+}
+
 void go_back() {   // Back: cancel a text entry, else up one sub-menu level, else close
-    if (g_dlg_open) { dialog_choose(int(dialog_buttons().size()) - 1); return; }
+    if (any_dlg()) { dlg_pick(dlg_n() - 1); return; }
     if (g_edit.active) { edit_end(); return; }
+    if (page_id() == PAGE_SAVES && g_saves_env && g_saves.in_sub()) { g_saves.set_sel(g_sel); g_saves.back(); saves_sync(-1); return; }
     if (g_sub >= 0) { leave_sub(); return; }
     if (!g_focus_tabs) { g_focus_tabs = true; g_dirty = true; return; }   // from a category's rows back to the category list
     set_open(false);
@@ -2106,6 +2361,10 @@ void set_open(bool open) {
         g_focus_tabs = true;
         g_dlg_open = false;
         g_built_page = -1;
+        if (g_saves_env) g_saves.reset();
+        g_saves_depth = 0;
+        g_sel_page[PAGE_SAVES] = g_saves.sel();
+        ++g_open_serial;
         build_rows();
         g_view = psp_sddialog::SettingsView();
         g_view.set_open(true);
@@ -2125,6 +2384,7 @@ void set_open(bool open) {
         }
         g_sel_page[page_id()] = g_sel;
         if (g_edit.active) edit_end();
+        if (g_saves_env) { if (page_id() == PAGE_SAVES) g_saves.set_sel(g_sel); g_saves.reset(); }   // closes a file window, drops unpacked archives
         g_closing = true;
         g_view.set_open(false);
         std::fprintf(stderr, "[SETTINGS] menu closing\n");
@@ -2255,6 +2515,14 @@ void mod_install_tick() {
 
 void confirm_row() {
     if (g_sel < 0 || g_sel >= int(g_rows.size())) return;
+    if (is_ext_row(g_rows[size_t(g_sel)])) {
+        if (!g_saves_env) return;
+        g_saves.set_sel(g_sel);
+        g_saves.confirm(g_sel);
+        saves_sync(0);
+        return;
+    }
+    if (g_rows[size_t(g_sel)] == ROW_CLOUD_CONFLICTS) { open_category(PAGE_SAVES); return; }
     NextStartNote note_;
     if (is_mod_row(g_rows[size_t(g_sel)])) { const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_MOD0); if (i < g_mods.size()) mod_set_enabled(i, !g_mods[i].on); g_dirty = true; return; }
     if (g_rows[size_t(g_sel)] >= ROW_SUB_ENV0 && g_rows[size_t(g_sel)] <= ROW_SUB_ENV_END) { enter_sub(PAGE_ENV0 + int(g_rows[size_t(g_sel)] - ROW_SUB_ENV0)); return; }
@@ -2321,8 +2589,15 @@ void confirm_row() {
     case ROW_TEXPACK: apply_texpack(!texpack_choice()); break;
     case ROW_UPDATES: apply_updates(!updates_choice()); break;
     case ROW_DISCORD: apply_discord(!psp_discord::enabled()); break;
+    case ROW_NET_UPNP: apply_upnp(!psp_upnp_enabled()); break;
+    case ROW_NET_UPNP_STATUS: break;
+    case ROW_NET_PING: apply_ping(!ge_draw_ping_overlay()); break;
     case ROW_DISCORD_STATUS: break;
     case ROW_TOUCH: change(psp_touch_mode() >= 2 ? -2 : 1); return;
+    case ROW_PROMPTS: change(psp_input_prompt_setting() >= PSP_PROMPT_KEYBOARD ? -5 : 1); return;
+    case ROW_LR_BUTTONS: change(psp_input_lr_triggers() ? -1 : 1); return;
+    case ROW_P1_PAD: { const auto v = p1_choices(); change(p1_index(v) + 1 >= int(v.size()) ? -p1_index(v) : 1); return; }
+    case ROW_KEYS_INFO: break;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
     case ROW_NET_MODE: change(g_net_internet ? 1 : -1); return;
     case ROW_NET_SERVER: edit_begin(0); return;
@@ -2384,15 +2659,15 @@ void confirm_row() {
 
 
 void confirm() {   // Confirm: open the highlighted category, or act on the highlighted row
-    if (g_dlg_open) { dialog_choose(g_dlg_sel); return; }
+    if (any_dlg()) { dlg_pick(g_dlg_sel); return; }
     if (g_focus_tabs && g_sub < 0) { g_focus_tabs = false; g_dirty = true; return; }
     confirm_row();
 }
 
 void nav(uint32_t dir) {
     g_device = 0;
-    if (g_dlg_open) {
-        const int n = int(dialog_buttons().size());
+    if (any_dlg()) {
+        const int n = dlg_n();
         if (dir & (1 | 4)) g_dlg_sel = std::max(0, g_dlg_sel - 1);
         else if (dir & (2 | 8)) g_dlg_sel = std::min(n - 1, g_dlg_sel + 1);
         return;
@@ -2505,7 +2780,7 @@ void row_tap(int idx) {   // a click / tap on a row's body
 
 void pointer_hover(float ux, float uy) {
     const auto& G = g_view.geom();
-    if (g_dlg_open) { g_dlg_hover = -1; for (size_t i = 0; i < G.dlg_btns.size(); ++i) if (G.dlg_btns[i].has(ux, uy)) g_dlg_hover = int(i); return; }
+    if (any_dlg()) { g_dlg_hover = -1; for (size_t i = 0; i < G.dlg_btns.size(); ++i) if (G.dlg_btns[i].has(ux, uy)) g_dlg_hover = int(i); return; }
     int row = -1, part = 0, cat = -1;
     bool back = G.back.has(ux, uy);
     if (!g_edit.active) {
@@ -2526,8 +2801,8 @@ void pointer_press(float ux, float uy, bool touch) {
     g_device = touch ? 2 : 1;
     pointer_hover(ux, uy);
     const auto& G = g_view.geom();
-    if (g_dlg_open) {
-        for (size_t i = 0; i < G.dlg_btns.size(); ++i) if (G.dlg_btns[i].has(ux, uy)) { g_dlg_sel = int(i); g_ptr = Pointer{}; dialog_choose(int(i)); return; }
+    if (any_dlg()) {
+        for (size_t i = 0; i < G.dlg_btns.size(); ++i) if (G.dlg_btns[i].has(ux, uy)) { g_dlg_sel = int(i); g_ptr = Pointer{}; dlg_pick(int(i)); return; }
         return;
     }
     g_ptr = Pointer{};
@@ -2682,6 +2957,9 @@ void psp_settings_load_early() {
         if (it->second.empty()) psp_plat::unsetenv_("PSPRECOMP_GPU_DRIVER");
         else put("PSPRECOMP_GPU_DRIVER", it->second);
     }
+    if ((it = g_saved.find("button_prompts")) != g_saved.end()) put("PSPRECOMP_BUTTON_PROMPTS", it->second);
+    if ((it = g_saved.find("lr_buttons")) != g_saved.end()) put("PSPRECOMP_LR_TRIGGERS", it->second == "triggers" ? "1" : "0");
+    if ((it = g_saved.find("p1_controller")) != g_saved.end()) put("PSPRECOMP_P1_CONTROLLER", it->second);
     if ((it = g_saved.find("touch")) != g_saved.end() && (it->second == "auto" || it->second == "on" || it->second == "off"))
         put("PSPRECOMP_TOUCH", it->second);
     if ((it = g_saved.find("window_size")) != g_saved.end() && g_saved.count("display") && g_saved["display"] == "window"
@@ -2694,6 +2972,8 @@ void psp_settings_load_early() {
     if ((it = g_saved.find("net_server")) != g_saved.end() && !it->second.empty()) put("PSPRECOMP_ADHOC_SERVER", it->second);
     if ((it = g_saved.find("net_room")) != g_saved.end()) put("PSPRECOMP_ADHOC_ROOM", it->second);
     if ((it = g_saved.find("net_peers")) != g_saved.end()) put("PSPRECOMP_ADHOC_PEERS", it->second);
+    if ((it = g_saved.find("net_upnp")) != g_saved.end()) put("PSPRECOMP_ADHOC_UPNP", it->second == "1" ? "1" : "0");
+    if ((it = g_saved.find("net_ping")) != g_saved.end()) put("PSPRECOMP_PING_OVERLAY", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("fps_counter")) != g_saved.end()) put("PSPRECOMP_FPS_COUNTER", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("vsync")) != g_saved.end() && (it->second == "0" || it->second == "1")) put("PSPRECOMP_VSYNC", it->second);
     if ((it = g_saved.find("perf_overlay")) != g_saved.end()) put("PSPRECOMP_PERF_HUD", it->second == "1" ? "1" : "0");
@@ -2705,6 +2985,8 @@ void psp_settings_load_early() {
 bool psp_settings_menu_open() { return g_open.load(); }
 
 void psp_settings_request_open() { g_request_open.store(true); }
+void psp_settings_request_open_saves() { g_request_saves.store(true); }
+unsigned psp_settings_open_serial() { return g_open_serial.load(); }
 bool psp_settings_take_gate_dirty() { return g_gate_dirty.exchange(false); }
 
 bool psp_settings_handle_event(const SDL_Event& ev) {
@@ -2731,6 +3013,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
             case SDLK_LEFT: edit_move(0, -1, g); break;
             case SDLK_RIGHT: edit_move(0, 1, g); break;
             case SDLK_BACKSPACE: edit_backspace(); break;
+            case SDLK_v: if (ev.key.keysym.mod & (KMOD_CTRL | KMOD_GUI)) edit_paste(); break;   // Ctrl+V (Cmd+V on a Mac)
             case SDLK_RETURN: case SDLK_KP_ENTER: if (!ev.key.repeat) edit_commit(); break;
             default: break;
             }
@@ -2805,7 +3088,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
         if (ev.type == SDL_MOUSEWHEEL) {
             if (ev.wheel.which == SDL_TOUCH_MOUSEID || g_edit.active) return false;
             g_device = 1;
-            if (g_dlg_open) return false;
+            if (any_dlg()) return false;
             int mx = 0, my = 0; float wx = 0, wy = 0;
             SDL_GetMouseState(&mx, &my);
             if (mouse_to_canvas(mx, my, &wx, &wy) && g_view.geom().side.has(wx, wy)) { g_view.scroll_cats(-float(ev.wheel.preciseY) * 22.f); return false; }   // over the category list
@@ -2875,6 +3158,10 @@ static void apply_default_frame_rate() {
 void psp_settings_tick() {
     apply_default_frame_rate();
     if (g_request_open.exchange(false) && !g_open.load()) { set_open(true); g_gate_dirty.store(true); }
+    if (g_request_saves.exchange(false)) {
+        if (!g_open.load()) { set_open(true); g_gate_dirty.store(true); }
+        if (g_open.load() && !g_closing) open_category(PAGE_SAVES);
+    }
     if (!g_open.load()) return;
     if (!g_closing && (psp_adhoc_connected() || psp_adhoc_in_session())) {   // a match started while the menu was open (e.g. from a pad press queued before): give the game back
         std::fprintf(stderr, "[SETTINGS] closing: multiplayer session started\n");
@@ -2905,6 +3192,8 @@ void psp_settings_tick() {
         char st[128];
         psp_adhoc_status(st, sizeof st);
         if (g_net_status != st) { g_net_status = st; g_dirty = true; }
+        const std::string us = psp_upnp_status();
+        if (g_upnp_status != us) { g_upnp_status = us; g_dirty = true; }
         const std::string ds = psp_discord::status();
         if (g_discord_status != ds) { g_discord_status = ds; g_dirty = true; }
     }
@@ -2921,6 +3210,24 @@ void psp_settings_tick() {
         }
     }
     if (page_id() == PAGE_MODS && g_installer.label) mod_install_tick();
+    if (page_id() == PAGE_SAVES && g_saves_env && !g_edit.active) {   // file window answers, cloud status, questions
+        g_saves.set_sel(g_sel);              // (before tick: an answer from the file window may open another level with its own cursor)
+        if (g_saves.tick(t)) saves_sync(0);
+        if (g_saves.take_cloud_settings_request()) open_category(PAGE_CLOUD);
+        static bool dlg_seen = false;
+        const bool dlg_now = saves_dlg();
+        if (dlg_now && !dlg_seen) { g_dlg_sel = 0; g_dlg_hover = -1; g_dirty = true; }
+        dlg_seen = dlg_now;
+    }
+#ifndef __ANDROID__
+    {   // the system's file window: a fullscreen game would hide it, so step aside while it is open (as for the Google sign-in)
+        static bool minimized = false;
+        const bool want = g_saves_env && g_saves.native_dialog_open() && win() &&
+                          (SDL_GetWindowFlags(win()) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP));
+        if (want && !minimized) { SDL_MinimizeWindow(win()); minimized = true; }
+        else if (!(g_saves_env && g_saves.native_dialog_open()) && minimized) { minimized = false; SDL_RestoreWindow(win()); SDL_RaiseWindow(win()); }
+    }
+#endif
     if (page_id() == PAGE_CLOUD && !g_edit.active) {   // the sync runs on its own thread: redraw when its status changes
         const unsigned rev = psp_cloud_svc::status().revision;
         if (rev != g_cloud_rev) {
@@ -2949,6 +3256,10 @@ void psp_settings_tick() {
     sc.crumbs.push_back(k_page_names[page_list()[size_t(g_page)]]);
     if (g_sub >= 0) sc.crumbs.push_back(k_page_names[g_sub]);
     sc.in_sub = g_sub >= 0;
+    if (page_id() == PAGE_SAVES && g_saves_env) {
+        for (const std::string& c : g_saves.crumbs()) sc.crumbs.push_back(c);
+        sc.in_sub = g_saves.in_sub();
+    }
     sc.focus_tabs = g_focus_tabs && g_sub < 0;
     sc.dlg.active = g_dlg_open;
     if (g_dlg_open) {
@@ -2957,6 +3268,13 @@ void psp_settings_tick() {
                                           : "Some of the changes only apply the next time the game starts.\nStart the game again to use them.";
         sc.dlg.buttons = dialog_buttons();
         sc.dlg.sel = g_dlg_sel; sc.dlg.hover = g_dlg_hover;
+    } else if (psp_saves::Dialog d; saves_dlg(&d)) {
+        sc.dlg.active = true;
+        sc.dlg.title = d.title;
+        sc.dlg.text = d.text;
+        sc.dlg.buttons = d.buttons;
+        sc.dlg.sel = std::clamp(g_dlg_sel, 0, std::max(0, int(d.buttons.size()) - 1));
+        sc.dlg.hover = g_dlg_hover;
     }
     sc.rows = g_set_rows;
     sc.sel = g_sel;

@@ -4,7 +4,7 @@
   make_notes.py --tag vX.Y.Z [-o notes.md] [--to REF]   (run inside the git checkout with the tags fetched; GH_TOKEN / gh for PR text)
 
 Where the "what changed" part comes from, first match wins:
-  1. release/notes/<tag>.md, used as written (hand-written notes for a release);
+  1. release/notes/<tag>.md, used as written and placed above the download table (hand-written notes for a release);
   2. the pull requests merged since the last *published* release (a tag whose release build failed has no release, so its changes are
      carried into the next one). Each PR gives the bullets of its "## Release notes" section (written for players), or its title when it
      has none. PRs labelled `no-release-notes`, a section that says "none", and CI / release tooling / docs / test-only PRs (title prefix)
@@ -87,8 +87,8 @@ def main():
 
     out = INSTALL.format(v=a.tag.lstrip("v")) + "\n"
     curated = os.path.join(HERE, "notes", a.tag + ".md")
-    if os.path.exists(curated):
-        out += open(curated).read().rstrip() + "\n"
+    if os.path.exists(curated):   # hand-written notes lead (what's new first), the download table follows
+        out = open(curated).read().rstrip() + "\n\n" + out
     else:
         rng = "%s..%s" % (prev, head) if prev else head
         new, fixes, other = [], [], []

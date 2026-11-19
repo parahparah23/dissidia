@@ -40,6 +40,8 @@ import subprocess
 import sys
 import time
 
+# On Android the bundled Python is started through the app's loader (psprecomp/setup/proc.cpp): child pythons need the same prefix
+PYEXE = ([os.environ["PSPRECOMP_PY_LOADER"]] if os.environ.get("PSPRECOMP_PY_LOADER") else []) + [sys.executable]
 HERE = os.path.dirname(os.path.abspath(__file__))
 ANALYSES = ["analysis", "analysis_battle", "analysis_menu", "analysis_extra", "analysis_supacc"]
 STEPS = ["analysis", "recompile", "overlays", "configure", "build"]
@@ -253,7 +255,7 @@ def main():
             out = os.path.join(work, n + ".json")
             if os.path.isfile(out) and not a.force and os.path.getmtime(out) >= os.path.getmtime(os.path.join(shipped, n + ".json.gz")):
                 continue
-            run([sys.executable] + ([] if os.environ.get("PYTHONHOME") else ["-I"]) + [os.path.join(HERE, "ship_analysis.py"), "hydrate",
+            run(PYEXE + ([] if os.environ.get("PYTHONHOME") else ["-I"]) + [os.path.join(HERE, "ship_analysis.py"), "hydrate",
                  os.path.join(shipped, n + ".json.gz"), sources[n], out], env=env)
     for name, lo in (("analysis", 5000), ("analysis_battle", 3000), ("analysis_menu", 3000), ("analysis_extra", 40), ("analysis_supacc", 30)):
         with open(os.path.join(work, name + ".json")) as f:
@@ -294,7 +296,7 @@ def main():
         ana = os.path.join(work, "analysis.json")
         for idx, prefix, name, extra in ((1, "ovl_battle", "battle", []), (2, "ovl_menu", "menu", []), (3, "ovl_extra", "extra", []),
                                          (0, "supacc", "supacc", ["--module"])):
-            run([sys.executable, bo, str(idx), prefix, os.path.join(work, "analysis_%s.json" % name), ana,
+            run(PYEXE + [bo, str(idx), prefix, os.path.join(work, "analysis_%s.json" % name), ana,
                  os.path.join(work, "overlays", name), os.path.join(game, "overlay_%s.toml" % name)] + extra, env=env)
             if not os.path.isfile(os.path.join(work, "overlays", name, "dispatch.cpp")):
                 die("overlay %s was not generated" % name)

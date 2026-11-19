@@ -62,7 +62,7 @@ def main():
     os.makedirs(os.path.join(out, "apk"))
     sdl_src = os.path.join(deps, "src-sdl2")
     run([sys.executable, "-I", os.path.join(REPO, "android", "make_skeleton.py"), "--sdk", sdk, "--sdl-src", sdl_src,
-         "--package", ver["package"], "--api", str(ver["api"]), "--extra-java", os.path.join(REPO, "android", "game_java"),   # the system document picker (psp_file_dialog.cpp)
+         "--package", ver["package"], "--api", str(ver["api"]), "--extra-java", os.path.join(REPO, "android", "game_java"),   # the save manager's document picker
          "-o", os.path.join(out, "apk", "skeleton.apk")], env=env)
     for f in ("apk_pack.py", "debug_key.json"):
         shutil.copy2(os.path.join(REPO, "android", f), os.path.join(out, "apk", f))
