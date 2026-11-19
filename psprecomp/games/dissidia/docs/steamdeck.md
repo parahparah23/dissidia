@@ -297,10 +297,9 @@ Input to any of the buttons above if you want them.
   Environment variables set in Steam's Launch Options as `PSPRECOMP_CAM_SENS=1.5 %command%` do not work here
   (the entry is a script, `%command%` is the script); export them in `play.sh` above the `exec` line instead.
 * Movement: the game itself only has 8 stick directions (a 78% per-axis dead zone). The port uses a radial dead zone
-  (`PSPRECOMP_ANALOG_DEADZONE`, default 0.20). On the world map the walk follows the stick's own angle; in battle it
-  stays 8-way in eight even sectors, because battle replays store only those 8 ways (`PSPRECOMP_ANALOG_WALK_BATTLE=1`
-  steers fighters by the real angle too, `PSPRECOMP_ANALOG_WALK=0` brings back the 8 ways on the world map,
-  `PSPRECOMP_ANALOG_FULL=0` the original stick code everywhere). The Deck's sticks have a hardware dead zone
+  (`PSPRECOMP_ANALOG_DEADZONE`, default 0.20) and walks and fights in the stick's own direction
+  (`PSPRECOMP_ANALOG_WALK_BATTLE=0` keeps battle 8-way, which saved battle replays need to play back exactly;
+  `PSPRECOMP_ANALOG_WALK=0` the 8 ways everywhere, `PSPRECOMP_ANALOG_FULL=0` the original stick code). The Deck's sticks have a hardware dead zone
   of their own plus Steam Input's; if drift is a problem raise the radial one.
 * `PSPRECOMP_GAMECONTROLLERDB=/path/gamecontrollerdb.txt` (or `run.sh --gamecontrollerdb FILE`, or just
   drop the file in the work directory as `gamecontrollerdb.txt`) loads extra SDL mappings for pads SDL

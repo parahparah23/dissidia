@@ -136,15 +136,17 @@ original 8-way behaviour, `PSPRECOMP_ANALOG_DEADZONE` (default 0.20 of travel) s
 Walking direction: the stick vector above is not what steers a walk. The walker's input (`ovl_battle FUN_08B38A0C`, on the world map
 and for the player's fighter in battle) builds its step from the four walk bits only, so even with the changes above every walk went one
 of eight ways (found by VCKing101, [related-projects.md](related-projects.md)). `input.cpp` turns that step to the stick's own direction
-just before the game applies the camera to it, for a human pad with the stick past the dead zone; when the walk starts, the walk speed
-and everything after it stay the game's. World map only by default: a battle replay stores just the 8-way bits, so a stick-steered
-fighter would play back elsewhere. `PSPRECOMP_ANALOG_WALK=0` turns it off, `PSPRECOMP_ANALOG_WALK_BATTLE=1` also steers in battle (never
-while the pads are fed by the game's online exchange), `PSPRECOMP_ANALOG_WALK_LOG=<n>` logs n replaced steps.
-Measured 18 November 2026 (Story Mode prologue field, debug socket `A` pushes of 0.4 s, walker position at `+0x110`): relative to a
-straight push, 15, -15 and 30 degrees of stick turned the walk by 14.8, 15.0 and 30.2 degrees; with `PSPRECOMP_ANALOG_WALK=0` the
-headings jump by 20 to 45 degrees. In battle the step is replaced too, but the fighter's heading moved only 2 to 6 degrees for a
-15 degree push and drifted back to the line to the opponent (battle_test, Squall, stage 12): battle movement has more steering after
-this step, so `PSPRECOMP_ANALOG_WALK_BATTLE` is experimental.
+just before the game applies the camera to it, for the hardware pad's walker with the stick past the dead zone; when the walk starts, the
+walk speed and everything after it stay the game's. On the world map and in battle; never while the pads are fed by the game's online
+exchange or a replay. A saved battle replay stores just the 8-way bits, so a fight steered by the stick can play back a little
+differently; `PSPRECOMP_ANALOG_WALK_BATTLE=0` keeps battle 8-way (and replays exact). `PSPRECOMP_ANALOG_WALK=0` turns it all off,
+`PSPRECOMP_ANALOG_WALK_LOG=<n>` logs n replaced steps, `PSPRECOMP_ANALOG_WALK_OUTLOG=<n>` the walk's world-space output.
+Measured 18-19 November 2026: on the prologue field (debug socket `A` pushes of 0.4 s, walker position at `+0x110`) 15, -15 and 30
+degrees of stick turned the walk by 14.8, 15.0 and 30.2 degrees against a straight push, where the 8-way walk jumps by 20 to 45. In
+battle (battle_test, Squall, stage 12, stick 0 then 15 degrees) the walk's world direction turned 15.6 degrees and the fighter moved
+along it to within 1 to 3 degrees a frame (more while the body turns); with the 8-way walk it stayed on one direction for 0, 15 and -15.
+Comparing world headings between separate battle runs does not work: the lock-on camera orbits the opponent, and the dummy stands
+somewhere else each run.
 
 Camera follow dead zone: the world map's free camera (`ovl_battle FUN_08B3F7F4`) turns toward the walker's facing by up to 0.05 rad a
 frame with no dead zone. With the walk at the stick's own angle, a push a few degrees off straight up then turns the camera, the
