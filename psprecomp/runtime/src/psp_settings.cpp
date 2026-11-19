@@ -1375,7 +1375,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.label = "Character Shadows";
             m.value = psp_rt_char_shadows() ? "Soft" : "Off";
             m.disabled = !usable;
-            m.can_dec = m.can_inc = usable;
+            m.can_dec = usable && psp_rt_char_shadows() != 0;
+            m.can_inc = usable && psp_rt_char_shadows() == 0;
             m.help = !psp_rt_available() ? std::string("Character shadows: unavailable\n") + psp_rt_unavailable_reason()
                    : psp_rt_quality() == 0 ? "Character shadows: needs Ray-Traced Shadows on."
                    : "Character shadows (PSPRECOMP_RT_CHAR_SHADOWS)\nHow a fighter's own body shadows it (hair on the face, an arm on the chest). Off: never, the fighter is shaded by the stage only. Soft: its own body takes part of the light, softened, so hair and clothes shade it without the blocky shapes of the low-poly models. Takes effect at once. Saved.";
@@ -1503,12 +1504,12 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (r >= ROW_SUB_ENV0 && r <= ROW_SUB_ENV_END) return K::Submenu;
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
-    case ROW_RT_REFL_FX: case ROW_RT_CHAR:
+    case ROW_RT_REFL_FX:
     case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_LR_BUTTONS: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
-    case ROW_FXL_INT: case ROW_FXL_RAD: return K::Choice;
+    case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
     case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: return K::Action;
     case ROW_MOD_UNINSTALL: return K::Choice;
     case ROW_QUIT: return K::Danger;
@@ -1992,7 +1993,8 @@ void change(int d) {   // left / right on the selected row
     }
     case ROW_RT_CHAR: {
         if (!psp_rt_available() || psp_rt_quality() == 0) break;
-        const int v = psp_rt_char_shadows() ? 0 : 1;
+        const int v = d > 0 ? 1 : 0;
+        if (v == psp_rt_char_shadows()) break;
         psp_rt_char_set_shadows(v);
         save("rt_char_shadows", v ? "1" : "0");
         break;
@@ -2657,7 +2659,7 @@ void confirm_row() {
     case ROW_CONTACT: change(psp_fx_contact() >= 3 ? -3 : 1); return;
     case ROW_RT_SOFT: if (psp_rt_available() && psp_rt_quality() >= 2) change(1); return;
     case ROW_RT_REFL_FX: if (psp_rt_available() && psp_rt_refl_quality() >= 2) change(1); return;
-    case ROW_RT_CHAR: if (psp_rt_available() && psp_rt_quality() > 0) change(1); return;
+    case ROW_RT_CHAR: if (psp_rt_available() && psp_rt_quality() > 0) change(psp_rt_char_shadows() ? -1 : 1); return;
     case ROW_RT: if (psp_rt_available()) change(psp_rt_quality() >= 3 ? -3 : 1); return;
     case ROW_RT_REFL: if (psp_rt_available()) change(psp_rt_refl_quality() >= 3 ? -3 : 1); return;
     case ROW_SSR: change(psp_fx_ssr() >= 3 ? -3 : 1); return;
