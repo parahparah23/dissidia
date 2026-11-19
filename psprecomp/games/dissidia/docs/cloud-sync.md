@@ -50,6 +50,12 @@ other; a downloaded save is renamed to the installed game's ID and its `PARAM.SF
 The device name in a conflict is the other device's host name (Windows: the computer name; Android: the maker and model);
 `PSPRECOMP_DEVICE_NAME` sets this device's.
 
+**Deleting.** A sync never deletes on its own. A save deleted (or moved to another slot) in Settings > Saves leaves a deletion marker in
+the cloud (`<slot>.meta` with `deleted=1`; the `.save` is kept once as `<slot>.bak`). Another device whose copy is unchanged since its
+last sync moves it into its backups (`deleted`); one that changed it since keeps it and uploads it again. The delete is not done in the
+cloud when the cloud copy changed since this device's last sync (it then comes back). Devices with an older runtime ignore the marker
+and upload their copy again.
+
 ## Where things are stored
 
 | What | Where |

@@ -28,6 +28,9 @@ inline constexpr const char* kImport = "import";                  // replaced by
 inline constexpr const char* kRestore = "restore";                // replaced by restoring a backup
 inline constexpr const char* kReplaced = "replaced";              // any other replacement
 inline constexpr const char* kManual = "manual";                  // "Back up now"
+inline constexpr const char* kDeleted = "deleted";                // deleted with the save manager, or on another device (cloud sync)
+inline constexpr const char* kMoved = "moved";                    // moved to another slot
+inline constexpr const char* kRenamed = "renamed";                // before its name was changed
 inline constexpr const char* kDaily = "daily";                    // the first start of a day (when the saves changed)
 inline constexpr const char* kLegacy = "legacy";                  // a <name>.bak folder of an older runtime
 

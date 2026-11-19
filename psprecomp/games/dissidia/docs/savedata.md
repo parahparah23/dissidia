@@ -31,6 +31,15 @@ paused while it is open and the save list behind it is refreshed when it closes.
   *Keep this device's save* / *Use the cloud save* / *Decide later*; *Keep the newer save of each* settles all of them. The side that
   loses is never lost: this device's save goes to Backups, the cloud's is kept in the cloud as `<slot>.bak`.
 - **Cloud sync** (at the top, when cloud sync runs): status, *Sync now*, and a jump to Settings > Cloud.
+- **This game's saves** (*Duplicate, move, rename or delete...*): pick one of your saves, then
+  - *Duplicate to another slot...*: a copy in another slot (the game's save list offers game data slots 00 to 19 and lists every one
+    that exists), e.g. to keep a copy from before a hard fight; a taken slot is asked about and its save goes to Backups;
+  - *Move to another slot...*: the same, and the old slot becomes free (its folder goes to Backups);
+  - *Rename...*: the name the save list shows (`SAVEDATA_TITLE`, e.g. "GAME DATA"), to tell copies apart; the game writes its own name
+    back the next time it saves into that slot;
+  - *Delete*: into Backups (restorable). With cloud sync on, the slot is deleted in the cloud too (a deletion marker; the cloud copy is
+    kept once as `<slot>.bak`), and each other device moves its copy into its own backups at its next sync - unless it changed that
+    save since, in which case the save stays and is uploaded again.
 - **Import saves**
   - *From PPSSPP / a memory stick*: found automatically (PPSSPP's `PSP/SAVEDATA` on Linux, Flatpak, macOS, Windows; memory sticks and
     disks under `/media`, `/run/media`, `/mnt` and Windows drive letters), with the number of saves in each. The search runs in the
@@ -65,7 +74,7 @@ they have changed. They live in `ms0/PSP/SAVEDATA_BACKUP/` (never inside `SAVEDA
 
 | Folder | What |
 |---|---|
-| `20261119-210405_cloud-download/ULES01505GameData00/` | one backup: local date and time, the reason (`cloud-download`, `cloud-conflict`, `import`, `restore`, `daily`, `manual`), the save folders as they were |
+| `20261119-210405_cloud-download/ULES01505GameData00/` | one backup: local date and time, the reason (`cloud-download`, `cloud-conflict`, `import`, `restore`, `daily`, `manual`, `deleted`, `moved`, `renamed`, `replaced`), the save folders as they were |
 | `ULES01505GameData00.bak` | an older runtime's single backup: listed as "Older backup" |
 
 Saves replaced by one occasion within two minutes (a sync that downloads three saves) share one backup. The newest 40 automatic and

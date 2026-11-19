@@ -121,6 +121,9 @@ const char* reason_text(const std::string& code) {
     if (code == kImport) return "Before an import";
     if (code == kRestore) return "Before a restore";
     if (code == kManual) return "Backed up by you";
+    if (code == kDeleted) return "Deleted save";
+    if (code == kMoved) return "Before a move to another slot";
+    if (code == kRenamed) return "Before a rename";
     if (code == kDaily) return "Daily backup";
     if (code == kLegacy) return "Older backup";
     return "Before a save was replaced";

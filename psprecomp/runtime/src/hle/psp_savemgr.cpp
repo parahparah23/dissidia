@@ -332,6 +332,27 @@ std::string copy_save(const SaveInfo& s, const std::string& dest_root_s, const s
     return "";
 }
 
+std::string set_title(const std::string& dir, const std::string& title) {
+    Sfo sfo;
+    sfo.d = read_file(P(dir) / "PARAM.SFO");
+    if (!sfo.parse()) return "PARAM.SFO is not valid";
+    const SfoEntry* t = sfo.find("SAVEDATA_TITLE");
+    if (!t) return "this save has no name to change";
+    if (title.size() + 1 > t->max) return "the name is too long (at most " + std::to_string(t->max - 1) + " bytes)";
+    if (!sfo.set_str("SAVEDATA_TITLE", title)) return "cannot change the name";
+    const SfoEntry* sp = sfo.find("SAVEDATA_PARAMS");
+    if (sp && sp->max == 128 && sfo.d.size() % 16 == 0) {
+        const size_t off = sfo.datatab + sp->off;
+        const int mode = psp_sdcrypto::crypt_mode_from_params_flag(sfo.d[off]);
+        if (mode > 0 && psp_sdcrypto::update_sfo_hash(sfo.d, off, mode) != 0) return "could not sign PARAM.SFO";
+    }
+    const fs::path tmp = P(dir) / "PARAM.SFO.tmp";
+    if (!write_file(tmp, sfo.d)) return "cannot write PARAM.SFO";
+    std::error_code ec;
+    fs::rename(tmp, P(dir) / "PARAM.SFO", ec);
+    return ec ? "cannot write PARAM.SFO: " + ec.message() : "";
+}
+
 std::vector<std::string> save_files(const std::string& dir) {
     Sfo sfo;
     sfo.d = read_file(P(dir) / "PARAM.SFO");

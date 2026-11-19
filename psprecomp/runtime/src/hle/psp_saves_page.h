@@ -8,6 +8,8 @@
 //                       the picked place and get this game's folder names (psp_savemgr::copy_save signs PARAM.SFO again)
 //   Export              to a folder or a .zip picked with the system's dialog, PPSSPP / a memory stick, the in-game browser or a typed
 //                       path; folder names keep their region or take this game's
+//   This game's saves   duplicate a save into another slot (the game shows game data slots 00-19), move it to another slot, rename it
+//                       (the name the save list shows), delete it (into the backups; with cloud sync, on the other devices too)
 //   Backups             every replaced save is kept (psp_savebackup), plus a daily copy and "Back up now"; any save of any backup can be
 //                       put back (e.g. to undo a cloud download), which itself is backed up first and is uploaded at the next sync
 //   Cloud sync          status, Sync now, a jump to Settings > Cloud
@@ -51,6 +53,7 @@ struct Env {
     std::function<bool()> cloud_configured;
     std::function<void()> cloud_sync;
     std::function<void(const std::string& suffix, psp_cloud::Choice)> cloud_resolve;
+    std::function<void(const std::string& suffix)> cloud_delete;   // a slot deleted / moved away here: delete it in the cloud too
     std::string device_name;     // this device, as the conflict screen names it
     // Places for the in-game browser (null = home, Downloads, Documents, the game folder, mounts / drives / Android storage).
     std::function<std::vector<psp_savemgr::Source>()> places;

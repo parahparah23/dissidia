@@ -15,6 +15,7 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <ctime>
 
 namespace fs = std::filesystem;
 
@@ -252,7 +253,7 @@ struct Run {
         for (const RemoteItem& it : items) {
             if (it.name.size() <= 5 || it.name.compare(it.name.size() - 5, 5, ".meta") != 0) continue;
             const std::string sfx = it.name.substr(0, it.name.size() - 5);
-            if (!plain_suffix(sfx) || !included(sfx) || !remote_blobs.count(sfx)) continue;
+            if (!plain_suffix(sfx) || !included(sfx)) continue;   // (a deletion marker has no .save: checked below)
             wanted.push_back({sfx, it.name});
         }
         // Each download is its own connection (a TLS handshake each): with a provider that allows it, read them side by side.
@@ -273,7 +274,7 @@ struct Run {
         for (size_t i = 0; i < wanted.size(); ++i) {
             if (!got[i]) continue;
             const Meta m = meta_from_text(std::string(bodies[i].begin(), bodies[i].end()));
-            if (m.valid()) remote[wanted[i].first] = m;
+            if (m.valid() && (m.deleted || remote_blobs.count(wanted[i].first))) remote[wanted[i].first] = m;
         }
         return "";
     }
@@ -340,6 +341,24 @@ struct Run {
         if (r != remote.end()) it.remote = r->second;
         auto b = st.base.find(sfx);
         const std::string base = b == st.base.end() ? "" : b->second;
+
+        if (r != remote.end() && r->second.deleted) {   // deleted on another device
+            const std::string who = r->second.device_name.empty() ? "another device" : r->second.device_name;
+            if (l == local_hash.end()) { st.base.erase(sfx); it.action = Action::Same; it.note = "deleted"; return it; }
+            if (!base.empty() && l->second == base) {      // unchanged here since: delete it here too (into the backups)
+                if (!o.allow_pull) { it.action = Action::Skipped; it.note = "deleted on " + who + "; removed here at the next sync"; return it; }
+                const std::string e = psp_savebackup::set_aside(local.at(sfx).path, o.backup_root, psp_savebackup::kDeleted);
+                if (!e.empty()) { it.action = Action::Error; it.note = e; return it; }
+                st.base.erase(sfx);
+                it.action = Action::Removed;
+                it.note = "deleted on " + who + " (this device's copy is in the backups)";
+                return it;
+            }
+            const std::string err = push(sfx, false);   // changed here after the delete (or no history): it stays, and goes up again
+            it.action = err.empty() ? Action::Pushed : Action::Error;
+            it.note = err.empty() ? "uploaded again (changed here after it was deleted on " + who + ")" : err;
+            return it;
+        }
 
         if (l != local_hash.end() && r != remote.end() && l->second == r->second.hash) {
             st.base[sfx] = l->second;
@@ -489,6 +508,7 @@ std::string meta_to_text(const Meta& m) {
     if (!m.device_name.empty()) t += "name=" + meta_value(m.device_name, 48) + "\n";
     if (!m.savetitle.empty()) t += "title=" + meta_value(m.savetitle, 128) + "\n";
     if (!m.detail.empty()) t += "detail=" + meta_value(m.detail, 256) + "\n";
+    if (m.deleted) t += "deleted=1\n";
     return t;
 }
 
@@ -508,6 +528,7 @@ Meta meta_from_text(const std::string& text) {
         else if (k == "name") m.device_name = meta_value(v, 48);
         else if (k == "title") m.savetitle = meta_value(v, 128);
         else if (k == "detail") m.detail = meta_value(v, 256);
+        else if (k == "deleted") m.deleted = v == "1";
     }
     return m;
 }
@@ -537,6 +558,45 @@ std::vector<Item> sync_all(Provider& p, const Options& o, std::string* error) {
     for (const std::string& sfx : all) out.push_back(r.decide(sfx));
     r.persist();
     return out;
+}
+
+Item delete_remote(Provider& p, const Options& o, const std::string& suffix) {
+    Item it;
+    it.suffix = suffix;
+    Run r(p, o);
+    if (r.st.device.empty()) r.st.device = new_device_id();
+    if (std::string e = r.scan_remote(); !e.empty()) { it.action = Action::Error; it.note = e; return it; }
+    auto rm = r.remote.find(suffix);
+    auto b = r.st.base.find(suffix);
+    if (rm == r.remote.end() || rm->second.deleted) {   // nothing in the cloud (or already deleted there)
+        if (b != r.st.base.end()) r.st.base.erase(b);
+        r.persist();
+        it.action = Action::Same;
+        it.note = "deleted";
+        return it;
+    }
+    if (b == r.st.base.end() || b->second != rm->second.hash) {
+        it.action = Action::Skipped;
+        it.remote = rm->second;
+        it.note = "changed in the cloud since this device's last sync: not deleted there, it comes back at the next sync";
+        return it;
+    }
+    Bytes old;
+    if (p.get(suffix + ".save", &old).empty()) p.put(suffix + ".bak", old);   // a one-slot undo, as for a conflict
+    Meta m = rm->second;
+    m.deleted = true;
+    m.blob.clear();
+    m.device = r.st.device;
+    m.device_name = o.device_name;
+    m.mtime = std::time(nullptr);
+    const std::string t = meta_to_text(m);
+    if (std::string e = p.put(suffix + ".meta", Bytes(t.begin(), t.end())); !e.empty()) { it.action = Action::Error; it.note = e; return it; }
+    p.remove(suffix + ".save");
+    r.st.base.erase(suffix);
+    r.persist();
+    it.action = Action::Removed;
+    it.note = "deleted in the cloud too (kept there once as " + suffix + ".bak)";
+    return it;
 }
 
 Item resolve_conflict(Provider& p, const Options& o, const std::string& suffix, Choice c) {

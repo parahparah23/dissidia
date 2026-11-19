@@ -69,6 +69,10 @@ std::vector<Source> detect_sources(bool with_saves, const std::string& exclude =
 std::string copy_save(const SaveInfo& s, const std::string& dest_root, const std::string& new_disc, bool replace,
                       std::string* dest_name, const std::string& backup_root = "", const std::string& backup_reason = "");
 
+// Changes the name the save list shows for the save in `dir` (PARAM.SFO's SAVEDATA_TITLE, e.g. "GAME DATA"; signed again). The game
+// writes its own name back the next time it saves into that slot. "" on success, else an error text.
+std::string set_title(const std::string& dir, const std::string& title);
+
 // The file names that travel with the save folder `dir` (PARAM.SFO, the icons and the files PARAM.SFO lists) that
 // exist on disk, sorted. Empty when PARAM.SFO is unreadable.
 std::vector<std::string> save_files(const std::string& dir);

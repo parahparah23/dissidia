@@ -33,7 +33,7 @@ using Clock = std::chrono::steady_clock;
 using CloudProvider = psp_cloud::Provider;   // (psp_cloud_svc::Provider is the backend choice)
 
 struct Job {
-    enum Kind { Sync, Push, Resolve, Signin } kind = Sync;
+    enum Kind { Sync, Push, Resolve, Signin, Delete } kind = Sync;
     std::string suffix;
     Choice choice = Choice::Skip;
 };
@@ -173,13 +173,14 @@ std::string ago(time_t t) {
 
 // ---- results -> status (call with the lock held) ----
 void summarise(const std::vector<Item>& items, const std::string& fatal, bool push_only) {
-    int up = 0, down = 0, conflicts = 0, errors = 0, skipped = 0;
+    int up = 0, down = 0, conflicts = 0, errors = 0, skipped = 0, removed = 0;
     std::string first_error;
     for (const Item& i : items) {
         up += i.action == Action::Pushed;
         down += i.action == Action::Pulled;
         conflicts += i.action == Action::Conflict;
         skipped += i.action == Action::Skipped;
+        removed += i.action == Action::Removed;
         if (i.action == Action::Error) { errors++; if (first_error.empty()) first_error = i.suffix + ": " + i.note; }
     }
     g.st.items = items;
@@ -191,6 +192,7 @@ void summarise(const std::vector<Item>& items, const std::string& fatal, bool pu
         std::string t = "Synced";
         if (up || down) t += " (" + std::string(up ? std::to_string(up) + " up" : "") + (up && down ? ", " : "") +
                              (down ? std::to_string(down) + " down" : "") + ")";
+        if (removed) t += ", " + std::to_string(removed) + " deleted (in the backups)";
         if (conflicts) { g.st.state = Status::NeedsChoice; t = std::to_string(conflicts) + " save" + (conflicts == 1 ? "" : "s") + " changed on both sides: choose which to keep"; }
         else g.st.state = Status::Idle;
         if (skipped && !conflicts && push_only) t += "; newer cloud saves arrive at the next start";
@@ -237,6 +239,25 @@ void do_resolve(std::unique_lock<std::mutex>& lk, const std::string& suffix, Cho
     for (Item& i : items) if (i.suffix == suffix) { i = done; found = true; }
     if (!found) items.push_back(done);
     summarise(items, "", false);
+}
+
+void do_delete(std::unique_lock<std::mutex>& lk, const std::string& suffix) {
+    const Config cfg = g.cfg;
+    const Paths paths = g.paths;
+    std::string err;
+    std::unique_ptr<CloudProvider> p = make_provider(cfg, &err);
+    if (!p) return;   // not set up: the deletion is local only
+    g.st.state = Status::Syncing;
+    g.st.text = "Deleting " + suffix + " in the cloud...";
+    touch();
+    lk.unlock();
+    const Item done = delete_remote(*p, make_options(cfg, paths, true), suffix);
+    lk.lock();
+    std::vector<Item> items;
+    for (const Item& i : g.st.items) if (i.suffix != suffix) items.push_back(i);
+    items.push_back(done);
+    summarise(items, "", false);
+    if (done.action == Action::Skipped || done.action == Action::Error) { g.st.text = suffix + ": " + done.note; touch(); }
 }
 
 void do_signin(std::unique_lock<std::mutex>& lk) {
@@ -308,6 +329,7 @@ void worker_main() {
         if (job.kind == Job::Signin) { do_signin(lk); g.cv.notify_all(); continue; }
         g.busy = true;
         if (job.kind == Job::Sync || job.kind == Job::Push) do_sync(lk, true);
+        else if (job.kind == Job::Delete) do_delete(lk, job.suffix);
         else do_resolve(lk, job.suffix, job.choice);
         g.busy = false;
         g.cv.notify_all();
@@ -420,6 +442,14 @@ void resolve(const std::string& suffix, Choice c) {
     std::lock_guard<std::mutex> lk(g.m);
     ensure_worker();
     g.jobs.push_back({Job::Resolve, suffix, c});
+    g.cv.notify_all();
+}
+
+void remove_save(const std::string& suffix) {
+    if (!configured()) return;
+    std::lock_guard<std::mutex> lk(g.m);
+    ensure_worker();
+    g.jobs.push_back({Job::Delete, suffix, Choice::Skip});
     g.cv.notify_all();
 }
 

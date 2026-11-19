@@ -202,6 +202,51 @@ int main() {
         CHECK(!find(r, "Quest05") && !find(r, "Quest06"));
     }
 
+    // deleting a save with the save manager: a deletion marker in the cloud; other devices move their copy into the backups, a device
+    // that changed it since uploads it again, and a delete is refused while the cloud copy is newer than this device's last sync
+    {
+        const std::string c2 = T + "/cloud_del";
+        auto p2 = make_folder_provider(c2);
+        Dev X{T + "/X", "ULUS10566"}, Y{T + "/Y", "ULES01505"}, Z{T + "/Z", "ULES01505"};
+        make_save(X.saves(), "ULUS10566GameData01", "DISSIDIA 012 FINAL FANTASY", "slot 1", "DISSIDIA.BIN", 21);
+        make_save(X.saves(), "ULUS10566FCard02", "DISSIDIA 012 FINAL FANTASY", "card", "FCARD.BIN", 22);
+        CHECK(count(sync_all(*p2, X.opts(), &err), Action::Pushed) == 2);
+        CHECK(count(sync_all(*p2, Y.opts(), &err), Action::Pulled) == 2);
+        CHECK(count(sync_all(*p2, Z.opts(), &err), Action::Pulled) == 2);
+        CHECK(psp_savebackup::set_aside(X.dir("GameData01").string(), X.root + "/backup", psp_savebackup::kDeleted).empty());
+        Item d = delete_remote(*p2, X.opts(), "GameData01");
+        CHECK(d.action == Action::Removed);
+        CHECK(!fs::exists(c2 + "/GameData01.save") && fs::exists(c2 + "/GameData01.bak"));
+        {
+            Bytes m = slurp(c2 + "/GameData01.meta");
+            CHECK(meta_from_text(std::string(m.begin(), m.end())).deleted);
+        }
+        r = sync_all(*p2, X.opts(), &err);
+        CHECK(find(r, "GameData01") && find(r, "GameData01")->action == Action::Same && !fs::exists(X.dir("GameData01")));   // not downloaded again
+        r = sync_all(*p2, Y.opts(), &err);
+        CHECK(find(r, "GameData01") && find(r, "GameData01")->action == Action::Removed && !fs::exists(Y.dir("GameData01")));
+        {
+            bool kept = false;
+            for (auto& b : psp_savebackup::list(Y.root + "/backup")) if (b.reason == psp_savebackup::kDeleted && !b.saves.empty() && b.saves[0].suffix == "GameData01") kept = true;
+            CHECK(kept);   // Y's copy is in its backups
+        }
+        r = sync_all(*p2, Y.opts(), &err);
+        CHECK(find(r, "GameData01") && find(r, "GameData01")->action == Action::Same);
+        Z.change("GameData01", "DISSIDIA.BIN", 23);   // Z played on it before hearing of the delete: it stays and goes up again
+        r = sync_all(*p2, Z.opts(), &err);
+        CHECK(find(r, "GameData01") && find(r, "GameData01")->action == Action::Pushed && fs::exists(c2 + "/GameData01.save"));
+        r = sync_all(*p2, X.opts(), &err);
+        CHECK(find(r, "GameData01") && find(r, "GameData01")->action == Action::Pulled);
+        // the cloud copy changed since Y's last sync: Y's delete is refused there, and the save comes back
+        X.change("FCard02", "FCARD.BIN", 24);
+        CHECK(count(sync_all(*p2, X.opts(), &err), Action::Pushed) == 1);
+        CHECK(psp_savebackup::set_aside(Y.dir("FCard02").string(), Y.root + "/backup", psp_savebackup::kDeleted).empty());
+        d = delete_remote(*p2, Y.opts(), "FCard02");
+        CHECK(d.action == Action::Skipped && fs::exists(c2 + "/FCard02.save"));
+        r = sync_all(*p2, Y.opts(), &err);
+        CHECK(find(r, "FCard02") && find(r, "FCard02")->action == Action::Pulled);
+    }
+
     // containers: round trip, and unsafe or damaged ones are refused
     {
         Bytes blob;

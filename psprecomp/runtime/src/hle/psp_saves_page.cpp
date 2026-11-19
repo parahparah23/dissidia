@@ -93,11 +93,12 @@ std::string save_title(const SaveInfo& s) {   // the save's own words, one line
     return d;
 }
 
-enum class V { Top, Pick, Browse, Conflict, Backups, Backup };
+enum class V { Top, Pick, Browse, Conflict, Backups, Backup, Mine, Save, Slots };
 enum class A {
     None, Conflict, KeepNewerAll, Source, PickFolder, PickArchive, Browse, TypeImport, ExportFolder, ExportZip, Dest, BrowseExport,
     TypeExport, Names, BackupNow, Backups, CloudSync, CloudSettings, SelAll, Toggle, Run, BrowseUse, BrowseUp, BrowseDir, BrowseFile,
     BrowseHere, KeepLocal, KeepRemote, Later, OpenBackup, Restore, RestoreAll, DeleteBackup,
+    Mine, OpenSave, Duplicate, Move, Rename, DeleteSave, ToSlot,
 };
 struct Act {
     A a = A::None; int i = 0; std::string s;
@@ -124,6 +125,9 @@ struct Level {
     bool fresh = true;                 // just opened: the cursor goes to the newer side's choice
     // Backup
     std::string backup_id;
+    // Save / Slots
+    std::string save_name;             // the folder (ULES01505GameData00)
+    bool moving = false;               // Slots: move instead of duplicate
 };
 
 enum class Native { None, ImportFolder, ImportArchive, ExportFolder, ExportZip };
@@ -138,6 +142,19 @@ std::string slot_label(const std::string& suffix) {
     if (suffix.rfind("Replay", 0) == 0) return "Replay " + num(6);
     return suffix;
 }
+namespace {
+constexpr int kSlots = 20;   // the slots the game offers per kind (its save list asks for GameData00 .. GameData19)
+std::string slot_prefix(const std::string& suffix) {   // "GameData07" -> "GameData"
+    size_t n = suffix.size();
+    while (n > 0 && suffix[n - 1] >= '0' && suffix[n - 1] <= '9') --n;
+    return suffix.substr(0, n);
+}
+std::string slot_numbered(const std::string& suffix) {   // always with its number: "Game data 00"
+    const std::string l = slot_label(suffix);
+    return suffix.rfind("GameData", 0) == 0 && l == "Game data" ? "Game data " + (suffix.size() > 8 ? suffix.substr(8) : std::string("00")) : l;
+}
+}  // namespace
+
 std::string when_text(time_t t) {
     if (!t) return "unknown time";
     const std::tm a = local_tm(t);
@@ -681,6 +698,13 @@ struct Page::Impl {
             }
             add(SetKind::Submenu, "Cloud settings...", "", "Cloud settings\nChoose the service and sign in (Settings > Cloud).", {A::CloudSettings});
         }
+        {
+            const int n = int(psp_savemgr::scan(env.saves_root).size());
+            header("This game's saves");
+            add(SetKind::Submenu, "Duplicate, move, rename or delete...", plural(n, "save", "saves"),
+                "This game's saves\nCopy a save into another slot, move it, change the name the save list shows, or delete it (deleted saves go to Backups).",
+                {A::Mine});
+        }
         const bool native = dlg_available();
         header("Import saves");
         if (!searched)
@@ -875,6 +899,112 @@ struct Page::Impl {
         add(SetKind::Danger, "Delete this backup", "", "Delete this backup\nRemove it for good.", {A::DeleteBackup});
     }
 
+    // ---- this game's saves: duplicate, move, rename, delete ----
+    std::vector<SaveInfo> mine() {
+        std::vector<SaveInfo> v = psp_savemgr::scan(env.saves_root);
+        sort_saves(v);
+        return v;
+    }
+    bool mine_one(const std::string& name, SaveInfo* out) const {
+        return psp_savemgr::read_save(S(P(env.saves_root) / P(name)), out) && out->name == name;
+    }
+    void build_mine() {
+        const auto v = mine();
+        header(v.empty() ? "No saves yet" : "Choose a save");
+        for (size_t i = 0; i < v.size() && i < 150; ++i) {
+            const std::string t = save_title(v[i]);
+            add(SetKind::Submenu, slot_numbered(v[i].suffix) + "  " + region_label(v[i].disc), when_short(v[i].mtime),
+                slot_numbered(v[i].suffix) + "\n" + (t.empty() ? "" : t + ". ") + "Saved " + when_text(v[i].mtime) + ", " + size_text(v[i].bytes) + ", folder " + v[i].name + ".",
+                {A::OpenSave, 0, v[i].name});
+        }
+    }
+    void build_save() {
+        SaveInfo s;
+        if (!mine_one(top().save_name, &s)) { add(SetKind::Info, "This save is gone", "", "", {}); return; }
+        const std::string t = save_title(s), shown = psp_savemgr::one_line(s.savetitle);
+        header(slot_numbered(s.suffix) + "  " + region_label(s.disc) + "  (" + s.name + ")");
+        add(SetKind::Info, t.empty() ? slot_numbered(s.suffix) : fit(t, 40, true), when_short(s.mtime),
+            slot_numbered(s.suffix) + "\n" + (t.empty() ? "" : t + ". ") + "Saved " + when_text(s.mtime) + ", " + size_text(s.bytes) + ", folder " + s.name + ".", {});
+        add(SetKind::Submenu, "Duplicate to another slot...", "", "Duplicate\nCopy this save into another slot, to keep a copy you can go back to or play on separately. "
+            "The game shows both on its save list.", {A::Duplicate});
+        add(SetKind::Submenu, "Move to another slot...", "", "Move\nPut this save into another slot; this slot becomes free. The old folder goes to Backups.", {A::Move});
+        add(SetKind::Text, "Rename...", fit(shown, 24), "Rename\nChange the name the save list shows for this save (now \"" + shown + "\"), e.g. to tell copies apart. "
+            "The game writes its own name back the next time it saves into this slot.", {A::Rename});
+        add(SetKind::Danger, "Delete", "", "Delete\nRemove this save. It goes to Backups, so it can be restored." +
+            std::string(cloud_configured() ? " Cloud sync deletes it on your other devices too (each keeps a backup)." : ""), {A::DeleteSave});
+    }
+    void build_slots() {
+        SaveInfo s;
+        if (!mine_one(top().save_name, &s)) { add(SetKind::Info, "This save is gone", "", "", {}); return; }
+        const std::string pre = slot_prefix(s.suffix);
+        header(std::string(top().moving ? "Move " : "Copy ") + slot_numbered(s.suffix) + " to which slot?");
+        for (int n = 0; n < kSlots; ++n) {
+            char num[8];
+            std::snprintf(num, sizeof num, "%02d", n);
+            const std::string sfx = pre + num;
+            if (sfx == s.suffix) continue;
+            const std::string have = existing(sfx);
+            SaveInfo other;
+            const bool taken = !have.empty() && psp_savemgr::read_save(S(P(env.saves_root) / P(have)), &other);
+            add(SetKind::Action, slot_numbered(sfx), taken ? "replaces " + when_short(other.mtime) : "empty",
+                slot_numbered(sfx) + "\n" + (taken ? "Holds a save from " + when_text(other.mtime) + (save_title(other).empty() ? "" : " (" + save_title(other) + ")") +
+                                                      ", which goes to Backups first."
+                                                    : std::string("An empty slot.")), {A::ToSlot, 0, sfx});
+        }
+    }
+    void to_slot(const std::string& target) {
+        SaveInfo s;
+        const bool moving = top().moving;
+        if (!mine_one(top().save_name, &s)) { message("This save is gone", "It is no longer there."); return; }
+        const std::string have = existing(target);
+        SaveInfo t = s;
+        t.suffix = target;
+        const std::string disc = have.size() >= 9 ? have.substr(0, 9) : s.disc;
+        std::string name;
+        std::string e = psp_savemgr::copy_save(t, env.saves_root, disc, !have.empty(), &name, env.backup_root, psp_savebackup::kReplaced);
+        if (e.empty() && moving) {
+            e = psp_savebackup::set_aside(s.path, env.backup_root, psp_savebackup::kMoved);
+            if (e.empty() && cloud_configured() && env.cloud_delete) env.cloud_delete(s.suffix);
+        }
+        std::fprintf(stderr, "[SAVEMGR] %s %s -> %s: %s\n", moving ? "move" : "duplicate", s.name.c_str(), name.c_str(), e.empty() ? "ok" : e.c_str());
+        backups_loaded = false;
+        if (e.empty()) after_local_change();
+        while (stack.size() > 2) pop();   // back to the list of saves
+        if (!e.empty()) { message(moving ? "Move failed" : "Copy failed", e); return; }
+        message(moving ? "Moved" : "Duplicated", slot_numbered(s.suffix) + (moving ? " is now " : " was copied to ") + slot_numbered(target) + "." +
+                (have.empty() ? "" : "\nThe save that was there is in Backups."));
+    }
+    void delete_save() {
+        SaveInfo s;
+        if (!mine_one(top().save_name, &s)) return;
+        const std::string e = psp_savebackup::set_aside(s.path, env.backup_root, psp_savebackup::kDeleted);
+        std::fprintf(stderr, "[SAVEMGR] delete %s: %s\n", s.name.c_str(), e.empty() ? "ok (in the backups)" : e.c_str());
+        if (!e.empty()) { message("Cannot delete", e); return; }
+        const bool cloud = cloud_configured() && env.cloud_delete;
+        if (cloud) env.cloud_delete(s.suffix);
+        ++changed;
+        backups_loaded = false;
+        pop();
+        message("Deleted", slot_numbered(s.suffix) + " was deleted. It is in Backups (Restore a backup) if you want it back." +
+                std::string(cloud ? "\nIt is deleted in the cloud and on your other devices at their next sync too." : ""));
+    }
+    void rename_save(const std::string& title_in) {
+        std::string title = title_in;
+        while (!title.empty() && title.back() == ' ') title.pop_back();
+        while (!title.empty() && title.front() == ' ') title.erase(title.begin());
+        SaveInfo s;
+        if (title.empty() || !mine_one(top().save_name, &s)) return;
+        if (title.size() > 127) { message("Cannot rename", "the name is too long (at most 127 bytes)"); return; }   // (SAVEDATA_TITLE holds 128)
+        std::string id;
+        psp_savebackup::snapshot(env.saves_root, env.backup_root, psp_savebackup::kRenamed, {s.name}, &id);
+        const std::string e = psp_savemgr::set_title(s.path, title);
+        std::fprintf(stderr, "[SAVEMGR] rename %s: %s\n", s.name.c_str(), e.empty() ? "ok" : e.c_str());
+        backups_loaded = false;
+        if (!e.empty()) { message("Cannot rename", e); return; }
+        ++changed;   // (the content hash does not cover PARAM.SFO: the name stays on this device)
+        dirty = true;
+    }
+
     void build() {
         rows.clear();
         acts.clear();
@@ -885,6 +1015,9 @@ struct Page::Impl {
         case V::Conflict: build_conflict(); break;
         case V::Backups: build_backups(); break;
         case V::Backup: build_backup(); break;
+        case V::Mine: build_mine(); break;
+        case V::Save: build_save(); break;
+        case V::Slots: build_slots(); break;
         }
         // never rest on a header
         int& s = top().sel;
@@ -988,6 +1121,33 @@ struct Page::Impl {
                      {"Restore all", "Cancel"}, [this, id](int bt) { if (bt == 0) restore(id, -1); });
             break;
         }
+        case A::Mine: { Level n; n.v = V::Mine; n.title = "This game's saves"; push(std::move(n)); break; }
+        case A::OpenSave: { Level n; n.v = V::Save; n.save_name = a.s; std::string d, x; psp_savemgr::split_name(a.s, &d, &x); n.title = slot_numbered(x); n.sel = 2; push(std::move(n)); break; }   // (on Duplicate)
+        case A::Duplicate: case A::Move: { Level n; n.v = V::Slots; n.save_name = l.save_name; n.moving = a.a == A::Move; n.title = a.a == A::Move ? "Move" : "Duplicate"; push(std::move(n)); break; }
+        case A::Rename: {
+            SaveInfo s;
+            if (!mine_one(l.save_name, &s)) break;
+            ask_text("Name shown on the save list", psp_savemgr::one_line(s.savetitle), [this](const std::string& v) { rename_save(v); });
+            break;
+        }
+        case A::DeleteSave: {
+            SaveInfo s;
+            if (!mine_one(l.save_name, &s)) break;
+            const std::string t = save_title(s);
+            question("Delete " + slot_numbered(s.suffix) + "?", (t.empty() ? std::string() : fit(t, 70, true) + "\n") + "It goes to Backups, so it can be restored." +
+                     std::string(cloud_configured() ? "\nIt is deleted in the cloud and on your other devices too (each keeps a backup)." : ""),
+                     {"Delete", "Cancel"}, [this](int b) { if (b == 0) delete_save(); });
+            break;
+        }
+        case A::ToSlot: {
+            const std::string target = a.s, have = existing(a.s);
+            if (have.empty()) { to_slot(target); break; }
+            SaveInfo other;
+            psp_savemgr::read_save(S(P(env.saves_root) / P(have)), &other);
+            question("Replace " + slot_numbered(target) + "?", "It holds a save from " + when_text(other.mtime) + ". That save goes to Backups first.",
+                     {"Replace", "Cancel"}, [this, target](int b) { if (b == 0) to_slot(target); });
+            break;
+        }
         case A::DeleteBackup: {
             const std::string id = l.backup_id;
             question("Delete this backup?", "It cannot be brought back.", {"Delete", "Cancel"}, [this, id](int bt) {
@@ -1082,7 +1242,7 @@ bool Page::tick(int64_t) {
         if (st.revision != d_->cloud_rev) {
             d_->cloud_rev = st.revision;
             if (st.state != psp_cloud_svc::Status::Syncing)
-                for (const auto& it : st.items) if (it.action == psp_cloud::Action::Pulled) { ++d_->changed; d_->backups_loaded = false; break; }
+                for (const auto& it : st.items) if (it.action == psp_cloud::Action::Pulled || it.action == psp_cloud::Action::Removed) { ++d_->changed; d_->backups_loaded = false; break; }
             d_->dirty = true;
             changed = true;
         }

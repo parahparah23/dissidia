@@ -2300,8 +2300,12 @@ static bool sd_ui_step(uint8_t* rdram, uint32_t p, uint32_t mode,
         g_sd_ui.stage = 1;
         g_sd_ui.pub_scale = 0;
         g_savedata_list_opened.fetch_add(1);
-        fprintf(stderr, "[HLE] sceUtilitySavedata: list dialog opened (%zu rows, %s confirms)\n",
-                g_sd_ui.dlg.entries().size(), confirm_cross ? "CROSS" : "CIRCLE");
+        {
+            std::string slots;   // the game's own slot list (saveNameList), for the log
+            for (auto& n : sd_savenamelist(rdram, p)) slots += (slots.empty() ? "" : ",") + n;
+            fprintf(stderr, "[HLE] sceUtilitySavedata: list dialog opened (%zu rows, %s confirms; game slots: %s)\n",
+                    g_sd_ui.dlg.entries().size(), confirm_cross ? "CROSS" : "CIRCLE", slots.empty() ? "none" : slots.c_str());
+        }
     }
     int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();

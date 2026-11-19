@@ -614,6 +614,114 @@ static void test_conflicts(const fs::path& T) {
     CHECK(f.syncs == 1);
 }
 
+static std::string sfo_title(const fs::path& dir) {
+    psp_savemgr::SaveInfo s;
+    return psp_savemgr::read_save(dir.string(), &s) ? s.savetitle : std::string("?");
+}
+
+static void test_mine(const fs::path& T) {
+    const char* dump = std::getenv("DUMP_SAVES");
+    Fake f;
+    f.cloud = true;
+    f.configured = true;
+    std::vector<std::string> deleted;
+    psp_saves::Page p;
+    psp_saves::Env env = make_env(T, f);
+    env.cloud_delete = [&deleted](const std::string& s) { deleted.push_back(s); };
+    const fs::path saves = env.saves_root, bak = env.backup_root;
+    make_save(saves, "ULES01505GameData00", "DISSIDIA 012 FINAL FANTASY", "PLAYER: Ender Time: 10:00:00", "DISSIDIA.BIN", 51);
+    make_save(saves, "ULES01505GameData03", "DISSIDIA 012 FINAL FANTASY", "PLAYER: Other Time: 01:00:00", "DISSIDIA.BIN", 52);
+    p.set_env(env);
+    p.reset();
+    p.wait_idle();
+    CHECK(press(p, "Duplicate, move, rename or delete"));
+    CHECK(row_of(p, "Game data 00") > 0 && row_of(p, "Game data 03") > 0);
+    dump_page(dump, "saves_mine", p);
+
+    // duplicate 00 into 01 (empty): a real copy under the new slot name, PARAM.SFO retargeted and signed
+    CHECK(press(p, "Game data 00"));
+    dump_page(dump, "saves_one", p);
+    CHECK(press(p, "Duplicate to another slot"));
+    CHECK(row_of(p, "Game data 00") < 0);                                   // not its own slot
+    CHECK(p.rows()[size_t(row_of(p, "Game data 01"))].value == "empty");
+    CHECK(p.rows()[size_t(row_of(p, "Game data 03"))].value.rfind("replaces", 0) == 0);
+    CHECK(row_of(p, "Game data 19") > 0 && row_of(p, "Game data 20") < 0);   // the game's 20 slots
+    dump_page(dump, "saves_slots", p);
+    CHECK(press(p, "Game data 01"));
+    CHECK(dialog_text(p).find("copied to Game data 01") != std::string::npos);
+    CHECK(answer(p, "OK"));
+    CHECK(slurp(saves / "ULES01505GameData01" / "DISSIDIA.BIN") == slurp(saves / "ULES01505GameData00" / "DISSIDIA.BIN"));
+    {
+        Bytes sfo = slurp(saves / "ULES01505GameData01" / "PARAM.SFO");
+        const std::string n = "ULES01505GameData01";
+        CHECK(std::search(sfo.begin(), sfo.end(), n.begin(), n.end()) != sfo.end());
+        CHECK(resign_is_noop(saves / "ULES01505GameData01" / "PARAM.SFO"));
+    }
+    CHECK(f.syncs == 1);                                                    // the new slot goes up
+    CHECK(p.crumbs().size() == 1);                                          // back on the list of saves
+
+    // duplicate onto a taken slot asks, and keeps the old one in Backups
+    CHECK(press(p, "Game data 00"));
+    CHECK(press(p, "Duplicate to another slot"));
+    CHECK(press(p, "Game data 03"));
+    CHECK(dialog_text(p).find("Replace Game data 03?") != std::string::npos);
+    CHECK(answer(p, "Replace"));
+    CHECK(answer(p, "OK"));
+    CHECK(slurp(saves / "ULES01505GameData03" / "DISSIDIA.BIN") == slurp(saves / "ULES01505GameData00" / "DISSIDIA.BIN"));
+    {
+        bool kept = false;
+        for (auto& b : psp_savebackup::list(bak.string())) for (auto& s : b.saves) if (s.name == "ULES01505GameData03" && psp_savemgr::one_line(s.detail).find("Other") != std::string::npos) kept = true;
+        CHECK(kept);
+    }
+
+    // move 01 to 05: 01 is free afterwards (its folder in Backups), and the cloud forgets slot 01
+    CHECK(press(p, "Game data 01"));
+    CHECK(press(p, "Move to another slot"));
+    CHECK(press(p, "Game data 05"));
+    CHECK(dialog_text(p).find("is now Game data 05") != std::string::npos);
+    CHECK(answer(p, "OK"));
+    CHECK(!fs::exists(saves / "ULES01505GameData01") && fs::is_directory(saves / "ULES01505GameData05"));
+    CHECK(deleted.size() == 1 && deleted[0] == "GameData01");
+
+    // rename: the save list's name changes, the signature stays valid, the old PARAM.SFO is in Backups
+    CHECK(press(p, "Game data 05"));
+    CHECK(press(p, "Rename"));
+    psp_saves::TextAsk ask;
+    CHECK(p.text(&ask) && ask.text == "Slot");
+    p.text_done(true, "  Before the final boss  ");
+    CHECK(sfo_title(saves / "ULES01505GameData05") == "Before the final boss");
+    CHECK(resign_is_noop(saves / "ULES01505GameData05" / "PARAM.SFO"));
+    CHECK(p.rows()[size_t(row_of(p, "Rename"))].value == "Before the final boss");
+    {
+        bool kept = false;
+        for (auto& b : psp_savebackup::list(bak.string())) if (b.reason == psp_savebackup::kRenamed && !b.saves.empty() && b.saves[0].savetitle == "Slot") kept = true;
+        CHECK(kept);
+    }
+    CHECK(press(p, "Rename"));
+    p.text_done(true, std::string(200, 'x'));   // too long for SAVEDATA_TITLE
+    CHECK(dialog_text(p).find("too long") != std::string::npos);
+    CHECK(answer(p, "OK"));
+
+    // delete: asks, goes to Backups, the cloud is told
+    CHECK(press(p, "Delete"));
+    CHECK(dialog_text(p).find("Delete Game data 05?") != std::string::npos && dialog_text(p).find("other devices") != std::string::npos);
+    dump_page(dump, "saves_delete", p);
+    CHECK(answer(p, "Cancel"));
+    CHECK(fs::exists(saves / "ULES01505GameData05"));
+    CHECK(press(p, "Delete"));
+    CHECK(answer(p, "Delete"));
+    CHECK(dialog_text(p).find("was deleted") != std::string::npos);
+    CHECK(answer(p, "OK"));
+    CHECK(!fs::exists(saves / "ULES01505GameData05"));
+    CHECK(deleted.size() == 2 && deleted[1] == "GameData05");
+    {
+        bool kept = false;
+        for (auto& b : psp_savebackup::list(bak.string())) if (b.reason == psp_savebackup::kDeleted && !b.saves.empty() && b.saves[0].name == "ULES01505GameData05") kept = true;
+        CHECK(kept);
+    }
+    CHECK(row_of(p, "Game data 05") < 0 && row_of(p, "Game data 00") > 0);
+}
+
 // ---------------------------------------------------------------------------------------------------- the real PPSSPP folder
 static void test_real(const fs::path& T) {
     const char* e = std::getenv("PSPRECOMP_TEST_PPSSPP_SAVES");
@@ -660,6 +768,7 @@ int main() {
     test_backups(T / "bak");
     test_page(T / "page");
     test_conflicts(T / "conf");
+    test_mine(T / "mine");
     test_real(T);
     if (!std::getenv("KEEP")) fs::remove_all(T);
     else std::printf("kept %s\n", tmpl);

@@ -63,6 +63,7 @@ void sync_now();                        // full sync
 void startup_sync();                    // sync_now when auto_sync is on
 void after_save();                      // debounced sync when auto_sync is on
 void resolve(const std::string& suffix, psp_cloud::Choice c);
+void remove_save(const std::string& suffix);   // the save manager deleted this slot here: delete it in the cloud too (psp_cloud::delete_remote)
 
 void signin_start();                    // Google device flow; status() shows user_code / verify_url meanwhile
 void signin_cancel();

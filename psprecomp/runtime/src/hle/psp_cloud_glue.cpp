@@ -77,6 +77,7 @@ psp_saves::Env psp_cloud_glue_saves_env() {
     e.cloud_configured = [] { return svc::configured(); };
     e.cloud_sync = [] { svc::sync_now(); };
     e.cloud_resolve = [](const std::string& s, psp_cloud::Choice c) { svc::resolve(s, c); };
+    e.cloud_delete = [](const std::string& s) { svc::remove_save(s); };
     return e;
 }
 
