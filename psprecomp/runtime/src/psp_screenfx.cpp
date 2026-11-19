@@ -1626,7 +1626,9 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_depth_fbo);
     glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-    if (sr) {
+    // The colour copy is also the albedo of the stage / effect lights and holds the fighter mask (its alpha): without reflections it was not
+    // made, so lights read whatever the texture held (black once the fighter mask pass rendered into it: no stage lights since #68).
+    if (sr || n_lights > 0 || (cs > 0 && sc.fighters)) {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_color_fbo);
         glBlitFramebuffer(0, 0, w, h, 0, 0, g_hw, g_hh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     }
