@@ -349,9 +349,24 @@ static void steam_keyboard(bool show) {
     const int rc = std::system(cmd.c_str());
     std::fprintf(stderr, "[OSK] Steam keyboard %s (%s, rc %d)\n", show ? "open" : "close", in_box ? "host" : "local", rc);
 }
+// The clipboard's text into the game's on-screen keyboard (its Paste key, Ctrl+V), as typed keys; line breaks dropped.
+static void osk_paste() {
+    char* clip = SDL_GetClipboardText();
+    if (!clip) return;
+    const unsigned char* t = reinterpret_cast<const unsigned char*>(clip);
+    for (size_t i = 0; t[i];) {
+        uint32_t cp = t[i];
+        int n = cp < 0x80 ? 1 : (cp >> 5) == 6 ? 2 : (cp >> 4) == 14 ? 3 : (cp >> 3) == 30 ? 4 : 1;
+        if (n > 1) { cp &= 0xFFu >> (n + 1); for (int k = 1; k < n && t[i + k]; ++k) cp = (cp << 6) | (t[i + k] & 63u); }
+        if (cp != '\r' && cp != '\n') psp_sddialog::osk_push_key(cp);
+        i += size_t(n);
+    }
+    SDL_free(clip);
+}
 static void osk_tick() {
     static bool was = false;
     const bool now = psp_sddialog::osk_active();
+    if (now && psp_sddialog::osk_take_paste_request()) osk_paste();
     if (now == was) return;
     was = now;
     if (now) SDL_StartTextInput(); else SDL_StopTextInput();
@@ -383,6 +398,7 @@ static void handle_sdl_event(const SDL_Event& ev) {
             }
             return;
         }
+        if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_v && (ev.key.keysym.mod & (KMOD_CTRL | KMOD_GUI))) { osk_paste(); return; }
         if (ev.type == SDL_KEYDOWN && !(ev.key.keysym.mod & (KMOD_ALT | KMOD_GUI | KMOD_CTRL))) {
             const SDL_Keycode k = ev.key.keysym.sym;
             if (k == SDLK_BACKSPACE || k == SDLK_DELETE) { psp_sddialog::osk_push_key(8); return; }
