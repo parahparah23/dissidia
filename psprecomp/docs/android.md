@@ -27,26 +27,46 @@ The launcher icon is original artwork (a crystal); the setup app and the PC wiza
 
 ## Building on the phone (the setup app)
 
-`DissidiaRecomp-Setup-<version>-android.apk` (a release asset) is a wizard, in the same look as the PC one, that builds the game **on the phone** from your own
-disc image and installs it. Nothing but the APK is downloaded, and no PC or terminal is involved.
+`DissidiaRecomp-Setup-<version>-android.apk` (a release asset) is an Android app that builds the game **on the phone** from your own disc image and installs it.
+Nothing but the APK is downloaded, and no PC or terminal is involved.
 
 1. Install the setup APK (allow your browser or file manager to install apps once) and open "Dissidia Recomp Setup". The first start unpacks its tools (about a minute).
-2. **Build the game** opens Android's own file picker: choose your disc image (`.iso`/`.cso`) anywhere (SD card, Download...). The picker hands the app an open
-   file, so no storage permission is needed to read it. "Use the simple browser instead" is a built-in fallback (needs "all files access").
-3. After the file, the **Options** page (the game's Settings-screen look) offers **HD textures** (on / off, then **Texture pack**: LiinkPK's, about 0.8 GB, or the AI upscaled one, about 1.3 GB; downloaded by the app itself over your connection, then unpacked into the game's mods folder; finished downloads are kept if you retry),
-   **Japanese voices (undub)** (asks for a second disc image with the same file picker) and the update check. Android version and Import saves are PC-only.
-   Later, **Change extras** on the start page opens the same Extras page for the built game: it adds, removes or swaps the HD texture pack and adds the Japanese voices without building the game again.
-3b. The app asks for "all files access" once: the game app reads its files from the shared folder `<storage>/Android/media/org.psprecomp.game/game` (since Android 11 no
-   other app may write to `Android/data`).
-4. It extracts and decrypts the disc, translates the game to C++ and compiles it (about 5 minutes on a Snapdragon 8 Gen 2; the screen is kept on and a wake lock is held),
-   copies the files, and asks Android to install the game (confirm the dialog; allow the setup app to install apps once). Then start "Dissidia 012".
+2. **Build the game** explains what to pick, then opens Android's own file picker: choose your disc image (`.iso`/`.cso`) anywhere (SD card, Download...). The picker hands the
+   app an open file, so no storage permission is needed to read it. "Use the simple browser instead" (on the page shown while the picker is open) is a built-in fallback (needs "all files access").
+3. The app asks for "all files access" once (the game reads its files from the shared folder `<storage>/Android/media/org.psprecomp.game/game`; since Android 11 no other app
+   may write to `Android/data`). Switch it on in the settings page Android opens; back in the app it continues by itself.
+4. **Options** (made from the shared extras list, `setup/extras.cpp`: an extra added for the PC wizard appears here too): **HD textures** (on / off, then **Texture pack**: LiinkPK's, about 0.8 GB, or the AI upscaled one, about 1.3 GB; downloaded by the app itself, then unpacked into the
+   game's mods folder; finished downloads are kept if you retry), **Japanese voices (undub)** and **Bartz: Dissidia 1 moves** (each asks for its second disc image with the same
+   picker) and the update check. Later, **Change extras** on the start page opens the same page for the built game and applies it without building again.
+5. **Start building** extracts and decrypts the disc, translates the game to C++ and compiles it (about 5 minutes on a Snapdragon 8 Gen 2), copies the files, then
+   **Install the game** asks Android to install it (the app asks for "install unknown apps" once, then continues by itself) and **Play now** starts it.
+
+The pages are native Android views (`android/setup/java/org/psprecomp/setup/`, no SDL): a night-sky backdrop with a slowly turning crystal, cards in the game's gold-framed menu
+style (Cinzel / Noto Sans from `runtime/assets/fonts`, packed as APK assets), animated page changes. Portrait and landscape (landscape: the header beside the list, like the game's
+menus; the activity handles rotation itself, so a running build is not disturbed). Touch, keyboard or a game controller: d-pad / left stick move the focus, A chooses, B goes
+back, left / right flip a switch or a choice, Y opens Logs (on the build page: the log size), L / R page the log; button hints replace the version in the top bar while a
+controller is used. During the build the page shows the stage, step, a per-step track, elapsed time and ETA and a **live log** (the tools' output as it arrives, errors red,
+warnings amber, the build's own lines gold; it follows the newest line until scrolled). A foreground service (`BuildService`, type dataSync) keeps the build going with a
+progress notification when another app is on screen, and notifies when it ends while the app is in the background.
+
+Logs: every run appends to `files/work/setup.log`. A failed run shows the reason and its last output lines, with **Share the log** (share sheet, through `ShareProvider`, read only)
+and **Save the log** (Android's "save as" picker). **Logs and reports** on the start page lists the build log, the game's `last_run.log` (when readable: "all files access"),
+the updater log and the setup app's own crash reports (an uncaught exception writes `files/crash/crash-<time>.txt` with the device, versions, stack trace and the last
+build lines; the next start offers to share or save it once); each opens in a viewer with Share and Save.
+
+Code: the Java pages drive the flow (`SetupActivity`) and run plans step by step (`BuildRunner`, downloads with `Downloader`); the install logic is the C++ of the desktop
+wizard (`setup/install.cpp`: `plan_install_android`, `plan_rebuild_android`, `plan_extras_android`, `feed_line` progress, `install.ini`), with `setup/proc.cpp` running the
+tools in their own process group and `setup/payload.cpp` unpacking the payload, reached through JNI (`setup/android_engine.cpp`, class `Engine`; built as `libsetupcore.so`
+by `android/build_setup_app.py`). Test switch: a file `files/ui_demo` (made with `run-as` on a debuggable build) replaces the build by a plan that only prints build-like
+output (`fail` in it makes the build step fail): the pages can be checked where the tools cannot run, e.g. the x86_64 emulator, whose arm64 translation does not load
+the musl Python.
 
 How it works: the app ships, as `lib*.so` in its native-library folder (the only place an app may run files from), a static aarch64 **zig** (clang + lld in one binary; it
 compiles the game against the NDK's headers and libc++, linking with `zig ld.lld --threads=1`), the recompiler and pspdecrypt (static musl), and python-build-standalone
 (musl; its interpreter is patched to a link the app makes to Alpine's musl loader). The rest (Python's library, zig's headers, the NDK sysroot, the prebuilt Android core and libraries,
 the game's tools) is one zip, `libpayload.so`, unpacked on the first start. `games/dissidia/tools/psp_build.py --android` runs unchanged on the phone
 (`android_build.py` `device_build`). Built by `release/build_android_app.py` (CI job `android-app`); pinned inputs: `android/versions.json` ("tools"), `toolchain/versions.json`.
-Sources of the Java glue: `android/setup/`; the wizard: `setup/` (`#ifdef __ANDROID__`, `setup/android.cpp`).
+Sources: the app `android/setup/` (manifest, Java pages, theme), its engine `setup/android_engine.cpp` + `setup/install.cpp`.
 
 Status (2026-11-13): verified on a Retroid Pocket 6 (Android 13): extract, build, copy, install and the installed game booting, driven through the app's touch UI. Not yet
 verified: a first-ever install on a phone with no earlier game folder (the shared-folder fallback in `runtime/src/psp_android.cpp` needs a core built after that change),
@@ -64,7 +84,7 @@ announced once. Test: put a `manifest_url.txt` (a `file:` URL of a manifest with
 ### Updates of the setup app
 
 The app checks `manifest.json` of the latest GitHub release (the same signed manifest as the PC updater; entry `platforms.android-aarch64`) at start (silently; only the start
-screen shows an offer) and from **Check for updates**. The download goes through Android's own HTTPS stack (`SetupActivity.download`: the bundled Python is musl and has no DNS
+screen shows an offer) and from **Check for updates**. The download goes through Android's own HTTPS stack (`Downloader`: the bundled Python is musl and has no DNS
 configuration or CA store on Android); `games/dissidia/tools/update.py android-check` verifies the manifest's Ed25519 signature (`game/update_key.pub`, the committed key) and compares
 versions, `android-verify` checks the APK's size and sha256 (a mismatch deletes the file), then the PackageInstaller installs it (Android asks to confirm; the new APK has a higher
 `versionCode`, derived from the release version by `make_skeleton.py --version`, and the same signing key, so the app and its unpacked work folder stay). The APK's contents are

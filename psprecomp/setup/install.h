@@ -1,6 +1,7 @@
 // What the setup wizard does, without any UI: where the pieces of a release are, the command lines of the install steps,
 // how their output maps to a progress bar, the remembered install location, and starting the game.
 #pragma once
+#include <map>
 #include <string>
 #include <vector>
 
@@ -36,22 +37,19 @@ struct Step {
     double base = 0;                    // fraction done when this step starts
 };
 
-// What the player chose besides the game file and folder.
+// What the player chose besides the game file and folder. The extras (HD textures, Japanese voices, ...) are generic: their list is
+// setup/extras.cpp, shared with the Android setup app; the rest are the desktop wizard's own options.
 struct Options {
     bool check_updates = true;
-    bool hd_textures = true;            // pull an HD texture pack (which one: texture_pack)
-    std::string texture_pack = "liink"; // "liink" = LiinkPK's hand-retouched pack, "ai" = Niosa's D012FFRT + our AI upscales
-    bool jp_audio = false;              // undub (Japanese voices); needs undub_iso
-    bool d1_moves = false;              // Bartz's Dissidia 1 moves (tools/d1_moves.py install); needs d1_iso
-    bool android = false;               // also build the Android version
+    bool android = false;               // also build the Android version (desktop)
     bool steam = false;                 // add the game to the Steam library (desktop; Steam is closed and reopened for a moment)
-    std::string undub_iso;
-    std::string d1_iso;                 // a Dissidia Final Fantasy (2008) disc image, read once
-    std::string import_saves;           // a SAVEDATA folder to copy the player's Dissidia 012 saves from (empty = none)
+    std::string import_saves;           // a SAVEDATA folder to copy the player's Dissidia 012 saves from (empty = none; desktop)
+    std::map<std::string, std::string> extras;   // extra key -> value ("1" / "0" or a choice); a second disc's path under its disc key
+    std::string get(const std::string& key) const;   // the value, else the extra's default ("" for an unknown key)
+    bool on(const std::string& key) const { return get(key) == "1"; }
+    void set(const std::string& key, const std::string& value) { extras[key] = value; }
+    void clear_discs();                 // forget the picked discs (a path or Android descriptor is only valid once)
 };
-// Names and credits of the two texture packs the wizard offers (shown on the options page and in the download step).
-const char* texture_pack_title(const std::string& pack);
-const char* texture_pack_credit(const std::string& pack);
 // Optional features a release can offer: game/features.ini has one "name=1" line per implemented feature
 // (hd_textures, jp_audio, d1_moves, android). A missing file or line = not in this release yet (the wizard shows the option but
 // does not let it be turned on).
@@ -73,8 +71,9 @@ bool open_on_desktop(const std::string& path, bool show_in_folder, std::string* 
 
 std::vector<Step> plan_install(const Layout& l, const std::string& iso, const std::string& workdir, const Options& o);
 // The game build only (rebuild / repair): analysis, recompile, compile (+ the Android build when chosen).
-// Only the extras of `o` (HD textures unless skip_textures, Japanese voices, saves, the Android build) on an installed game: no rebuild.
-std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures);
+// Change extras on an installed game (prev = what is installed, o = the new choice; extras.h plan_extra_steps), plus saves, the Android
+// build and Steam as chosen: no rebuild.
+std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& prev, const Options& o);
 // Adds the installed game to the Steam library as a non-Steam shortcut (steam_shortcut.py; the launcher is the program itself with --launch).
 std::vector<Step> plan_steam(const Layout& l, const std::string& workdir);
 std::vector<Step> plan_rebuild(const Layout& l, const std::string& workdir, const Options& o);
@@ -100,7 +99,7 @@ constexpr const char* kManifestUrl = "https://github.com/schindlershadow/dissidi
 std::string android_payload_fingerprint(const Layout& l);   // android/build_fingerprint.txt of the unpacked payload ("" if absent)
 // The game build again (translate + compile + copy) from the already extracted work folder, after the app was updated.
 // Only the extras of `o` on a built game, then the copy to the game's folder (no rebuild).
-std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures);
+std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdir, const Options& prev, const Options& o);
 std::vector<Step> plan_rebuild_android(const Layout& l, const std::string& workdir);   // where the game app reads its files: /sdcard/Android/media/org.psprecomp.game/game
 #endif
 

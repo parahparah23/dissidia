@@ -71,6 +71,26 @@ Proc::~Proc() {
     }
 }
 
+#ifdef __ANDROID__
+// The bundled Python's ELF interpreter is a fixed /data/data/<pkg>/files/ld-musl, a path that does not exist for secondary Android users
+// (their data is /data/user/N/): the kernel then fails the exec with ENOENT (exit 127, "No such file"). Run it through the loader instead.
+// Note: /data/data is user 0's; for user N the same path names user 0's folder, which this app cannot see, so access() fails there.
+static std::vector<std::string> android_wrap(const std::vector<std::string>& argv) {
+    std::vector<std::string> out = argv;
+    const std::string& a0 = argv[0];
+    const size_t sl = a0.rfind('/');
+    // only when the patched path does not resolve (user 0 runs it directly, as before: starting the loader as a program does not work under
+    // every arm64 translation layer, e.g. the x86_64 emulator's)
+    if (a0.size() > 13 && a0.compare(a0.size() - 13, 13, "/libpython.so") == 0 && sl != std::string::npos &&
+        access("/data/data/org.psprecomp.setup/files/ld-musl", X_OK) != 0) {
+        const std::string loader = a0.substr(0, sl) + "/libmusl.so";
+        out.insert(out.begin(), loader);
+        setenv("PSPRECOMP_PY_LOADER", loader.c_str(), 1);   // child pythons (psp_build.py) need the same prefix
+    }
+    return out;
+}
+#endif
+
 bool Proc::start(const std::vector<std::string>& argv, const EnvList& env, const std::string& cwd) {
     if (argv.empty()) { error_ = "empty command"; return false; }
     if (impl_) { kill(); if (reader_.joinable()) reader_.join(); delete impl_; impl_ = nullptr; }
@@ -116,8 +136,14 @@ bool Proc::start(const std::vector<std::string>& argv, const EnvList& env, const
         int nul = open("/dev/null", O_RDONLY); if (nul >= 0) { dup2(nul, 0); close(nul); }
         if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
         for (auto& kv : env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
+#ifdef __ANDROID__
+        std::vector<std::string> wrapped = android_wrap(argv);
+        std::vector<char*> av;
+        for (auto& a : wrapped) av.push_back(const_cast<char*>(a.c_str()));
+#else
         std::vector<char*> av;
         for (auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
+#endif
         av.push_back(nullptr);
         execvp(av[0], av.data());
         std::fprintf(stderr, "cannot run %s: %s\n", av[0], std::strerror(errno));
@@ -234,8 +260,14 @@ bool spawn_detached(const std::vector<std::string>& argv, const EnvList& env, co
             if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
         }
         for (auto& kv : env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
+#ifdef __ANDROID__
+        std::vector<std::string> wrapped = android_wrap(argv);
+        std::vector<char*> av;
+        for (auto& a : wrapped) av.push_back(const_cast<char*>(a.c_str()));
+#else
         std::vector<char*> av;
         for (auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
+#endif
         av.push_back(nullptr);
         execvp(av[0], av.data());
         _exit(127);

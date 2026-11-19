@@ -1,279 +1,1918 @@
 package org.psprecomp.setup;
 
+import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.net.Uri;
-import android.os.ParcelFileDescriptor;
-import android.provider.OpenableColumns;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.view.Gravity;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.OvershootInterpolator;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.io.FileReader;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
-import org.libsdl.app.SDLActivity;
+/**
+ * The Android setup app: builds Dissidia 012 on the phone from the player's own disc image and installs it. Native Android pages (no SDL):
+ * the flow is the one of the desktop wizard's Android build (setup/setup_main.cpp), the work is done by the C++ engine (Engine,
+ * setup/android_engine.cpp). Works with touch, a keyboard or a game controller (d-pad / stick to move, A to choose, B to go back), in
+ * portrait and landscape.
+ */
+public class SetupActivity extends Activity {
+    // ---- request codes
+    private static final int REQ_PICK = 4711, REQ_SAVE = 4712, REQ_NOTIFY = 4713;
+    private static final String ACTION_INSTALLED = "org.psprecomp.setup.INSTALL_RESULT";
+    private static final String MANIFEST_URL = "https://github.com/schindlershadow/dissidia/releases/latest/download/manifest.json";
+    private static final int PICK_ISO = 0, PICK_DISC = 1;   // PICK_DISC: the second disc of an extra (pickExtra)
 
-/** SDL's activity plus the few Android services the setup wizard (native, C++) needs: storage access, installing the built APK, keeping awake. */
-public class SetupActivity extends SDLActivity {
-    private static final String ACTION = "org.psprecomp.setup.INSTALL_RESULT";
+    // ---- shell views
+    private FrameLayout root, stage, overlay;
+    private BackdropView backdrop;
+    private LinearLayout topBar;
+    private TextView topTitle;
+    private View backButton;
+    private HintBar hints;
+    private Page page;
+    private View pageView;
+    private Runnable rebuildPage;   // builds the current page again (rotation)
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private boolean resumed;
+
+    // ---- state (install.ini, the choices of this run)
+    private final Map<String, String> st = new LinkedHashMap<>();
+    private Options opt = new Options();
+    private String stateFile, workdir, iso = "", isoName = "";
+    private boolean prepared;
+    private String problem = "";
+    private boolean extrasMode;
+    private int pickKind = PICK_ISO;
+    private Runnable beforePick;
+
+    // the last plan request (Try again runs it again)
+    private String runKind = "install", runOpts = "";
+    private String runPrev;          // Change extras: the installed options the plan was made against
+    private JSONObject pickExtra;    // PICK_DISC: the extra (from Engine.extrasJson) whose disc is picked
+    private JSONArray extras = new JSONArray();   // the extras (setup/extras.cpp): the Options page is made from them
+
+    // install / update
     private static volatile String installStatus = "";
-    private static PowerManager.WakeLock wakeLock;
-    private static BroadcastReceiver receiver;
+    private BroadcastReceiver installReceiver;
+    private boolean pendingInstall;
+    private String pendingInstallApk;
+    private PowerManager.WakeLock wakeLock;
+    private JSONObject upd;
+    private volatile int checkSeq = 0;
+    private Downloader updDl;
+    private String saveSource;   // the file the "save as" picker writes
+
+    // ------------------------------------------------------------------------------------------------------------- lifecycle
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        UpdateCheckService.schedule(this);   // the daily background check for updates (a notification only)
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
-            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 1);   // Android 13+: asks once, for the update notifications
+    protected void onCreate(Bundle saved) {
+        super.onCreate(saved);
+        CrashReports.install(this);
+        Theme.init(this);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        Window w = getWindow();
+        w.setStatusBarColor(0);
+        w.setNavigationBarColor(0);
+        w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        if (Build.VERSION.SDK_INT >= 28) w.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+
+        root = new FrameLayout(this);
+        backdrop = new BackdropView(this);
+        root.addView(backdrop, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout shell = new LinearLayout(this);
+        shell.setOrientation(LinearLayout.VERTICAL);
+        topBar = buildTopBar();
+        shell.addView(topBar, new LinearLayout.LayoutParams(-1, Theme.dp(56)));
+        stage = new FrameLayout(this);
+        shell.addView(stage, new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(shell, new FrameLayout.LayoutParams(-1, -1));
+        overlay = new FrameLayout(this);
+        root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+        root.setOnApplyWindowInsetsListener((v, ins) -> {
+            shell.setPadding(ins.getSystemWindowInsetLeft(), ins.getSystemWindowInsetTop(), ins.getSystemWindowInsetRight(), ins.getSystemWindowInsetBottom());
+            return ins;
+        });
+        setContentView(root);
+
+        stateFile = new File(getFilesDir(), "install.ini").getPath();   // where the SDL wizard kept it (its pref path): old installs carry over
+        workdir = new File(getFilesDir(), "work").getPath();
+        UpdateCheckService.schedule(this);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY);   // build progress + update notifications
+
+        if (BuildRunner.current != null && prepared()) {   // the activity came back while a build runs (or just finished)
+            loadState();
+            showBuild();
+        } else showBootstrap();
     }
 
-    /** Where the executables (lib*.so) were unpacked: the one folder an app may run files from. */
-    public static String nativeLibDir() {
-        return mSingleton.getApplicationInfo().nativeLibraryDir;
+    private static volatile boolean sPrepared;
+
+    private boolean prepared() {
+        return sPrepared;
     }
 
-    /** All-files access ("manage external storage"): needed to read the disc image from the SD card or Download. */
-    public static boolean hasAllFilesAccess() {
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+        BuildService.clearFinished(this);
+        if (page == null) return;
+        if (page.id.equals("permission") && hasAllFilesAccess()) {   // came back from Android's settings with access switched on
+            refreshPage();
+            ui.postDelayed(() -> { if (page != null && page.id.equals("permission") && hasAllFilesAccess()) afterPermission(); }, 650);
+        }
+        if (pendingInstall && canInstallPackages()) {
+            pendingInstall = false;
+            doInstall(pendingInstallApk, installUpdate);
+        } else if (page.id.equals("install-allow") && canInstallPackages()) refreshPage();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        resumed = false;
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        // portrait <-> landscape (and window size changes): the same page, laid out again
+        ui.post(() -> { if (rebuildPage != null) present(rebuildPage, 0, false); });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (installReceiver != null) try { unregisterReceiver(installReceiver); } catch (Exception e) { /* gone */ }
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- shell
+
+    private LinearLayout buildTopBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(Theme.dp(8), 0, Theme.dp(18), 0);
+        FrameLayout bb = new FrameLayout(this) {
+            final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            @Override
+            protected void dispatchDraw(Canvas c) {
+                if (isFocused() || isPressed()) {
+                    p.setColor(isPressed() ? 0x40E2C47A : 0x28E2C47A);
+                    c.drawCircle(getWidth() / 2f, getHeight() / 2f, Math.min(getWidth(), getHeight()) / 2f, p);
+                }
+                Icons.draw(c, Icons.BACK, getWidth() / 2f, getHeight() / 2f, Theme.dpf(22), Theme.GOLD_LIGHT, Theme.dpf(2));
+            }
+        };
+        bb.setWillNotDraw(false);
+        bb.setFocusable(true);
+        bb.setClickable(true);
+        bb.setContentDescription("Back");
+        bb.setOnClickListener(v -> goBack());
+        bb.setOnFocusChangeListener((v, f) -> v.invalidate());
+        backButton = bb;
+        bar.addView(bb, new LinearLayout.LayoutParams(Theme.dp(44), Theme.dp(44)));
+        topTitle = Theme.single(Theme.text(this, "DISSIDIA 012  ·  RECOMP SETUP", 13, Theme.GOLD, Theme.title));
+        topTitle.setLetterSpacing(0.14f);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1);
+        tp.leftMargin = Theme.dp(6);
+        bar.addView(topTitle, tp);
+        // the version, or (while a controller is used) the controller hints in its place
+        FrameLayout end = new FrameLayout(this);
+        TextView ver = Theme.text(this, "v" + appVersion(), 12, Theme.TEXT_FAINT, Theme.body);
+        end.addView(ver, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_VERTICAL | Gravity.END));
+        hints = new HintBar(this);
+        hints.version = ver;
+        end.addView(hints, new FrameLayout.LayoutParams(-2, Theme.dp(30), Gravity.CENTER_VERTICAL | Gravity.END));
+        bar.addView(end, new LinearLayout.LayoutParams(-2, -1));
+        return bar;
+    }
+
+    /** Shows a page. dir: +1 forward (slides in from the right), -1 back, 0 in place (a rotation / refresh). */
+    private void present(Runnable builder, int dir, boolean animate) {
+        rebuildPage = builder;
+        pendingDir = animate ? dir : 0;
+        builder.run();
+    }
+
+    private void show(Page p, int dir) {
+        final boolean firstPage = page == null;
+        final boolean samePage = page != null && page.id.equals(p.id);
+        page = p;
+        boolean landscape = root.getWidth() > 0 ? root.getWidth() > root.getHeight() * 1.05f
+                : getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        int width = root.getWidth() > 0 ? root.getWidth() : getResources().getDisplayMetrics().widthPixels;
+        View v = p.build(landscape, width);
+        final View old = pageView;
+        pageView = v;
+        stage.addView(v, new FrameLayout.LayoutParams(-1, -1));
+        if (old != null) {
+            old.setFocusable(false);
+            if (old instanceof ViewGroup) ((ViewGroup) old).setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            if (dir == 0 || samePage) stage.removeView(old);
+            else old.animate().alpha(0).translationX(-dir * Theme.dp(48)).setDuration(200).setInterpolator(new DecelerateInterpolator())
+                    .withEndAction(() -> stage.removeView(old)).start();
+        }
+        if (dir != 0 && !samePage) {
+            v.setTranslationX(dir * Theme.dp(64));
+            v.animate().translationX(0).setDuration(420).setInterpolator(new DecelerateInterpolator(2.2f)).start();
+            p.animateIn(dir);
+        } else if (firstPage) p.animateIn(1);
+        boolean hasBack = p.back != null;
+        backButton.animate().alpha(hasBack ? 1 : 0).setDuration(200).start();
+        backButton.setFocusable(hasBack);
+        backButton.setClickable(hasBack);
+        hints.setBack(hasBack);
+        backdrop.setCrystal(p.hero == null && p.custom == null);
+        hints.setY(p.onY != null ? yLabel(p) : null);
+        ui.post(() -> {
+            View f = p.firstFocus();
+            if (f != null && !v.isInTouchMode()) f.requestFocus();
+        });
+    }
+
+    private String yLabel(Page p) {
+        return p.id.equals("build") ? "Log size" : "Logs";
+    }
+
+    private void refreshPage() {
+        if (rebuildPage != null) present(rebuildPage, 0, false);
+    }
+
+    private void go(Runnable builder) {
+        present(builder, 1, true);
+    }
+
+    private void goBackTo(Runnable builder) {
+        present(builder, -1, true);
+    }
+
+    private void goBack() {
+        if (dismissDialog()) return;
+        if (page != null && page.back != null) page.back.run();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (dismissDialog()) return;
+        if (page != null && page.back != null) page.back.run();
+        else moveTaskToBack(true);   // the start page: like home (a running build keeps going in the service)
+    }
+
+    // ---- input: a game controller's A chooses (as the d-pad centre), B goes back, Y / L / R are page shortcuts; the stick moves like the d-pad
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        int src = e.getSource();
+        boolean pad = (src & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD || (src & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD
+                || (src & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+        if (pad || (src & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD) hints.reveal(pad);
+        int k = e.getKeyCode();
+        if (k == KeyEvent.KEYCODE_BUTTON_A || k == KeyEvent.KEYCODE_BUTTON_START) {
+            if (getCurrentFocus() == null && page != null) {
+                View f = dialogFocus != null ? dialogFocus : page.firstFocus();
+                if (f != null) f.requestFocus();
+                return true;
+            }
+            return super.dispatchKeyEvent(new KeyEvent(e.getDownTime(), e.getEventTime(), e.getAction(), KeyEvent.KEYCODE_DPAD_CENTER, e.getRepeatCount(),
+                    e.getMetaState(), e.getDeviceId(), e.getScanCode(), e.getFlags(), e.getSource()));
+        }
+        if (k == KeyEvent.KEYCODE_BUTTON_B) {
+            if (e.getAction() == KeyEvent.ACTION_UP) onBackPressed();
+            return true;
+        }
+        if (k == KeyEvent.KEYCODE_BUTTON_Y) {
+            if (e.getAction() == KeyEvent.ACTION_UP && page != null && page.onY != null && overlay.getChildCount() == 0) page.onY.run();
+            return true;
+        }
+        if ((k == KeyEvent.KEYCODE_BUTTON_L1 || k == KeyEvent.KEYCODE_BUTTON_R1) && page != null && page.console != null) {
+            if (e.getAction() == KeyEvent.ACTION_DOWN) page.console.page(k == KeyEvent.KEYCODE_BUTTON_L1 ? -1 : 1);
+            return true;
+        }
+        if (e.getAction() == KeyEvent.ACTION_DOWN && getCurrentFocus() == null && page != null
+                && (k == KeyEvent.KEYCODE_DPAD_DOWN || k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            View f = dialogFocus != null ? dialogFocus : page.firstFocus();
+            if (f != null && f.requestFocus()) return true;
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent e) {
+        if (e.getActionMasked() == MotionEvent.ACTION_DOWN) hints.reveal(false);
+        return super.dispatchTouchEvent(e);
+    }
+
+    // ---- dialogs (an overlay in the app's look) and the snackbar
+    private View dialogFocus;
+    private Runnable dialogCancel;
+
+    private static final class Btn {
+        final String label;
+        final int icon, style;
+        final Runnable run;
+
+        Btn(String label, int icon, int style, Runnable run) {
+            this.label = label;
+            this.icon = icon;
+            this.style = style;
+            this.run = run;
+        }
+    }
+
+    private void dialog(String title, String message, int icon, Btn... buttons) {
+        dismissDialog(false);
+        final FrameLayout scrim = new FrameLayout(this);
+        scrim.setBackgroundColor(0xB0020308);
+        scrim.setClickable(true);
+        scrim.setAlpha(0);
+        LinearLayout panel = new LinearLayout(this) {
+            final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            final android.graphics.Path path = new android.graphics.Path();
+            @Override
+            protected void dispatchDraw(Canvas c) {
+                Card.chamferPath(path, 1, 1, getWidth() - 1, getHeight() - 1, Theme.dp(16));
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(0xFFFFFFFF);   // a shader is multiplied by the paint's alpha
+                p.setShader(new android.graphics.LinearGradient(0, 0, 0, getHeight(), 0xF41C2648, 0xF40B1028, android.graphics.Shader.TileMode.CLAMP));
+                c.drawPath(path, p);
+                p.setShader(null);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(Theme.dpf(1.3f));
+                p.setColor(0xB0E2C47A);
+                c.drawPath(path, p);
+                super.dispatchDraw(c);
+            }
+        };
+        panel.setWillNotDraw(false);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        int pad = Theme.dp(22);
+        panel.setPadding(pad, pad, pad, Theme.dp(12));
+        if (icon != Icons.NONE) {
+            Icons.IconView iv = new Icons.IconView(this, icon, icon == Icons.WARN ? Theme.DANGER : Theme.GOLD);
+            panel.addView(iv, new LinearLayout.LayoutParams(Theme.dp(34), Theme.dp(34)));
+        }
+        TextView t = Theme.heading(this, title, 21);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-2, -2);
+        tp.topMargin = Theme.dp(8);
+        panel.addView(t, tp);
+        TextView m = Theme.body(this, message);
+        m.setTextColor(Theme.TEXT);
+        LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(-1, -2);
+        mp.topMargin = Theme.dp(10);
+        mp.bottomMargin = Theme.dp(16);
+        android.widget.ScrollView ms = new android.widget.ScrollView(this);
+        ms.addView(m);
+        panel.addView(ms, mp);
+        dialogFocus = null;
+        dialogCancel = null;
+        for (Btn b : buttons) {
+            Card k = new Card(this, Card.ACTION, b.icon, b.label, null).style(b.style == Card.STYLE_NORMAL ? Card.STYLE_QUIET : b.style);
+            k.onClick(v -> {
+                dismissDialog(false);
+                if (b.run != null) b.run.run();
+            });
+            LinearLayout.LayoutParams kp = new LinearLayout.LayoutParams(-1, -2);
+            kp.bottomMargin = Theme.dp(8);
+            panel.addView(k, kp);
+            if (dialogFocus == null) dialogFocus = k;
+        }
+        dialogCancel = buttons.length > 0 ? buttons[buttons.length - 1].run : null;
+        int maxW = Math.min(root.getWidth() - Theme.dp(32), Theme.dp(480));
+        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(maxW > 0 ? maxW : -1, -2, Gravity.CENTER);
+        pp.topMargin = pp.bottomMargin = Theme.dp(24);
+        scrim.addView(panel, pp);
+        overlay.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
+        stage.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        topBar.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        scrim.animate().alpha(1).setDuration(180).start();
+        panel.setScaleX(0.9f);
+        panel.setScaleY(0.9f);
+        panel.animate().scaleX(1).scaleY(1).setDuration(320).setInterpolator(new OvershootInterpolator(1.4f)).start();
+        final View f = dialogFocus;
+        ui.post(() -> { if (f != null && !f.isInTouchMode()) f.requestFocus(); });
+    }
+
+    private boolean dismissDialog() {
+        return dismissDialog(true);
+    }
+
+    /** Closes the dialog; back / B (asCancel) also does what its last button does. True if there was one. */
+    private boolean dismissDialog(boolean asCancel) {
+        if (overlay.getChildCount() == 0) return false;
+        for (int i = overlay.getChildCount() - 1; i >= 0; i--) {
+            View s = overlay.getChildAt(i);
+            if (s.getTag() != null) continue;   // the snackbar
+            overlay.removeView(s);
+        }
+        stage.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+        topBar.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+        boolean had = dialogFocus != null;
+        dialogFocus = null;
+        Runnable c = dialogCancel;
+        dialogCancel = null;
+        if (had && asCancel && c != null) ui.post(c);
+        if (page != null && !root.isInTouchMode()) {
+            View f = page.firstFocus();
+            if (f != null) f.requestFocus();
+        }
+        return had;
+    }
+
+    private void snack(String text) {
+        TextView t = Theme.text(this, text, 14, Theme.TEXT, Theme.body);
+        t.setTag("snack");
+        t.setPadding(Theme.dp(18), Theme.dp(12), Theme.dp(18), Theme.dp(12));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xF0202B52);
+        bg.setStroke(Theme.dp(1), 0x90E2C47A);
+        bg.setCornerRadius(Theme.dp(22));
+        t.setBackground(bg);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        lp.bottomMargin = Theme.dp(56);
+        lp.leftMargin = lp.rightMargin = Theme.dp(24);
+        overlay.addView(t, lp);
+        t.setAlpha(0);
+        t.setTranslationY(Theme.dp(20));
+        t.animate().alpha(1).translationY(0).setDuration(260).start();
+        ui.postDelayed(() -> t.animate().alpha(0).translationY(Theme.dp(10)).setDuration(260).withEndAction(() -> overlay.removeView(t)).start(), 2800);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- start
+
+    private void showBootstrap() {
+        present(() -> {
+            Page p = new Page(this, "bootstrap");
+            ProgressEmblem em = new ProgressEmblem(this);
+            p.hero = em;
+            p.heroHeightDp = 210;
+            p.head("First start", "Preparing", "Unpacking the build tools that come with this app (the compiler, Python and the game's tools). This happens once after each install or update of the app.");
+            TextView pct = Theme.text(this, "", 14, Theme.GOLD_LIGHT, Theme.bodyBold);
+            p.headerExtra.add(pct);
+            show(p, 0);
+            if (sPrepared) {
+                em.setFraction(1);
+                afterBootstrap();
+                return;
+            }
+            final String lib = getApplicationInfo().nativeLibraryDir, files = getFilesDir().getPath();
+            new Thread(() -> {
+                final long[] last = {0};
+                String err;
+                try {
+                    err = Engine.bootstrap(lib, files, f -> {
+                        long now = System.currentTimeMillis();
+                        if (now - last[0] < 50) return;
+                        last[0] = now;
+                        ui.post(() -> { em.setFraction((float) f); });
+                    });
+                } catch (Throwable t) {
+                    err = t.toString();
+                }
+                final String e = err;
+                ui.post(() -> {
+                    if (!e.isEmpty()) problem = "Could not prepare the app: " + e;
+                    else sPrepared = true;
+                    em.setFraction(1);
+                    ui.postDelayed(this::afterBootstrap, 250);
+                });
+            }, "setup-unpack").start();
+        }, 0, false);
+    }
+
+    private void afterBootstrap() {
+        if (problem.isEmpty()) problem = Engine.layoutProblem();
+        loadState();
+        prepared = true;
+        loadExtras();
+        go(this::showHome);
+        if (problem.isEmpty() && opt.checkUpdates()) beginCheck(false);   // silent; an update shows its page only from the start page
+        ui.postDelayed(this::offerCrashReport, 900);
+    }
+
+    /** The extras list of the engine (setup/extras.cpp): the same list the desktop wizard uses, so a new extra shows here by itself. */
+    private void loadExtras() {
+        try {
+            extras = new JSONArray(Engine.extrasJson());
+        } catch (Exception e) {
+            extras = new JSONArray();
+        }
+        Options.defaults.clear();
+        Options.discKeys.clear();
+        for (int i = 0; i < extras.length(); i++) {
+            JSONObject x = extras.optJSONObject(i);
+            Options.defaults.put(x.optString("key"), x.optString("def"));
+            JSONObject d = x.optJSONObject("disc");
+            if (d != null) Options.discKeys.add(d.optString("key"));
+        }
+    }
+
+    private JSONObject extra(String key) {
+        for (int i = 0; i < extras.length(); i++)
+            if (extras.optJSONObject(i).optString("key").equals(key)) return extras.optJSONObject(i);
+        return null;
+    }
+
+    private static int iconOf(String name) {
+        switch (name) {
+        case "texture": return Icons.TEXTURE;
+        case "voice": return Icons.VOICE;
+        case "sword": return Icons.SWORD;
+        case "sliders": return Icons.SLIDERS;
+        case "disc": return Icons.DISC;
+        case "download": return Icons.DOWNLOAD;
+        case "play": return Icons.PLAY;
+        default: return Icons.CRYSTAL;
+        }
+    }
+
+    private void loadState() {
+        st.clear();
+        String text = Engine.loadState(stateFile);
+        for (String l : text.split("\n")) {
+            int eq = l.indexOf('=');
+            if (eq > 0) st.put(l.substring(0, eq), l.substring(eq + 1));
+        }
+        opt = Options.from(st);
+        iso = "";   // a descriptor number ("fd:N") means nothing after a restart: the picker is asked again
+    }
+
+    private void saveState() {
+        StringBuilder b = new StringBuilder();
+        for (Map.Entry<String, String> e : st.entrySet()) b.append(e.getKey()).append('=').append(e.getValue()).append('\n');
+        Engine.saveState(stateFile, b.toString());
+    }
+
+    private String stWorkdir() {
+        String w = st.get("workdir");
+        return w == null || w.isEmpty() ? workdir : w;
+    }
+
+    private boolean installed() {
+        String w = st.get("workdir");
+        return w != null && !w.isEmpty() && new File(w, "android/dissidia.apk").isFile();
+    }
+
+    private boolean needRebuild() {
+        if (!installed()) return false;
+        String fp = Engine.payloadFingerprint(), built = st.get("built_fp");
+        return !fp.equals(built == null ? "" : built);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- home
+
+    private void showHome() {
+        Page p = new Page(this, "home");
+        backdrop.setMood(BackdropView.MOOD_CRYSTAL);
+        backdrop.setEnergy(0);
+        ProgressEmblem em = new ProgressEmblem(this);
+        em.setShowPercent(false);
+        p.hero = em;
+        p.heroHeightDp = 190;
+        p.onY = () -> go(this::showLogs);
+        if (!problem.isEmpty()) {
+            em.setMode(ProgressEmblem.FAILED);
+            backdrop.setMood(BackdropView.MOOD_CHAOS);
+            p.head("Setup", "Something is missing", problem);
+            p.card(new Card(this, Card.ACTION, Icons.LOG, "Logs and reports", "Look at, save or share what the app wrote down.")).onClick(v -> go(this::showLogs));
+            p.card(new Card(this, Card.ACTION, Icons.QUIT, "Close", null).style(Card.STYLE_QUIET)).onClick(v -> finishAndRemoveTask());
+        } else if (installed()) {
+            boolean upd = needRebuild();
+            em.setMode(ProgressEmblem.DONE);
+            em.setFraction(1);
+            p.head(upd ? "Update ready" : "Ready", "Dissidia 012", upd
+                    ? "This app was updated since the game was built. Update the game to rebuild it from the files already on this device: no disc needed, about 5 minutes."
+                    : "The game is built on this device. Install it as an app, change its extras, or build it again from your disc.");
+            if (upd)
+                p.card(new Card(this, Card.ACTION, Icons.REFRESH, "Update the game", "Builds the game again from the files already on this device, then installs it.").style(Card.STYLE_PRIMARY).pulse())
+                        .onClick(v -> { workdir = stWorkdir(); startPlan("rebuild", "", Options.from(st), null); });
+            Card ins = p.card(new Card(this, Card.ACTION, Icons.INSTALL, "Install the game", "Installs the built game as an app. Android asks you to confirm."));
+            if (!upd) ins.style(Card.STYLE_PRIMARY);
+            ins.onClick(v -> installGame(new File(stWorkdir(), "android/dissidia.apk").getPath(), false));
+            p.card(new Card(this, Card.ACTION, Icons.SLIDERS, "Change extras", "HD textures, texture pack, Japanese voices or Bartz's Dissidia 1 moves, without building again.")).onClick(v -> beginExtras());
+            p.card(new Card(this, Card.ACTION, Icons.DISC, "Build it again", "Pick your game file and build from scratch. Your saves are kept.")).onClick(v -> beginPick(PICK_ISO, this::backHome));
+            p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Check for updates", "Looks for a newer version of this app on github.com. Nothing about you or your game is sent.")).onClick(v -> beginCheck(true));
+            p.card(new Card(this, Card.ACTION, Icons.LOG, "Logs and reports", "The build log, the game's last run and crash reports: view, save or share them.").style(Card.STYLE_QUIET)).onClick(v -> go(this::showLogs));
+        } else {
+            em.setMode(ProgressEmblem.SPIN);
+            p.head("Welcome", "Dissidia 012", "Builds the game on this device from your own copy of Dissidia 012 (EU or US, ISO or CSO) and installs it. Nothing from the game is downloaded or shipped with this app.");
+            p.card(new Card(this, Card.ACTION, Icons.BUILD, "Build the game", "About 10 to 20 minutes. You can use your phone meanwhile; the build keeps going.").style(Card.STYLE_PRIMARY).pulse())
+                    .onClick(v -> beginPick(PICK_ISO, this::backHome));
+            p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Check for updates", "Looks for a newer version of this app on github.com. Nothing about you or your game is sent.")).onClick(v -> beginCheck(true));
+            p.card(new Card(this, Card.ACTION, Icons.LOG, "Logs and reports", "The build log, the game's last run and crash reports.").style(Card.STYLE_QUIET)).onClick(v -> go(this::showLogs));
+        }
+        show(p, dirOf(p));
+    }
+
+    private int pendingDir = 1;
+
+    private int dirOf(Page p) {
+        int d = pendingDir;
+        pendingDir = 1;
+        return d;
+    }
+
+    private void backHome() {
+        extrasMode = false;
+        pendingDir = -1;
+        present(this::showHome, -1, true);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- picking the disc images
+
+    private void beginPick(int kind, Runnable back) {
+        pickKind = kind;
+        beforePick = back;
+        go(this::showPickInfo);
+    }
+
+    private void showPickInfo() {
+        Page p = new Page(this, "pick-info-" + pickKind);
+        p.back = () -> { pendingDir = -1; present(beforePick, -1, true); };
+        backdrop.setMood(BackdropView.MOOD_CRYSTAL);
+        String how = "Android's file picker opens next: browse to the file (SD card, Downloads...) and tap it. The app only reads it; nothing is uploaded.";
+        JSONObject disc = pickKind == PICK_DISC && pickExtra != null ? pickExtra.optJSONObject("disc") : null;
+        if (disc != null) {   // an extra's second disc: its texts come with the extra (setup/extras.cpp)
+            p.head(disc.optString("eyebrow"), disc.optString("title"), how);
+            p.card(new Card(this, Card.INFO, iconOf(pickExtra.optString("icon")), disc.optString("what") + " (" + disc.optString("exts") + ")", disc.optString("what_help")));
+            p.card(new Card(this, Card.INFO, Icons.CHECK, disc.optString("valid"), disc.optString("valid_help")));
+        } else {
+            p.head("Step 1", "Your game file", how);
+            p.card(new Card(this, Card.INFO, Icons.DISC, "A Dissidia 012 disc image", "Your own copy of the PSP game Dissidia 012 [duodecim] Final Fantasy as a .iso or .cso (compressed ISO) of the whole disc."));
+            p.card(new Card(this, Card.INFO, Icons.CHECK, "Valid: EU or US release", "The European release (ULES-01505, also the PSN version) or the US release (ULUS-10566). Not an archive: unpack .zip / .7z first."));
+        }
+        Card choose = p.card(new Card(this, Card.ACTION, Icons.FOLDER, "Choose the file", "Opens Android's file picker.").style(Card.STYLE_PRIMARY));
+        choose.onClick(v -> launchPicker());
+        p.focus = choose;
+        show(p, dirOf(p));
+    }
+
+    private void launchPicker() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_PICK);
+        } catch (Exception e) {
+            dialog("No file picker", "Android's file picker could not be opened (" + e.getMessage() + "). Use the simple browser instead.", Icons.WARN,
+                    new Btn("Use the simple browser", Icons.FOLDER, Card.STYLE_PRIMARY, this::openBrowser), new Btn("Close", Icons.CLOSE, Card.STYLE_NORMAL, null));
+            return;
+        }
+        if (page == null || !page.id.equals("waiting")) go(this::showWaiting);
+    }
+
+    private void showWaiting() {
+        Page p = new Page(this, "waiting");
+        p.back = () -> { pendingDir = -1; present(beforePick, -1, true); };
+        ProgressEmblem em = new ProgressEmblem(this);
+        em.setMode(ProgressEmblem.SPIN);
+        em.setShowPercent(false);
+        p.hero = em;
+        p.heroHeightDp = 150;
+        JSONObject disc = pickKind == PICK_DISC && pickExtra != null ? pickExtra.optJSONObject("disc") : null;
+        String what = disc != null ? "the disc image for " + pickExtra.optString("title") + " (" + disc.optString("exts") + ")" : "your Dissidia 012 disc image (.iso or .cso)";
+        p.head("Choose a file", "Waiting for the picker", "Pick " + what + " in Android's file picker. If it closed without a file, open it again or browse inside this app.");
+        p.card(new Card(this, Card.ACTION, Icons.FOLDER, "Open the file picker", "From the SD card, Download or anywhere else.").style(Card.STYLE_PRIMARY)).onClick(v -> launchPicker());
+        p.card(new Card(this, Card.ACTION, Icons.STORAGE, "Use the simple browser instead", "Browse the storage inside this app. Needs the \"all files\" permission.")).onClick(v -> {
+            if (hasAllFilesAccess()) openBrowser(); else go(this::showPermission);
+        });
+        show(p, dirOf(p));
+    }
+
+    private boolean checkedDisc;   // picked(): the disc check passed (second call)
+
+    private static void closeFd(String path) {
+        if (!path.startsWith("fd:")) return;
+        try {
+            ParcelFileDescriptor.adoptFd(Integer.parseInt(path.substring(3))).close();
+        } catch (Exception e) {
+            // already closed
+        }
+    }
+
+    private void picked(String path, String name) {
+        if (pickKind == PICK_DISC) {
+            final JSONObject disc = pickExtra == null ? null : pickExtra.optJSONObject("disc");
+            if (disc != null && !checkedDisc) {   // the right game, before anything is installed with it (setup/extras.cpp disc check)
+                final String key = pickExtra.optString("key");
+                new Thread(() -> {
+                    final String why = Engine.discProblem(key, path);
+                    ui.post(() -> {
+                        if (why.isEmpty()) {
+                            checkedDisc = true;
+                            picked(path, name);
+                            checkedDisc = false;
+                            return;
+                        }
+                        opt.set(disc.optString("key"), "");
+                        closeFd(path);   // the picker's descriptor of the refused file
+                        dialog("Wrong disc", why, Icons.WARN,
+                                new Btn("Choose another file", Icons.FOLDER, Card.STYLE_PRIMARY, () -> go(this::showPickInfo)),
+                                new Btn("Back", Icons.BACK, Card.STYLE_NORMAL, () -> present(this::showOptionsPage, -1, true)));
+                    });
+                }, "setup-disc-check").start();
+                return;
+            }
+            if (disc != null) opt.set(disc.optString("key"), path);
+            present(this::showOptionsPage, -1, true);
+            startInstallOrAsk();
+            return;
+        }
+        iso = path;
+        isoName = name;
+        new File(workdir).mkdirs();
+        if (hasAllFilesAccess()) go(this::showOptionsPage); else go(this::showPermission);
+    }
+
+    // ---- the simple browser (fallback; needs all-files access)
+    private File browseDir;
+
+    private void openBrowser() {
+        File start = new File("/storage/emulated/0");
+        browseDir = start;
+        go(this::showBrowser);
+    }
+
+    private void showBrowser() {
+        Page p = new Page(this, "browser:" + browseDir.getPath());
+        p.back = () -> { pendingDir = -1; present(beforePick, -1, true); };
+        String shown = browseDir.getPath().startsWith("/storage/emulated/0") ? "Internal storage" + browseDir.getPath().substring(19) : browseDir.getPath();
+        p.head("Simple browser", browseDir.getName().isEmpty() || browseDir.getPath().equals("/storage") ? "Storage" : browseDir.getName(), shown);
+        File parent = browseDir.getPath().equals("/storage/emulated/0") ? new File("/storage") : browseDir.getParentFile();
+        if (parent != null && !browseDir.getPath().equals("/storage")) {
+            final File up = parent;
+            p.card(new Card(this, Card.ACTION, Icons.UP, "Up one folder", null).style(Card.STYLE_QUIET)).onClick(v -> { browseDir = up; pendingDir = -1; present(this::showBrowser, -1, true); });
+        }
+        File[] list = browseDir.listFiles();
+        ArrayList<File> dirs = new ArrayList<>(), files = new ArrayList<>();
+        if (list != null)
+            for (File f : list) {
+                String n = f.getName();
+                if (n.startsWith(".")) continue;
+                if (browseDir.getPath().equals("/storage")) {
+                    if (n.equals("self")) continue;
+                    dirs.add(n.equals("emulated") ? new File("/storage/emulated/0") : f);
+                } else if (f.isDirectory()) dirs.add(f);
+                else {
+                    String l = n.toLowerCase(Locale.US);
+                    if (l.endsWith(".iso") || l.endsWith(".cso")) files.add(f);
+                }
+            }
+        java.util.Comparator<File> byName = (a, b) -> a.getName().compareToIgnoreCase(b.getName());
+        files.sort(byName);
+        dirs.sort(byName);
+        for (File f : files) p.card(new Card(this, Card.ACTION, Icons.DISC, f.getName(), BuildRunner.size(f.length())).style(Card.STYLE_PRIMARY)).onClick(v -> picked(f.getPath(), f.getName()));
+        for (File d : dirs) {
+            String label = browseDir.getPath().equals("/storage") ? (d.getPath().equals("/storage/emulated/0") ? "Internal storage" : "SD card " + d.getName()) : d.getName();
+            p.card(new Card(this, Card.ACTION, d.getParent() != null && d.getParent().equals("/storage") || d.getPath().equals("/storage/emulated/0") ? Icons.STORAGE : Icons.FOLDER, label, null))
+                    .onClick(v -> { browseDir = d; go(this::showBrowser); });
+        }
+        if (files.isEmpty() && dirs.isEmpty())
+            p.card(new Card(this, Card.INFO, Icons.INFO, "No .iso or .cso files here", "Go up, or open another folder."));
+        show(p, dirOf(p));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- permission
+
+    private boolean hasAllFilesAccess() {
         return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager();
     }
 
-    public static void requestAllFilesAccess() {
-        final SDLActivity a = mSingleton;
-        a.runOnUiThread(new Runnable() {
-            public void run() {
-                try {
-                    Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + a.getPackageName()));
-                    a.startActivity(i);
-                } catch (Exception e) {
-                    a.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-                }
-            }
-        });
-    }
-
-    /** Keep the CPU running (and the screen on) during the long build. */
-    public static void keepAwake(final boolean on) {
-        final SDLActivity a = mSingleton;
-        a.runOnUiThread(new Runnable() {
-            public void run() {
-                if (on) {
-                    a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    if (wakeLock == null) {
-                        PowerManager pm = (PowerManager) a.getSystemService(Context.POWER_SERVICE);
-                        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "psprecomp:build");
-                    }
-                    if (!wakeLock.isHeld()) wakeLock.acquire();
-                } else {
-                    a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-                }
-            }
-        });
-    }
-
-    public static boolean canInstallPackages() {
-        return Build.VERSION.SDK_INT < 26 || mSingleton.getPackageManager().canRequestPackageInstalls();
-    }
-
-    public static void requestInstallPermission() {
-        final SDLActivity a = mSingleton;
-        a.runOnUiThread(new Runnable() {
-            public void run() {
-                a.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + a.getPackageName())));
-            }
-        });
-    }
-
-    /** Install an APK with the PackageInstaller (no file provider needed). Android shows its own confirmation. Result: installStatus(). */
-    public static void installApk(final String path) {
-        final SDLActivity a = mSingleton;
-        installStatus = "working";
+    private void requestAllFilesAccess() {
         try {
-            if (receiver == null) {
-                receiver = new BroadcastReceiver() {
-                    public void onReceive(Context c, Intent i) {
-                        int st = i.getIntExtra(PackageInstaller.EXTRA_STATUS, -1);
-                        if (st == PackageInstaller.STATUS_PENDING_USER_ACTION) {
-                            Intent confirm = (Intent) i.getParcelableExtra(Intent.EXTRA_INTENT);
+            startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+            } catch (Exception e2) {
+                snack("Open Settings > Apps > Dissidia Recomp Setup > Permissions and allow access to all files.");
+            }
+        }
+    }
+
+    private void showPermission() {
+        Page p = new Page(this, "permission");
+        p.back = this::backHome;
+        boolean ok = hasAllFilesAccess();
+        Icons.IconView hero = new Icons.IconView(this, ok ? Icons.CHECK : Icons.KEY, ok ? Theme.CRYSTAL : Theme.GOLD);
+        hero.strokeDp = 2.2f;
+        p.hero = hero;
+        p.heroHeightDp = 84;
+        p.head("Permission", "Allow access to files", "The game reads its files from a shared folder (Android/media). To put them there, this app needs \"all files access\". Android opens a settings page: switch it on for this app, then come back.");
+        Card allow = p.card(new Card(this, Card.ACTION, Icons.KEY, "Allow access to files", ok ? "Allowed. Thank you." : "Opens Android's settings page for this app.")
+                .value(ok ? "Allowed" : "Needed").style(ok ? Card.STYLE_NORMAL : Card.STYLE_PRIMARY));
+        allow.onClick(v -> { if (hasAllFilesAccess()) afterPermission(); else requestAllFilesAccess(); });
+        Card cont = p.card(new Card(this, Card.ACTION, Icons.CHEVRON, "Continue", iso.isEmpty() ? "Pick your game file." : "On to the options."));
+        if (ok) cont.style(Card.STYLE_PRIMARY);
+        cont.onClick(v -> {
+            if (hasAllFilesAccess()) afterPermission();
+            else dialog("Allow access", "Access to files is not allowed yet. Choose \"Allow access to files\" and switch it on for this app.", Icons.KEY,
+                    new Btn("Open the settings", Icons.KEY, Card.STYLE_PRIMARY, this::requestAllFilesAccess), new Btn("Not now", Icons.CLOSE, Card.STYLE_NORMAL, null));
+        });
+        p.focus = ok ? cont : allow;
+        show(p, dirOf(p));
+    }
+
+    private void afterPermission() {
+        if (!iso.isEmpty()) {
+            new File(workdir).mkdirs();
+            go(this::showOptionsPage);
+        } else openBrowser();
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- options
+
+    private void showOptionsPage() {
+        Page p = new Page(this, extrasMode ? "extras" : "options");
+        p.back = this::backHome;
+        backdrop.setMood(BackdropView.MOOD_CRYSTAL);
+        if (extrasMode) p.head("Installed game", "Change extras", "Turn extras on or off without building the game again. Extras built from a second disc keep their files when turned off.");
+        else p.head("Step 2", "Options", (isoName.isEmpty() ? "" : "Game file: " + isoName + ". ") + "Extras can be changed later without building again.");
+
+        // one card per extra, in the list's order (setup/extras.cpp, shared with the desktop wizard); a sub-choice shows while its switch is on
+        final Map<String, ArrayList<Card>> children = new LinkedHashMap<>();
+        for (int i = 0; i < extras.length(); i++) {
+            final JSONObject x = extras.optJSONObject(i);
+            final String key = x.optString("key"), parent = x.optString("parent"), help = x.optString("help");
+            final JSONArray ch = x.optJSONArray("choices");
+            final JSONObject disc = x.optJSONObject("disc");
+            final boolean available = x.optBoolean("available");
+            Card k;
+            if (ch == null || ch.length() == 0) {
+                k = p.card(new Card(this, Card.TOGGLE, iconOf(x.optString("icon")), x.optString("title"), help).toggle(opt.on(key)));
+                k.onChange(c -> {
+                    opt.set(key, c.isOn() ? "1" : "0");
+                    if (!c.isOn() && disc != null) opt.set(disc.optString("key"), "");   // its disc is picked again when turned on
+                    ArrayList<Card> kids = children.get(key);
+                    if (kids != null) for (Card kid : kids) kid.setVisibility(c.isOn() ? View.VISIBLE : View.GONE);
+                });
+            } else {
+                final String[] labels = new String[ch.length()], values = new String[ch.length()], helps = new String[ch.length()];
+                int sel = 0;
+                for (int j = 0; j < ch.length(); j++) {
+                    labels[j] = ch.optJSONObject(j).optString("label");
+                    values[j] = ch.optJSONObject(j).optString("value");
+                    helps[j] = ch.optJSONObject(j).optString("help");
+                    if (values[j].equals(opt.get(key))) sel = j;
+                }
+                k = p.card(new Card(this, Card.CHOICE, iconOf(x.optString("icon")), x.optString("title"), (help + " " + helps[sel]).trim()).choices(labels, sel));
+                k.onChange(c -> { opt.set(key, values[c.choice()]); c.summary((help + " " + helps[c.choice()]).trim()); });
+            }
+            if (!available) k.disabled("Not yet");
+            if (!parent.isEmpty()) {
+                ArrayList<Card> kids = children.get(parent);
+                if (kids == null) children.put(parent, kids = new ArrayList<>());
+                kids.add(k);
+                k.setVisibility(opt.on(parent) && available ? View.VISIBLE : View.GONE);
+            }
+        }
+        if (!extrasMode) {
+            Card up = p.card(new Card(this, Card.TOGGLE, Icons.REFRESH, "Check for updates", "Look for a newer version of this app when it starts, and once a day in the background (a notification only).").toggle(opt.checkUpdates()));
+            up.onChange(k -> opt.set("check_updates", k.isOn() ? "1" : "0"));
+        }
+        long free = Engine.freeSpace(workdir);
+        String space = free >= 0 ? "Free space: " + BuildRunner.size(free) + (free < (6L << 30) && !extrasMode ? " (about 6 GB are needed!)" : "") + "." : "";
+        Card start = p.card(new Card(this, Card.ACTION, extrasMode ? Icons.CHECK : Icons.BUILD, extrasMode ? "Apply changes" : "Start building",
+                extrasMode ? "Adds the extras you turned on and removes those you turned off (where they can be removed)." : "Reads your game file and builds the game here. You can cancel and continue later. " + space)
+                .style(Card.STYLE_PRIMARY));
+        start.onClick(v -> startInstallOrAsk());
+        show(p, dirOf(p));
+    }
+
+    private void beginExtras() {
+        extrasMode = true;
+        workdir = stWorkdir();
+        opt = Options.from(st);
+        opt.clearDiscs();   // a saved path (or Android descriptor) from the install is no longer valid
+        go(this::showOptionsPage);
+    }
+
+    private void startInstallOrAsk() {
+        String prev = extrasMode ? Options.from(st).text() : null;
+        String[] need = Engine.extrasNeedingDisc(opt.text(), prev);   // extras built from a second disc (undub, Dissidia 1...) need it first
+        if (need.length > 0 && extra(need[0]) != null) {
+            pickExtra = extra(need[0]);
+            beginPick(PICK_DISC, this::showOptionsPage);
+            return;
+        }
+        if (extrasMode) {   // Change extras: the engine removes what was turned off and adds what was turned on (no rebuild)
+            startPlan("extras", "", opt, prev);
+            return;
+        }
+        File w = new File(workdir);
+        w.mkdirs();
+        if (!w.isDirectory()) { failPage("Cannot create " + workdir + ".", ""); return; }
+        File demo = new File(getFilesDir(), "ui_demo");   // test switch (run-as on a debuggable build): the build page without the tools
+        if (demo.isFile()) { startPlan(readText(demo, 64).contains("fail") ? "demo-fail" : "demo", iso, opt, null); return; }
+        startPlan("install", iso, opt, null);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- the build
+
+    private void startPlan(String kind, String isoPath, Options o, String prev) {
+        runKind = kind;
+        runOpts = o.text();
+        runPrev = prev;
+        if (!kind.equals("install") && !kind.startsWith("demo")) workdir = stWorkdir();
+        JSONArray plan;
+        try {
+            plan = new JSONArray(Engine.plan(kind, isoPath, workdir, runOpts, prev == null ? "" : prev));
+        } catch (Exception e) {
+            failPage("Could not plan the steps: " + e.getMessage(), "");
+            return;
+        }
+        if (plan.length() == 0) {
+            dialog("Extras", "Nothing needed to be added: the extras you chose are already in place.", Icons.CHECK, new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, this::backHome));
+            return;
+        }
+        BuildRunner r = new BuildRunner(kind, plan, new File(workdir, "setup.log"));
+        r.start();
+        keepAwake(true);
+        BuildService.start(this);
+        go(this::showBuild);
+    }
+
+    private boolean logBig;
+
+    private void showBuild() {
+        final BuildRunner r = BuildRunner.current;
+        if (r == null) { backHome(); return; }
+        Page p = new Page(this, "build");
+        boolean landscape = root.getWidth() > 0 ? root.getWidth() > root.getHeight() * 1.05f
+                : getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        backdrop.setMood(BackdropView.MOOD_CRYSTAL);
+        backdrop.setEnergy(1);
+        backdrop.setSlow(true);
+        final ProgressEmblem em = new ProgressEmblem(this);
+        final TextView eyebrow = Theme.eyebrow(this, r.kind.equals("rebuild") ? "Updating the game" : r.kind.equals("extras") ? "Extras" : "Building");
+        final TextView stage = Theme.heading(this, "Starting...", landscape ? 22 : 21);
+        final TextView stepOf = Theme.text(this, "", 13, Theme.GOLD, Theme.bodyBold);
+        final TextView explain = Theme.body(this, "");
+        explain.setTextSize(13.5f);
+        final TextView detail = Theme.single(Theme.text(this, "", 13, Theme.TEXT, Theme.mono));
+        final TextView elapsed = Theme.text(this, "", 12.5f, Theme.TEXT_DIM, Theme.body), eta = Theme.text(this, "", 12.5f, Theme.CRYSTAL, Theme.bodyBold);
+        final StepTrack track = new StepTrack(this);
+        float[] weights = new float[r.plan.length()];
+        for (int i = 0; i < weights.length; i++) weights[i] = (float) r.plan.optJSONObject(i).optDouble("weight", 0.1);
+        track.setPlan(weights);
+        final LogConsole console = new LogConsole(this);
+        console.setEmptyText("The tools' output appears here as they run.");
+        synchronized (r.history) { console.setAll(r.history); }
+        p.console = console;
+        Card cancel = new Card(this, Card.ACTION, Icons.CLOSE, "Cancel", null).style(Card.STYLE_DANGER);
+        cancel.onClick(v -> dialog("Cancel the build?", "The work done so far is kept: building again continues where it stopped.", Icons.WARN,
+                new Btn("Keep building", Icons.BUILD, Card.STYLE_PRIMARY, null),
+                new Btn("Yes, cancel", Icons.CLOSE, Card.STYLE_DANGER, () -> { BuildRunner b = BuildRunner.current; if (b != null) b.cancel(); }),
+                new Btn("Back", Icons.BACK, Card.STYLE_NORMAL, null)));
+        Card size = new Card(this, Card.ACTION, Icons.NONE, logBig ? "Smaller log" : "Bigger log", null).style(Card.STYLE_QUIET);
+
+        // layout: landscape = [emblem beside the title, status, buttons | log], portrait = emblem / status / log / buttons
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.addView(eyebrow);
+        head.addView(stage);
+        head.addView(stepOf);
+        LinearLayout status = new LinearLayout(this);
+        status.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-1, -2);
+        tp.topMargin = Theme.dp(10);
+        tp.bottomMargin = Theme.dp(8);
+        status.addView(track, tp);
+        status.addView(detail);
+        LinearLayout times = new LinearLayout(this);
+        times.setOrientation(LinearLayout.HORIZONTAL);
+        times.addView(elapsed, new LinearLayout.LayoutParams(0, -2, 1));
+        times.addView(eta);
+        LinearLayout.LayoutParams tsp = new LinearLayout.LayoutParams(-1, -2);
+        tsp.topMargin = Theme.dp(4);
+        status.addView(times, tsp);
+        LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(-1, -2);
+        ep.topMargin = Theme.dp(8);
+        if (!logBig) status.addView(explain, ep);
+        LinearLayout btns = new LinearLayout(this);
+        boolean stackBtns = landscape && logBig;   // the narrow column: one above the other
+        btns.setOrientation(stackBtns ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams bp = stackBtns ? new LinearLayout.LayoutParams(-1, -2) : new LinearLayout.LayoutParams(0, -2, 1);
+        if (stackBtns) bp.bottomMargin = Theme.dp(8); else bp.rightMargin = Theme.dp(8);
+        btns.addView(cancel, bp);
+        btns.addView(size, stackBtns ? new LinearLayout.LayoutParams(-1, -2) : new LinearLayout.LayoutParams(0, -2, 1));
+
+        View layout;
+        if (landscape) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(Theme.dp(24), Theme.dp(4), Theme.dp(24), Theme.dp(16));
+            LinearLayout left = new LinearLayout(this);
+            left.setOrientation(LinearLayout.VERTICAL);
+            left.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout top = new LinearLayout(this);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            em.setShowPercent(false);
+            top.addView(em, new LinearLayout.LayoutParams(Theme.dp(84), Theme.dp(112)));
+            LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(0, -2, 1);
+            hp.leftMargin = Theme.dp(10);
+            top.addView(head, hp);
+            left.addView(top);
+            left.addView(status);
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
+            blp.topMargin = Theme.dp(12);
+            left.addView(btns, blp);
+            android.widget.ScrollView ls = new android.widget.ScrollView(this);
+            ls.setFillViewport(true);
+            ls.setVerticalScrollBarEnabled(false);
+            ls.addView(left);
+            row.addView(ls, new LinearLayout.LayoutParams(0, -1, logBig ? 0.36f : 0.44f));
+            View sp = new View(this);
+            row.addView(sp, new LinearLayout.LayoutParams(Theme.dp(20), 1));
+            row.addView(console, new LinearLayout.LayoutParams(0, -1, logBig ? 0.64f : 0.56f));
+            layout = row;
+        } else {
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            int side = Theme.dp(18);
+            int w = root.getWidth() > 0 ? root.getWidth() : getResources().getDisplayMetrics().widthPixels;
+            if (w > Theme.dp(640)) side = (w - Theme.dp(600)) / 2;
+            col.setPadding(side, 0, side, Theme.dp(14));
+            if (!logBig) col.addView(em, new LinearLayout.LayoutParams(-1, 0, 0.62f));
+            col.addView(head);
+            col.addView(status);
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, 0, logBig ? 3 : 1.15f);
+            cp.topMargin = Theme.dp(12);
+            col.addView(console, cp);
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
+            blp.topMargin = Theme.dp(10);
+            col.addView(btns, blp);
+            layout = col;
+        }
+        size.onClick(v -> { logBig = !logBig; refreshPage(); });
+        p.onY = () -> { logBig = !logBig; refreshPage(); };
+        p.custom = layout;
+        p.focus = cancel;
+        p.back = () -> dialog("Leave this page?", "The build keeps going in the background (see the notification). Come back any time.", Icons.INFO,
+                new Btn("Go to the home screen", Icons.CHEVRON, Card.STYLE_NORMAL, () -> moveTaskToBack(true)),
+                new Btn("Cancel the build", Icons.CLOSE, Card.STYLE_DANGER, () -> { BuildRunner b = BuildRunner.current; if (b != null) b.cancel(); }),
+                new Btn("Stay", Icons.BUILD, Card.STYLE_PRIMARY, null));
+        show(p, dirOf(p));
+
+        final String title = r.kind.equals("rebuild") ? "Updating the game" : r.kind.equals("extras") ? "Adding extras" : "Building the game";
+        BuildRunner.Listener l = new BuildRunner.Listener() {
+            public void lines(String[] lines) {
+                console.append(lines);
+            }
+
+            public void progress(JSONObject j) {
+                float f = (float) j.optDouble("fraction");
+                em.setFraction(f);
+                int step = j.optInt("step");
+                String s = j.optString("stage");
+                if (!s.equals(stage.getText().toString())) {   // a new stage: the title fades over
+                    stage.animate().alpha(0).setDuration(120).withEndAction(() -> { stage.setText(s); stage.animate().alpha(1).setDuration(260).start(); }).start();
+                }
+                stepOf.setText((r.plan.length() > 1 ? "Step " + (step + 1) + " of " + r.plan.length() + "  \u00B7  " : "") + Math.round(f * 100) + "%");
+                explain.setText(j.optString("explain"));
+                String d = j.optString("detail");
+                detail.setText(d.isEmpty() ? "Working..." : d);
+                elapsed.setText(j.optString("elapsed"));
+                eta.setText(j.optString("eta"));
+                JSONObject st = r.plan.optJSONObject(Math.min(step, r.plan.length() - 1));
+                double base = st == null ? 0 : st.optDouble("base"), w = st == null ? 1 : st.optDouble("weight", 1);
+                track.set(step, (float) ((f - base) / Math.max(0.0001, w)), false);
+                BuildService.update(SetupActivity.this, title, s + " · " + Math.round(f * 100) + "%", Math.round(f * 100));
+            }
+
+            public void finished(boolean ok, String error, String note) {
+                onBuildFinished(r, ok, error, note);
+            }
+        };
+        r.setListener(l);
+        if (r.lastProgress != null) l.progress(r.lastProgress);
+        if (!r.running) ui.post(() -> onBuildFinished(r, r.ok, r.error, r.note));
+    }
+
+    private void onBuildFinished(BuildRunner r, boolean ok, String error, String note) {
+        if (BuildRunner.current != r) return;
+        BuildRunner.current = null;
+        r.setListener(null);
+        keepAwake(false);
+        BuildService.stop(this);
+        backdrop.setEnergy(0);
+        backdrop.setSlow(false);
+        if (!ok) {
+            if (!resumed) BuildService.finished(this, false, error);
+            failPage(error, r.recentText());
+            return;
+        }
+        if (r.kind.startsWith("demo")) { go(this::showDone); return; }   // the test plan built nothing
+        // remember what was built (install.ini)
+        if (r.kind.equals("install")) {
+            st.put("workdir", workdir);
+            st.put("iso", iso);
+            st.put("version", "dev");
+            opt.putInto(st);
+            writeSettings();
+        }
+        if (!r.kind.equals("extras")) st.put("built_fp", Engine.payloadFingerprint());
+        else {
+            Options o = opt.copy();
+            o.clearDiscs();
+            o.putInto(st);
+        }
+        saveState();
+        if (!resumed) BuildService.finished(this, true, r.kind.equals("extras") ? "The extras are in place." : "Open the setup app and install the game.");
+        if (r.kind.equals("extras")) {
+            extrasMode = false;
+            backdrop.setMood(BackdropView.MOOD_GOLD);
+            dialog("Done", note.isEmpty() ? "The extras are in place." : note, Icons.CHECK, new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, this::backHome));
+            return;
+        }
+        go(this::showDone);
+    }
+
+    /** settings.ini is the game's own file (key=value): only add the update option if the player has no entry yet. */
+    private void writeSettings() {
+        File f = new File(workdir, "settings.ini");
+        String content = readText(f, 1 << 20);
+        if (content.contains("check_updates=")) return;
+        if (!content.isEmpty() && !content.endsWith("\n")) content += "\n";
+        content += "check_updates=" + (opt.checkUpdates() ? "1" : "0") + "\n";
+        try (FileOutputStream o = new FileOutputStream(f)) {
+            o.write(content.getBytes("UTF-8"));
+        } catch (Exception e) {
+            // the game asks again
+        }
+    }
+
+    private void showDone() {
+        Page p = new Page(this, "done");
+        p.back = this::backHome;
+        backdrop.setMood(BackdropView.MOOD_GOLD);
+        ProgressEmblem em = new ProgressEmblem(this);
+        em.setFraction(1);
+        em.setMode(ProgressEmblem.DONE);
+        em.setShowPercent(false);
+        p.hero = em;
+        p.heroHeightDp = 200;
+        p.head("Finished", "All done", "The game is built and its files are in place. Install it as an app: Android asks you to confirm.");
+        p.card(new Card(this, Card.ACTION, Icons.INSTALL, "Install the game", "Then open \"Dissidia 012\" from your app list.").style(Card.STYLE_PRIMARY).pulse())
+                .onClick(v -> installGame(new File(stWorkdir(), "android/dissidia.apk").getPath(), false));
+        p.card(new Card(this, Card.ACTION, Icons.LOG, "View the build log", null).style(Card.STYLE_QUIET)).onClick(v -> viewLog(new File(stWorkdir(), "setup.log"), "Build log"));
+        show(p, dirOf(p));
+    }
+
+    private void failPage(String msg, String tail) {
+        failMsg = msg;
+        failTail = tail;
+        go(this::showFailed);
+    }
+
+    private String failMsg = "", failTail = "";
+
+    private void showFailed() {
+        Page p = new Page(this, "failed");
+        p.back = this::backHome;
+        backdrop.setMood(BackdropView.MOOD_CHAOS);
+        ProgressEmblem em = new ProgressEmblem(this);
+        em.setFraction(BuildRunner.current == null ? 0.35f : 0.35f);
+        em.setMode(ProgressEmblem.FAILED);
+        em.setShowPercent(false);
+        p.hero = em;
+        p.heroHeightDp = 150;
+        p.head("Stopped", "Not finished", failMsg + " Trying again continues where it stopped.");
+        if (!failTail.isEmpty()) {
+            TextView tail = Theme.text(this, failTail, 11.5f, 0xFFE8C6C0, Theme.mono);
+            tail.setPadding(Theme.dp(12), Theme.dp(10), Theme.dp(12), Theme.dp(10));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0xC0140810);
+            bg.setStroke(Theme.dp(1), 0x60E0675A);
+            bg.setCornerRadius(Theme.dp(6));
+            tail.setBackground(bg);
+            tail.setTextIsSelectable(true);
+            p.headerExtra.add(tail);
+        }
+        final File log = new File(workdir, "setup.log");
+        p.card(new Card(this, Card.ACTION, Icons.RETRY, "Try again", "Runs the same steps again; finished work is kept.").style(Card.STYLE_PRIMARY))
+                .onClick(v -> {
+                    if (runKind.equals("install") && iso.isEmpty()) { beginPick(PICK_ISO, this::backHome); return; }
+                    startPlan(runKind, iso, Options.parse(runOpts), runPrev);
+                });
+        p.card(new Card(this, Card.ACTION, Icons.SHARE, "Share the log", "Send it to another app: messages, e-mail, a cloud drive...")).onClick(v -> shareFile(log, "dissidia-setup-log.txt", "Dissidia Recomp setup log"));
+        p.card(new Card(this, Card.ACTION, Icons.SAVE, "Save the log", "Save it as a file where you choose.")).onClick(v -> saveFile(log, "dissidia-setup-log.txt"));
+        p.card(new Card(this, Card.ACTION, Icons.EYE, "View the full log", null).style(Card.STYLE_QUIET)).onClick(v -> viewLog(log, "Build log"));
+        show(p, dirOf(p));
+    }
+
+    private void keepAwake(boolean on) {
+        if (on) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (wakeLock == null) wakeLock = ((PowerManager) getSystemService(Context.POWER_SERVICE)).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "psprecomp:build");
+            if (!wakeLock.isHeld()) wakeLock.acquire(3 * 60 * 60 * 1000L);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- installing the APK
+
+    private boolean canInstallPackages() {
+        return Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls();
+    }
+
+    private void installGame(String apk, boolean update) {
+        if (!new File(apk).isFile()) {
+            dialog("Not built", "The game's app was not found (" + apk + "). Build the game again.", Icons.WARN, new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, null));
+            return;
+        }
+        if (!canInstallPackages()) {
+            pendingInstall = true;
+            pendingInstallApk = apk;
+            installUpdate = update;
+            go(this::showInstallAllow);
+            return;
+        }
+        doInstall(apk, update);
+    }
+
+    private boolean installUpdate;
+
+    private void showInstallAllow() {
+        Page p = new Page(this, "install-allow");
+        p.back = () -> { pendingInstall = false; backHome(); };
+        boolean ok = canInstallPackages();
+        Icons.IconView hero = new Icons.IconView(this, ok ? Icons.CHECK : Icons.KEY, ok ? Theme.CRYSTAL : Theme.GOLD);
+        hero.strokeDp = 2.2f;
+        p.hero = hero;
+        p.heroHeightDp = 84;
+        p.head("Permission", "Allow installing", "Android asks once whether this app may install apps. Switch on \"Allow from this source\", then come back: the installation continues by itself.");
+        p.card(new Card(this, Card.ACTION, Icons.KEY, "Open the setting", null).value(ok ? "Allowed" : "Needed").style(Card.STYLE_PRIMARY)).onClick(v -> {
+            if (canInstallPackages()) { pendingInstall = false; doInstall(pendingInstallApk, installUpdate); }
+            else startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+        });
+        show(p, dirOf(p));
+    }
+
+    private void doInstall(final String apk, boolean update) {
+        installUpdate = update;
+        pendingInstallApk = apk;
+        installStatus = "working";
+        if (installReceiver == null) {
+            installReceiver = new BroadcastReceiver() {
+                public void onReceive(Context c, Intent i) {
+                    int s = i.getIntExtra(PackageInstaller.EXTRA_STATUS, -1);
+                    if (s == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                        Intent confirm = (Intent) i.getParcelableExtra(Intent.EXTRA_INTENT);
+                        if (confirm != null) {
                             confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                             c.startActivity(confirm);
-                        } else if (st == PackageInstaller.STATUS_SUCCESS) {
-                            installStatus = "ok";
-                        } else {
-                            installStatus = "failed: " + i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
                         }
-                    }
-                };
-                a.registerReceiver(receiver, new IntentFilter(ACTION));
-            }
-            PackageInstaller pi = a.getPackageManager().getPackageInstaller();
-            PackageInstaller.SessionParams p = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
-            int id = pi.createSession(p);
-            PackageInstaller.Session s = pi.openSession(id);
-            InputStream in = new FileInputStream(path);
-            OutputStream out = s.openWrite("dissidia.apk", 0, -1);
-            byte[] buf = new byte[1 << 16];
-            int n;
-            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-            s.fsync(out);
-            in.close();
-            out.close();
-            Intent cb = new Intent(ACTION).setPackage(a.getPackageName());
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
-            s.commit(PendingIntent.getBroadcast(a, id, cb, flags).getIntentSender());
-            s.close();
-        } catch (Exception e) {
-            installStatus = "failed: " + e;
-        }
-    }
-
-    // ---- Android's own file picker (Storage Access Framework): it hands us an open file descriptor, not a path, so no storage permission is needed
-    // to read the disc image. The wizard passes the descriptor on to the build tools as "fd:N" (games/dissidia/tools/setup_from_iso.py).
-    private static final int REQ_PICK = 4711;
-    private static volatile String pickStatus = "";
-
-    public static void pickFile() {
-        final SDLActivity a = mSingleton;
-        pickStatus = "pending";
-        a.runOnUiThread(new Runnable() {
-            public void run() {
-                try {
-                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                    i.addCategory(Intent.CATEGORY_OPENABLE);
-                    i.setType("*/*");
-                    a.startActivityForResult(i, REQ_PICK);
-                } catch (Exception e) {
-                    pickStatus = "failed: " + e;
+                        installStatus = "confirm";
+                    } else if (s == PackageInstaller.STATUS_SUCCESS) installStatus = "ok";
+                    else if (s == PackageInstaller.STATUS_FAILURE_ABORTED) installStatus = "failed: cancelled";
+                    else installStatus = "failed: " + i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+                    ui.post(() -> { if (page != null && page.id.equals("installing")) refreshPage(); });
                 }
-            }
-        });
-    }
-
-    /** "" (never asked) | "pending" | "cancelled" | "failed: ..." | "ok:<fd>:<file name>" */
-    public static void clearPick() {
-        pickStatus = "";
-    }
-
-    public static String pickStatus() {
-        return pickStatus;
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode != REQ_PICK) {
-            super.onActivityResult(requestCode, resultCode, data);
-            return;
+            };
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(installReceiver, new IntentFilter(ACTION_INSTALLED), Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(installReceiver, new IntentFilter(ACTION_INSTALLED));
         }
-        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
-            pickStatus = "cancelled";
-            return;
-        }
-        try {
-            Uri u = data.getData();
-            String name = "game";
-            Cursor c = getContentResolver().query(u, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null);
-            if (c != null) {
-                if (c.moveToFirst()) name = c.getString(0);
-                c.close();
+        go(this::showInstalling);
+        new Thread(() -> {
+            try {
+                PackageInstaller pi = getPackageManager().getPackageInstaller();
+                PackageInstaller.SessionParams sp = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+                int id = pi.createSession(sp);
+                try (PackageInstaller.Session s = pi.openSession(id)) {
+                    try (InputStream in = new FileInputStream(apk); OutputStream out = s.openWrite("app.apk", 0, new File(apk).length())) {
+                        byte[] buf = new byte[1 << 16];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                        s.fsync(out);
+                    }
+                    Intent cb = new Intent(ACTION_INSTALLED).setPackage(getPackageName());
+                    int flags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
+                    s.commit(PendingIntent.getBroadcast(this, id, cb, flags).getIntentSender());
+                }
+            } catch (Exception e) {
+                installStatus = "failed: " + e.getMessage();
+                ui.post(() -> { if (page != null && page.id.equals("installing")) refreshPage(); });
             }
-            ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(u, "r");
-            pickStatus = "ok:" + pfd.detachFd() + ":" + name;
+        }, "setup-install").start();
+    }
+
+    private void showInstalling() {
+        Page p = new Page(this, "installing");
+        p.back = this::backHome;
+        String s = installStatus;
+        boolean ok = s.equals("ok"), failed = s.startsWith("failed");
+        ProgressEmblem em = new ProgressEmblem(this);
+        em.setShowPercent(false);
+        if (ok) { em.setFraction(1); em.setMode(ProgressEmblem.DONE); backdrop.setMood(BackdropView.MOOD_GOLD); }
+        else if (failed) { em.setFraction(0.3f); em.setMode(ProgressEmblem.FAILED); backdrop.setMood(BackdropView.MOOD_CHAOS); }
+        else { em.setMode(ProgressEmblem.SPIN); backdrop.setMood(BackdropView.MOOD_CRYSTAL); }
+        p.hero = em;
+        p.heroHeightDp = 170;
+        String what = installUpdate ? "the update" : "the game";
+        if (ok) {
+            p.head("Installed", installUpdate ? "Updated" : "Ready to play", installUpdate ? "The new version of the setup app is installed. It opens again by itself or from your app list."
+                    : "Open \"Dissidia 012\" from your app list. The first start prepares the graphics for a moment.");
+            Intent launch = getPackageManager().getLaunchIntentForPackage("org.psprecomp.game");
+            if (!installUpdate && launch != null)
+                p.card(new Card(this, Card.ACTION, Icons.PLAY, "Play now", "Starts Dissidia 012.").style(Card.STYLE_PRIMARY).pulse()).onClick(v -> {
+                    try { startActivity(launch); } catch (Exception e) { snack("Could not start the game: " + e.getMessage()); }
+                });
+            p.card(new Card(this, Card.ACTION, Icons.BACK, "Back to the start", null).style(Card.STYLE_QUIET)).onClick(v -> backHome());
+        } else if (failed) {
+            p.head("Not installed", "Installation stopped", "Android said: " + s.substring(Math.min(s.length(), 8)) + ". If it asked for permission to install apps from this app, allow it and try again.");
+            p.card(new Card(this, Card.ACTION, Icons.RETRY, "Install again", "Asks Android to install " + what + " again.").style(Card.STYLE_PRIMARY)).onClick(v -> installGame(pendingInstallApk, installUpdate));
+            p.card(new Card(this, Card.ACTION, Icons.BACK, "Back to the start", null).style(Card.STYLE_QUIET)).onClick(v -> backHome());
+        } else {
+            p.head("Installing", "Waiting for Android", "Android shows a confirmation: tap Install. The game's files are already in place.");
+            p.card(new Card(this, Card.ACTION, Icons.RETRY, "Install again", "If the confirmation did not appear.")).onClick(v -> installGame(pendingInstallApk, installUpdate));
+            p.card(new Card(this, Card.ACTION, Icons.BACK, "Back to the start", null).style(Card.STYLE_QUIET)).onClick(v -> backHome());
+        }
+        show(p, dirOf(p));
+        if (!ok && !failed) ui.postDelayed(() -> { if (page != null && page.id.equals("installing") && !installStatus.equals(s)) refreshPage(); }, 600);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- updates
+
+    private File updDir() {
+        File d = new File(getFilesDir(), "update");
+        d.mkdirs();
+        return d;
+    }
+
+    private void updateLog(String s) {
+        try (FileOutputStream o = new FileOutputStream(new File(updDir(), "update.log"), true)) {
+            o.write((new SimpleDateFormat("yyyy-MM-dd HH:mm:ss ", Locale.US).format(new Date()) + s + "\n").getBytes("UTF-8"));
         } catch (Exception e) {
-            pickStatus = "failed: " + e;
+            // a convenience
         }
     }
 
-    // ---- updates: HTTPS downloads go through Android's own stack (the bundled Python is musl: no resolver config, no CA store on Android).
-    private static volatile String downloadStatus = "";
-    private static volatile boolean downloadCancel = false;
+    private void beginCheck(final boolean manual) {
+        if (!problem.isEmpty()) return;
+        final int seq = ++checkSeq;
+        if (manual) go(this::showChecking);
+        final File dir = updDir();
+        new Thread(() -> {
+            JSONObject u = check(dir);
+            ui.post(() -> finishCheck(seq, manual, u));
+        }, "setup-check").start();
+    }
 
-    /** The app's own version name (set at build time from the release version). */
-    public static String appVersion() {
+    private JSONObject check(File dir) {
         try {
-            return mSingleton.getPackageManager().getPackageInfo(mSingleton.getPackageName(), 0).versionName;
+            File man = new File(dir, "manifest.json"), sig = new File(dir, "manifest.json.sig");
+            man.delete();
+            sig.delete();
+            String url = MANIFEST_URL;
+            String over = readText(new File(getFilesDir(), "manifest_url.txt"), 4096).trim();   // debug / test switch: another manifest (still needs a valid signature)
+            if (!over.isEmpty()) url = over.split("\n")[0].trim();
+            Downloader d = new Downloader();
+            String r = d.fetch(url, man, null);
+            if (r != null) return new JSONObject().put("error", r);
+            d.fetch(url + ".sig", sig, null);   // a missing signature is judged by update.py (an error when this app carries a key)
+            String[] out = Engine.runTool(Engine.checkArgv(man.getPath(), sig.getPath(), appVersion()), workdir, 30000);
+            String result = "";
+            for (String l : out) {
+                updateLog("check: " + l);
+                if (l.startsWith("UPDATE") || l.startsWith("NOUPDATE") || l.startsWith("ERROR")) result = l;
+            }
+            if (result.isEmpty())   // the checker did not answer (it could not run): not "no update"
+                return new JSONObject().put("error", "the update checker did not run (Logs and reports > Updater log)");
+            return new JSONObject(Engine.parseUpdate(result));
+        } catch (Exception e) {
+            try { return new JSONObject().put("error", e.toString()); } catch (Exception e2) { return new JSONObject(); }
+        }
+    }
+
+    private void showChecking() {
+        Page p = new Page(this, "checking");
+        p.back = () -> { checkSeq++; backHome(); };
+        ProgressEmblem em = new ProgressEmblem(this);
+        em.setMode(ProgressEmblem.SPIN);
+        em.setShowPercent(false);
+        p.hero = em;
+        p.heroHeightDp = 170;
+        p.head("Updates", "Checking", "Looking for a newer version on the release page. Nothing about you or your game is sent.");
+        p.card(new Card(this, Card.ACTION, Icons.CLOSE, "Skip", null).style(Card.STYLE_QUIET)).onClick(v -> { checkSeq++; backHome(); });
+        show(p, dirOf(p));
+    }
+
+    private void finishCheck(int seq, boolean manual, JSONObject u) {
+        if (seq != checkSeq) return;   // skipped
+        upd = u;
+        if (!manual && (page == null || !page.id.equals("home"))) return;   // the silent start-up check never interrupts what the player is doing
+        if (u.optBoolean("available")) { go(this::showUpdateAvail); return; }
+        if (manual) {
+            String err = u.optString("error");
+            dialog("Updates", err.isEmpty() ? "You have the newest version." : "Could not check for updates: " + err, err.isEmpty() ? Icons.CHECK : Icons.WARN,
+                    new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, this::backHome));
+        }
+    }
+
+    private void showUpdateAvail() {
+        Page p = new Page(this, "update-avail");
+        p.back = this::backHome;
+        backdrop.setMood(BackdropView.MOOD_GOLD);
+        Icons.IconView hero = new Icons.IconView(this, Icons.DOWNLOAD, Theme.GOLD_LIGHT);
+        hero.strokeDp = 2;
+        p.hero = hero;
+        p.heroHeightDp = 90;
+        p.head("Update available", "Version " + upd.optString("version"), "You have " + upd.optString("current") + ". Download size: " + BuildRunner.size(upd.optLong("size"))
+                + ". Android asks you to confirm the installation. If the update changes how the game is built, you are offered to build it again afterwards (no game file needed).");
+        p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Update now", "The game and your saves are not touched.").style(Card.STYLE_PRIMARY).pulse()).onClick(v -> startUpdateDownload());
+        p.card(new Card(this, Card.ACTION, Icons.CLOSE, "Not now", "You can update later from the start page.").style(Card.STYLE_QUIET)).onClick(v -> backHome());
+        show(p, dirOf(p));
+    }
+
+    private ProgressEmblem dlEmblem;
+    private TextView dlText;
+
+    private void startUpdateDownload() {
+        final File apk = new File(updDir(), "dissidia-setup.apk");
+        final Downloader d = new Downloader();
+        updDl = d;
+        go(this::showDownload);
+        new Thread(() -> {
+            updateLog("downloading " + upd.optString("url"));
+            String r = d.fetch(upd.optString("url"), apk, (done, total) -> {
+                long t = total > 0 ? total : upd.optLong("size");
+                ui.post(() -> {
+                    if (dlEmblem != null && t > 0) dlEmblem.setFraction((float) done / t);
+                    if (dlText != null) dlText.setText(BuildRunner.size(done) + (t > 0 ? " of " + BuildRunner.size(t) : ""));
+                });
+            });
+            if (r != null) {
+                updateLog("download failed: " + r);
+                ui.post(() -> { if (!d.cancelled()) dialog("Update failed", "The download failed: " + r, Icons.WARN, new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, this::backHome)); });
+                return;
+            }
+            ui.post(() -> { if (dlText != null) dlText.setText("Checking the download..."); });
+            updateLog("verifying " + apk + " sha256=" + upd.optString("sha256") + " size=" + upd.optLong("size"));
+            boolean ok = false;
+            for (String l : Engine.runTool(Engine.verifyArgv(apk.getPath(), upd.optString("sha256"), upd.optLong("size")), workdir, 120000)) {
+                updateLog("verify: " + l);
+                if (l.equals("OK")) ok = true;
+            }
+            final boolean good = ok;
+            ui.post(() -> {
+                if (d.cancelled()) return;
+                if (good) installGame(apk.getPath(), true);
+                else dialog("Update failed", "The downloaded file does not match what the release lists, so it was deleted. Try again later.", Icons.WARN,
+                        new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, this::backHome));
+            });
+        }, "setup-update").start();
+    }
+
+    private void showDownload() {
+        Page p = new Page(this, "download");
+        Runnable cancel = () -> { if (updDl != null) updDl.cancel(); backHome(); };
+        p.back = cancel;
+        ProgressEmblem em = new ProgressEmblem(this);
+        dlEmblem = em;
+        p.hero = em;
+        p.heroHeightDp = 190;
+        p.head("Updating", "Version " + upd.optString("version"), "Downloading the new version of this app. Android then asks you to confirm the installation. The game and your saves are not touched.");
+        dlText = Theme.text(this, "Starting...", 14, Theme.GOLD_LIGHT, Theme.bodyBold);
+        p.headerExtra.add(dlText);
+        p.card(new Card(this, Card.ACTION, Icons.CLOSE, "Cancel", null).style(Card.STYLE_DANGER)).onClick(v -> cancel.run());
+        show(p, dirOf(p));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- logs and reports
+
+    private static final class LogEntry {
+        final String title, summary, shareName;
+        final File file;
+        final int icon;
+
+        LogEntry(String title, String summary, File file, String shareName, int icon) {
+            this.title = title;
+            this.summary = summary;
+            this.file = file;
+            this.shareName = shareName;
+            this.icon = icon;
+        }
+    }
+
+    private List<LogEntry> logEntries() {
+        ArrayList<LogEntry> l = new ArrayList<>();
+        File build = new File(stWorkdir(), "setup.log");
+        if (build.isFile()) l.add(new LogEntry("Build log", "Everything the build tools printed, every run. " + when(build), build, "dissidia-setup-log.txt", Icons.BUILD));
+        File game = new File(Engine.gameDir(), "last_run.log");
+        if (game.canRead()) l.add(new LogEntry("Game log (last run)", "What the game printed the last time it ran: useful when it crashed or closed. " + when(game), game, "dissidia-game-last-run-log.txt", Icons.PLAY));
+        else if (game.exists() || !hasAllFilesAccess())
+            l.add(new LogEntry("Game log (last run)", "Needs \"all files access\" to be read (the game keeps it in Android/media).", null, "", Icons.PLAY));
+        File update = new File(getFilesDir(), "update/update.log");
+        if (update.isFile()) l.add(new LogEntry("Updater log", "What the update checks did. " + when(update), update, "dissidia-updater-log.txt", Icons.DOWNLOAD));
+        for (File f : CrashReports.list(this))
+            l.add(new LogEntry("Setup app crash report", "The setup app closed unexpectedly. " + when(f), f, f.getName(), Icons.BUG));
+        return l;
+    }
+
+    private static String when(File f) {
+        return "Written " + new SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()).format(new Date(f.lastModified())) + ", " + BuildRunner.size(f.length()) + ".";
+    }
+
+    private void showLogs() {
+        Page p = new Page(this, "logs");
+        p.back = this::backHome;
+        backdrop.setMood(BackdropView.MOOD_CRYSTAL);
+        p.head("Logs and reports", "Logs", "Something went wrong? Share a log with whoever helps you, or save it as a file. Logs contain file paths and tool output, nothing else about you.");
+        List<LogEntry> l = logEntries();
+        if (l.isEmpty()) p.card(new Card(this, Card.INFO, Icons.INFO, "No logs yet", "The build log appears after the first build."));
+        for (LogEntry e : l) {
+            Card k = p.card(new Card(this, Card.ACTION, e.icon, e.title, e.summary));
+            if (e.file == null) k.onClick(v -> go(this::showPermission));
+            else k.onClick(v -> viewLog(e.file, e.title, e.shareName));
+        }
+        show(p, dirOf(p));
+    }
+
+    private File viewing;
+    private String viewingTitle, viewingShare;
+
+    private void viewLog(File f, String title) {
+        viewLog(f, title, f.getName());
+    }
+
+    private void viewLog(File f, String title, String shareName) {
+        viewing = f;
+        viewingTitle = title;
+        viewingShare = shareName;
+        final Runnable back = rebuildPage;
+        viewBack = back;
+        go(this::showLogViewer);
+    }
+
+    private Runnable viewBack;
+
+    private void showLogViewer() {
+        Page p = new Page(this, "viewer");
+        final Runnable back = viewBack;
+        p.back = () -> { pendingDir = -1; present(back != null ? back : this::showHome, -1, true); };
+        boolean landscape = root.getWidth() > root.getHeight() * 1.05f;
+        LogConsole console = new LogConsole(this);
+        console.setEmptyText("Loading...");
+        console.setLive(false);
+        p.console = console;
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(landscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        col.setPadding(Theme.dp(18), 0, Theme.dp(18), Theme.dp(14));
+        LinearLayout side = new LinearLayout(this);
+        side.setOrientation(LinearLayout.VERTICAL);
+        side.addView(Theme.eyebrow(this, "Log"));
+        side.addView(Theme.heading(this, viewingTitle, 22));
+        TextView info = Theme.body(this, viewing.getName() + " · " + BuildRunner.size(viewing.length()));
+        info.setTextSize(13);
+        side.addView(info);
+        Card share = new Card(this, Card.ACTION, Icons.SHARE, "Share", null);
+        share.onClick(v -> shareFile(viewing, viewingShare, viewingTitle));
+        Card save = new Card(this, Card.ACTION, Icons.SAVE, "Save as file", null);
+        save.onClick(v -> saveFile(viewing, viewingShare));
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(landscape ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams b1 = landscape ? new LinearLayout.LayoutParams(-1, -2) : new LinearLayout.LayoutParams(0, -2, 1);
+        if (landscape) b1.bottomMargin = Theme.dp(8); else b1.rightMargin = Theme.dp(8);
+        btns.addView(share, b1);
+        btns.addView(save, landscape ? new LinearLayout.LayoutParams(-1, -2) : new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
+        bp.topMargin = Theme.dp(12);
+        if (landscape) {
+            side.addView(btns, bp);
+            col.addView(side, new LinearLayout.LayoutParams(0, -2, 0.32f));
+            View sp = new View(this);
+            col.addView(sp, new LinearLayout.LayoutParams(Theme.dp(18), 1));
+            col.addView(console, new LinearLayout.LayoutParams(0, -1, 0.68f));
+        } else {
+            col.addView(side);
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, 0, 1);
+            cp.topMargin = Theme.dp(12);
+            col.addView(console, cp);
+            col.addView(btns, bp);
+        }
+        p.custom = col;
+        p.focus = share;
+        show(p, dirOf(p));
+        final File f = viewing;
+        new Thread(() -> {
+            List<String> lines = tailLines(f, 4000);
+            ui.post(() -> { console.setAll(lines); console.setEmptyText("(empty)"); });
+        }, "setup-log").start();
+    }
+
+    private static List<String> tailLines(File f, int max) {
+        ArrayList<String> l = new ArrayList<>();
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String s;
+            while ((s = r.readLine()) != null) {
+                l.add(s);
+                if (l.size() > max * 2) l.subList(0, max).clear();
+            }
+        } catch (Exception e) {
+            l.add("Could not read " + f + ": " + e.getMessage());
+        }
+        return l.size() > max ? l.subList(l.size() - max, l.size()) : l;
+    }
+
+    private static String readText(File f, int max) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            byte[] b = new byte[(int) Math.min(max, f.length())];
+            int n = 0, k;
+            while (n < b.length && (k = in.read(b, n, b.length - n)) > 0) n += k;
+            return new String(b, 0, n, "UTF-8");
         } catch (Exception e) {
             return "";
         }
     }
 
-    /** Downloads url to dest on a thread. downloadStatus(): "" | "working:<bytes>:<total>" | "ok" | "failed: ..." */
-    public static void download(final String url, final String dest) {
-        downloadStatus = "working:0:0";
-        downloadCancel = false;
-        new Thread(new Runnable() {
-            public void run() {
-                HttpURLConnection c = null;
-                try {
-                    c = (HttpURLConnection) new URL(url).openConnection();
-                    c.setConnectTimeout(15000);
-                    c.setReadTimeout(30000);
-                    c.setInstanceFollowRedirects(true);
-                    int code = c.getResponseCode();
-                    if (code != 200) {
-                        downloadStatus = "failed: HTTP " + code;
-                        return;
-                    }
-                    long total = c.getContentLengthLong();
-                    File part = new File(dest + ".part");
-                    InputStream in = c.getInputStream();
-                    OutputStream out = new FileOutputStream(part);
-                    byte[] buf = new byte[1 << 16];
-                    long done = 0;
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        if (downloadCancel) {
-                            out.close();
-                            in.close();
-                            part.delete();
-                            downloadStatus = "failed: cancelled";
-                            return;
-                        }
-                        out.write(buf, 0, n);
-                        done += n;
-                        downloadStatus = "working:" + done + ":" + total;
-                    }
-                    out.close();
-                    in.close();
-                    File d = new File(dest);
-                    d.delete();
-                    if (!part.renameTo(d)) {
-                        downloadStatus = "failed: cannot write " + dest;
-                        return;
-                    }
-                    downloadStatus = "ok";
-                } catch (Exception e) {
-                    downloadStatus = "failed: " + e;
-                } finally {
-                    if (c != null) c.disconnect();
-                }
+    private static void copy(InputStream in, OutputStream out) throws java.io.IOException {
+        byte[] buf = new byte[1 << 16];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+    }
+
+    /** The share sheet: a copy of the file goes to cache/share, ShareProvider hands it out read-only. */
+    private void shareFile(File src, String name, String subject) {
+        if (src == null || !src.isFile()) { snack("There is no log yet."); return; }
+        try {
+            File dst = new File(ShareProvider.dir(this), name);
+            try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+                copy(in, out);
             }
-        }).start();
+            Uri u = ShareProvider.uri(name);
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_STREAM, u);
+            send.putExtra(Intent.EXTRA_SUBJECT, subject);
+            send.putExtra(Intent.EXTRA_TEXT, subject + " (Dissidia Recomp setup " + appVersion() + ", " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + ")");
+            send.setClipData(ClipData.newRawUri(name, u));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(send, "Share " + subject.toLowerCase(Locale.US)));
+        } catch (Exception e) {
+            snack("Could not share: " + e.getMessage());
+        }
     }
 
-    public static void cancelDownload() {
-        downloadCancel = true;
+    /** "Save as": Android's document picker, the file is copied to the place chosen. */
+    private void saveFile(File src, String name) {
+        if (src == null || !src.isFile()) { snack("There is no log yet."); return; }
+        saveSource = src.getPath();
+        try {
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("text/plain");
+            i.putExtra(Intent.EXTRA_TITLE, name);
+            startActivityForResult(i, REQ_SAVE);
+        } catch (Exception e) {
+            snack("Could not open the file picker: " + e.getMessage());
+        }
     }
 
-    public static String downloadStatus() {
-        return downloadStatus;
+    /** The app closed unexpectedly last time: offer the report once. */
+    private void offerCrashReport() {
+        final File f = CrashReports.unseen(this);
+        if (f == null || overlay.getChildCount() > 0) return;
+        CrashReports.markSeen(f);
+        dialog("The setup app closed unexpectedly", "It wrote a crash report. Sharing it helps to fix the problem. You find it later under Logs and reports too.", Icons.BUG,
+                new Btn("Share the report", Icons.SHARE, Card.STYLE_PRIMARY, () -> shareFile(f, f.getName(), "Dissidia Recomp setup crash report")),
+                new Btn("Save the report", Icons.SAVE, Card.STYLE_NORMAL, () -> saveFile(f, f.getName())),
+                new Btn("Not now", Icons.CLOSE, Card.STYLE_NORMAL, null));
     }
 
-    public static String installStatus() {
-        return installStatus;
+    // ------------------------------------------------------------------------------------------------------------- activity results
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        if (req == REQ_SAVE) {
+            if (res != RESULT_OK || data == null || data.getData() == null) return;
+            try (InputStream in = new FileInputStream(saveSource); OutputStream out = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                copy(in, out);
+                snack("Saved.");
+            } catch (Exception e) {
+                snack("Could not save: " + e.getMessage());
+            }
+            return;
+        }
+        if (req != REQ_PICK) {
+            super.onActivityResult(req, res, data);
+            return;
+        }
+        if (res != RESULT_OK || data == null || data.getData() == null) return;   // cancelled: the waiting page stays
+        try {
+            Uri u = data.getData();
+            String name = "game";
+            try (Cursor c = getContentResolver().query(u, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (c != null && c.moveToFirst()) name = c.getString(0);
+            }
+            ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(u, "r");
+            int fd = pfd.detachFd();
+            Engine.inheritFd(fd);   // the build tools inherit it (setup_from_iso.py "fd:N")
+            picked("fd:" + fd, name);
+        } catch (Exception e) {
+            dialog("Cannot open the file", e.getMessage() == null ? e.toString() : e.getMessage(), Icons.WARN, new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, null));
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- small things
+
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * What the player chose (setup::Options): check_updates and the extras by key (setup/extras.cpp; a second disc's path under its disc
+     * key). Travels to the engine as install.ini lines; a missing key means the extra's default.
+     */
+    static final class Options {
+        static final Map<String, String> defaults = new LinkedHashMap<>();   // from Engine.extrasJson
+        static final ArrayList<String> discKeys = new ArrayList<>();
+        private static final List<String> NOT_OPTIONS = Arrays.asList("workdir", "iso", "version", "built_fp");
+        final LinkedHashMap<String, String> m = new LinkedHashMap<>();
+
+        static Options from(Map<String, String> state) {
+            Options o = new Options();
+            for (Map.Entry<String, String> e : state.entrySet())
+                if (!NOT_OPTIONS.contains(e.getKey())) o.m.put(e.getKey(), e.getValue());
+            return o;
+        }
+
+        static Options parse(String text) {
+            Map<String, String> m = new LinkedHashMap<>();
+            for (String l : text.split("\n")) {
+                int eq = l.indexOf('=');
+                if (eq > 0) m.put(l.substring(0, eq), l.substring(eq + 1));
+            }
+            return from(m);
+        }
+
+        String get(String key) {
+            String v = m.get(key);
+            if (v != null) return v;
+            v = defaults.get(key);
+            return v == null ? "" : v;
+        }
+
+        boolean on(String key) {
+            return "1".equals(get(key));
+        }
+
+        void set(String key, String value) {
+            m.put(key, value);
+        }
+
+        boolean checkUpdates() {
+            return !"0".equals(m.get("check_updates"));
+        }
+
+        void clearDiscs() {
+            for (String k : discKeys) m.put(k, "");
+        }
+
+        Options copy() {
+            return parse(text());
+        }
+
+        void putInto(Map<String, String> state) {
+            state.putAll(m);
+        }
+
+        String text() {
+            StringBuilder b = new StringBuilder();
+            for (Map.Entry<String, String> e : m.entrySet()) b.append(e.getKey()).append('=').append(e.getValue()).append('\n');
+            return b.toString();
+        }
+    }
+
+    /** Controller hints in the corner (A choose, B back, Y ...): only while a controller or keyboard is in use. */
+    static final class HintBar extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private boolean back = false;
+        private String y;
+        private boolean pad;
+        View version;
+
+        HintBar(Context c) {
+            super(c);
+            setAlpha(0);
+            setVisibility(GONE);
+            p.setTypeface(Theme.bodyBold);
+            p.setTextSize(Theme.dpf(12));
+        }
+
+        void reveal(boolean controller) {
+            if (controller != pad) {
+                pad = controller;
+                requestLayout();
+                invalidate();
+            }
+            if (controller) setVisibility(VISIBLE);
+            animate().alpha(controller ? 1 : 0).setDuration(controller ? 200 : 400)
+                    .withEndAction(() -> { if (!pad) setVisibility(GONE); }).start();   // gone: it takes no room from the title
+            if (version != null) version.animate().alpha(controller ? 0 : 1).setDuration(300).start();
+        }
+
+        void setBack(boolean b) {
+            back = b;
+            requestLayout();
+            invalidate();
+        }
+
+        void setY(String s) {
+            y = s;
+            requestLayout();
+            invalidate();
+        }
+
+        private String[][] items() {
+            ArrayList<String[]> l = new ArrayList<>();
+            l.add(new String[] {"A", "Choose"});
+            l.add(new String[] {"B", back ? "Back" : "Leave"});
+            if (y != null) l.add(new String[] {"Y", y});
+            return l.toArray(new String[0][]);
+        }
+
+        @Override
+        protected void onMeasure(int w, int h) {
+            float x = Theme.dpf(10);
+            for (String[] it : items()) x += Theme.dpf(24) + p.measureText(it[1]) + Theme.dpf(14);
+            setMeasuredDimension((int) x, Theme.dp(30));
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float h = getHeight();
+            p.setColor(0xD0101830);
+            c.drawRoundRect(0, 0, getWidth(), h, h / 2, h / 2, p);
+            float x = Theme.dpf(10);
+            for (String[] it : items()) {
+                int col = it[0].equals("A") ? 0xFF86EBCB : it[0].equals("B") ? 0xFFE0675A : 0xFFE2C47A;
+                p.setColor(col);
+                c.drawCircle(x + Theme.dpf(9), h / 2, Theme.dpf(9), p);
+                p.setColor(0xFF0A0F22);
+                p.setTextAlign(Paint.Align.CENTER);
+                c.drawText(it[0], x + Theme.dpf(9), h / 2 - (p.ascent() + p.descent()) / 2, p);
+                p.setTextAlign(Paint.Align.LEFT);
+                p.setColor(Theme.TEXT);
+                c.drawText(it[1], x + Theme.dpf(24), h / 2 - (p.ascent() + p.descent()) / 2, p);
+                x += Theme.dpf(24) + p.measureText(it[1]) + Theme.dpf(14);
+            }
+        }
     }
 }

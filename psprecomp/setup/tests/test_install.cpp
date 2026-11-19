@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "../extras.h"
 #include "../install.h"
 #include "../third_party/miniz.h"
 
@@ -152,39 +153,62 @@ int main() {
     CHECK(!feature_available(l, "android"));
 
     Options o;
-    CHECK(o.hd_textures);   // on by default
-    CHECK(o.texture_pack == "liink");   // LiinkPK's pack is the first choice
-    o.hd_textures = false;
+    CHECK(o.on("hd_textures"));   // on by default
+    CHECK(o.get("texture_pack") == "liink");   // LiinkPK's pack is the first choice
+    o.set("hd_textures", "0");
     auto plan = plan_install(l, "x.iso", "/w", o);
     CHECK(plan.size() == 2);
     double sum = 0;
     for (auto& s : plan) sum += s.weight;
     CHECK(std::fabs(sum - 1.0) < 1e-9);
     CHECK(std::fabs(plan[1].base - plan[0].weight) < 1e-9);
-    {   // extras on an installed game: no build step, only what is wanted
-        Options e;
-        auto ep = plan_extras(l, "/w", e, false);
-        CHECK(ep.size() == 1 && !ep[0].is_build);           // the texture download only
-        CHECK(plan_extras(l, "/w", e, true).empty());        // textures already in place: nothing to do
-        e.hd_textures = false;
-        CHECK(plan_extras(l, "/w", e, false).empty());
+    {   // Change extras on an installed game: no build step, only what changed (setup/extras.cpp)
+        const std::string w = (tmp / "w").string();
+        Options prev, e;
+        prev.set("hd_textures", "0");
+        auto ep = plan_extras(l, w, prev, e);
+        CHECK(ep.size() == 1 && !ep[0].is_build);           // turned on: the texture download only
+        fs::create_directories(tmp / "w/mods/textures");
+        { std::ofstream f(tmp / "w/mods/textures/textures.ini"); f << "x"; }
+        prev.set("hd_textures", "1");
+        CHECK(plan_extras(l, w, prev, e).empty());           // textures already in place: nothing to do
+        e.set("texture_pack", "ai");                         // another pack: the old one goes, the new one comes
+        ep = plan_extras(l, w, prev, e);
+        CHECK(ep.size() == 1 && ep[0].argv.back() == "ai");
+        CHECK(!fs::exists(tmp / "w/mods/textures"));
+        fs::create_directories(tmp / "w/mods/textures");
+        { std::ofstream f(tmp / "w/mods/textures/textures.ini"); f << "x"; }
+        e.set("texture_pack", "liink");
+        e.set("hd_textures", "0");                           // turned off: removed, nothing added
+        CHECK(plan_extras(l, w, prev, e).empty());
+        CHECK(!fs::exists(tmp / "w/mods/textures"));
+        prev.set("hd_textures", "0");
+        CHECK(plan_extras(l, w, prev, e).empty());
+    }
+    {   // the shared list: every extra has a title and a known kind; sub-choices name an existing parent
+        for (const Extra& x : extras()) {
+            CHECK(!x.key.empty() && !x.title.empty());
+            CHECK(x.parent.empty() || find_extra(x.parent));
+            CHECK(x.disc.key.empty() || !x.disc.what.empty());
+        }
+        CHECK(extras_json(l, true).find("\"key\":\"jp_audio\"") != std::string::npos);
     }
     {   // the Steam shortcut is one optional step (a failure does not fail the install)
         auto sp = plan_steam(l, "/w");
         CHECK(sp.size() == 1 && sp[0].optional && !sp[0].is_build);
         CHECK(sp[0].argv.size() > 3 && sp[0].argv[1].find("steam_shortcut.py") != std::string::npos);
     }
-    o.hd_textures = true;   // available in this release: one more step
+    o.set("hd_textures", "1");   // available in this release: one more step
     o.android = true;       // not available: no step
     plan = plan_install(l, "x.iso", "/w", o);
     CHECK(plan.size() == 3);
     {
         auto& a = plan.back().argv;
         CHECK(a.size() >= 5 && a[a.size() - 2] == "--pack" && a.back() == "liink");
-        o.texture_pack = "ai";
+        o.set("texture_pack", "ai");
         auto p2 = plan_install(l, "x.iso", "/w", o);
         CHECK(p2.back().argv.back() == "ai");
-        o.texture_pack = "liink";
+        o.set("texture_pack", "liink");
     }
     sum = 0;
     for (auto& s : plan) sum += s.weight;
@@ -234,22 +258,26 @@ int main() {
     CHECK(update_check_enabled(tmp.string()));
 
     {   // Bartz's Dissidia 1 moves: a step only with the feature, the option and the disc image
-        Options e; e.hd_textures = false; e.d1_moves = true; e.d1_iso = "/d1.iso";
-        CHECK(plan_extras(l, "/w", e, true).empty());                     // feature off in this release
+        Options prev, e; prev.set("hd_textures", "0"); e.set("hd_textures", "0"); e.set("d1_moves", "1"); e.set("d1_iso", "/d1.iso");
+        CHECK(plan_extras(l, "/w", prev, e).empty());                     // feature off in this release
+        CHECK(extras_needing_disc(l, false, e, &prev).empty());
         { std::ofstream f(tmp / "game" / "features.ini"); f << "hd_textures=1\njp_audio=0\nd1_moves=1\n"; }
-        auto dp = plan_extras(l, "/w", e, true);
+        auto dp = plan_extras(l, "/w", prev, e);
         CHECK(dp.size() == 1 && dp[0].argv.size() == 7 && dp[0].argv[2] == "install" && dp[0].argv[4] == "/d1.iso" && dp[0].argv[6] == "/w");
-        e.d1_iso.clear();
-        CHECK(plan_extras(l, "/w", e, true).empty());                     // no disc picked: nothing
+        e.set("d1_iso", "");
+        CHECK(plan_extras(l, "/w", prev, e).empty());                     // no disc picked: nothing
+        CHECK(extras_needing_disc(l, false, e, &prev) == std::vector<std::string>{"d1_moves"});   // the wizard asks for it
+        prev.set("d1_moves", "1");
+        CHECK(extras_needing_disc(l, false, e, &prev).empty());           // already added: no disc needed
         { std::ofstream f(tmp / "game" / "features.ini"); f << "hd_textures=1\njp_audio=0\n"; }
     }
 
     // state round trip
     State s;
-    s.workdir = "/a b/c"; s.iso = "/i.iso"; s.version = "1"; s.options.android = true; s.options.undub_iso = "/u.iso"; s.options.check_updates = false; s.options.d1_moves = true;
+    s.workdir = "/a b/c"; s.iso = "/i.iso"; s.version = "1"; s.options.android = true; s.options.set("undub_iso", "/u.iso"); s.options.check_updates = false; s.options.set("d1_moves", "1");
     save_state((tmp / "state.ini").string(), s);
     State r = load_state((tmp / "state.ini").string());
-    CHECK(r.workdir == s.workdir && r.options.android && r.options.undub_iso == "/u.iso" && !r.options.check_updates && r.options.d1_moves);
+    CHECK(r.workdir == s.workdir && r.options.android && r.options.get("undub_iso") == "/u.iso" && !r.options.check_updates && r.options.on("d1_moves"));
 
 #ifndef _WIN32
     {   // the menu entry

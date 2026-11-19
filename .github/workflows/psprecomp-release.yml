@@ -147,7 +147,7 @@ jobs:
           path: psprecomp/dist/*
 
   android-app:
-    # The Android setup app (DissidiaRecomp-Setup-<version>-android.apk): a wizard that builds the game ON the phone from the player's own disc.
+    # The Android setup app (DissidiaRecomp-Setup-<version>-android.apk): an Android app (native views + the C++ install engine over JNI) that builds the game ON the phone from the player's own disc.
     # It carries its own compiler (zig), recompiler, Python and the prebuilt Android core, so nothing but the APK is downloaded.
     # Design and the verified steps: docs/android.md "Building on the phone".
     runs-on: ubuntu-22.04

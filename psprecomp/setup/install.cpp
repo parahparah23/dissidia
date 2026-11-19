@@ -1,4 +1,5 @@
 #include "install.h"
+#include "extras.h"
 
 #include <algorithm>
 #include <cctype>
@@ -95,14 +96,6 @@ std::string Layout::problem() const {
         return "this release is incomplete: sdk/lib/libpsprecomp_core.a is missing";
     if (!is_file(join(toolchain, "toolchain.cmake"))) return "this release is incomplete: toolchain/ is missing";
     return "";
-}
-
-const char* texture_pack_title(const std::string& pack) {
-    return pack == "ai" ? "AI upscaled (D012FFRT + upscales)" : "LiinkPK's HD Project (hand-retouched)";
-}
-const char* texture_pack_credit(const std::string& pack) {
-    return pack == "ai" ? "Credits: D012FFRT by Niosa (github.com/Niosa/D012FFRT); AI upscales by schindlershadow made with Real-ESRGAN (Xintao Wang et al.)."
-                        : "Credits: Dissidia 012 HD Project by LiinkPK (github.com/LiinkPK/Dissidia-012-HD-Textures); artwork also by ajb3art.";
 }
 
 // ---- disc identity: which game a picked disc image is (before anything is installed with it) ----
@@ -385,37 +378,9 @@ std::vector<Step> plan_rebuild(const Layout& l, const std::string& workdir, cons
     return p;
 }
 
-// The optional extras after the game is built: the HD texture pack, the Japanese voices, the saves. `textures` = fetch the pack
-// (false when it is already installed and only the other extras are wanted).
-static void append_extras(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
-    if (!skip_textures && o.hd_textures && feature_available(l, "hd_textures")) {
-        Step t;
-        const bool ai = o.texture_pack == "ai";
-        t.label = ai ? "Downloading the AI upscaled textures" : "Downloading the HD textures";
-        t.explain = ai ? "Downloads the AI upscaled HD textures (about 1.3 GB)." : "Downloads LiinkPK's HD textures (about 0.8 GB).";
-        t.argv = {l.python, join(l.game_dir, "tools/fetch_textures.py"), workdir, "--pack", ai ? "ai" : "liink"};
-        t.env = {{"PYTHONUNBUFFERED", "1"}};
-        t.weight = 0.06;
-        p.push_back(t);
-    }
-    if (o.jp_audio && feature_available(l, "jp_audio") && !o.undub_iso.empty()) {
-        Step j;
-        j.label = "Extracting the Japanese voices";
-        j.explain = "Adds the Japanese voices and movies from the undub disc.";
-        j.argv = {l.python, join(l.game_dir, "tools/jp_audio.py"), "--iso", o.undub_iso, "--work", workdir};
-        j.env = {{"PYTHONUNBUFFERED", "1"}};
-        j.weight = 0.05;
-        p.push_back(j);
-    }
-    if (o.d1_moves && feature_available(l, "d1_moves") && !o.d1_iso.empty()) {
-        Step d;
-        d.label = "Adding Bartz's Dissidia 1 moves";
-        d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
-        d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
-        d.env = {{"PYTHONUNBUFFERED", "1"}};
-        d.weight = 0.01;
-        p.push_back(d);
-    }
+// The optional extras after the game is built (the shared list in extras.cpp; prev = what is installed for Change extras), then the saves.
+static void append_extras(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, const Options* prev) {
+    plan_extra_steps(p, ExtraCtx{l, workdir, false}, o, prev);
     if (!o.import_saves.empty()) {
         Step v;
         v.label = "Importing your saves";
@@ -437,15 +402,15 @@ std::vector<Step> plan_install(const Layout& l, const std::string& iso, const st
     for (auto& s : plan_rebuild(l, workdir, o)) p.push_back(s);   // weights are renormalised below
     // plan_rebuild() normalised its own steps; restore their relative sizes
     for (size_t i = 1; i < p.size(); i++) p[i].weight = i == 1 ? 0.84 : 0.60;
-    append_extras(p, l, workdir, o, false);
+    append_extras(p, l, workdir, o, nullptr);
     if (o.steam && feature_available(l, "steam")) for (auto& st : plan_steam(l, workdir)) { st.weight = 0.03; p.push_back(st); }
     finish_plan(p);
     return p;
 }
 
-std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
+std::vector<Step> plan_extras(const Layout& l, const std::string& workdir, const Options& prev, const Options& o) {
     std::vector<Step> p;
-    append_extras(p, l, workdir, o, skip_textures);
+    append_extras(p, l, workdir, o, &prev);
     if (o.android && feature_available(l, "android")) {
         Step a = build_step(l, workdir, true);
         a.weight = 0.60;
@@ -534,60 +499,13 @@ std::string android_payload_fingerprint(const Layout& l) {
 
 std::vector<Step> plan_rebuild_android(const Layout& l, const std::string& workdir) {
     Options none;
-    none.hd_textures = false;
+    for (const Extra& e : extras()) none.set(e.key, "0");   // the build only
     std::vector<Step> all = plan_install_android(l, "", workdir, none);
     std::vector<Step> p(all.begin() + 1, all.end());   // without "Reading your game file": the disc is already extracted
     for (auto& s : p) { s.base = 0; }
     p[0].weight = 0.88; p[1].weight = 0.12;
     finish_plan(p);
     return p;
-}
-
-static void append_extras_android(std::vector<Step>& p, const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
-    if (!skip_textures && o.hd_textures && feature_available(l, "hd_textures")) {
-        const std::string mods = join(workdir, "mods");
-        std::error_code mk;
-        fs::create_directories(mods, mk);
-        const bool ai = o.texture_pack == "ai";
-        Step d;
-        d.label = ai ? "Downloading the AI upscaled textures" : "Downloading the HD textures";
-        d.explain = ai ? "Downloads the AI upscaled textures (about 1.3 GB). WiFi is best." : "Downloads LiinkPK's HD textures (about 0.8 GB). WiFi is best.";
-        Step t;
-        t.label = "Unpacking the HD textures";
-        t.explain = "Unpacks the textures into the mods folder.";
-        t.argv = {l.python, join(l.game_dir, "tools/fetch_textures.py"), workdir, "--pack", ai ? "ai" : "liink", "--consume-zips"};
-        if (ai) {
-            d.downloads = {{"https://codeload.github.com/Niosa/D012FFRT/zip/main", join(mods, ".d012ffrt.zip")},
-                           {"https://codeload.github.com/schindlershadow/dissidia-hd-textures/zip/main", join(mods, ".hdtextures.zip")}};
-            t.argv.insert(t.argv.end(), {"--zip", join(mods, ".d012ffrt.zip"), "--ids-zip", join(mods, ".hdtextures.zip")});
-        } else {
-            d.downloads = {{"https://codeload.github.com/LiinkPK/Dissidia-012-HD-Textures/zip/master", join(mods, ".liink.zip")}};
-            t.argv.insert(t.argv.end(), {"--zip", join(mods, ".liink.zip")});
-        }
-        t.env = android_env(l, workdir);
-        d.weight = 0.25;
-        t.weight = 0.06;
-        p.push_back(d);
-        p.push_back(t);
-    }
-    if (o.jp_audio && feature_available(l, "jp_audio") && !o.undub_iso.empty()) {
-        Step j;
-        j.label = "Extracting the Japanese voices";
-        j.explain = "Adds the Japanese voices and movies from the undub disc.";
-        j.argv = {l.python, join(l.game_dir, "tools/jp_audio.py"), "--iso", o.undub_iso, "--work", workdir};
-        j.env = android_env(l, workdir);
-        j.weight = 0.05;
-        p.push_back(j);
-    }
-    if (o.d1_moves && feature_available(l, "d1_moves") && !o.d1_iso.empty()) {
-        Step d;
-        d.label = "Adding Bartz's Dissidia 1 moves";
-        d.explain = "Rebuilds the eight moves Bartz had in the first Dissidia from your Dissidia 1 disc and adds them as new abilities. Settings > Mods in the game turns them off and on.";
-        d.argv = {l.python, join(l.game_dir, "tools/d1_moves.py"), "install", "--d1", o.d1_iso, "--work", workdir};
-        d.env = android_env(l, workdir);
-        d.weight = 0.01;
-        p.push_back(d);
-    }
 }
 
 std::vector<Step> plan_install_android(const Layout& l, const std::string& iso, const std::string& workdir, const Options& o) {
@@ -614,18 +532,18 @@ std::vector<Step> plan_install_android(const Layout& l, const std::string& iso, 
     c.weight = 0.10;
     std::vector<Step> p{x};
     // the extras go in before the files are copied to the game's folder
-    append_extras_android(p, l, workdir, o, false);
+    plan_extra_steps(p, ExtraCtx{l, workdir, true}, o, nullptr);
     p.push_back(b);
     p.push_back(c);
     finish_plan(p);
     return p;
 }
 
-std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdir, const Options& o, bool skip_textures) {
+std::vector<Step> plan_extras_android(const Layout& l, const std::string& workdir, const Options& prev, const Options& o) {
     std::error_code ec;
     fs::create_directories(join(workdir, "tmp"), ec);
     std::vector<Step> p;
-    append_extras_android(p, l, workdir, o, skip_textures);
+    plan_extra_steps(p, ExtraCtx{l, workdir, true}, o, &prev);
     Step c;
     c.label = "Putting the game files where the game can read them";
     c.explain = "Copies the files to where the game reads them.";
@@ -810,12 +728,9 @@ State load_state(const std::string& file) {
         else if (k == "version") s.version = v;
         else if (k == "built_fp") s.built_fp = v;
         else if (k == "check_updates") s.options.check_updates = v != "0";
-        else if (k == "hd_textures") s.options.hd_textures = v == "1";
-        else if (k == "texture_pack") s.options.texture_pack = v == "ai" ? "ai" : "liink";
-        else if (k == "jp_audio") s.options.jp_audio = v == "1";
-        else if (k == "d1_moves") s.options.d1_moves = v == "1";
         else if (k == "android") s.options.android = v == "1";
-        else if (k == "undub_iso") s.options.undub_iso = v;
+        else if (find_extra(k)) s.options.set(k, v);   // the extras (extras.cpp), whatever they are
+        else for (const Extra& e : extras()) if (!e.disc.key.empty() && e.disc.key == k) s.options.set(k, v);
     }
     return s;
 }
@@ -824,8 +739,12 @@ bool save_state(const std::string& file, const State& s) {
     std::ofstream f(file, std::ios::trunc);
     if (!f) return false;
     f << "workdir=" << s.workdir << "\niso=" << s.iso << "\nversion=" << s.version << "\n"
-      << "check_updates=" << s.options.check_updates << "\nhd_textures=" << s.options.hd_textures << "\ntexture_pack=" << s.options.texture_pack << "\njp_audio=" << s.options.jp_audio << "\nd1_moves=" << s.options.d1_moves
-      << "\nandroid=" << s.options.android << "\nundub_iso=" << s.options.undub_iso << "\nbuilt_fp=" << s.built_fp << "\n";
+      << "check_updates=" << s.options.check_updates << "\nandroid=" << s.options.android << "\n";
+    for (const Extra& e : extras()) {
+        f << e.key << "=" << s.options.get(e.key) << "\n";
+        if (!e.disc.key.empty()) f << e.disc.key << "=" << s.options.get(e.disc.key) << "\n";
+    }
+    f << "built_fp=" << s.built_fp << "\n";
     return (bool)f;
 }
 
