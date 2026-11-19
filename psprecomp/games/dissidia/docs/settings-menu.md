@@ -29,7 +29,7 @@ VCKing101's, MIT), through the runtime's texture editor (`psp_texpack_set_editor
 pack's own image for the same texture overrides). `PSPRECOMP_NO_TEXTURE_EDITS=1` keeps the PSP's symbols, `PSPRECOMP_PROMPTS_LOG=1`
 logs each redraw. The Controls page is now on every device; its Touch screen rows only with a touch screen.
 
-Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard.
+Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard. Its **Paste** key (or Ctrl+V) types the clipboard's text in: printable characters only, line breaks dropped, up to the field's length. The game's own name entry (Data Config > Player Name) has a Paste key and Ctrl+V too.
 
 ## Categories, restart and mods
 

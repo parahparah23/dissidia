@@ -14,8 +14,13 @@
 // like a PDP packet); type 5 is client <-> server:
 //   client -> server  op 1 HELLO: room[32], cookie(8)      (cookie 0 asks for one)
 //                     op 4 BYE
+//                     op 5 INTRO: target MAC(6), the client's own LAN address(4) and port(2, LE)   (version 2)
 //   server -> client  op 2 CHALLENGE: cookie(8)
 //                     op 3 OK: players in the room(2, LE), version(1)
+//                     op 6 PEER: MAC(6), its public address(4) + port(2, LE), its LAN address(4) + port(2, LE)   (version 2)
+// INTRO asks to be introduced to another player in the same room, for a direct path (UDP hole punching): both get a PEER with
+// the other's public address (what this server sees) and the LAN address it reported, then send to each other directly and
+// keep the server for broadcasts and as the fallback. Addresses go out only between two registered players of one room.
 // The cookie is SipHash(secret, client address, 30 s time bucket). A spoofed source address can
 // not complete the handshake, so the server cannot be used to flood a third party.
 //
@@ -46,8 +51,8 @@ namespace {
 using Mac = std::array<uint8_t, 6>;
 constexpr size_t HDR = 13;
 constexpr uint8_t T_BEACON = 1, T_PDP = 2, T_MATCH = 3, T_PTP = 4, T_RELAY = 5, T_FRAG = 6;
-constexpr uint8_t OP_HELLO = 1, OP_CHALLENGE = 2, OP_OK = 3, OP_BYE = 4;
-constexpr uint8_t VERSION = 1;
+constexpr uint8_t OP_HELLO = 1, OP_CHALLENGE = 2, OP_OK = 3, OP_BYE = 4, OP_INTRO = 5, OP_PEER = 6;
+constexpr uint8_t VERSION = 2;   // 2: INTRO / PEER (direct paths)
 constexpr size_t MAX_DATAGRAM = 16384;
 constexpr int64_t CLIENT_TIMEOUT_US = 8000000;
 constexpr int64_t COOKIE_BUCKET_US = 30000000;
@@ -127,6 +132,8 @@ struct Client {
     double pkt_tokens = 0, byte_tokens = 0;
     int64_t refill_at = 0;
     uint64_t rx = 0, fwd = 0, dropped = 0;
+    uint8_t lan[6] = {0};   // the LAN address and port it reported in its last INTRO (for two players behind one router)
+    int64_t intro_at = 0;   // last INTRO handled (at most a few a second)
 };
 
 std::unordered_map<uint64_t, std::unique_ptr<Client>> g_clients;                 // by address
@@ -140,7 +147,7 @@ void send_to(const sockaddr_in& to, const uint8_t* d, size_t n) {
 }
 
 void send_relay(const sockaddr_in& to, uint8_t op, const uint8_t* payload, size_t n) {
-    uint8_t p[HDR + 1 + 16];
+    uint8_t p[HDR + 1 + 32];
     std::memcpy(p, "DSAH", 4);
     p[4] = T_RELAY;
     std::memset(p + 5, 0, 6);
@@ -223,6 +230,38 @@ void handle_hello(const sockaddr_in& from, const Mac& mac, const uint8_t* body, 
     send_relay(from, OP_OK, ok, 3);
 }
 
+// INTRO: introduce `from` and the target to each other (both get the other's public and LAN address).
+void handle_intro(const sockaddr_in& from, const Mac& mac, const uint8_t* body, size_t len) {
+    if (len < 1 + 6 + 6) return;
+    auto it = g_clients.find(addr_key(from));
+    if (it == g_clients.end() || it->second->mac != mac) return;
+    Client& c = *it->second;
+    const int64_t t = now_us();
+    if (t - c.intro_at < 250000) return;   // a few a second at most
+    c.intro_at = t;
+    c.last_seen = t;
+    std::memcpy(c.lan, body + 7, 6);
+    Mac target; std::memcpy(target.data(), body + 1, 6);
+    auto rit = g_rooms.find(c.room);
+    if (rit == g_rooms.end()) return;
+    auto mit = rit->second.find(target);
+    if (mit == rit->second.end() || mit->second == &c) return;
+    Client& o = *mit->second;
+    auto peer_of = [](const Client& p, uint8_t out[18]) {
+        std::memcpy(out, p.mac.data(), 6);
+        std::memcpy(out + 6, &p.addr.sin_addr.s_addr, 4);
+        const uint16_t port = ntohs(p.addr.sin_port);
+        std::memcpy(out + 10, &port, 2);
+        std::memcpy(out + 12, p.lan, 6);
+    };
+    uint8_t a[18], b[18];
+    peer_of(o, a);
+    peer_of(c, b);
+    send_relay(c.addr, OP_PEER, a, 18);
+    send_relay(o.addr, OP_PEER, b, 18);
+    if (cfg.verbose) std::printf("  intro %s <-> %s\n", mac_str(c.mac).c_str(), mac_str(o.mac).c_str());
+}
+
 bool allow(Client& c, size_t bytes) {
     const int64_t t = now_us();
     const double dt = (t - c.refill_at) / 1e6;
@@ -245,6 +284,7 @@ void handle_packet(const uint8_t* d, size_t n, const sockaddr_in& from) {
     if (type == T_RELAY) {
         if (blen < 1) return;
         if (body[0] == OP_HELLO) handle_hello(from, src, body, blen);
+        else if (body[0] == OP_INTRO) handle_intro(from, src, body, blen);
         else if (body[0] == OP_BYE) {
             auto it = g_clients.find(addr_key(from));
             if (it != g_clients.end() && it->second->mac == src) drop_client(addr_key(from), "bye");

@@ -75,3 +75,12 @@ void psp_adhoc_set_pump_hook(void (*hook)(uint8_t* rdram));
 
 /// A one-line description of the network state for the settings menu.
 void psp_adhoc_status(char* out, size_t n);
+
+/// One line on screen and in the log about the network (a lost player, the server not answering, high latency, ...), shown at most
+/// once per `min_interval_s` for the same `key`. Also for game modules (their battle link).
+void psp_net_notice(const char* key, int min_interval_s, const char* fmt, ...);
+/// A network notice is on screen right now (other messages should not replace it).
+bool psp_net_notice_showing();
+/// The round trip to the slowest player in our group, in ms (smoothed, measured once a second), or -1 when unknown (no group, or the
+/// others run a build that does not answer pings).
+int psp_adhoc_ping_ms();

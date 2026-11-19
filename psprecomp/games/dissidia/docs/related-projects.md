@@ -121,6 +121,8 @@ Check each in the game code before adding it to the table: their codes are the e
 
 ### 6. Smaller facts
 
+Their six research notes are copied, with their licence, in [research/vcking101/](research/vcking101/README.md).
+
 - `PACKAGE_INFO.BIN` is read into a fixed buffer of `0x20F8C` bytes (`0x08871938`), room for only 210 more records
   ([japanese-voices.md](https://github.com/VCKing101/Dissidia012-pc/blob/main/docs/port/japanese-voices.md)).
 - The pad manager object map (`0x08C15B90`), its three pad arrays, the remap tables and the injected / replay /
