@@ -90,3 +90,20 @@ void psp_runtime_shutdown();
 /// Install signal handlers for SIGTERM and SIGINT that set g_should_exit.
 /// Implemented in Plan 05.
 void psp_install_signal_handlers();
+
+// ---- Button prompts: what the game's button symbols should look like (games/<id>/runtime redraws them) ----
+enum PspPromptStyle { PSP_PROMPT_PSP = 0, PSP_PROMPT_XBOX = 1, PSP_PROMPT_PLAYSTATION = 2, PSP_PROMPT_NINTENDO = 3, PSP_PROMPT_KEYBOARD = 4 };
+enum PspPromptPos { PSP_POS_SOUTH = 0, PSP_POS_EAST = 1, PSP_POS_WEST = 2, PSP_POS_NORTH = 3 };
+struct PspPrompts {
+    int style;                                // PspPromptStyle
+    int cross, circle, square, triangle;      // PspPromptPos of the pad button that sends each PSP face button
+    bool numbered_shoulders;                  // L1 / R1 (PlayStation, Steam Deck) instead of LB / RB
+    bool lr_on_triggers;                      // the PSP's L and R are on the triggers (Controls > Swap shoulders and triggers)
+    char key_names[8][12];                    // keyboard style: the key for cross, circle, square, triangle, L, R, START, SELECT ("" none)
+};
+/// The setting: -1 Automatic (the device player 1 used last), else a PspPromptStyle.
+void psp_input_set_prompt_setting(int setting);
+int psp_input_prompt_setting();
+/// What to draw now (thread-safe; any thread).
+PspPrompts psp_input_prompts();
+
