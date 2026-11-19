@@ -70,6 +70,7 @@ extern void dissidia_framerate_install(uint8_t* rdram);
 // xdelta_mods.cpp: recompiled code of installed xdelta (ISO patch) mods.
 extern void dissidia_xmods_install();
 extern void dissidia_xmods_boot_patch(uint8_t* rdram);
+extern FuncPtr dissidia_xmod_dynamic_lookup(uint32_t vaddr);
 
 bool dissidia_player_pos(float* P);   // camera.cpp
 int dissidia_ex_cores(float (*P)[3], int max);   // framerate.cpp
@@ -103,6 +104,8 @@ FuncPtr dissidia_overlay_resolver(uint32_t vaddr) {
     // LIBSUPPREACC's own internal indirect calls (function-pointer tables)
     // land here too: its set is not in the EBOOT dispatch map.
     if (vaddr >= SUPACC_BASE && vaddr < SUPACC_END) return supacc_lookup(vaddr);
+    // code an xdelta mod loaded into the heap at run time (xdelta_mods.cpp)
+    if (vaddr >= OVL_END) if (FuncPtr f = dissidia_xmod_dynamic_lookup(vaddr)) return f;
     if (vaddr < OVL_BASE || vaddr >= OVL_END || !g_rdram) return nullptr;
     uint32_t id;
     std::memcpy(&id, g_rdram + (OVL_BASE & 0x07FFFFFFu), 4);

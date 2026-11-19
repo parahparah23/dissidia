@@ -302,10 +302,10 @@ def test_code_helpers():
         XC.write_set(d, [], {}, [], [])
         s = open(os.path.join(d, 'dispatch.cpp')).read()
         assert 'dissidia_xmod_sets(int* count)' in s and '*count = 0;' in s
-        XC.write_set(d, [('m', 'abc', 2, 'xm0_m_menu', [(0x089E0000, 'xm0_m_menu_FUN_089e0000')])],
+        XC.write_set(d, [{'folder': 'm', 'stamp': 'abc', 'module': 2, 'fns': [(0x089E0000, 'xm0_m_menu_FUN_089e0000')], 'blob': (0, 0, 0)}],
                      {'batch_xm0_m_menu.cpp': 'RECOMP_FUNC void xm0_m_menu_FUN_089e0000(uint8_t* rdram, recomp_context* ctx) {}\n'}, [], [])
         s = open(os.path.join(d, 'dispatch.cpp')).read()
-        assert '{0x089E0000U, xm0_m_menu_FUN_089e0000}' in s and '{"m", "abc", 2, s_fns0, 1}' in s, s
+        assert '{0x089E0000U, xm0_m_menu_FUN_089e0000}' in s and '{"m", "abc", 2, s_fns0, 1, 0ull, 0u, 0x00000000U}' in s, s
     finally:
         shutil.rmtree(d)
 

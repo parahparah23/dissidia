@@ -865,6 +865,33 @@ pub(crate) fn emit_branch_or_tail(
     }
 }
 
+/// A link branch (`bltzal` / `bgezal`, `bal`). Into the same function it stays a branch, as before (the RA model of
+/// coalesced owners handles internal link branches separately). Into another function it is a conditional CALL: the
+/// callee returns here and execution continues after the delay slot, exactly like `jal` (no link value is written,
+/// as for `jal`). It used to be emitted as a tail call followed by `return`, which skipped the rest of the caller
+/// (found in code an ISO patch loads at run time, games/dissidia/docs/xdelta-mods.md).
+pub(crate) fn emit_link_branch(
+    gen: &mut dyn Generator,
+    cond: &str,
+    target: u32,
+    likely: bool,
+    ds_comment: &str,
+    func_start: u32,
+    func_end: u32,
+) {
+    if target >= func_start && target < func_end {
+        emit_branch_or_tail(gen, cond, target, likely, ds_comment, func_start, func_end);
+        return;
+    }
+    gen.note_static_lookup(target);
+    let ds = if likely && !ds_comment.trim().is_empty() {
+        format!("{ds_comment} ")
+    } else {
+        String::new()
+    };
+    gen.emit_raw(&format!("if ({cond}) {{ {ds}RECOMP_LOOKUP(0x{target:08X}u)(rdram, ctx); }}"));
+}
+
 /// Emit a branch-likely instruction with its captured delay-slot C++ code.
 ///
 /// This is only called for branch-likely instructions whose delay slot
@@ -1406,16 +1433,16 @@ fn emit_op(
             emit_branch_or_tail(gen, &cond, *target, *likely, "/* bgezl */", func_start, func_end);
         }
         MipsOp::Bltzal { rs, target, likely } => {
-            // link + branch if rs < 0 (link handled by stack, simplified here)
+            // link + branch if rs < 0: a call (like jal) when the target is another function
             let rs_s = gen.emit_gpr_read(*rs);
             let cond = format!("(int32_t)({rs_s}) < 0");
-            emit_branch_or_tail(gen, &cond, *target, *likely, "/* bltzall */", func_start, func_end);
+            emit_link_branch(gen, &cond, *target, *likely, "/* bltzall */", func_start, func_end);
         }
         MipsOp::Bgezal { rs, target, likely } => {
-            // link + branch if rs >= 0 (link handled by stack, simplified here)
+            // link + branch if rs >= 0 (`bal` is bgezal $zero): a call when the target is another function
             let rs_s = gen.emit_gpr_read(*rs);
             let cond = format!("(int32_t)({rs_s}) >= 0");
-            emit_branch_or_tail(gen, &cond, *target, *likely, "/* bgezall */", func_start, func_end);
+            emit_link_branch(gen, &cond, *target, *likely, "/* bgezall */", func_start, func_end);
         }
 
         // -----------------------------------------------------------------

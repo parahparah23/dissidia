@@ -52,6 +52,9 @@ bool dissidia_xmod_folder_usable(const std::string& folder_dir, bool say);
 std::string dissidia_xmod_overlay_file(int ovl);
 std::string dissidia_xmod_package_tail();
 std::string dissidia_xmod_usrdir_file(const std::string& rel_upper);
+void dissidia_xmod_tail_read(uint64_t tail_off, uint32_t size, uint32_t addr);
+uint8_t* dissidia_xmod_rdram();
+uint64_t g_tail_start = 0;   // PACKAGE.BIN offset where an xdelta mod's appended data starts (0 = none)
 extern uint32_t dissidia_model_budget_request(uint32_t bytes);
 extern uint32_t dissidia_model_budget();
 
@@ -366,9 +369,11 @@ void ensure_built(const std::string& host_info_path) {
         return;
     }
     if (tail_size) {
-        if (g_mods.add_region((uint64_t)pst.st_size, tail, (uint32_t)tail_size))
+        if (g_mods.add_region((uint64_t)pst.st_size, tail, (uint32_t)tail_size)) {
+            g_tail_start = (uint64_t)pst.st_size;
             std::fprintf(stderr, "[XMOD] PACKAGE.BIN bytes 0x%llX.. (%llu B appended by an xdelta mod) served from %s\n",
                          (unsigned long long)pst.st_size, (unsigned long long)tail_size, tail.c_str());
+        }
         else
             std::fprintf(stderr, "[XMOD] %s overlaps a loose-file override: not served\n", tail.c_str());
     }
@@ -454,6 +459,11 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
                                   g_dbg_rdram ? (uint32_t)(dest - g_dbg_rdram) + 0x08000000u : 0u);
     if (pkg_trace && size >= 0x100000) psp_dump_func_ring("PKG-RING");
     bool hit = g_mods.read_package(off, size, dest, nread, base);
+    if (hit && g_tail_start && (uint64_t)off >= g_tail_start) {   // the appended data may hold code the mod runs (xdelta_mods.cpp)
+        uint8_t* rd = dissidia_xmod_rdram();
+        if (rd && dest >= rd && dest < rd + 0x08000000)
+            dissidia_xmod_tail_read((uint64_t)off - g_tail_start, *nread, (uint32_t)(dest - rd) + 0x08000000u);
+    }
     if (!asset_patches().empty()) {   // the built-in edits apply to retail entries, so the read is done here when no mod touched it
         if (!hit) { const int64_t got = base(dest, size, off); *nread = (uint32_t)std::max<int64_t>(got, 0); hit = true; }
         apply_asset_patches(off, *nread, dest);

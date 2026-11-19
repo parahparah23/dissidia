@@ -28,6 +28,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -229,6 +230,241 @@ def c_ident(s):
     return ("m" + s) if not s or s[0].isdigit() else s
 
 
+class Ctx:
+    def __init__(self, work, game, env):
+        self.work, self.game, self.env = work, game, env
+
+    def recompile(self, module, prefix, analysis_path, toml, od, what):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "build_overlay.py"), str(module), prefix,
+                            analysis_path, os.path.join(self.work, "analysis.json"), od, toml],
+                           env=self.env, capture_output=True, text=True)
+        if r.returncode != 0:
+            say("  %s: recompile failed:\n%s%s" % (what, r.stdout[-2000:], r.stderr[-2000:]))
+            raise SystemExit(1)
+        return functions_of(os.path.join(od, "generated"))
+
+
+def kept_mids(od, kept_names):
+    mtext = open(os.path.join(od, "mid_entries.cpp")).read()
+    return [(int(m.group(2), 16), m.group(1), m.group(0)) for m in MID_RE.finditer(mtext) if m.group(3) in kept_names]
+
+
+def word_at(segs, va):
+    for sg in segs:
+        base = int(sg["p_vaddr"], 16)
+        data = base64.b64decode(sg["data_b64"])
+        if base <= va and va + 4 <= base + len(data):
+            return struct.unpack_from("<I", data, va - base)[0]
+    return None
+
+
+def guard_sites(keep, variant, sites, segs, say_key):
+    """Puts a check in front of every instruction that run-time code rewrites (games/dissidia/runtime/xdelta_mods.cpp
+    dissidia_xmod_site): when the word in memory is no longer the original, the jump it now holds is followed."""
+    for site in sorted(set(sites)):
+        orig = word_at(segs, site)
+        if orig is None:
+            continue
+        lab = "L_%08X:\n" % site
+        owner = [a for a, (n, b) in variant.items() if lab in b]
+        if not owner:
+            say("  %s: rewritten instruction 0x%08X lies in no compiled function; not followed" % (say_key, site))
+            continue
+        prev = word_at(segs, site - 4)
+        if prev is not None and (prev >> 26) in (1, 2, 3, 4, 5, 6, 7, 0x14, 0x15, 0x16, 0x17) or (prev is not None and prev >> 26 == 0 and prev & 63 in (8, 9)):
+            say("  %s: rewritten instruction 0x%08X is a delay slot; not followed" % (say_key, site))
+            continue
+        a = owner[0]
+        name, body = keep.get(a) or variant[a]
+        nxt = "L_%08X" % (site + 8)
+        cont = "goto %s;" % nxt if (nxt + ":") in body else "return;"
+        chk = ("    if ((uint32_t)MEM_W(rdram, 0x%08XU) != 0x%08XU) { switch (dissidia_xmod_site(rdram, ctx, 0x%08XU)) "
+               "{ case 1: %s case 2: return; default: break; } }\n" % (site, orig, site, cont))
+        body = body.replace(lab, lab + chk, 1)
+        keep[a] = (name, body)
+
+
+def compile_module(cx, module, key, blob, prefix, sites=(), extra_mid=()):
+    """The functions of one game module (EBOOT or an overlay) whose translation differs when the module holds `blob`
+    (the patched file) instead of the retail bytes, plus the functions holding `sites` (instructions run-time code of
+    the mod rewrites, guarded) and the mid-entries `extra_mid` (where that code jumps back into the game).
+    None when the module cannot be handled."""
+    _m, an_name, toml_name, _d, _p = X.CODE[key]
+    an_path = os.path.join(cx.work, an_name)
+    if not os.path.isfile(an_path):
+        say("  %s: %s missing (run the pipeline first); skipped" % (key, an_name))
+        return None
+    analysis = json.load(open(an_path))
+    try:
+        new_segs = patched_segments(module, analysis, blob)
+    except ValueError as e:
+        say("  %s: %s; skipped" % (key, e))
+        return None
+    force, mid = entries_for(analysis, analysis["segments"], new_segs)
+    fl = sorted((int(f["address"], 16), int(f["size"])) for f in analysis["functions"] if f.get("size"))
+    fstarts = {a for a, _ in fl}
+    for t in extra_mid:                      # only where the module has code: a jump into a function's middle
+        own = [a for a, sz in fl if a < t < a + sz]
+        if own and t not in fstarts:
+            mid.append((t, max(own)))
+    force, mid = sorted(set(force)), sorted(set(mid))
+    patched = dict(analysis)
+    patched["segments"] = new_segs
+    tmp = tempfile.mkdtemp(prefix="xmod_", dir=cx.work)
+    try:
+        pa = os.path.join(tmp, "analysis.json")
+        json.dump(patched, open(pa, "w"))
+        tt = os.path.join(tmp, "recompile.toml")
+        ranges = new_code_ranges(analysis["segments"], new_segs)
+        funcs = sorted((int(f["address"], 16), int(f["size"])) for f in analysis["functions"] if f.get("size"))
+        starts = {a for a, _ in funcs}
+        force = sorted(set(force) | {t for t in pointer_targets(new_segs, ranges) if t not in starts})
+        lo_seg = min(int(sg["p_vaddr"], 16) for sg in new_segs)
+        hi_seg = max(int(sg["p_vaddr"], 16) + len(base64.b64decode(sg["data_b64"])) for sg in new_segs)
+        toml = os.path.join(cx.game, toml_name)
+        # the retail module through the very same command and prefix: what differs is what the patch changes
+        retail = cx.recompile(module, prefix, an_path, toml, os.path.join(tmp, "retail"), key)
+        retail_missing = missing_targets(os.path.join(tmp, "retail"))
+        od = os.path.join(tmp, "set")
+        # the patched module, then again with every lookup target the patch's code needs and the set lacks (a branch
+        # out of a function into code the patch wrote, a jump back into the middle of a function ...)
+        for _round in range(6):
+            open(tt, "w").write(toml_with(toml, force, mid))
+            shutil.rmtree(od, ignore_errors=True)
+            variant = cx.recompile(module, prefix, pa, tt, od, key)
+            known = set(force) | {e for e, _ in mid}
+            extra = sorted(t for t in missing_targets(od) - retail_missing
+                           if lo_seg <= t < hi_seg and t % 4 == 0 and t not in known)
+            if not extra:
+                break
+            for t in extra:
+                own = [a for a, sz in funcs if a < t < a + sz]
+                if own and not any(lo <= t < hi for lo, hi in ranges):
+                    mid.append((t, max(own)))       # into unchanged code of a function: continue its frame
+                else:
+                    force.append(t)
+            force, mid = sorted(set(force)), sorted(set(mid))
+        else:
+            say("  %s: lookup targets still missing after 6 rounds: %s" % (key, ", ".join("0x%08X" % t for t in extra[:8])))
+        keep = {addr: nb for addr, nb in variant.items() if retail.get(addr) is None or retail[addr][1] != nb[1]}
+        if sites:
+            guard_sites(keep, variant, sites, new_segs, key)
+        mk = kept_mids(od, {n for n, _ in keep.values()})
+        fns = sorted((addr, name) for addr, (name, _) in keep.items()) + sorted((addr, n) for addr, n, _ in mk)
+        return {"fns": fns, "batch": "".join(b for _, (_, b) in sorted(keep.items())), "mids": [t for _, _, t in mk],
+                "info": "%d function(s) and %d mid-entr%s (%d new entr%s)" % (
+                    len(keep), len(mk), "y" if len(mk) == 1 else "ies", len(force) + len(mid), "y" if len(force) + len(mid) == 1 else "ies")}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def blob_entries(data, addr, extra=()):
+    """Entry points of code loaded at run time: its first word, every jal / bal target and pointer word inside it."""
+    size = len(data)
+    out = {addr} | {t for t in extra if addr <= t < addr + size}
+    for o in range(0, size - 3, 4):
+        w = struct.unpack_from("<I", data, o)[0]
+        va = addr + o
+        if (w >> 26) == 3:
+            t = ((va + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+        elif (w >> 26) == 1 and ((w >> 16) & 31) in (0x10, 0x11):        # bltzal / bgezal (bal)
+            t = va + 4 + ((w & 0xFFFF) - (0x10000 if w & 0x8000 else 0)) * 4
+        elif addr <= w < addr + size and w % 4 == 0:
+            t = w
+        else:
+            continue
+        if addr <= t < addr + size:
+            out.add(t)
+    return sorted(out)
+
+
+def compile_blob(cx, data, addr, prefix, entries):
+    """All functions of code loaded at run time to `addr`, recompiled as a module of its own."""
+    base = json.load(open(os.path.join(cx.work, "analysis.json")))
+    tmp = tempfile.mkdtemp(prefix="xmod_", dir=cx.work)
+    try:
+        ents = blob_entries(data, addr, entries)
+        for _round in range(6):
+            funcs = []
+            for i, e in enumerate(ents):
+                end = ents[i + 1] if i + 1 < len(ents) else addr + len(data)
+                funcs.append({"name": "FUN_%08x" % e, "address": "0x%08X" % e, "size": end - e,
+                              "is_external": False, "is_thunk": False, "source": "binary_scan"})
+            an = {k: base[k] for k in base if k not in ("segments", "functions", "mid_entries", "xrefs", "relocations", "constructors")}
+            an.update({"functions": funcs, "mid_entries": [], "xrefs": [], "relocations": [], "constructors": [],
+                       "segments": [{"p_vaddr": "0x%08X" % addr, "p_filesz": len(data), "p_memsz": len(data), "p_flags": 7,
+                                     "data_b64": base64.b64encode(data).decode()}]})
+            pa = os.path.join(tmp, "analysis.json")
+            json.dump(an, open(pa, "w"))
+            tt = os.path.join(tmp, "recompile.toml")
+            open(tt, "w").write("[recompile]\n")
+            od = os.path.join(tmp, "set")
+            shutil.rmtree(od, ignore_errors=True)
+            got = cx.recompile(4, prefix, pa, tt, od, "code at 0x%08X" % addr)
+            extra = sorted(t for t in missing_targets(od) if addr <= t < addr + len(data) and t % 4 == 0 and t not in ents)
+            if not extra:
+                break
+            ents = sorted(set(ents) | set(extra))
+        mk = kept_mids(od, {n for n, _ in got.values()})
+            # where the code jumps into the game (back into the middle of a function it hooked, typically)
+        outside = set(t for t in missing_targets(od) if not (addr <= t < addr + len(data)) and t % 4 == 0)
+        # every j / jal word of the block into the game, also in pieces no function covers (hook templates the code
+        # copies into its trampolines at run time); build-code keeps only targets inside a game function
+        for o in range(0, len(data) - 3, 4):
+            w = struct.unpack_from("<I", data, o)[0]
+            if (w >> 26) in (2, 3):
+                t = ((addr + o + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+                if 0x08804000 <= t < 0x08B63170 and not (addr <= t < addr + len(data)):
+                    outside.add(t)
+        outside = sorted(outside)
+        return got, mk, outside
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def read_dynamic(code_dir):
+    """code/dynamic.txt (written by the runtime, xdelta_mods.cpp): {(tail offset, size): {"addr", "file", "writes"}}."""
+    out = {}
+    p = os.path.join(code_dir, "dynamic.txt")
+    if not os.path.isfile(p):
+        return out
+    lines = [l.split() for l in open(p) if l.strip()]
+    for f in lines:
+        if f[0] == "blob" and len(f) == 5:
+            out[(int(f[1]), int(f[2]))] = {"addr": int(f[3]), "file": f[4], "writes": []}
+    for f in lines:
+        if f[0] == "write" and len(f) == 6:
+            b = out.get((int(f[4]), int(f[5])))
+            if b:
+                b["writes"].append((int(f[1]), int(f[2]), int(f[3])))
+    return out
+
+
+def retail_module(cx, key):
+    if key == "EBOOT.BIN":
+        p = os.path.join(cx.work, "EBOOT.dec.elf")
+    else:
+        p = os.path.join(cx.work, "disc0", "PSP_GAME", "USRDIR", "DATA", key)
+    return open(p, "rb").read() if os.path.isfile(p) else None
+
+
+def with_writes(module, blob, writes):
+    """The module file with the words the run-time code wrote into it (module 0 EBOOT ELF, 1..3 overlay ELF)."""
+    b = bytearray(blob)
+    if module == 0:
+        segs = X.elf_segments(bytes(blob))
+        for _m, va, w in writes:
+            for off, sva, fs, _ms in segs:
+                if sva <= va < sva + fs:
+                    struct.pack_into("<I", b, off + va - sva, w)
+    else:
+        for _m, va, w in writes:
+            o = X.OVL_FILE_HDR + va - X.OVL_BASE
+            if X.OVL_FILE_HDR <= o and o + 4 <= len(b):
+                struct.pack_into("<I", b, o, w)
+    return bytes(b)
+
+
 def build(a):
     work = os.path.abspath(a.work)
     mods = os.path.abspath(a.mods or X.default_mods(work))
@@ -237,123 +473,116 @@ def build(a):
     env = dict(os.environ)
     if a.psprecomp:
         env["PSPRECOMP_BIN"] = os.path.abspath(a.psprecomp)
-    sets, batches, decls, mids = [], {}, [], []
+    cx = Ctx(work, game, env)
+    sets, batches, decls, mids, wrappers = [], {}, [], [], []
+    names = ["eboot", "battle", "menu", "extra"]
     for idx, (folder, path, meta) in enumerate(X.xdelta_folders(mods)):
         code = os.path.join(path, "code")
         mods_in = [k for k in X.CODE if os.path.isfile(os.path.join(code, k))]
-        if not mods_in:
+        dyn = read_dynamic(code)
+        if not mods_in and not dyn:
             continue
-        stamp = X.code_stamp(path)
-        if meta.get("code_stamp") and meta["code_stamp"] != stamp:
+        stamp = meta.get("code_stamp") or X.code_stamp(path)
+        if meta.get("code_stamp") and meta["code_stamp"] != X.code_stamp(path):
             say("xmods: %s: code/ changed since the import; using it as it is now" % folder)
-        say("xmods: %s (%s)" % (folder, ", ".join(mods_in)))
-        for key in mods_in:
-            module, an_name, toml_name, _retail_dir, _retail_prefix = X.CODE[key]
-            an_path = os.path.join(work, an_name)
-            if not os.path.isfile(an_path):
-                say("  %s: %s missing (run the pipeline first); skipped" % (key, an_name))
-                continue
-            analysis = json.load(open(an_path))
-            blob = open(os.path.join(code, key), "rb").read()
-            try:
-                new_segs = patched_segments(module, analysis, blob)
-            except ValueError as e:
-                say("  %s: %s; skipped" % (key, e))
-                continue
-            force, mid = entries_for(analysis, analysis["segments"], new_segs)
-            patched = dict(analysis)
-            patched["segments"] = new_segs
-            prefix = "xm%d_%s_%s" % (idx, c_ident(folder)[:24], ["eboot", "battle", "menu", "extra"][module])
-            tmp = tempfile.mkdtemp(prefix="xmod_", dir=work)
-            try:
-                pa = os.path.join(tmp, "analysis.json")
-                json.dump(patched, open(pa, "w"))
-                tt = os.path.join(tmp, "recompile.toml")
-                ranges = new_code_ranges(analysis["segments"], new_segs)
-                funcs = sorted((int(f["address"], 16), int(f["size"])) for f in analysis["functions"] if f.get("size"))
-                starts = {a for a, _ in funcs}
-                force = sorted(set(force) | {t for t in pointer_targets(new_segs, ranges) if t not in starts})
-                lo_seg = min(int(sg["p_vaddr"], 16) for sg in new_segs)
-                hi_seg = max(int(sg["p_vaddr"], 16) + len(base64.b64decode(sg["data_b64"])) for sg in new_segs)
+        say("xmods: %s (%s)" % (folder, ", ".join(mods_in + (["code loaded at run time"] if dyn else []))))
+        base = "xm%d_%s" % (idx, c_ident(folder)[:24])
 
-                def recompile(analysis_path, toml, od):
-                    r = subprocess.run([sys.executable, os.path.join(HERE, "build_overlay.py"), str(module), prefix,
-                                        analysis_path, os.path.join(work, "analysis.json"), od, toml],
-                                       env=env, capture_output=True, text=True)
-                    if r.returncode != 0:
-                        say("  %s: recompile failed:\n%s%s" % (key, r.stdout[-2000:], r.stderr[-2000:]))
-                        raise SystemExit(1)
-                    return functions_of(os.path.join(od, "generated"))
-                # the retail module through the very same command and prefix: what differs is what the patch changes
-                retail = recompile(an_path, os.path.join(game, toml_name), os.path.join(tmp, "retail"))
-                retail_missing = missing_targets(os.path.join(tmp, "retail"))
-                od = os.path.join(tmp, "set")
-                # the patched module, then again with every lookup target the patch's code needs and the set lacks (a
-                # branch out of a function into code the patch wrote, a jump back into the middle of a function ...)
-                for _round in range(6):
-                    open(tt, "w").write(toml_with(os.path.join(game, toml_name), force, mid))
-                    shutil.rmtree(od, ignore_errors=True)
-                    variant = recompile(pa, tt, od)
-                    known = set(force) | {e for e, _ in mid}
-                    extra = sorted(t for t in missing_targets(od) - retail_missing
-                                   if lo_seg <= t < hi_seg and t % 4 == 0 and t not in known)
-                    if not extra:
-                        break
-                    for t in extra:
-                        own = [a for a, sz in funcs if a < t < a + sz]
-                        if own and not any(lo <= t < hi for lo, hi in ranges):
-                            mid.append((t, max(own)))       # into unchanged code of a function: continue its frame
-                        else:
-                            force.append(t)
-                    force, mid = sorted(set(force)), sorted(set(mid))
-                else:
-                    say("  %s: lookup targets still missing after 6 rounds: %s" % (key, ", ".join("0x%08X" % t for t in extra[:8])))
-                keep = {}
-                for addr, (name, body) in variant.items():
-                    r0 = retail.get(addr)
-                    if r0 is None or r0[1] != body:
-                        keep[addr] = (name, body)
-                kept_names = {n for n, _ in keep.values()}
-                mtext = open(os.path.join(od, "mid_entries.cpp")).read()
-                mk = [(int(m.group(2), 16), m.group(1), m.group(0)) for m in MID_RE.finditer(mtext) if m.group(3) in kept_names]
-                fns = sorted((addr, name) for addr, (name, _) in keep.items()) + sorted((addr, n) for addr, n, _ in mk)
-                batches["batch_%s.cpp" % prefix] = "".join(b for _, (_, b) in sorted(keep.items()))
-                mids.extend(t for _, _, t in mk)
-                decls.extend("RECOMP_FUNC void %s(uint8_t* rdram, recomp_context* ctx);" % n for _, n in fns)
-                sets.append((folder, meta.get("code_stamp") or stamp, module, prefix, fns))
-                say("  %s: %d function(s) and %d mid-entr%s replaced (%d new entr%s added)"
-                    % (key, len(keep), len(mk), "y" if len(mk) == 1 else "ies", len(force) + len(mid),
-                       "y" if len(force) + len(mid) == 1 else "ies"))
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
-    write_set(out, sets, batches, decls, mids)
+        def add(res, module, prefix, blob=(0, 0, 0)):
+            batches["batch_%s.cpp" % prefix] = res["batch"]
+            mids.extend(res["mids"])
+            decls.extend("RECOMP_FUNC void %s(uint8_t* rdram, recomp_context* ctx);" % n for _, n in res["fns"])
+            sets.append({"folder": folder, "stamp": stamp, "module": module, "fns": res["fns"], "blob": blob})
+
+        # run-time code: each block compiled as is (it checks memory itself), and what it needs from the game modules
+        sites = {m: set() for m in range(4)}
+        jumps_in = []
+        for k, ((off, size), b) in enumerate(sorted(dyn.items())):
+            snap = os.path.join(code, b["file"])
+            if not os.path.isfile(snap) or os.path.getsize(snap) != size:
+                say("  run-time code %s: snapshot missing; skipped" % b["file"])
+                continue
+            data = open(snap, "rb").read()
+            addr = b["addr"]
+            prefix = "%s_dyn%d" % (base, k)
+            # the instructions it rewrites jump to entry points of it
+            ext = [((w & 0x03FFFFFF) << 2) | (va & 0xF0000000) for _m, va, w in b["writes"]]
+            for m, va, _w in b["writes"]:
+                sites[m].add(va)
+            got, mk, outside = compile_blob(cx, data, addr, prefix, ext)
+            jumps_in += outside
+            starts = sorted(got)
+            fns = []
+            for i2, fa in enumerate(starts):   # each function checks memory still holds what it was compiled from
+                end = min(starts[i2 + 1] if i2 + 1 < len(starts) else addr + size, fa + 4096)
+                wname = "%s_chk_%08X" % (prefix, fa)
+                wrappers.append((wname, fa, end - fa, zlib.crc32(data[fa - addr:end - addr]) & 0xFFFFFFFF, addr, addr + size, got[fa][0]))
+                fns.append((fa, wname))
+            for ea, n2, _t in mk:              # mid-entries too: they run compiled code from the same bytes
+                nxt = min([x for x in starts if x > ea] + [addr + size])
+                end = min(nxt, ea + 4096)
+                wname = "%s_chk_%08X" % (prefix, ea)
+                wrappers.append((wname, ea, end - ea, zlib.crc32(data[ea - addr:end - addr]) & 0xFFFFFFFF, addr, addr + size, n2))
+                fns.append((ea, wname))
+            fns.sort()
+            batches["batch_%s.cpp" % prefix] = "".join(bd for _, (_, bd) in sorted(got.items()))
+            mids.extend(t for _, _, t in mk)
+            decls.extend("RECOMP_FUNC void %s(uint8_t* rdram, recomp_context* ctx);" % n for _, (n, _) in got.items())
+            decls.extend("RECOMP_FUNC void %s(uint8_t* rdram, recomp_context* ctx);" % n for _, n, _ in mk)
+            sets.append({"folder": folder, "stamp": stamp, "module": 4, "fns": fns, "blob": (off, size, addr)})
+            say("  run-time code at 0x%08X (%d B): %d function(s); rewrites %d game instruction(s)"
+                % (addr, size, len(got), len(b["writes"])))
+        # the game modules: the patch's changes, plus guards on the rewritten instructions and entries for the jumps back
+        for key, (module, _a, _t, _d, _p) in X.CODE.items():
+            in_mod = [t for t in jumps_in if (X.OVL_BASE <= t < 0x08B63170) == (module != 0)]
+            if key not in mods_in and not sites[module] and not in_mod:
+                continue
+            src = open(os.path.join(code, key), "rb").read() if key in mods_in else retail_module(cx, key)
+            if src is None:
+                say("  %s: not found; its run-time rewrites are not followed" % key)
+                continue
+            pre = "%s_%s" % (base, names[module])
+            res = compile_module(cx, module, key, src, pre, sites[module], in_mod)
+            if res:
+                add(res, module, pre)
+                say("  %s: %s replaced%s" % (key, res["info"], ", %d rewritten instruction(s) guarded" % len(sites[module]) if sites[module] else ""))
+    write_set(out, sets, batches, decls, mids, wrappers)
     say("xmods: %d function set(s) -> %s" % (len(sets), out))
     return 0
 
 
-def write_set(out, sets, batches, decls, mids):
+def write_set(out, sets, batches, decls, mids, wrappers=()):
     gen = os.path.join(out, "generated")
     os.makedirs(gen, exist_ok=True)
-    head = '// Generated by xdelta_mod.py build-code — do not edit\n#include "recomp.h"\n#include "funcs.h"\n\n'
+    head = ('// Generated by xdelta_mod.py build-code — do not edit\n#include "recomp.h"\n#include "funcs.h"\n\n'
+            'int dissidia_xmod_site(uint8_t* rdram, recomp_context* ctx, uint32_t site);\n\n')
     for fn in os.listdir(gen):
         if fn.startswith("batch_") and fn not in batches:
             os.remove(os.path.join(gen, fn))
     for fn, body in batches.items():
         X.write_if_changed(os.path.join(gen, fn), (head + body).encode())
-    X.write_if_changed(os.path.join(out, "funcs.h"), ("#pragma once\n#include \"recomp.h\"\n" + "\n".join(decls) + "\n").encode())
+    X.write_if_changed(os.path.join(out, "funcs.h"), ("#pragma once\n#include \"recomp.h\"\n" + "\n".join(sorted(set(decls))) + "\n").encode())
     X.write_if_changed(os.path.join(out, "mid_entries.cpp"), (head + "\n".join(mids)).encode())
     d = [head, "#include <cstdint>\n\n",
          "// layout shared with games/dissidia/runtime/xdelta_mods.cpp\n",
          "struct DissidiaXmodFn { uint32_t addr; void (*fn)(uint8_t*, recomp_context*); };\n",
-         "struct DissidiaXmodSet { const char* folder; const char* stamp; int module; const DissidiaXmodFn* fns; int count; };\n\n"]
-    for i, (folder, stamp, module, prefix, fns) in enumerate(sets):
+         "struct DissidiaXmodSet {\n    const char* folder; const char* stamp; int module; const DissidiaXmodFn* fns; int count;\n"
+         "    uint64_t blob_off; uint32_t blob_size; uint32_t blob_addr;\n};\n",
+         "void dissidia_xmod_checked(uint32_t addr, uint32_t len, uint32_t crc, uint32_t lo, uint32_t hi,\n"
+         "                           void (*fn)(uint8_t*, recomp_context*), uint8_t* rdram, recomp_context* ctx);\n\n"]
+    for wname, fa, ln, crc, lo, hi, real in wrappers:
+        d.append("static void %s(uint8_t* r, recomp_context* c) { dissidia_xmod_checked(0x%08XU, %du, 0x%08XU, 0x%08XU, 0x%08XU, %s, r, c); }\n"
+                 % (wname, fa, ln, crc, lo, hi, real))
+    for i, st in enumerate(sets):
         d.append("static const DissidiaXmodFn s_fns%d[] = {\n" % i)
-        d.extend("    {0x%08XU, %s},\n" % (addr, name) for addr, name in fns)
+        d.extend("    {0x%08XU, %s},\n" % (addr, name) for addr, name in st["fns"])
         d.append("};\n")
     if sets:
         d.append("static const DissidiaXmodSet s_sets[] = {\n")
-        for i, (folder, stamp, module, prefix, fns) in enumerate(sets):
-            d.append("    {%s, \"%s\", %d, s_fns%d, %d},\n" % (json.dumps(folder), stamp, module, i, len(fns)))
+        for i, st in enumerate(sets):
+            off, size, addr = st["blob"]
+            d.append("    {%s, \"%s\", %d, s_fns%d, %d, %dull, %du, 0x%08XU},\n"
+                     % (json.dumps(st["folder"]), st["stamp"], st["module"], i, len(st["fns"]), off, size, addr))
         d.append("};\n")
     d.append("\nconst DissidiaXmodSet* dissidia_xmod_sets(int* count) {\n")
     d.append("    *count = %d;\n    return %s;\n}\n" % (len(sets), "s_sets" if sets else "nullptr"))
