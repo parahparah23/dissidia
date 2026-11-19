@@ -2113,7 +2113,8 @@ static int32_t savedata_dispatch(uint8_t* rdram, uint32_t p, uint32_t mode) {
     std::string dirname = sd_resolve_dirname(rdram, p, mode);
     std::string dir = sd_base() + "/" + dirname;
     std::string file = sd_cstr(rdram, p + SD_FILENAME, 13);
-    if (mode < 32 && !logged[mode]) {
+    static const bool trace = std::getenv("PSPRECOMP_SD_TRACE") != nullptr;   // every call, not only the first per mode
+    if (mode < 32 && (!logged[mode] || trace)) {
         logged[mode] = true;
         fprintf(stderr, "[HLE] sceUtilitySavedata mode=%u dir='%s' -> %s\n",
                 mode, dirname.c_str(), dir.c_str());
@@ -2386,6 +2387,13 @@ static void savedata_complete(UtilityDialogState& dlg, uint8_t* rdram) {
         g_sd_chosen_save.clear();
     } else {
         result = savedata_dispatch(rdram, dlg.param_addr, mode);
+        if ((mode == 4 || mode == 5) && result == 0) {
+            // No list shown (PSPRECOMP_SAVEDATA_AUTO): the PSP still copies the chosen name back into the request, and
+            // code reads it (an xdelta mod derives its own save's name from it, docs/xdelta-mods.md)
+            const std::string dn = sd_resolve_dirname(rdram, dlg.param_addr, mode);
+            if (dn.size() > 9 && dn.find('*') == std::string::npos)
+                sd_put_str(rdram, dlg.param_addr + SD_SAVENAME, dn.substr(9), 20);
+        }
     }
     psp_mem_write<int32_t>(
         rdram, dlg.param_addr + UTILITY_COMMON_RESULT_OFFSET, result);

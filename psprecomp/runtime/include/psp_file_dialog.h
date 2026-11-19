@@ -21,6 +21,7 @@ namespace psp_filedlg {
 enum class Kind {
     ImportFolder,   // pick a folder to read saves from
     ImportArchive,  // pick an archive file (.zip .7z .rar .tar.gz ...)
+    ImportPatch,    // pick an ISO patch (.xdelta / .vcdiff): Settings > Mods
     ExportFolder,   // pick (or create) a folder to write saves into
     ExportZip,      // choose a .zip file name to write
 };

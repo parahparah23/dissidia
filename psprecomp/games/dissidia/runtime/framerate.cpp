@@ -67,9 +67,9 @@
 #include <iterator>
 #include <unordered_map>
 
-extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
-extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
-extern FuncPtr ovl_extra_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_battle_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);
 
 int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, int id);   // roster.cpp
 
@@ -321,6 +321,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "vsync") {   // vsync <0|1>: vertical sync off / on while running (psp_vsync_set), for pacing A/B in one run
             int v = 1; ss >> v;
             ev.push_back({t, 30, static_cast<uint32_t>(v), 0, "", rel});
+        } else if (cmd == "gate") {   // gate <hex guest addr> <byte>: write one guest byte (PSPRECOMP_FIRSTCALL phase gate: diff the functions two runs call in a phase)
+            std::string a; int v = 0; ss >> a >> v;
+            ev.push_back({t, 31, static_cast<uint32_t>(std::strtoul(a.c_str(), nullptr, 16)), static_cast<uint32_t>(v), "", rel});
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
@@ -637,6 +640,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             continue;
         }
         if (e.kind == 16) { psp_fx_lights_set(e.a != 0); continue; }
+        if (e.kind == 31) { g_ram[e.a & 0x07FFFFFFu] = static_cast<uint8_t>(e.b); continue; }
         if (e.kind == 17) {   // rstick: the debug socket's right-stick injection, held until the next rstick
             g_injected_ranalog.store(e.b, std::memory_order_relaxed);
             g_injected_ranalog_deadline_ms.store(e.b == 0x8080u ? 0 : INT64_MAX, std::memory_order_relaxed);
@@ -729,7 +733,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
         }
         else if (e.kind == 7) {
             const uint32_t a = test_fighter(e.b);
-            FuncPtr start = ovl_battle_lookup(0x08A3EB70u);
+            FuncPtr start = dissidia_ovl_battle_lookup(0x08A3EB70u);
             const uint32_t ctl = r32(0x08A405E0u);   // the EX Burst controller object (global, the caller in FUN_08ACB208 reads it at 0x08A40000 + 1504)
             bool started = false;
             if (a && start && ok(ctl)) {
@@ -737,7 +741,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
                 const uint32_t info = r32(a + 1348u) + 288u;   // the caller's own query: the foe, through the actor's vtable-like entry
                 recomp_context c = *ctx;
                 c.r[4] = static_cast<int32_t>(a + static_cast<uint32_t>(static_cast<int16_t>(r32(info) & 0xFFFFu)));
-                FuncPtr getter = ok(info) ? (ovl_battle_lookup(r32(info + 4u)) ? ovl_battle_lookup(r32(info + 4u)) : psp_dispatch_probe_lookup(r32(info + 4u))) : nullptr;
+                FuncPtr getter = ok(info) ? (dissidia_ovl_battle_lookup(r32(info + 4u)) ? dissidia_ovl_battle_lookup(r32(info + 4u)) : psp_dispatch_probe_lookup(r32(info + 4u))) : nullptr;
                 if (getter) getter(rdram, &c);
                 const uint32_t foe = getter ? static_cast<uint32_t>(c.r[2]) : 0u;
                 c = *ctx;
@@ -1146,9 +1150,13 @@ void global_step_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 void task_dump_frame();
+}  // namespace
+void dissidia_xmods_frame();
+namespace {
 void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t timer = static_cast<uint32_t>(ctx->r[4]);
     g_tick++;
+    dissidia_xmods_frame();   // xdelta_mods.cpp: code a mod rewrote while running
     ge_draw_perf_set_gameplay(battle_running());   // the performance overlay's average / 1% low count battle frames only
     if (ok(timer)) {
         // In an ad-hoc session every player runs at the lowest rate any of them asked for, so the
@@ -1857,7 +1865,7 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
 void cam_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t id = overlay_id();
     if (id != 1) {   // the same address in another overlay is another function
-        FuncPtr f = id == 2 ? ovl_menu_lookup(CAM_DT) : id == 3 ? ovl_extra_lookup(CAM_DT) : nullptr;
+        FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(CAM_DT) : id == 3 ? dissidia_ovl_extra_lookup(CAM_DT) : nullptr;
         if (f) f(rdram, ctx);
         return;
     }
@@ -1886,7 +1894,7 @@ int g_exb_edges = 0, g_exb_used = 0;
 void exb_pressed_common(FuncPtr orig, bool* sticky, uint32_t addr, uint8_t* rdram, recomp_context* ctx) {
     const uint32_t id = overlay_id();
     if (id != 1) {
-        FuncPtr f = id == 2 ? ovl_menu_lookup(addr) : id == 3 ? ovl_extra_lookup(addr) : nullptr;
+        FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(addr) : id == 3 ? dissidia_ovl_extra_lookup(addr) : nullptr;
         if (f) f(rdram, ctx);
         return;
     }
@@ -1954,7 +1962,7 @@ void vt_poll_held(uint8_t* rdram, recomp_context* ctx) {
 }
 template <int I> void vt_probe(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t id = overlay_id();
-    if (id != 1) { FuncPtr f = id == 2 ? ovl_menu_lookup(k_vtests[I]) : id == 3 ? ovl_extra_lookup(k_vtests[I]) : nullptr; if (f) f(rdram, ctx); return; }
+    if (id != 1) { FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(k_vtests[I]) : id == 3 ? dissidia_ovl_extra_lookup(k_vtests[I]) : nullptr; if (f) f(rdram, ctx); return; }
     const uint32_t who = static_cast<uint32_t>(ctx->r[4]);
     g_vt_orig[I](rdram, ctx);
     const uint32_t c = r32(0x08A405E0u);
@@ -1977,7 +1985,7 @@ template <int I> void vt_probe(uint8_t* rdram, recomp_context* ctx) {
         if (g_exb_log_on && ph && k_vtests[I] == 0x08B328CCu) std::fprintf(stderr, "[EXBG] bt=%.0f ph=%u call test=08B328CC in=%d result=%d\n", g_play_ms - g_exb_t0, ph, g_exb_in ? 1 : 0, static_cast<int>(ctx->r[2] & 1));
     }
 }
-template <int I> struct VtReg { static void go() { VtReg<I - 1>::go(); if (k_vtests[I] != 0x08B326C4u && k_vtests[I] != 0x08B324CCu && (g_vt_orig[I] = ovl_battle_lookup(k_vtests[I]))) psp_dispatch_register(k_vtests[I], vt_probe<I>); } };
+template <int I> struct VtReg { static void go() { VtReg<I - 1>::go(); if (k_vtests[I] != 0x08B326C4u && k_vtests[I] != 0x08B324CCu && (g_vt_orig[I] = dissidia_ovl_battle_lookup(k_vtests[I]))) psp_dispatch_register(k_vtests[I], vt_probe<I>); } };
 template <> struct VtReg<-1> { static void go() {} };
 void vt_summary() {
     for (int i = 0; i < kNV; i++) {
@@ -2037,7 +2045,7 @@ void exb_log(const char* what, uint32_t ctl, bool ran) {
 void exb_prompt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t id = overlay_id();
     if (id != 1) {
-        FuncPtr f = id == 2 ? ovl_menu_lookup(EXB_PROMPT) : id == 3 ? ovl_extra_lookup(EXB_PROMPT) : nullptr;
+        FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(EXB_PROMPT) : id == 3 ? dissidia_ovl_extra_lookup(EXB_PROMPT) : nullptr;
         if (f) f(rdram, ctx);
         return;
     }
@@ -2073,7 +2081,7 @@ bool g_exb_ui = true;
 void exb_ui_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t id = overlay_id();
     if (id != 1) {
-        FuncPtr f = id == 2 ? ovl_menu_lookup(EXB_UI) : id == 3 ? ovl_extra_lookup(EXB_UI) : nullptr;
+        FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(EXB_UI) : id == 3 ? dissidia_ovl_extra_lookup(EXB_UI) : nullptr;
         if (f) f(rdram, ctx);
         return;
     }
@@ -2092,7 +2100,7 @@ void exb_ui_hook(uint8_t* rdram, recomp_context* ctx) {
 void exb_ctrl_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t id = overlay_id();
     if (id != 1) {
-        FuncPtr f = id == 2 ? ovl_menu_lookup(EXB_CTRL) : id == 3 ? ovl_extra_lookup(EXB_CTRL) : nullptr;
+        FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(EXB_CTRL) : id == 3 ? dissidia_ovl_extra_lookup(EXB_CTRL) : nullptr;
         if (f) f(rdram, ctx);
         return;
     }
@@ -2220,7 +2228,7 @@ void gauge_sm_hook(uint8_t* rdram, recomp_context* ctx) {
     FuncPtr g_orig_probe_##NAME = nullptr; \
     void probe_##NAME(uint8_t* rdram, recomp_context* ctx) { \
         const uint32_t id = overlay_id(); \
-        if (id != 1) { FuncPtr f = id == 2 ? ovl_menu_lookup(ADDR) : id == 3 ? ovl_extra_lookup(ADDR) : nullptr; if (f) f(rdram, ctx); return; } \
+        if (id != 1) { FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(ADDR) : id == 3 ? dissidia_ovl_extra_lookup(ADDR) : nullptr; if (f) f(rdram, ctx); return; } \
         static int n = 0; if (n++ < 6 || n % 200 == 0) std::fprintf(stderr, "[EXBX] %08X called gt=%.0f n=%d\n", ADDR, g_gt_ms, n); \
         g_orig_probe_##NAME(rdram, ctx); }
 EXB_PROBE(a, 0x08A32EBCu)
@@ -2236,7 +2244,7 @@ EXB_PROBE(f, 0x08A37A00u)
     FuncPtr g_orig_tp_##NAME = nullptr; \
     void tp_##NAME(uint8_t* rdram, recomp_context* ctx) { \
         const uint32_t id = overlay_id(); \
-        if (id != 1) { FuncPtr f = id == 2 ? ovl_menu_lookup(ADDR) : id == 3 ? ovl_extra_lookup(ADDR) : nullptr; if (f) f(rdram, ctx); return; } \
+        if (id != 1) { FuncPtr f = id == 2 ? dissidia_ovl_menu_lookup(ADDR) : id == 3 ? dissidia_ovl_extra_lookup(ADDR) : nullptr; if (f) f(rdram, ctx); return; } \
         static uint32_t seen[16]; static int ns = 0; const uint32_t ra = ok(r32(0x08A405E0u)) ? r32(r32(0x08A405E0u) + 632u) : 99u; bool k = false; \
         for (int i = 0; i < ns; i++) if (seen[i] == ra) k = true; \
         if (!k && ns < 16) { seen[ns++] = ra; std::fprintf(stderr, "[EXBT] test %08X ra=%08X gt=%.0f phase=%u\n", ADDR, ra, g_gt_ms, r32(r32(0x08A405E0u) + 632u)); } \
@@ -2552,8 +2560,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
     g_orig_frame_end = psp_dispatch_probe_lookup(FRAME_END);
     g_orig_pad = psp_dispatch_probe_lookup(PAD_SET);
     g_orig_actor_dt = psp_dispatch_probe_lookup(ACTOR_DT);
-    g_orig_cam_dt = ovl_battle_lookup(CAM_DT);
-    g_orig_pressed = ovl_battle_lookup(PRESSED);
+    g_orig_cam_dt = dissidia_ovl_battle_lookup(CAM_DT);
+    g_orig_pressed = dissidia_ovl_battle_lookup(PRESSED);
     if (!g_orig_frame_end || !g_orig_pad || !g_orig_actor_dt || !g_orig_cam_dt) {
         std::fprintf(stderr, "[FPS] hooks NOT installed (frame end %p pad %p actor dt %p camera dt %p): 30 Hz only\n",
                      (void*)g_orig_frame_end, (void*)g_orig_pad, (void*)g_orig_actor_dt, (void*)g_orig_cam_dt);
@@ -2565,39 +2573,39 @@ void dissidia_framerate_install(uint8_t* rdram) {
     psp_dispatch_register(CAM_DT, cam_dt_hook);
     if (const char* fs = std::getenv("PSPRECOMP_FACE_STEP"); fs && fs[0] == '0') g_face_fix = false;
     if ((g_face_fix || g_face_log) && (g_orig_face_step = psp_dispatch_probe_lookup(FACE_STEP))) psp_dispatch_register(FACE_STEP, face_step_hook);
-    if ((g_orig_exb_pressed = ovl_battle_lookup(EXB_PRESSED))) psp_dispatch_register(EXB_PRESSED, exb_pressed_hook);
-    if ((g_orig_exb_pressed2 = ovl_battle_lookup(EXB_PRESSED2))) psp_dispatch_register(EXB_PRESSED2, exb_pressed2_hook);
+    if ((g_orig_exb_pressed = dissidia_ovl_battle_lookup(EXB_PRESSED))) psp_dispatch_register(EXB_PRESSED, exb_pressed_hook);
+    if ((g_orig_exb_pressed2 = dissidia_ovl_battle_lookup(EXB_PRESSED2))) psp_dispatch_register(EXB_PRESSED2, exb_pressed2_hook);
     VtReg<kNV - 1>::go();   // sticky presses for every virtual-button test the gated burst code calls (+ counts with PSPRECOMP_EXB_LOG)
     if (std::getenv("PSPRECOMP_EXB_LOG")) {
-        if ((g_orig_probe_a = ovl_battle_lookup(0x08A32EBCu))) psp_dispatch_register(0x08A32EBCu, probe_a);
-        if ((g_orig_probe_b = ovl_battle_lookup(0x08A3419Cu))) psp_dispatch_register(0x08A3419Cu, probe_b);
-        if ((g_orig_probe_c = ovl_battle_lookup(0x08A35B20u))) psp_dispatch_register(0x08A35B20u, probe_c);
-        if ((g_orig_probe_d = ovl_battle_lookup(0x08A36830u))) psp_dispatch_register(0x08A36830u, probe_d);
-        if ((g_orig_probe_e = ovl_battle_lookup(0x08A38F50u))) psp_dispatch_register(0x08A38F50u, probe_e);
-        if ((g_orig_probe_f = ovl_battle_lookup(0x08A37A00u))) psp_dispatch_register(0x08A37A00u, probe_f);
+        if ((g_orig_probe_a = dissidia_ovl_battle_lookup(0x08A32EBCu))) psp_dispatch_register(0x08A32EBCu, probe_a);
+        if ((g_orig_probe_b = dissidia_ovl_battle_lookup(0x08A3419Cu))) psp_dispatch_register(0x08A3419Cu, probe_b);
+        if ((g_orig_probe_c = dissidia_ovl_battle_lookup(0x08A35B20u))) psp_dispatch_register(0x08A35B20u, probe_c);
+        if ((g_orig_probe_d = dissidia_ovl_battle_lookup(0x08A36830u))) psp_dispatch_register(0x08A36830u, probe_d);
+        if ((g_orig_probe_e = dissidia_ovl_battle_lookup(0x08A38F50u))) psp_dispatch_register(0x08A38F50u, probe_e);
+        if ((g_orig_probe_f = dissidia_ovl_battle_lookup(0x08A37A00u))) psp_dispatch_register(0x08A37A00u, probe_f);
     }
-    if (std::getenv("PSPRECOMP_EXB_LOG") && (g_orig_exb_prompt = ovl_battle_lookup(EXB_PROMPT))) psp_dispatch_register(EXB_PROMPT, exb_prompt_hook);
+    if (std::getenv("PSPRECOMP_EXB_LOG") && (g_orig_exb_prompt = dissidia_ovl_battle_lookup(EXB_PROMPT))) psp_dispatch_register(EXB_PROMPT, exb_prompt_hook);
     if (const char* x = std::getenv("PSPRECOMP_EXB_UI"); x && x[0] == '0') g_exb_ui = false;
-    if ((g_orig_exb_ui = ovl_battle_lookup(EXB_UI))) psp_dispatch_register(EXB_UI, exb_ui_hook);
-    if ((g_orig_exb_ctrl = ovl_battle_lookup(EXB_CTRL))) psp_dispatch_register(EXB_CTRL, exb_ctrl_hook);
+    if ((g_orig_exb_ui = dissidia_ovl_battle_lookup(EXB_UI))) psp_dispatch_register(EXB_UI, exb_ui_hook);
+    if ((g_orig_exb_ctrl = dissidia_ovl_battle_lookup(EXB_CTRL))) psp_dispatch_register(EXB_CTRL, exb_ctrl_hook);
     else std::fprintf(stderr, "[FPS] EX Burst controller hook NOT installed\n");
-    if ((g_orig_gauge_add = ovl_battle_lookup(GAUGE_ADD))) psp_dispatch_register(GAUGE_ADD, gauge_add_hook);
-    if ((g_orig_gauge_drain = ovl_battle_lookup(GAUGE_DRAIN))) psp_dispatch_register(GAUGE_DRAIN, gauge_drain_hook);
-    if ((g_orig_gauge_hud = ovl_battle_lookup(GAUGE_HUD))) psp_dispatch_register(GAUGE_HUD, gauge_hud_hook);
-    if ((g_orig_gauge_tick = ovl_battle_lookup(GAUGE_TICK))) psp_dispatch_register(GAUGE_TICK, gauge_tick_hook);
+    if ((g_orig_gauge_add = dissidia_ovl_battle_lookup(GAUGE_ADD))) psp_dispatch_register(GAUGE_ADD, gauge_add_hook);
+    if ((g_orig_gauge_drain = dissidia_ovl_battle_lookup(GAUGE_DRAIN))) psp_dispatch_register(GAUGE_DRAIN, gauge_drain_hook);
+    if ((g_orig_gauge_hud = dissidia_ovl_battle_lookup(GAUGE_HUD))) psp_dispatch_register(GAUGE_HUD, gauge_hud_hook);
+    if ((g_orig_gauge_tick = dissidia_ovl_battle_lookup(GAUGE_TICK))) psp_dispatch_register(GAUGE_TICK, gauge_tick_hook);
     if (const char* x = std::getenv("PSPRECOMP_GAUGE30"); x && x[0] == '0') g_gauge30 = false;
-    if ((g_orig_gauge_sm = ovl_battle_lookup(GAUGE_SM))) psp_dispatch_register(GAUGE_SM, gauge_sm_hook);
+    if ((g_orig_gauge_sm = dissidia_ovl_battle_lookup(GAUGE_SM))) psp_dispatch_register(GAUGE_SM, gauge_sm_hook);
     if (g_orig_pressed) psp_dispatch_register(PRESSED, pressed_hook);
     if (const char* g = std::getenv("PSPRECOMP_JECHT_GRID"); g && g[0] == '0') g_jecht_grid = false;
     psp_ctrl_set_filter(jecht_grid_filter);
-    if ((g_orig_chain_check = ovl_battle_lookup(CHAIN_CHECK))) psp_dispatch_register(CHAIN_CHECK, chain_check_hook);
-    if ((g_orig_gate_37 = ovl_battle_lookup(GATE_37))) psp_dispatch_register(GATE_37, gate_37_hook);
-    if ((g_orig_gate_36 = ovl_battle_lookup(GATE_36))) psp_dispatch_register(GATE_36, gate_36_hook);
-    if ((g_orig_gate_3a = ovl_battle_lookup(GATE_3A))) psp_dispatch_register(GATE_3A, gate_3a_hook);
+    if ((g_orig_chain_check = dissidia_ovl_battle_lookup(CHAIN_CHECK))) psp_dispatch_register(CHAIN_CHECK, chain_check_hook);
+    if ((g_orig_gate_37 = dissidia_ovl_battle_lookup(GATE_37))) psp_dispatch_register(GATE_37, gate_37_hook);
+    if ((g_orig_gate_36 = dissidia_ovl_battle_lookup(GATE_36))) psp_dispatch_register(GATE_36, gate_36_hook);
+    if ((g_orig_gate_3a = dissidia_ovl_battle_lookup(GATE_3A))) psp_dispatch_register(GATE_3A, gate_3a_hook);
     if (const char* d = std::getenv("PSPRECOMP_DBG_COMBO"); d && d[0] && d[0] != '0') g_dbg_combo = true;   // start with the debug options on (tests)
     if (const char* d = std::getenv("PSPRECOMP_DBG_NOAI"); d && d[0] && d[0] != '0') g_dbg_no_ai = true;
     if (const char* na = std::getenv("PSPRECOMP_TEST_NO_AI"); na && na[0] && na[0] != '0') g_env_no_ai = true;
-    if ((g_orig_cpu_tick = ovl_battle_lookup(CPU_TICK))) psp_dispatch_register(CPU_TICK, cpu_tick_noai_hook);
+    if ((g_orig_cpu_tick = dissidia_ovl_battle_lookup(CPU_TICK))) psp_dispatch_register(CPU_TICK, cpu_tick_noai_hook);
     if (const char* l3 = std::getenv("PSPRECOMP_LOGIC30"); l3 && l3[0] == '0') g_logic30 = false;   // default on (16 Nov: checked on the RP6 and the desktop)
     if (const char* rl = std::getenv("PSPRECOMP_TASK_RUNLOG"))
         for (const char* q = rl; *q;) { g_runlog_ticks.push_back(std::strtoull(q, nullptr, 10)); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; }
@@ -2615,7 +2623,7 @@ void dissidia_framerate_install(uint8_t* rdram) {
     }
     psp_settings_add_debug_toggle({"Jecht Combo Timing", "Jecht combo helper (debug)\nThe screen edge flashes green when the window for his next chain press opens, and a press says GOOD, TOO EARLY or TOO LATE with the milliseconds off. Rush, Neutral / Up 2 and 3, HP. This session only.",
                                    +[]() { return g_dbg_combo; }, +[](bool on) { g_dbg_combo = on; }});
-    if (g_test_ai_off && (g_orig_pad_set_state = ovl_battle_lookup(PAD_SET_STATE)) && (g_orig_pad_set_pending = ovl_battle_lookup(PAD_SET_PENDING))) {
+    if (g_test_ai_off && (g_orig_pad_set_state = dissidia_ovl_battle_lookup(PAD_SET_STATE)) && (g_orig_pad_set_pending = dissidia_ovl_battle_lookup(PAD_SET_PENDING))) {
         psp_dispatch_register(PAD_SET_STATE, pad_set_state_hook); psp_dispatch_register(PAD_SET_PENDING, pad_set_pending_hook);
         std::fprintf(stderr, "[FPS] test: CPU AI input off\n");
     }
@@ -2632,7 +2640,7 @@ void dissidia_framerate_install(uint8_t* rdram) {
         g_orig_global_step = slowmo_frame_hook;
     }
     else std::fprintf(stderr, "[FPS] slow-motion hook NOT installed (no function at %08X)\n", SLOWMO_FRAME);
-    if (const char* sm = std::getenv("PSPRECOMP_STEER_MOVE"); !(sm && sm[0] == '0') && (g_orig_steer_move = ovl_battle_lookup(STEER_MOVE))) { psp_dispatch_register(STEER_MOVE, steer_move_hook); std::fprintf(stderr, "[FPS] steered-move hook installed\n"); }
+    if (const char* sm = std::getenv("PSPRECOMP_STEER_MOVE"); !(sm && sm[0] == '0') && (g_orig_steer_move = dissidia_ovl_battle_lookup(STEER_MOVE))) { psp_dispatch_register(STEER_MOVE, steer_move_hook); std::fprintf(stderr, "[FPS] steered-move hook installed\n"); }
     if (g_log && (g_orig_skel = psp_dispatch_probe_lookup(SKEL_BUILD))) psp_dispatch_register(SKEL_BUILD, skel_build_hook);
     fx_install();
     psp_settings_set_frame_rate_hook({k_rates, static_cast<int>(std::size(k_rates)), fps_get, fps_set});

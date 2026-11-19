@@ -104,7 +104,7 @@ lives entirely under `games/<id>/`:
 | Artifact | Consumed by | Carries |
 |----------|-------------|---------|
 | `games/<id>/game.toml` | `psprecomp recompile --config` | `[recompile]` force entries / force mid-entries (replaces the former hardcoded consts), top-level stubs/skips/patches, and `[game]`/`[boot]`/`[module]`/`[runtime]` choices emitted into `recomp_game_config.h` (the runtime never parses TOML) |
-| `games/<id>/runtime/*.cpp` | runtime build via `-DPSPRECOMP_GAME=<id>` | Address-keyed dispatch hooks, allocator/CRT override bodies, boot/thread context tweaks, asset layer, IO policy, LOOKUP_MISS handler, GE vertex fallback — everything title-specific that is code, not data (Dissidia: `hooks_main.cpp` overlay resolver and module binding, `hooks_io.cpp` + `package_mods.cpp` loose-file mods (plus installed mod folders: `<mods>/<folder>/mod.json` + `install/`, served as one more mods root while enabled, so Settings > Mods can turn a finished mod on and off on any platform), `roster.cpp`, `savedata_theme.cpp`, `camera.cpp`, `input.cpp`, `framerate.cpp` native 60 Hz battle logic, …) |
+| `games/<id>/runtime/*.cpp` | runtime build via `-DPSPRECOMP_GAME=<id>` | Address-keyed dispatch hooks, allocator/CRT override bodies, boot/thread context tweaks, asset layer, IO policy, LOOKUP_MISS handler, GE vertex fallback — everything title-specific that is code, not data (Dissidia: `hooks_main.cpp` overlay resolver and module binding, `hooks_io.cpp` + `package_mods.cpp` loose-file mods (plus installed mod folders: `<mods>/<folder>/mod.json` + `install/`, served as one more mods root while enabled, so Settings > Mods can turn a finished mod on and off on any platform), `xdelta_mods.cpp` + `xmod_interp.cpp` ISO-patch mods (code the patch loads at run time is interpreted on the first run and recorded, compiled by the next build; rewritten game instructions are guarded in the compiled functions; the functions an `.xdelta` patch changes are recompiled by `tools/xdelta_code.py` into one more prefixed set, `<work>/overlays/xmods`, always built and linked; while the mod is on they replace the retail ones in the dispatch table / the `dissidia_ovl_*_lookup` overlay lookups; a mod not in the build runs interpreted; `xdelta_import.cpp` installs a patch from Settings > Mods (a `PspModInstaller`; the generic VCDIFF decoder is `runtime/src/psp_vcdiff.cpp` with `third_party/xz-embedded`, the system file picker `runtime/src/psp_file_dialog.cpp` + `android/game_java`); docs/xdelta-mods.md), `roster.cpp`, `savedata_theme.cpp`, `camera.cpp`, `input.cpp`, `framerate.cpp` native 60 Hz battle logic, …) |
 | `games/<id>/tests/`, `games/<id>/scripts/` | manual / CI | Game-coupled tests and scripts (optional; `games/dissidia/tests/`) |
 
 The seam is `PspGameModule` (`runtime/include/psp_game_module.h`): one struct of
@@ -199,7 +199,19 @@ flowchart LR
   the render queue — game threads never call GL directly (macOS requirement).
 - Mid-function entries (jump targets inside a function, e.g. from vtables or cross-function
   branches) are handled by wrappers that set `ctx->entry_point`; the parent function's entry
-  switch dispatches to the matching label and clears the field before the goto.
+  switch dispatches to the matching label and clears the field before the goto. A mid-entry at a
+  delay slot's address is decoded like a branch into a delay slot (BIDS, issue #56): the slot's
+  instruction runs at its label as a normal instruction.
+- Calls keep `$ra` as the CPU does: `jal`, `jalr` (its rd) and link branches write the return
+  address before the callee runs, although compiled code returns by C++ `return`. Code that looks
+  at its caller needs it (hooks an ISO patch installs compare `$ra`; runtime hooks log it), and a
+  `jr <reg>` to the address the function was called from (`move s4, ra` ... `jr s4`) is a return.
+  The prologue scan never starts a function in a delay slot (the branch before it would lose it).
+- A link branch (`bal`) into another function, or into a mid-entry of its own function (a subroutine
+  the sibling coalescer merged), is a call; the caller resumes after it only when `$ra` still holds the
+  link address (`bal` over an inline table never comes back: its target leaves with the caller's
+  return address), else it returns as well. Only the RA-modeled coalesced owners lower internal links
+  as gotos.
 
 ## Invariants and Conventions
 

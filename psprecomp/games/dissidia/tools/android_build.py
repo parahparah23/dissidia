@@ -202,7 +202,7 @@ def device_build(adir, work, jobs, say, tag, die):
     for f in sorted(glob.glob(out + "/generated/batch_*.cpp")) + [os.path.join(out, n) for n in
             ("dispatch.cpp", "data_sections.cpp", "init_array.cpp", "mid_entries.cpp", "syscall_table.cpp")]:
         srcs.append((f, oi))
-    for name in ("battle", "menu", "extra", "supacc"):
+    for name in ("battle", "menu", "extra", "supacc", "xmods"):
         d = os.path.join(ovl, name)
         inc = ["-I" + d] + oi
         files = sorted(glob.glob(d + "/generated/batch_*.cpp")) + [d + "/dispatch.cpp", d + "/mid_entries.cpp"]

@@ -300,3 +300,7 @@ void vfpu_vflush();
 // Unknown opcode stub (log-once warning)
 void vfpu_unknown_stub(recomp_context* ctx, uint8_t* rdram,
                        uint32_t opcode, uint32_t pc);
+
+// Runs one VFPU instruction word (decoded at run time; for interpreted code). False: not a VFPU instruction this
+// handles (bvf/bvt branches are the caller's).
+bool psp_vfpu_exec(recomp_context* ctx, uint8_t* rdram, uint32_t word);

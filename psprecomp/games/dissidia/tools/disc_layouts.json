@@ -1,0 +1,1953 @@
+{
+ "about": "Layouts of the retail Dissidia 012 discs for xdelta_mod.py: file positions, sizes and MD5s plus the ISO 9660 descriptor/directory sectors, UMD_DATA.BIN and the plaintext ~PSP header of EBOOT.BIN (metadata only, no game data). Regenerate with: xdelta_mod.py layout <iso>...",
+ "discs": [
+  {
+   "blobs": [
+    {
+     "data": "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",
+     "offset": 28672
+    },
+    {
+     "data": "eNoL9XEN1jUwNDUwrTEwMzU1sHQ0NDO2MHSzNLKoMTAwMKxxZ0AGNQADvgjA",
+     "offset": 71680
+    },
+    {
+     "data": "eNqrCwgOYGBgYmBkdHMLDvECsrEBRqYtF9wYBC65gXkcRjIME24xMDIIACEQODg0cBQYbuOAqW6YLMsw4TZQHg8QYGBm4wTSJRY/1/S8qspjvXJyu7jwxvO/j7nYTu1tW1XH4S7w+s9G6XuRgibBTyem57xakFMobtoPckcDkjldNzadNGT1P3F30oONqlcL3n4QFrvJQCOg+yP6y5rH2Z1uKenFipkx0n0ZD1bqOIvMzuflmdbz4vGOCvFlrQD/VUQr",
+     "offset": 1146880
+    }
+   ],
+   "files": {
+    "PSP_GAME/ICON0.PNG": {
+     "md5": "e1a54b4dc0dd60c51c96ac45aaa11c0e",
+     "offset": 52461568,
+     "size": 17207
+    },
+    "PSP_GAME/ICON1.PMF": {
+     "md5": "ab831367168fca663154614523058fb4",
+     "offset": 52494336,
+     "size": 260096
+    },
+    "PSP_GAME/PARAM.SFO": {
+     "md5": "991c936dc0fd4a3de441c5ba261043b4",
+     "offset": 52428800,
+     "size": 560
+    },
+    "PSP_GAME/PIC1.PNG": {
+     "md5": "cda1408828546aeb8fb1bb87404405ad",
+     "offset": 52756480,
+     "size": 170502
+    },
+    "PSP_GAME/SND0.AT3": {
+     "md5": "950103f101ab6120a1b0b5b4b4570e4f",
+     "offset": 52953088,
+     "size": 219964
+    },
+    "PSP_GAME/SYSDIR/BOOT.BIN": {
+     "md5": "1841984af9a364d922cf3d1950ad0b97",
+     "offset": 47775744,
+     "size": 4640948,
+     "zero": true
+    },
+    "PSP_GAME/SYSDIR/EBOOT.BIN": {
+     "md5": "f0a923f1b6a937b0ac54072ac84122a5",
+     "offset": 1146880,
+     "size": 4641296
+    },
+    "PSP_GAME/SYSDIR/OPNSSMP.BIN": {
+     "md5": "b6d81b360a5672d80c27430f39153e2c",
+     "offset": 98304,
+     "size": 1048576,
+     "zero": true
+    },
+    "PSP_GAME/SYSDIR/UPDATE/DATA.BIN": {
+     "md5": "58f06dd588d8ffb3beb46ada6309436b",
+     "offset": 14221312,
+     "size": 33554432,
+     "zero": true
+    },
+    "PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN": {
+     "md5": "96995b58d4cbf6aaa9041b4f00c7f6ae",
+     "offset": 5832704,
+     "size": 8388608,
+     "zero": true
+    },
+    "PSP_GAME/SYSDIR/UPDATE/PARAM.SFO": {
+     "md5": "d41d8cd98f00b204e9800998ecf8427e",
+     "offset": 5799936,
+     "size": 0,
+     "zero": true
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B01_01.AT3": {
+     "md5": "f63168ca7814b5d8caf3c39b46e8f678",
+     "offset": 177635328,
+     "size": 1258484
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B01_02.AT3": {
+     "md5": "a63786690b53c95b74b318643a55fea1",
+     "offset": 55803904,
+     "size": 1705364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B02_01.AT3": {
+     "md5": "72500ace0c504f086d30b7cabdb5e3d8",
+     "offset": 57540608,
+     "size": 1340244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B02_02.AT3": {
+     "md5": "54843e77c0e275f55e0348890aa1053c",
+     "offset": 58884096,
+     "size": 1001444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B03_01.AT3": {
+     "md5": "9c9bc0ab2301dd4cb6e5eb62cab73198",
+     "offset": 59899904,
+     "size": 2053124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B03_02.AT3": {
+     "md5": "6950c4a67fa87b9f82ca1441c3fcf83e",
+     "offset": 61964288,
+     "size": 853604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B04_01.AT3": {
+     "md5": "702881af6b273543d45692c59550880c",
+     "offset": 62849024,
+     "size": 1474644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B04_02.AT3": {
+     "md5": "d10c53c341117047e71a836022c78a4a",
+     "offset": 64356352,
+     "size": 914644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B05_01.AT3": {
+     "md5": "b3c6ceacf63d733edafc1298debc6976",
+     "offset": 65273856,
+     "size": 1047924
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B05_02.AT3": {
+     "md5": "c18f52036e0a63577e14253a068e25b5",
+     "offset": 66322432,
+     "size": 783044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B06_01.AT3": {
+     "md5": "f22849ee5d6857f9b0e780f4df180efc",
+     "offset": 67108864,
+     "size": 694564
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B06_02.AT3": {
+     "md5": "a82e67ee591660687ca4b5dc0386027b",
+     "offset": 67829760,
+     "size": 887204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B07_01.AT3": {
+     "md5": "47a85edfb880709bc941fdb377eed978",
+     "offset": 68747264,
+     "size": 3068964
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B07_02.AT3": {
+     "md5": "894ab03ecada5992a1946743f61ff1ed",
+     "offset": 71827456,
+     "size": 1125204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B08_01.AT3": {
+     "md5": "924efca663d8f1b12bc63c1cd3a76fcd",
+     "offset": 72974336,
+     "size": 1974164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B08_02.AT3": {
+     "md5": "0ecce80302e019dffefc870fa841ea0b",
+     "offset": 74973184,
+     "size": 1834164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B09_01.AT3": {
+     "md5": "fcac51c97a10f28f82edbdc841af2f74",
+     "offset": 76808192,
+     "size": 2207684
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B09_02.AT3": {
+     "md5": "5f339341cc309cde88d905036e146e89",
+     "offset": 79036416,
+     "size": 1380004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B10_01.AT3": {
+     "md5": "68c99d68d2369a464938fa4331de2cae",
+     "offset": 80445440,
+     "size": 1740084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B10_02.AT3": {
+     "md5": "b29c694f2a0e12148de9638fc080d4ad",
+     "offset": 82214912,
+     "size": 1242804
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B11.AT3": {
+     "md5": "878e62180a88c770689ed539060693ab",
+     "offset": 83460096,
+     "size": 1284244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B11_02.AT3": {
+     "md5": "25aab7a8b395bb707bed071c486a1d5c",
+     "offset": 84770816,
+     "size": 1292644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B11_03.AT3": {
+     "md5": "b123bb8d57435afab3f7ee313bea9eee",
+     "offset": 86081536,
+     "size": 1437124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B12.AT3": {
+     "md5": "1745a7f17d95d79a7426ab52a64fa5c4",
+     "offset": 87523328,
+     "size": 1496484
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B12_02.AT3": {
+     "md5": "5429bb979cd247799ca113159f79e76d",
+     "offset": 89030656,
+     "size": 4383284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B13.AT3": {
+     "md5": "2b937f173ed435a8e250420d7319daf0",
+     "offset": 93421568,
+     "size": 678884
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B14.AT3": {
+     "md5": "a86ebc2e86863bea214db19e0c9c7ed8",
+     "offset": 94109696,
+     "size": 1205284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS01.AT3": {
+     "md5": "2e2e9e50f266e3200f57b92e9ba99c78",
+     "offset": 95322112,
+     "size": 274004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS02.AT3": {
+     "md5": "2f131713541890b4ffdb5056da337c80",
+     "offset": 95617024,
+     "size": 393284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS03.AT3": {
+     "md5": "de0d710cce843976bb4ab12fc81c4797",
+     "offset": 96043008,
+     "size": 442004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS04.AT3": {
+     "md5": "6f068467f7f6cfbb2686b9b8db24723a",
+     "offset": 96501760,
+     "size": 844644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS05.AT3": {
+     "md5": "44fd803e5cc6ec8b166199d7ebadadad",
+     "offset": 97353728,
+     "size": 2011124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS06.AT3": {
+     "md5": "80c7cc1fbb974653b14a1221449e6cf7",
+     "offset": 99385344,
+     "size": 2309604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS07.AT3": {
+     "md5": "a4699efab7faf187091b8c737a037ab5",
+     "offset": 101711872,
+     "size": 2529124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS08.AT3": {
+     "md5": "2adc62d6250a8a6b8e56a464856e7b8b",
+     "offset": 104267776,
+     "size": 1081524
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS09.AT3": {
+     "md5": "391c9638fbf3967c0dec748d6dda5d81",
+     "offset": 105381888,
+     "size": 2003284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS10.AT3": {
+     "md5": "936c609606ad2bc5591e799759b7b5e3",
+     "offset": 107413504,
+     "size": 2236244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS11.AT3": {
+     "md5": "ecabbf43c9220d7ba47f1dbaf1c9edeb",
+     "offset": 109674496,
+     "size": 3287924
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS12.AT3": {
+     "md5": "4700fb3af31982f50a5b34c235c3ca02",
+     "offset": 112984064,
+     "size": 1072004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E01.AT3": {
+     "md5": "113f1012025b458ee2a29f41e0964516",
+     "offset": 114065408,
+     "size": 831204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E02.AT3": {
+     "md5": "9630596970012bf5247945703debb1fb",
+     "offset": 114917376,
+     "size": 458244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E03.AT3": {
+     "md5": "b172931ae21c6b1d9e1648559121f7d7",
+     "offset": 115376128,
+     "size": 788636
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E04.AT3": {
+     "md5": "e0fb7fbaca002dade82e633f53dcbdff",
+     "offset": 116195328,
+     "size": 606652
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/FF7TATAKAU.AT3": {
+     "md5": "63b24ae27ce06c1f1b17001741db095e",
+     "offset": 116817920,
+     "size": 981284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/INSTALL.AT3": {
+     "md5": "b81a327ed5b154b32c7072b384dfcdd2",
+     "offset": 117800960,
+     "size": 611124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/INSTALL_OK.AT3": {
+     "md5": "fb96e123c554549dde4ceba2ec30d1f6",
+     "offset": 118423552,
+     "size": 216884
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/LOSE_B.AT3": {
+     "md5": "4fad41a306bca185ce6aa90ba7cfc55a",
+     "offset": 118652928,
+     "size": 282404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/LOSE_H.AT3": {
+     "md5": "649f9846c7b3b8c0588dd700ab786379",
+     "offset": 118947840,
+     "size": 259444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M01.AT3": {
+     "md5": "b9a3a1ede904534cd1c9b2157d87bfbb",
+     "offset": 119209984,
+     "size": 439764
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M02.AT3": {
+     "md5": "d24e24cdb278f3ea894b9666267b0169",
+     "offset": 119668736,
+     "size": 598244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M03.AT3": {
+     "md5": "4ef1c5278ee3db6d4004904d97f9f8ed",
+     "offset": 120291328,
+     "size": 688964
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M04.AT3": {
+     "md5": "4ef1c5278ee3db6d4004904d97f9f8ed",
+     "offset": 121012224,
+     "size": 688964
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M05.AT3": {
+     "md5": "d24e24cdb278f3ea894b9666267b0169",
+     "offset": 121733120,
+     "size": 598244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/PRELUDE.AT3": {
+     "md5": "197a15ea53a8cfe189b7741f337bb1e0",
+     "offset": 122355712,
+     "size": 875492
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R01.AT3": {
+     "md5": "52976026df1bca50ede447e461965dcc",
+     "offset": 123469824,
+     "size": 580324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R02.AT3": {
+     "md5": "c1d0f14ac543d3f5ef1088c8a476350c",
+     "offset": 124059648,
+     "size": 648084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R03.AT3": {
+     "md5": "f86df5189775b46fb3c1958571312e77",
+     "offset": 124715008,
+     "size": 862004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R04.AT3": {
+     "md5": "e97f9893bc9ca3f9674ec05a17c3e20c",
+     "offset": 125599744,
+     "size": 938164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R05.AT3": {
+     "md5": "12d7f6a0b390fc828fd476d1ff474676",
+     "offset": 126550016,
+     "size": 603844
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R06.AT3": {
+     "md5": "59ba74279e2b1fedccdc62fffe7fccba",
+     "offset": 127172608,
+     "size": 405604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R07.AT3": {
+     "md5": "51376618ab71813d67569acb9aed3be8",
+     "offset": 127598592,
+     "size": 811604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R08.AT3": {
+     "md5": "b2bf09d804a5293fcd7dabd05fc1a03a",
+     "offset": 128417792,
+     "size": 812724
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R09.AT3": {
+     "md5": "631471f488872bf19ed03d8215ba8f77",
+     "offset": 129236992,
+     "size": 724804
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R10.AT3": {
+     "md5": "f3b77c8acbdbe49f425da28f25981aec",
+     "offset": 129990656,
+     "size": 767364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R11.AT3": {
+     "md5": "17219ab3fea5a00c2f5c8bb30a34f34b",
+     "offset": 130777088,
+     "size": 877124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R12.AT3": {
+     "md5": "6aa458f3a723b222737f8c7ffc63f347",
+     "offset": 131661824,
+     "size": 612804
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R13.AT3": {
+     "md5": "3c57f2455090b35814aebe35828e1fd5",
+     "offset": 132284416,
+     "size": 641364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R14.AT3": {
+     "md5": "1af1875c9885fe97aea2f4ed6f367dc9",
+     "offset": 132939776,
+     "size": 909604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R_CLEAR.AT3": {
+     "md5": "69028a2c465e42a960f2a6dfff3c4304",
+     "offset": 123240448,
+     "size": 220244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_01CHOS.AT3": {
+     "md5": "637ab501b71fefc3d2c95c483688b7c8",
+     "offset": 133857280,
+     "size": 1378324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_01GURUGU.AT3": {
+     "md5": "470fa089ff2bd99aa6f46683bff26a6b",
+     "offset": 135266304,
+     "size": 398324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_01MATOYA.AT3": {
+     "md5": "eb8dd94f1b48880fc14a4bad8bee4bb5",
+     "offset": 135692288,
+     "size": 596124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_02DUNGE.AT3": {
+     "md5": "7a27d5c26a691b01ea5f6565c588f308",
+     "offset": 136314880,
+     "size": 807684
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_02PANDEMO.AT3": {
+     "md5": "71ab817687aced124af328896fea5127",
+     "offset": 137134080,
+     "size": 2068244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_02TEIKOKU.AT3": {
+     "md5": "cd9a6d688738f5767aff8df038cddffb",
+     "offset": 139231232,
+     "size": 521524
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_03BATTLE1.AT3": {
+     "md5": "93ed4887cd40680d6f3f1b313b98e3ab",
+     "offset": 139755520,
+     "size": 1615204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_03CRYSTAL.AT3": {
+     "md5": "3a8f6156e93e279cc763645d9aeca169",
+     "offset": 141393920,
+     "size": 778108
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_03DOUGA.AT3": {
+     "md5": "460014760cca0d89c8dbeafb38d6977a",
+     "offset": 142180352,
+     "size": 490724
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04AINO.AT3": {
+     "md5": "87bcf6c466622af6ec7074f73b932493",
+     "offset": 142671872,
+     "size": 994724
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04BATTLE1.AT3": {
+     "md5": "c74ad4afb82dc1e4f008824eebb5cb76",
+     "offset": 143687680,
+     "size": 1567604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04DUNGE.AT3": {
+     "md5": "7cdead99a677f413ee94bb07848bef8b",
+     "offset": 145260544,
+     "size": 683364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04GIWAKU.AT3": {
+     "md5": "a7e3bd2f0a9983bf22e4df9ec39772a6",
+     "offset": 145948672,
+     "size": 648388
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05DUNGE.AT3": {
+     "md5": "3b260387575e10d9c42c02bfc584be04",
+     "offset": 146604032,
+     "size": 890004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05HARUKA.AT3": {
+     "md5": "734e028a95530cd5e09803d32d52efbd",
+     "offset": 147521536,
+     "size": 905684
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05LBATTLE.AT3": {
+     "md5": "ee54dcdedebb3de404ef7150610357eb",
+     "offset": 149749760,
+     "size": 1287044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05L_BATTLE.AT3": {
+     "md5": "22f3ecde0b5c57543efd06cdb33f607d",
+     "offset": 148439040,
+     "size": 1287604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_06MAYOI.AT3": {
+     "md5": "1b1e5facb20d5c2c1e0f911d1e4691f6",
+     "offset": 151060480,
+     "size": 823228
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_06NAKAMA.AT3": {
+     "md5": "70d8f4e9ac37389ba4630bd6a20380d2",
+     "offset": 151912448,
+     "size": 999764
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_06SENTO.AT3": {
+     "md5": "0d4ecb21212557e795238262191db67f",
+     "offset": 152928256,
+     "size": 788084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07JENOVA.AT3": {
+     "md5": "2de16f92db0e235563511de47887caab",
+     "offset": 153747456,
+     "size": 1222644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07JYUKAI.AT3": {
+     "md5": "32fe38511f330c6e85cbfa1933cd8d6e",
+     "offset": 154992640,
+     "size": 687492
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07TATAKAU.AT3": {
+     "md5": "63b24ae27ce06c1f1b17001741db095e",
+     "offset": 155680768,
+     "size": 981284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07TIFA.AT3": {
+     "md5": "91ef2595041281d763622b276d61ee6e",
+     "offset": 156663808,
+     "size": 618404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08FIND.AT3": {
+     "md5": "d8028300c3d700f68dbf855fdbc48329",
+     "offset": 157286400,
+     "size": 792004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08FORCE.AT3": {
+     "md5": "d4bffe2a5a3d921d319d13add2a29c20",
+     "offset": 158105600,
+     "size": 1336324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08JULIA.AT3": {
+     "md5": "ef6be21afa41dd3e0d84f9f635447aff",
+     "offset": 159449088,
+     "size": 550084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08PREMONI.AT3": {
+     "md5": "ecaf1e9cfbd42279acd7ed3a48f23208",
+     "offset": 160006144,
+     "size": 1878404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_09HITORI.AT3": {
+     "md5": "d83cb2374d2f63d2a76a6623c8f4eac3",
+     "offset": 161906688,
+     "size": 1654404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_09ITSUKA.AT3": {
+     "md5": "5287a2515ef92a9a89b887c5d14a605e",
+     "offset": 163577856,
+     "size": 820004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_09SAIGONO.AT3": {
+     "md5": "b98c04dc51508cfb1c920969e1be6352",
+     "offset": 164429824,
+     "size": 1273044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10ITSUKA.AT3": {
+     "md5": "d11959be5a8ba947ef5d323cc1cb476b",
+     "offset": 165707776,
+     "size": 1826324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10JYOUZAI.AT3": {
+     "md5": "0348bafcda92ec4342be054969114bcb",
+     "offset": 167542784,
+     "size": 802644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10KESEN.AT3": {
+     "md5": "60f6463611a17d83f7dc96e50d2bac0e",
+     "offset": 168361984,
+     "size": 2232324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10YUNA.AT3": {
+     "md5": "0f09fd290c18aae0f0cddfd801b494f1",
+     "offset": 170622976,
+     "size": 658540
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11AREALM.AT3": {
+     "md5": "328597d8e2b399e80c86ce6df37f39b0",
+     "offset": 171311104,
+     "size": 1389524
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11HEAVEN.AT3": {
+     "md5": "6398a3856f97b57664574a674baa5e68",
+     "offset": 172720128,
+     "size": 889028
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11IRON.AT3": {
+     "md5": "a33d2fc720e69b1279ecd25716fdcc92",
+     "offset": 173637632,
+     "size": 1493124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11RONF.AT3": {
+     "md5": "66a909befc3d223fafb1458d5231eee1",
+     "offset": 175144960,
+     "size": 803676
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12GORUMOA.AT3": {
+     "md5": "c0e4c9ea06f74e54c9614b37660859c4",
+     "offset": 175964160,
+     "size": 949188
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12HIGASI.AT3": {
+     "md5": "4bbd888e68914e44e04d8842ead80d06",
+     "offset": 176914432,
+     "size": 720324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12JIYUU.AT3": {
+     "md5": "d9072ee34630b03a59e54a633db02006",
+     "offset": 53411840,
+     "size": 2359444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12SYOUKAN.AT3": {
+     "md5": "153a3fa2fddc40e15961d277cd5265f3",
+     "offset": 178913280,
+     "size": 1194644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13ARUKA.AT3": {
+     "md5": "910d055f50f19ee1ce75f4299de3eadc",
+     "offset": 180125696,
+     "size": 830748
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13BATTLE.AT3": {
+     "md5": "5cd6dc52a6e5cc9d548d8122e41ffbaa",
+     "offset": 180977664,
+     "size": 2436164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13BOSSBAT.AT3": {
+     "md5": "feb36e0524ced2dafb920d9c3cafea19",
+     "offset": 183435264,
+     "size": 1981444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13HUNG.AT3": {
+     "md5": "ca1fa159b9e1f7f8aa8b62738a128183",
+     "offset": 185434112,
+     "size": 995060
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13LAST.AT3": {
+     "md5": "14d3482b59c57ab8bfb5cb276b8c8dcb",
+     "offset": 186449920,
+     "size": 3116564
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_DUN_DFF.AT3": {
+     "md5": "82a5793a47ef6d37549d18ca988fa491",
+     "offset": 189595648,
+     "size": 632596
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT05.AT3": {
+     "md5": "48a4986d84efe26e17ab5ef36c103574",
+     "offset": 194478080,
+     "size": 583716
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_01.AT3": {
+     "md5": "6a627ccf353033b3100b7e1bd1e84b96",
+     "offset": 190251008,
+     "size": 584468
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_02.AT3": {
+     "md5": "f84b68e0de8afd01a8d0be889943cab4",
+     "offset": 190840832,
+     "size": 713044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_03.AT3": {
+     "md5": "1faa2fdc319d2f95fc830fc0bb2b7d57",
+     "offset": 191561728,
+     "size": 576948
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_04.AT3": {
+     "md5": "106b55bd1db7035addd2343178e89c0a",
+     "offset": 192151552,
+     "size": 772404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_05.AT3": {
+     "md5": "e3569779b43f229a911d035d0e430fec",
+     "offset": 192937984,
+     "size": 898404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_06.AT3": {
+     "md5": "276e6456908bf906217d08289b6fe35b",
+     "offset": 193855488,
+     "size": 608532
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_INSTALL.AT3": {
+     "md5": "b81a327ed5b154b32c7072b384dfcdd2",
+     "offset": 195067904,
+     "size": 611124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MANBO.AT3": {
+     "md5": "920dd10a165a0511a3ca8cd79fe24fd7",
+     "offset": 195690496,
+     "size": 417924
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MENU01.AT3": {
+     "md5": "d19d4df79449638ad27c5e73169ab244",
+     "offset": 196116480,
+     "size": 797604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MENU02.AT3": {
+     "md5": "6bc57bc7e77cf6ece9e3c0bd443ce349",
+     "offset": 196935680,
+     "size": 869284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MENU03.AT3": {
+     "md5": "f5cdd17dcca180d7fab326169e24eafc",
+     "offset": 197820416,
+     "size": 757844
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_URACHOAS.AT3": {
+     "md5": "e290ddbcd2af12236dbfb5850f5f471c",
+     "offset": 198606848,
+     "size": 5318484
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_WORLDMAP.AT3": {
+     "md5": "d33a4438442ca8c887fe689b0f3c0ce6",
+     "offset": 203948032,
+     "size": 849124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/WIN_B.AT3": {
+     "md5": "eb2c437589c2384df2addda9da028107",
+     "offset": 204800000,
+     "size": 292692
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/WIN_H.AT3": {
+     "md5": "3f9ac81c7c4bd569dfa8974a5551f203",
+     "offset": 205094912,
+     "size": 263740
+    },
+    "PSP_GAME/USRDIR/DATA/MODULE/LIBFONT.PRX": {
+     "md5": "3aaa244cb0e6f4a9408dc12dbcf0689e",
+     "offset": 53182464,
+     "size": 20752
+    },
+    "PSP_GAME/USRDIR/DATA/MODULE/LIBSUPPREACC.PRX": {
+     "md5": "73674ad04735145771d8990d544b066f",
+     "offset": 53215232,
+     "size": 24868
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_001.PMF": {
+     "md5": "d731ba7f2510bd5e1b35cc1c747435d8",
+     "offset": 205389824,
+     "size": 3737600
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_002.PMF": {
+     "md5": "4af7f0daa447d96706c56b4cfc9bf759",
+     "offset": 209158144,
+     "size": 38920192
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_003.PMF": {
+     "md5": "e74bdec81a85adea8e865ea5b98fa262",
+     "offset": 248086528,
+     "size": 25524224
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_004.PMF": {
+     "md5": "235b22648a8362033a2b34256e87b3a0",
+     "offset": 273612800,
+     "size": 25131008
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_005.PMF": {
+     "md5": "0845399f85ba585d9277ffef5011b876",
+     "offset": 298745856,
+     "size": 10702848
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES01_001.PMF": {
+     "md5": "5d1c7be7365b9e9a32c8e9370c21901c",
+     "offset": 309460992,
+     "size": 6080512
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES01_010.PMF": {
+     "md5": "0710b9634a5b62d41186739194e4d452",
+     "offset": 315555840,
+     "size": 4460544
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES02_001.PMF": {
+     "md5": "fbca37f349957390298787fc7d3667a8",
+     "offset": 320045056,
+     "size": 8083456
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES02_010.PMF": {
+     "md5": "8927bfa4932fc5c4ebb612570fba448f",
+     "offset": 328138752,
+     "size": 5822464
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES03_001.PMF": {
+     "md5": "c1d548827a7475cabfdc2f1278ad9bc0",
+     "offset": 333971456,
+     "size": 10426368
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES03_010.PMF": {
+     "md5": "8812780a2c2b157c23d1121a542db8b0",
+     "offset": 344424448,
+     "size": 5249024
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES04_001.PMF": {
+     "md5": "24c5d0f246802f51b961c6b4b6b12f9b",
+     "offset": 349700096,
+     "size": 7766016
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES04_010.PMF": {
+     "md5": "40072f7c8ef38cee1a121e9467735667",
+     "offset": 357466112,
+     "size": 5279744
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES05_001.PMF": {
+     "md5": "16d6abcdb08e6efb1489177d0764925b",
+     "offset": 362774528,
+     "size": 11288576
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES05_010.PMF": {
+     "md5": "995c395ee8fe84aaf006553986935ff8",
+     "offset": 374079488,
+     "size": 4896768
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES06_001.PMF": {
+     "md5": "efcf0ed7f9e489d2690538e87e8defbe",
+     "offset": 1416593408,
+     "size": 9326592
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES06_010.PMF": {
+     "md5": "aca0d043759517c28b19074650cde663",
+     "offset": 1425932288,
+     "size": 2846720
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES07_001.PMF": {
+     "md5": "35c672f48b08295e7979443a15a762a5",
+     "offset": 1428783104,
+     "size": 8529920
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES07_010.PMF": {
+     "md5": "0decc2c63ecfbf56b00bf97b9c793fc6",
+     "offset": 1437335552,
+     "size": 5011456
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES08_001.PMF": {
+     "md5": "c67d2e4944e42465b1cd2ef33b390061",
+     "offset": 1442349056,
+     "size": 9809920
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES08_010.PMF": {
+     "md5": "e80bbed49258a757c72c43ff77b828d1",
+     "offset": 1452179456,
+     "size": 4814848
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES09_001.PMF": {
+     "md5": "ecfa68fc68491cf3887aa928b3114fc9",
+     "offset": 1456996352,
+     "size": 5378048
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES09_010.PMF": {
+     "md5": "45dd9756c91892c4eba918870d4c6593",
+     "offset": 1462403072,
+     "size": 5343232
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES10_001.PMF": {
+     "md5": "6abaf49e5c130004934b7383d918c9de",
+     "offset": 1467777024,
+     "size": 9895936
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/END.PMF": {
+     "md5": "cafd55a7e8f91de2eb831a228913b8b7",
+     "offset": 1593114624,
+     "size": 161398784
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/FFST03COSMOS.PMF": {
+     "md5": "41cb742604489395b0de119e2c21666f",
+     "offset": 1477672960,
+     "size": 1447936
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/LOP.PMF": {
+     "md5": "b4fc7fca86705178c3e0e1d45ebbb4f9",
+     "offset": 1479147520,
+     "size": 37873664
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/M_FF01_002.PMF": {
+     "md5": "8f86f3b86c88507b6b9af55aa155dc63",
+     "offset": 1517027328,
+     "size": 5279744
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/M_ST04_001.PMF": {
+     "md5": "8a3cdf8018c4cc4bc133eba644633b2e",
+     "offset": 1522335744,
+     "size": 15144960
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_ENB.PMF": {
+     "md5": "adcbebb9313ce7b11d0f650fc60dc662",
+     "offset": 1589772288,
+     "size": 3321856
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_END.PMF": {
+     "md5": "e351f311839e5c2858da69bfa1934db5",
+     "offset": 1537507328,
+     "size": 27766784
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_GIL.PMF": {
+     "md5": "53124fe41bf74cd535bf20af48c0ab5e",
+     "offset": 1565294592,
+     "size": 5085184
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_OPN.PMF": {
+     "md5": "fd9f87b6d2ec9b8d4ef6c1ddb4e65c02",
+     "offset": 1570406400,
+     "size": 15026176
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_PRI.PMF": {
+     "md5": "21490f0a302632606acaa78d16b36493",
+     "offset": 1585446912,
+     "size": 4296704
+    },
+    "PSP_GAME/USRDIR/DATA/OVL_BATTLE_APP.ELF": {
+     "md5": "47ec8e208d055c9f00aaca9927fc1c5a",
+     "offset": 380567552,
+     "size": 1596312
+    },
+    "PSP_GAME/USRDIR/DATA/OVL_EXTRA_APP.ELF": {
+     "md5": "22ed5d0749b3c0f89290a605029707f2",
+     "offset": 382173184,
+     "size": 24544
+    },
+    "PSP_GAME/USRDIR/DATA/OVL_MENU_APP.ELF": {
+     "md5": "ef4cdd610491809aeb7fbfb7f9ebd7d3",
+     "offset": 378994688,
+     "size": 1556096
+    },
+    "PSP_GAME/USRDIR/DATA/PACKAGE.BIN": {
+     "md5": "436a3db93073614598362a2e9e16a9d4",
+     "offset": 382205952,
+     "size": 1034358784,
+     "variants": [
+      {
+       "differs": [
+        [
+         0,
+         4096
+        ],
+        [
+         6144,
+         8192
+        ]
+       ],
+       "disc": "ULUS10566",
+       "md5": "ae62eafc260cda65737b8416b423c85d"
+      }
+     ]
+    },
+    "PSP_GAME/USRDIR/DATA/PACKAGE_INFO.BIN": {
+     "md5": "6e494cbfc2a72e8695490ddeb6667a21",
+     "offset": 53248000,
+     "size": 132532
+    },
+    "UMD_DATA.BIN": {
+     "md5": "448ccc100692610fb872947e469d8daa",
+     "offset": 71680,
+     "size": 48
+    }
+   },
+   "id": "ULES01505",
+   "size": 1754529792
+  },
+  {
+   "blobs": [
+    {
+     "data": "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",
+     "offset": 28672
+    },
+    {
+     "data": "eNoL9QkN1jU0MDUzqzE0sXAxMnc1NjF1NHU2MDOuMTAwMKxxZ0AGNQAK2Aju",
+     "offset": 71680
+    },
+    {
+     "data": "eNqrCwgOYGBgYmBkdHMLDvECsrEBRqYtF9wYBC65gXkcRjIME24xMDIIACEQODg0cBQYbuOAqW6YLMsw4TZQHg8QYGBm4wTS8o8XLa754XhooZqfl+3hRvMX+n8Ov/E0Ez268cme+kNXamT7nb50Jnn8rLNQUzqg4uUCckcDkjkn7tdtnnr7STNrkO674Hqu3R+ExW4y0AgwCjNGblmz6x/Tt4k+qQJB/e4vuRfqOIvMzuflmdbz4vGOCvFlrQCI/0IU",
+     "offset": 1146880
+    }
+   ],
+   "files": {
+    "PSP_GAME/ICON0.PNG": {
+     "md5": "e1a54b4dc0dd60c51c96ac45aaa11c0e",
+     "offset": 52461568,
+     "size": 17207
+    },
+    "PSP_GAME/ICON1.PMF": {
+     "md5": "ab831367168fca663154614523058fb4",
+     "offset": 52494336,
+     "size": 260096
+    },
+    "PSP_GAME/PARAM.SFO": {
+     "md5": "d05d3d02fb0c7b88084f5a82a4012cf9",
+     "offset": 52428800,
+     "size": 560
+    },
+    "PSP_GAME/PIC1.PNG": {
+     "md5": "cda1408828546aeb8fb1bb87404405ad",
+     "offset": 52756480,
+     "size": 170502
+    },
+    "PSP_GAME/SND0.AT3": {
+     "md5": "950103f101ab6120a1b0b5b4b4570e4f",
+     "offset": 52953088,
+     "size": 219964
+    },
+    "PSP_GAME/SYSDIR/BOOT.BIN": {
+     "md5": "1841984af9a364d922cf3d1950ad0b97",
+     "offset": 47775744,
+     "size": 4640948,
+     "zero": true
+    },
+    "PSP_GAME/SYSDIR/EBOOT.BIN": {
+     "md5": "a21e60c0dd63bcbfef4b7281ba9f50f9",
+     "offset": 1146880,
+     "size": 4641296
+    },
+    "PSP_GAME/SYSDIR/OPNSSMP.BIN": {
+     "md5": "c1d4a30d9c083d437c9a5bcef99a14b9",
+     "offset": 98304,
+     "size": 880
+    },
+    "PSP_GAME/SYSDIR/UPDATE/DATA.BIN": {
+     "md5": "f5a5709a5c5362667cefc1f5eaab46c6",
+     "offset": 14221312,
+     "size": 26091840
+    },
+    "PSP_GAME/SYSDIR/UPDATE/EBOOT.BIN": {
+     "md5": "1633b5f69911e4465d50a809365b8e49",
+     "offset": 5832704,
+     "size": 5540576
+    },
+    "PSP_GAME/SYSDIR/UPDATE/PARAM.SFO": {
+     "md5": "b5dd90e86704798afc761265da7325b9",
+     "offset": 5799936,
+     "size": 2080
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B01_01.AT3": {
+     "md5": "f63168ca7814b5d8caf3c39b46e8f678",
+     "offset": 177635328,
+     "size": 1258484
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B01_02.AT3": {
+     "md5": "a63786690b53c95b74b318643a55fea1",
+     "offset": 55803904,
+     "size": 1705364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B02_01.AT3": {
+     "md5": "72500ace0c504f086d30b7cabdb5e3d8",
+     "offset": 57540608,
+     "size": 1340244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B02_02.AT3": {
+     "md5": "54843e77c0e275f55e0348890aa1053c",
+     "offset": 58884096,
+     "size": 1001444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B03_01.AT3": {
+     "md5": "9c9bc0ab2301dd4cb6e5eb62cab73198",
+     "offset": 59899904,
+     "size": 2053124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B03_02.AT3": {
+     "md5": "6950c4a67fa87b9f82ca1441c3fcf83e",
+     "offset": 61964288,
+     "size": 853604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B04_01.AT3": {
+     "md5": "702881af6b273543d45692c59550880c",
+     "offset": 62849024,
+     "size": 1474644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B04_02.AT3": {
+     "md5": "d10c53c341117047e71a836022c78a4a",
+     "offset": 64356352,
+     "size": 914644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B05_01.AT3": {
+     "md5": "b3c6ceacf63d733edafc1298debc6976",
+     "offset": 65273856,
+     "size": 1047924
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B05_02.AT3": {
+     "md5": "c18f52036e0a63577e14253a068e25b5",
+     "offset": 66322432,
+     "size": 783044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B06_01.AT3": {
+     "md5": "f22849ee5d6857f9b0e780f4df180efc",
+     "offset": 67108864,
+     "size": 694564
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B06_02.AT3": {
+     "md5": "a82e67ee591660687ca4b5dc0386027b",
+     "offset": 67829760,
+     "size": 887204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B07_01.AT3": {
+     "md5": "47a85edfb880709bc941fdb377eed978",
+     "offset": 68747264,
+     "size": 3068964
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B07_02.AT3": {
+     "md5": "894ab03ecada5992a1946743f61ff1ed",
+     "offset": 71827456,
+     "size": 1125204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B08_01.AT3": {
+     "md5": "924efca663d8f1b12bc63c1cd3a76fcd",
+     "offset": 72974336,
+     "size": 1974164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B08_02.AT3": {
+     "md5": "0ecce80302e019dffefc870fa841ea0b",
+     "offset": 74973184,
+     "size": 1834164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B09_01.AT3": {
+     "md5": "fcac51c97a10f28f82edbdc841af2f74",
+     "offset": 76808192,
+     "size": 2207684
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B09_02.AT3": {
+     "md5": "5f339341cc309cde88d905036e146e89",
+     "offset": 79036416,
+     "size": 1380004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B10_01.AT3": {
+     "md5": "68c99d68d2369a464938fa4331de2cae",
+     "offset": 80445440,
+     "size": 1740084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B10_02.AT3": {
+     "md5": "b29c694f2a0e12148de9638fc080d4ad",
+     "offset": 82214912,
+     "size": 1242804
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B11.AT3": {
+     "md5": "878e62180a88c770689ed539060693ab",
+     "offset": 83460096,
+     "size": 1284244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B11_02.AT3": {
+     "md5": "25aab7a8b395bb707bed071c486a1d5c",
+     "offset": 84770816,
+     "size": 1292644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B11_03.AT3": {
+     "md5": "b123bb8d57435afab3f7ee313bea9eee",
+     "offset": 86081536,
+     "size": 1437124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B12.AT3": {
+     "md5": "1745a7f17d95d79a7426ab52a64fa5c4",
+     "offset": 87523328,
+     "size": 1496484
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B12_02.AT3": {
+     "md5": "5429bb979cd247799ca113159f79e76d",
+     "offset": 89030656,
+     "size": 4383284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B13.AT3": {
+     "md5": "2b937f173ed435a8e250420d7319daf0",
+     "offset": 93421568,
+     "size": 678884
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/B14.AT3": {
+     "md5": "a86ebc2e86863bea214db19e0c9c7ed8",
+     "offset": 94109696,
+     "size": 1205284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS01.AT3": {
+     "md5": "2e2e9e50f266e3200f57b92e9ba99c78",
+     "offset": 95322112,
+     "size": 274004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS02.AT3": {
+     "md5": "2f131713541890b4ffdb5056da337c80",
+     "offset": 95617024,
+     "size": 393284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS03.AT3": {
+     "md5": "de0d710cce843976bb4ab12fc81c4797",
+     "offset": 96043008,
+     "size": 442004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS04.AT3": {
+     "md5": "6f068467f7f6cfbb2686b9b8db24723a",
+     "offset": 96501760,
+     "size": 844644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS05.AT3": {
+     "md5": "44fd803e5cc6ec8b166199d7ebadadad",
+     "offset": 97353728,
+     "size": 2011124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS06.AT3": {
+     "md5": "80c7cc1fbb974653b14a1221449e6cf7",
+     "offset": 99385344,
+     "size": 2309604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS07.AT3": {
+     "md5": "a4699efab7faf187091b8c737a037ab5",
+     "offset": 101711872,
+     "size": 2529124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS08.AT3": {
+     "md5": "2adc62d6250a8a6b8e56a464856e7b8b",
+     "offset": 104267776,
+     "size": 1081524
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS09.AT3": {
+     "md5": "391c9638fbf3967c0dec748d6dda5d81",
+     "offset": 105381888,
+     "size": 2003284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS10.AT3": {
+     "md5": "936c609606ad2bc5591e799759b7b5e3",
+     "offset": 107413504,
+     "size": 2236244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS11.AT3": {
+     "md5": "ecabbf43c9220d7ba47f1dbaf1c9edeb",
+     "offset": 109674496,
+     "size": 3287924
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/BS12.AT3": {
+     "md5": "4700fb3af31982f50a5b34c235c3ca02",
+     "offset": 112984064,
+     "size": 1072004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E01.AT3": {
+     "md5": "113f1012025b458ee2a29f41e0964516",
+     "offset": 114065408,
+     "size": 831204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E02.AT3": {
+     "md5": "9630596970012bf5247945703debb1fb",
+     "offset": 114917376,
+     "size": 458244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E03.AT3": {
+     "md5": "b172931ae21c6b1d9e1648559121f7d7",
+     "offset": 115376128,
+     "size": 788636
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/E04.AT3": {
+     "md5": "e0fb7fbaca002dade82e633f53dcbdff",
+     "offset": 116195328,
+     "size": 606652
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/FF7TATAKAU.AT3": {
+     "md5": "63b24ae27ce06c1f1b17001741db095e",
+     "offset": 116817920,
+     "size": 981284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/INSTALL.AT3": {
+     "md5": "b81a327ed5b154b32c7072b384dfcdd2",
+     "offset": 117800960,
+     "size": 611124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/INSTALL_OK.AT3": {
+     "md5": "fb96e123c554549dde4ceba2ec30d1f6",
+     "offset": 118423552,
+     "size": 216884
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/LOSE_B.AT3": {
+     "md5": "4fad41a306bca185ce6aa90ba7cfc55a",
+     "offset": 118652928,
+     "size": 282404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/LOSE_H.AT3": {
+     "md5": "649f9846c7b3b8c0588dd700ab786379",
+     "offset": 118947840,
+     "size": 259444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M01.AT3": {
+     "md5": "b9a3a1ede904534cd1c9b2157d87bfbb",
+     "offset": 119209984,
+     "size": 439764
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M02.AT3": {
+     "md5": "d24e24cdb278f3ea894b9666267b0169",
+     "offset": 119668736,
+     "size": 598244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M03.AT3": {
+     "md5": "4ef1c5278ee3db6d4004904d97f9f8ed",
+     "offset": 120291328,
+     "size": 688964
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M04.AT3": {
+     "md5": "4ef1c5278ee3db6d4004904d97f9f8ed",
+     "offset": 121012224,
+     "size": 688964
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/M05.AT3": {
+     "md5": "d24e24cdb278f3ea894b9666267b0169",
+     "offset": 121733120,
+     "size": 598244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/PRELUDE.AT3": {
+     "md5": "197a15ea53a8cfe189b7741f337bb1e0",
+     "offset": 122355712,
+     "size": 875492
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R01.AT3": {
+     "md5": "52976026df1bca50ede447e461965dcc",
+     "offset": 123469824,
+     "size": 580324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R02.AT3": {
+     "md5": "c1d0f14ac543d3f5ef1088c8a476350c",
+     "offset": 124059648,
+     "size": 648084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R03.AT3": {
+     "md5": "f86df5189775b46fb3c1958571312e77",
+     "offset": 124715008,
+     "size": 862004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R04.AT3": {
+     "md5": "e97f9893bc9ca3f9674ec05a17c3e20c",
+     "offset": 125599744,
+     "size": 938164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R05.AT3": {
+     "md5": "12d7f6a0b390fc828fd476d1ff474676",
+     "offset": 126550016,
+     "size": 603844
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R06.AT3": {
+     "md5": "59ba74279e2b1fedccdc62fffe7fccba",
+     "offset": 127172608,
+     "size": 405604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R07.AT3": {
+     "md5": "51376618ab71813d67569acb9aed3be8",
+     "offset": 127598592,
+     "size": 811604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R08.AT3": {
+     "md5": "b2bf09d804a5293fcd7dabd05fc1a03a",
+     "offset": 128417792,
+     "size": 812724
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R09.AT3": {
+     "md5": "631471f488872bf19ed03d8215ba8f77",
+     "offset": 129236992,
+     "size": 724804
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R10.AT3": {
+     "md5": "f3b77c8acbdbe49f425da28f25981aec",
+     "offset": 129990656,
+     "size": 767364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R11.AT3": {
+     "md5": "17219ab3fea5a00c2f5c8bb30a34f34b",
+     "offset": 130777088,
+     "size": 877124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R12.AT3": {
+     "md5": "6aa458f3a723b222737f8c7ffc63f347",
+     "offset": 131661824,
+     "size": 612804
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R13.AT3": {
+     "md5": "3c57f2455090b35814aebe35828e1fd5",
+     "offset": 132284416,
+     "size": 641364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R14.AT3": {
+     "md5": "1af1875c9885fe97aea2f4ed6f367dc9",
+     "offset": 132939776,
+     "size": 909604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/R_CLEAR.AT3": {
+     "md5": "69028a2c465e42a960f2a6dfff3c4304",
+     "offset": 123240448,
+     "size": 220244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_01CHOS.AT3": {
+     "md5": "637ab501b71fefc3d2c95c483688b7c8",
+     "offset": 133857280,
+     "size": 1378324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_01GURUGU.AT3": {
+     "md5": "470fa089ff2bd99aa6f46683bff26a6b",
+     "offset": 135266304,
+     "size": 398324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_01MATOYA.AT3": {
+     "md5": "eb8dd94f1b48880fc14a4bad8bee4bb5",
+     "offset": 135692288,
+     "size": 596124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_02DUNGE.AT3": {
+     "md5": "7a27d5c26a691b01ea5f6565c588f308",
+     "offset": 136314880,
+     "size": 807684
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_02PANDEMO.AT3": {
+     "md5": "71ab817687aced124af328896fea5127",
+     "offset": 137134080,
+     "size": 2068244
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_02TEIKOKU.AT3": {
+     "md5": "cd9a6d688738f5767aff8df038cddffb",
+     "offset": 139231232,
+     "size": 521524
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_03BATTLE1.AT3": {
+     "md5": "93ed4887cd40680d6f3f1b313b98e3ab",
+     "offset": 139755520,
+     "size": 1615204
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_03CRYSTAL.AT3": {
+     "md5": "3a8f6156e93e279cc763645d9aeca169",
+     "offset": 141393920,
+     "size": 778108
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_03DOUGA.AT3": {
+     "md5": "460014760cca0d89c8dbeafb38d6977a",
+     "offset": 142180352,
+     "size": 490724
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04AINO.AT3": {
+     "md5": "87bcf6c466622af6ec7074f73b932493",
+     "offset": 142671872,
+     "size": 994724
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04BATTLE1.AT3": {
+     "md5": "c74ad4afb82dc1e4f008824eebb5cb76",
+     "offset": 143687680,
+     "size": 1567604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04DUNGE.AT3": {
+     "md5": "7cdead99a677f413ee94bb07848bef8b",
+     "offset": 145260544,
+     "size": 683364
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_04GIWAKU.AT3": {
+     "md5": "a7e3bd2f0a9983bf22e4df9ec39772a6",
+     "offset": 145948672,
+     "size": 648388
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05DUNGE.AT3": {
+     "md5": "3b260387575e10d9c42c02bfc584be04",
+     "offset": 146604032,
+     "size": 890004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05HARUKA.AT3": {
+     "md5": "734e028a95530cd5e09803d32d52efbd",
+     "offset": 147521536,
+     "size": 905684
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05LBATTLE.AT3": {
+     "md5": "ee54dcdedebb3de404ef7150610357eb",
+     "offset": 149749760,
+     "size": 1287044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_05L_BATTLE.AT3": {
+     "md5": "22f3ecde0b5c57543efd06cdb33f607d",
+     "offset": 148439040,
+     "size": 1287604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_06MAYOI.AT3": {
+     "md5": "1b1e5facb20d5c2c1e0f911d1e4691f6",
+     "offset": 151060480,
+     "size": 823228
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_06NAKAMA.AT3": {
+     "md5": "70d8f4e9ac37389ba4630bd6a20380d2",
+     "offset": 151912448,
+     "size": 999764
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_06SENTO.AT3": {
+     "md5": "0d4ecb21212557e795238262191db67f",
+     "offset": 152928256,
+     "size": 788084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07JENOVA.AT3": {
+     "md5": "2de16f92db0e235563511de47887caab",
+     "offset": 153747456,
+     "size": 1222644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07JYUKAI.AT3": {
+     "md5": "32fe38511f330c6e85cbfa1933cd8d6e",
+     "offset": 154992640,
+     "size": 687492
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07TATAKAU.AT3": {
+     "md5": "63b24ae27ce06c1f1b17001741db095e",
+     "offset": 155680768,
+     "size": 981284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_07TIFA.AT3": {
+     "md5": "91ef2595041281d763622b276d61ee6e",
+     "offset": 156663808,
+     "size": 618404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08FIND.AT3": {
+     "md5": "d8028300c3d700f68dbf855fdbc48329",
+     "offset": 157286400,
+     "size": 792004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08FORCE.AT3": {
+     "md5": "d4bffe2a5a3d921d319d13add2a29c20",
+     "offset": 158105600,
+     "size": 1336324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08JULIA.AT3": {
+     "md5": "ef6be21afa41dd3e0d84f9f635447aff",
+     "offset": 159449088,
+     "size": 550084
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_08PREMONI.AT3": {
+     "md5": "ecaf1e9cfbd42279acd7ed3a48f23208",
+     "offset": 160006144,
+     "size": 1878404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_09HITORI.AT3": {
+     "md5": "d83cb2374d2f63d2a76a6623c8f4eac3",
+     "offset": 161906688,
+     "size": 1654404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_09ITSUKA.AT3": {
+     "md5": "5287a2515ef92a9a89b887c5d14a605e",
+     "offset": 163577856,
+     "size": 820004
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_09SAIGONO.AT3": {
+     "md5": "b98c04dc51508cfb1c920969e1be6352",
+     "offset": 164429824,
+     "size": 1273044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10ITSUKA.AT3": {
+     "md5": "d11959be5a8ba947ef5d323cc1cb476b",
+     "offset": 165707776,
+     "size": 1826324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10JYOUZAI.AT3": {
+     "md5": "0348bafcda92ec4342be054969114bcb",
+     "offset": 167542784,
+     "size": 802644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10KESEN.AT3": {
+     "md5": "60f6463611a17d83f7dc96e50d2bac0e",
+     "offset": 168361984,
+     "size": 2232324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_10YUNA.AT3": {
+     "md5": "0f09fd290c18aae0f0cddfd801b494f1",
+     "offset": 170622976,
+     "size": 658540
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11AREALM.AT3": {
+     "md5": "328597d8e2b399e80c86ce6df37f39b0",
+     "offset": 171311104,
+     "size": 1389524
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11HEAVEN.AT3": {
+     "md5": "6398a3856f97b57664574a674baa5e68",
+     "offset": 172720128,
+     "size": 889028
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11IRON.AT3": {
+     "md5": "a33d2fc720e69b1279ecd25716fdcc92",
+     "offset": 173637632,
+     "size": 1493124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_11RONF.AT3": {
+     "md5": "66a909befc3d223fafb1458d5231eee1",
+     "offset": 175144960,
+     "size": 803676
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12GORUMOA.AT3": {
+     "md5": "c0e4c9ea06f74e54c9614b37660859c4",
+     "offset": 175964160,
+     "size": 949188
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12HIGASI.AT3": {
+     "md5": "4bbd888e68914e44e04d8842ead80d06",
+     "offset": 176914432,
+     "size": 720324
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12JIYUU.AT3": {
+     "md5": "d9072ee34630b03a59e54a633db02006",
+     "offset": 53411840,
+     "size": 2359444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_12SYOUKAN.AT3": {
+     "md5": "153a3fa2fddc40e15961d277cd5265f3",
+     "offset": 178913280,
+     "size": 1194644
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13ARUKA.AT3": {
+     "md5": "910d055f50f19ee1ce75f4299de3eadc",
+     "offset": 180125696,
+     "size": 830748
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13BATTLE.AT3": {
+     "md5": "5cd6dc52a6e5cc9d548d8122e41ffbaa",
+     "offset": 180977664,
+     "size": 2436164
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13BOSSBAT.AT3": {
+     "md5": "feb36e0524ced2dafb920d9c3cafea19",
+     "offset": 183435264,
+     "size": 1981444
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13HUNG.AT3": {
+     "md5": "ca1fa159b9e1f7f8aa8b62738a128183",
+     "offset": 185434112,
+     "size": 995060
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_13LAST.AT3": {
+     "md5": "14d3482b59c57ab8bfb5cb276b8c8dcb",
+     "offset": 186449920,
+     "size": 3116564
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_DUN_DFF.AT3": {
+     "md5": "82a5793a47ef6d37549d18ca988fa491",
+     "offset": 189595648,
+     "size": 632596
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT05.AT3": {
+     "md5": "48a4986d84efe26e17ab5ef36c103574",
+     "offset": 194478080,
+     "size": 583716
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_01.AT3": {
+     "md5": "6a627ccf353033b3100b7e1bd1e84b96",
+     "offset": 190251008,
+     "size": 584468
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_02.AT3": {
+     "md5": "f84b68e0de8afd01a8d0be889943cab4",
+     "offset": 190840832,
+     "size": 713044
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_03.AT3": {
+     "md5": "1faa2fdc319d2f95fc830fc0bb2b7d57",
+     "offset": 191561728,
+     "size": 576948
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_04.AT3": {
+     "md5": "106b55bd1db7035addd2343178e89c0a",
+     "offset": 192151552,
+     "size": 772404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_05.AT3": {
+     "md5": "e3569779b43f229a911d035d0e430fec",
+     "offset": 192937984,
+     "size": 898404
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_EVENT_06.AT3": {
+     "md5": "276e6456908bf906217d08289b6fe35b",
+     "offset": 193855488,
+     "size": 608532
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_INSTALL.AT3": {
+     "md5": "b81a327ed5b154b32c7072b384dfcdd2",
+     "offset": 195067904,
+     "size": 611124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MANBO.AT3": {
+     "md5": "920dd10a165a0511a3ca8cd79fe24fd7",
+     "offset": 195690496,
+     "size": 417924
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MENU01.AT3": {
+     "md5": "d19d4df79449638ad27c5e73169ab244",
+     "offset": 196116480,
+     "size": 797604
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MENU02.AT3": {
+     "md5": "6bc57bc7e77cf6ece9e3c0bd443ce349",
+     "offset": 196935680,
+     "size": 869284
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_MENU03.AT3": {
+     "md5": "f5cdd17dcca180d7fab326169e24eafc",
+     "offset": 197820416,
+     "size": 757844
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_URACHOAS.AT3": {
+     "md5": "e290ddbcd2af12236dbfb5850f5f471c",
+     "offset": 198606848,
+     "size": 5318484
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/U_WORLDMAP.AT3": {
+     "md5": "d33a4438442ca8c887fe689b0f3c0ce6",
+     "offset": 203948032,
+     "size": 849124
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/WIN_B.AT3": {
+     "md5": "eb2c437589c2384df2addda9da028107",
+     "offset": 204800000,
+     "size": 292692
+    },
+    "PSP_GAME/USRDIR/DATA/BGM/WIN_H.AT3": {
+     "md5": "3f9ac81c7c4bd569dfa8974a5551f203",
+     "offset": 205094912,
+     "size": 263740
+    },
+    "PSP_GAME/USRDIR/DATA/MODULE/LIBFONT.PRX": {
+     "md5": "3aaa244cb0e6f4a9408dc12dbcf0689e",
+     "offset": 53182464,
+     "size": 20752
+    },
+    "PSP_GAME/USRDIR/DATA/MODULE/LIBSUPPREACC.PRX": {
+     "md5": "73674ad04735145771d8990d544b066f",
+     "offset": 53215232,
+     "size": 24868
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_001.PMF": {
+     "md5": "d731ba7f2510bd5e1b35cc1c747435d8",
+     "offset": 205389824,
+     "size": 3737600
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_002.PMF": {
+     "md5": "4af7f0daa447d96706c56b4cfc9bf759",
+     "offset": 209158144,
+     "size": 38920192
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_003.PMF": {
+     "md5": "e74bdec81a85adea8e865ea5b98fa262",
+     "offset": 248086528,
+     "size": 25524224
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_004.PMF": {
+     "md5": "235b22648a8362033a2b34256e87b3a0",
+     "offset": 273612800,
+     "size": 25131008
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES00_005.PMF": {
+     "md5": "0845399f85ba585d9277ffef5011b876",
+     "offset": 298745856,
+     "size": 10702848
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES01_001.PMF": {
+     "md5": "5d1c7be7365b9e9a32c8e9370c21901c",
+     "offset": 309460992,
+     "size": 6080512
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES01_010.PMF": {
+     "md5": "0710b9634a5b62d41186739194e4d452",
+     "offset": 315555840,
+     "size": 4460544
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES02_001.PMF": {
+     "md5": "fbca37f349957390298787fc7d3667a8",
+     "offset": 320045056,
+     "size": 8083456
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES02_010.PMF": {
+     "md5": "8927bfa4932fc5c4ebb612570fba448f",
+     "offset": 328138752,
+     "size": 5822464
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES03_001.PMF": {
+     "md5": "c1d548827a7475cabfdc2f1278ad9bc0",
+     "offset": 333971456,
+     "size": 10426368
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES03_010.PMF": {
+     "md5": "8812780a2c2b157c23d1121a542db8b0",
+     "offset": 344424448,
+     "size": 5249024
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES04_001.PMF": {
+     "md5": "24c5d0f246802f51b961c6b4b6b12f9b",
+     "offset": 349700096,
+     "size": 7766016
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES04_010.PMF": {
+     "md5": "40072f7c8ef38cee1a121e9467735667",
+     "offset": 357466112,
+     "size": 5279744
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES05_001.PMF": {
+     "md5": "16d6abcdb08e6efb1489177d0764925b",
+     "offset": 362774528,
+     "size": 11288576
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES05_010.PMF": {
+     "md5": "995c395ee8fe84aaf006553986935ff8",
+     "offset": 374079488,
+     "size": 4896768
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES06_001.PMF": {
+     "md5": "efcf0ed7f9e489d2690538e87e8defbe",
+     "offset": 1416593408,
+     "size": 9326592
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES06_010.PMF": {
+     "md5": "aca0d043759517c28b19074650cde663",
+     "offset": 1425932288,
+     "size": 2846720
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES07_001.PMF": {
+     "md5": "35c672f48b08295e7979443a15a762a5",
+     "offset": 1428783104,
+     "size": 8529920
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES07_010.PMF": {
+     "md5": "0decc2c63ecfbf56b00bf97b9c793fc6",
+     "offset": 1437335552,
+     "size": 5011456
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES08_001.PMF": {
+     "md5": "c67d2e4944e42465b1cd2ef33b390061",
+     "offset": 1442349056,
+     "size": 9809920
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES08_010.PMF": {
+     "md5": "e80bbed49258a757c72c43ff77b828d1",
+     "offset": 1452179456,
+     "size": 4814848
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES09_001.PMF": {
+     "md5": "ecfa68fc68491cf3887aa928b3114fc9",
+     "offset": 1456996352,
+     "size": 5378048
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES09_010.PMF": {
+     "md5": "45dd9756c91892c4eba918870d4c6593",
+     "offset": 1462403072,
+     "size": 5343232
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/DES10_001.PMF": {
+     "md5": "6abaf49e5c130004934b7383d918c9de",
+     "offset": 1467777024,
+     "size": 9895936
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/END.PMF": {
+     "md5": "cafd55a7e8f91de2eb831a228913b8b7",
+     "offset": 1593114624,
+     "size": 161398784
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/FFST03COSMOS.PMF": {
+     "md5": "41cb742604489395b0de119e2c21666f",
+     "offset": 1477672960,
+     "size": 1447936
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/LOP.PMF": {
+     "md5": "b4fc7fca86705178c3e0e1d45ebbb4f9",
+     "offset": 1479147520,
+     "size": 37873664
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/M_FF01_002.PMF": {
+     "md5": "8f86f3b86c88507b6b9af55aa155dc63",
+     "offset": 1517027328,
+     "size": 5279744
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/M_ST04_001.PMF": {
+     "md5": "8a3cdf8018c4cc4bc133eba644633b2e",
+     "offset": 1522335744,
+     "size": 15144960
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_ENB.PMF": {
+     "md5": "adcbebb9313ce7b11d0f650fc60dc662",
+     "offset": 1589772288,
+     "size": 3321856
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_END.PMF": {
+     "md5": "e351f311839e5c2858da69bfa1934db5",
+     "offset": 1537507328,
+     "size": 27766784
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_GIL.PMF": {
+     "md5": "53124fe41bf74cd535bf20af48c0ab5e",
+     "offset": 1565294592,
+     "size": 5085184
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_OPN.PMF": {
+     "md5": "fd9f87b6d2ec9b8d4ef6c1ddb4e65c02",
+     "offset": 1570406400,
+     "size": 15026176
+    },
+    "PSP_GAME/USRDIR/DATA/MOVIE/UP_PRI.PMF": {
+     "md5": "21490f0a302632606acaa78d16b36493",
+     "offset": 1585446912,
+     "size": 4296704
+    },
+    "PSP_GAME/USRDIR/DATA/OVL_BATTLE_APP.ELF": {
+     "md5": "47ec8e208d055c9f00aaca9927fc1c5a",
+     "offset": 380567552,
+     "size": 1596312
+    },
+    "PSP_GAME/USRDIR/DATA/OVL_EXTRA_APP.ELF": {
+     "md5": "22ed5d0749b3c0f89290a605029707f2",
+     "offset": 382173184,
+     "size": 24544
+    },
+    "PSP_GAME/USRDIR/DATA/OVL_MENU_APP.ELF": {
+     "md5": "ef4cdd610491809aeb7fbfb7f9ebd7d3",
+     "offset": 378994688,
+     "size": 1556096
+    },
+    "PSP_GAME/USRDIR/DATA/PACKAGE.BIN": {
+     "md5": "ae62eafc260cda65737b8416b423c85d",
+     "offset": 382205952,
+     "size": 1034358784,
+     "variants": [
+      {
+       "differs": [
+        [
+         0,
+         4096
+        ],
+        [
+         6144,
+         8192
+        ]
+       ],
+       "disc": "ULES01505",
+       "md5": "436a3db93073614598362a2e9e16a9d4"
+      }
+     ]
+    },
+    "PSP_GAME/USRDIR/DATA/PACKAGE_INFO.BIN": {
+     "md5": "6e494cbfc2a72e8695490ddeb6667a21",
+     "offset": 53248000,
+     "size": 132532
+    },
+    "UMD_DATA.BIN": {
+     "md5": "b46a605dd5ee358f878bbf76f1573aac",
+     "offset": 71680,
+     "size": 48
+    }
+   },
+   "id": "ULUS10566",
+   "size": 1754529792
+  }
+ ]
+}

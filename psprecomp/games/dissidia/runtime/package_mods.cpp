@@ -173,6 +173,7 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
                         const std::string& mods_dir, std::string* log, std::string* err,
                         uint32_t index_capacity, const std::vector<std::string>& extra_dirs) {
     overrides_.clear();
+    duplicates_.clear();
     patched_ = original_index;
     package_size_ = package_size;
     PackageIndex idx;
@@ -224,8 +225,17 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
             crc = package_crc(norm);
         }
         if (st.st_size <= 0 || (uint64_t)st.st_size > kSizeMask) { note("[MODS] skip (size out of range): " + rel); continue; }
+        {
+            auto sk = skipped_.find(src.dir);
+            if (sk != skipped_.end() && sk->second.count(norm)) { note("[MODS] skip (its mod is off): " + rel); continue; }
+        }
         bool dup = false;
-        for (auto& o : overrides_) if (o.crc == crc) { note("[MODS] skip (duplicate of " + o.file + "): " + rel); dup = true; }
+        for (auto& o : overrides_)
+            if (o.crc == crc) {
+                note("[MODS] skip (duplicate of " + o.file + "): " + rel);
+                duplicates_.push_back({crc, asset, o.file, src.dir + "/" + rel});
+                dup = true;
+            }
         if (dup) continue;
 
         Override ov;
@@ -322,6 +332,18 @@ bool PackageMods::add_override(const std::string& asset, const std::string& file
     overrides_.push_back(ov);
     std::sort(overrides_.begin(), overrides_.end(), [](const Override& a, const Override& b) { return a.start < b.start; });
     patched_ = idx.serialize();
+    return true;
+}
+
+bool PackageMods::add_region(uint64_t start, const std::string& file, uint32_t size) {
+    if (size == 0 || start % kSectorSize) return false;
+    const uint64_t span = (uint64_t)((size + kSectorSize - 1) / kSectorSize) * kSectorSize;
+    for (const auto& o : overrides_)
+        if (o.start < start + span && start < o.start + o.span) return false;
+    Override ov;
+    ov.asset = "<appended data>"; ov.file = file; ov.size = size; ov.start = start; ov.span = span;
+    overrides_.push_back(ov);
+    std::sort(overrides_.begin(), overrides_.end(), [](const Override& a, const Override& b) { return a.start < b.start; });
     return true;
 }
 

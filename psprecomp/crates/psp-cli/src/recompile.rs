@@ -567,6 +567,18 @@ fn segment_range(segment_bytes: &[(u32, Vec<u8>)]) -> (u32, u32) {
 /// modified.
 ///
 /// Returns the per-pass discovery breakdown (carried into the recompile report).
+/// Whether a MIPS / Allegrex word is a branch or jump, i.e. the next word is its delay slot.
+fn has_delay_slot(w: u32) -> bool {
+    let op = w >> 26;
+    match op {
+        0x00 => matches!(w & 0x3F, 0x08 | 0x09),                                   // jr, jalr
+        0x01 => matches!((w >> 16) & 0x1F, 0x00..=0x03 | 0x10..=0x13),              // bltz/bgez(l)(al)
+        0x02..=0x07 | 0x14..=0x17 => true,                                         // j, jal, beq..bgtz(l)
+        0x11 | 0x12 => ((w >> 21) & 0x1F) == 0x08,                                 // bc1x, bvf/bvt
+        _ => false,
+    }
+}
+
 fn enhance_function_discovery(
     analysis: &mut AnalysisJson,
     segment_bytes: &[(u32, Vec<u8>)],
@@ -678,7 +690,13 @@ fn enhance_function_discovery(
             // negative immediate: bit 15 set => (word & 0xFFFF) >= 0x8000
             if (word >> 16) == 0x27BD && (word & 0xFFFF) >= 0x8000 {
                 let addr = seg_vaddr + off as u32;
-                if !all_known.contains(&addr)
+                // The delay slot of a branch or jump is not a function start: a split there leaves the branch at the
+                // end of the previous function without its delay slot (code an ISO patch added: `beqz t3, x;
+                // addiu sp, sp, -16` lost the stack adjustment on the taken path).
+                let in_delay_slot = off >= 4
+                    && has_delay_slot(u32::from_le_bytes(bytes[off - 4..off].try_into().unwrap()));
+                if !in_delay_slot
+                    && !all_known.contains(&addr)
                     && !is_inside_function(addr, &func_intervals)
                 {
                     discovered.insert(addr);
@@ -1508,7 +1526,8 @@ pub fn decode_and_emit_function_with_name(
     let mut patched = raw_bytes.to_vec();
     apply_patches(&mut patched, func_vaddr, &config.patches);
 
-    let ops = match psp_decoder::decode_function(&patched, func_vaddr, data_xrefs) {
+    let mid_entries = mid_entry_addr_map.get(&func_vaddr).map(Vec::as_slice).unwrap_or(&[]);
+    let ops = match psp_decoder::decode_function_with_entries(&patched, func_vaddr, data_xrefs, mid_entries) {
         Ok(ops) => ops,
         Err(e) => {
             tracing::warn!("Decode error in {} @ 0x{:08X}: {e}", func.name, func_vaddr);
@@ -1725,6 +1744,18 @@ mod tests {
                 data_b64: String::new(),
             }],
         }
+    }
+
+    #[test]
+    fn delay_slot_words() {
+        assert!(has_delay_slot(0x1160000A));   // beqz t3, ...
+        assert!(has_delay_slot(0x03E00008));   // jr ra
+        assert!(has_delay_slot(0x0C000000));   // jal
+        assert!(has_delay_slot(0x45000002));   // bc1f
+        assert!(has_delay_slot(0x04110002));   // bal
+        assert!(!has_delay_slot(0x27BDFFF0));  // addiu sp, sp, -16
+        assert!(!has_delay_slot(0x00000000));  // nop
+        assert!(!has_delay_slot(0x0000000C));  // syscall
     }
 
     #[test]

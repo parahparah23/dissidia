@@ -1,0 +1,3 @@
+xz-embedded (https://github.com/tukaani-project/xz-embedded, commit ae63ae3a36ed01724674e8f3d750dc47bf125410, 0BSD):
+the .xz / LZMA2 decoder only (no BCJ filters), for xdelta3 patches with LZMA secondary compression
+(runtime/src/psp_vcdiff.cpp). Files copied unchanged from linux/include/linux, linux/lib/xz and userspace/.

@@ -123,6 +123,9 @@ extern void psp_dispatch_register(uint32_t vaddr, FuncPtr fn);
 /// LOOKUP_MISS machinery: returns nullptr when absent (no log, no STRICT
 /// abort, no miss counters). Boot-time only — not thread-safe (#47 P1).
 extern FuncPtr psp_dispatch_probe_lookup(uint32_t vaddr);
+/// A game module may pass what psp_dispatch_probe_lookup returns through `filter` (nullptr: none), e.g. to hand the hooks
+/// it installs a wrapper as their "original" (games/dissidia/runtime/xdelta_mods.cpp: code an ISO patch changed).
+extern void psp_dispatch_set_probe_filter(FuncPtr (*filter)(uint32_t vaddr, FuncPtr fn));
 
 /// Game-module LOOKUP_MISS handler (#47 P5 seam): invoked from the
 /// non-STRICT miss stub with (rdram, ctx, missed addr, per-address miss

@@ -42,9 +42,9 @@
 #include <vector>
 
 extern std::string dissidia_mods_dir();   // hooks_io.cpp
-extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
-extern FuncPtr ovl_battle_lookup(uint32_t vaddr);   // generated menu overlay function set
-extern FuncPtr ovl_extra_lookup(uint32_t vaddr);    // extra overlay (cpu_forward)
+extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_battle_lookup(uint32_t vaddr);   // generated menu overlay function set
+extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);    // extra overlay (cpu_forward)
 extern thread_local uint32_t g_func_ring[32];      // psp_dispatch.cpp: last 32 function entries of this thread
 extern thread_local uint32_t g_func_ring_pos;
 // hitcam= (camera.cpp reads these): the attacker of a hit-confirmed follow-up, its framing length in ticks, and a
@@ -756,8 +756,8 @@ std::vector<const Entry*> extras() {
     return v;
 }
 
-// The recompiled code does not keep $ra for calls, so the accessor cannot see its caller. The two
-// callers that read record field 0 for different textures are wrapped to say who is asking.
+// The accessor serves several callers that read record field 0 for different textures; the two that matter are
+// wrapped to say who is asking (simpler than telling them apart by $ra, which compiled calls now keep).
 enum Caller { CALLER_OTHER = 0, CALLER_TILE = 1, CALLER_ART = 2 };
 int g_caller = CALLER_OTHER;
 FuncPtr g_orig_placer = nullptr, g_orig_cursor = nullptr;
@@ -776,11 +776,43 @@ void cursor_wrap(uint8_t* rdram, recomp_context* ctx) {   // FUN_08A84458: f0 ->
 
 void grid_table_hook(uint8_t* rdram, recomp_context* ctx) {
     const int who = g_caller;
-    const uint8_t* src = rdram + (GRID_TABLE_SRC & 0x07FFFFFFu);
+    // The table the game's own accessor gives now: the retail one, or a mod's (an ISO patch's run-time code rewrites the
+    // accessor to return a table with more rows: Emendatus adds Aerith, charId 33, as row 33). Its rows after the
+    // retail 33 are kept when they hold a charId; the extra characters come after them.
+    uint32_t src_addr = GRID_TABLE_SRC;
+    if (FuncPtr game = dissidia_ovl_menu_lookup(0x08A85ECCu); game && game != grid_table_hook) {
+        const int32_t keep = ctx->r[2];
+        game(rdram, ctx);
+        const uint32_t got = static_cast<uint32_t>(ctx->r[2]);
+        if (got >= 0x08800000u && got < 0x0C000000u) src_addr = got;
+        ctx->r[2] = keep;
+    }
+    const uint8_t* src = rdram + (src_addr & 0x07FFFFFFu);
     uint8_t* dst = rdram + (GRID_TABLE_DST & 0x07FFFFFFu);
-    std::memcpy(dst, src, kGridRetailRows * 12);
-    std::memset(dst + kGridRetailRows * 12, 0xFF, (kGridRows - kGridRetailRows) * 12);
-    int row_no = kGridRetailRows;
+    int src_rows = kGridRetailRows;
+    if (src_addr != GRID_TABLE_SRC)
+        while (src_rows < kGridRows) {   // a row for a charId the table does not have yet (past its end: repeats or junk)
+            int16_t id; std::memcpy(&id, src + 12 * src_rows + 8, 2);
+            if (id <= 0 || id >= kRosterMax) break;
+            bool dup = false;
+            for (int r = 0; r < src_rows && !dup; r++) { int16_t o; std::memcpy(&o, src + 12 * r + 8, 2); dup = o == id; }
+            if (dup) break;
+            src_rows++;
+        }
+    std::memcpy(dst, src, static_cast<size_t>(src_rows) * 12);
+    std::memset(dst + src_rows * 12, 0xFF, static_cast<size_t>(kGridRows - src_rows) * 12);
+    static int said_rows = -1;
+    if (src_rows != said_rows) {
+        said_rows = src_rows;
+        if (src_rows != kGridRetailRows) {
+            std::fprintf(stderr, "[ROSTER] grid: the game's record table at 0x%08X has %d rows (retail %d): kept\n", src_addr, src_rows, kGridRetailRows);
+            for (int r = 0; r < src_rows; r++) {
+                int16_t f[6]; std::memcpy(f, src + 12 * r, 12);
+                std::fprintf(stderr, "[ROSTER]   row %2d: %d %d %d %d charId %d %d\n", r, f[0], f[1], f[2], f[3], f[4], f[5]);
+            }
+        }
+    }
+    int row_no = src_rows;
     for (const Entry* e : extras()) {
         if (row_no >= kGridRows) break;
         for (int i = 0; i < kGridRetailRows - 1; i++) {
@@ -1339,6 +1371,11 @@ void list_build_hook(uint8_t* rdram, recomp_context* ctx) {
         std::array<uint8_t, 8> e; std::memcpy(e.data(), rdram + ((list + 8u * i) & 0x07FFFFFFu), 8); v.push_back(e);
     }
     auto id_of = [](const std::array<uint8_t, 8>& e) { uint32_t id; std::memcpy(&id, e.data(), 4); return id; };
+    if (std::getenv("PSPRECOMP_ROSTER_LISTLOG")) {   // debug: what the game's own builder returned
+        std::string ids;
+        for (auto& e : v) ids += " " + std::to_string(id_of(e));
+        std::fprintf(stderr, "[ROSTER] selectable list (game): %u entries:%s\n", n, ids.c_str());
+    }
     auto have = [&](uint32_t id) { for (auto& e : v) if (id_of(e) == id) return true; return false; };
     // Debug aid PSPRECOMP_ROSTER_UNLOCK_ALL=1: list every playable charId 1..32, to see the full grid.
     static const bool unlock_all = std::getenv("PSPRECOMP_ROSTER_UNLOCK_ALL") != nullptr;
@@ -1682,10 +1719,10 @@ void grid_init_hook(uint8_t* rdram, recomp_context* ctx) {
 void grid40_install() {
     if (std::getenv("PSPRECOMP_GRID40_OFF")) return;
     g40_log = std::getenv("PSPRECOMP_GRID40_LOG") != nullptr;
-    g_grid_init = ovl_menu_lookup(FN_GRID_INIT); g_layout = ovl_menu_lookup(FN_LAYOUT); g_posnode = ovl_menu_lookup(FN_POSNODE);
-    g_selanim = ovl_menu_lookup(FN_SELANIM); g_teardown = ovl_menu_lookup(FN_TEARDOWN); g_afterplace = ovl_menu_lookup(FN_AFTERPLACE);
-    g_layout_tail = ovl_menu_lookup(FN_LAYOUT_TAIL); g_reccheck = ovl_menu_lookup(FN_RECCHECK); g_cell_of = ovl_menu_lookup(FN_CELL_OF);
-    g_defcursor = ovl_menu_lookup(FN_DEFCURSOR);
+    g_grid_init = dissidia_ovl_menu_lookup(FN_GRID_INIT); g_layout = dissidia_ovl_menu_lookup(FN_LAYOUT); g_posnode = dissidia_ovl_menu_lookup(FN_POSNODE);
+    g_selanim = dissidia_ovl_menu_lookup(FN_SELANIM); g_teardown = dissidia_ovl_menu_lookup(FN_TEARDOWN); g_afterplace = dissidia_ovl_menu_lookup(FN_AFTERPLACE);
+    g_layout_tail = dissidia_ovl_menu_lookup(FN_LAYOUT_TAIL); g_reccheck = dissidia_ovl_menu_lookup(FN_RECCHECK); g_cell_of = dissidia_ovl_menu_lookup(FN_CELL_OF);
+    g_defcursor = dissidia_ovl_menu_lookup(FN_DEFCURSOR);
     g_node_new = psp_dispatch_probe_lookup(EF_NODE_NEW); g_node_free = psp_dispatch_probe_lookup(EF_NODE_FREE);
     g_node_show = psp_dispatch_probe_lookup(EF_NODE_SHOW); g_node_hide = psp_dispatch_probe_lookup(EF_NODE_HIDE);
     g_node_anim = psp_dispatch_probe_lookup(EF_NODE_ANIM); g_sheet_new = psp_dispatch_probe_lookup(EF_SHEET_NEW);
@@ -1944,7 +1981,7 @@ void trace_install() {
             // wrapped EBOOT address is what broke the first trace of 0x0887B3EC (menu came up without text, then hung).
             g_trace_menu[n] = g_trace_batt[n] = psp_dispatch_probe_lookup(a);
         } else {
-            g_trace_menu[n] = ovl_menu_lookup(a); g_trace_batt[n] = ovl_battle_lookup(a);
+            g_trace_menu[n] = dissidia_ovl_menu_lookup(a); g_trace_batt[n] = dissidia_ovl_battle_lookup(a);
             if (!g_trace_menu[n]) g_trace_menu[n] = psp_dispatch_probe_lookup(a);
         }
         if (g_trace_menu[n] || g_trace_batt[n]) psp_dispatch_register(a, fns[n]);
@@ -1978,7 +2015,7 @@ void dash_move_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(DASH_MOVE) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(DASH_MOVE) : nullptr) f(rdram, ctx);
         return;
     }
     g_dash_batt(rdram, ctx);
@@ -1997,7 +2034,7 @@ void dash_install() {
     bool any = false;
     for (const Entry& e : g_entries) if (e.dash != 1.0f) { any = true; std::fprintf(stderr, "[ROSTER] charId %d: dash x%.2f\n", e.charId, e.dash); }
     if (!any) return;
-    g_dash_batt = ovl_battle_lookup(DASH_MOVE);
+    g_dash_batt = dissidia_ovl_battle_lookup(DASH_MOVE);
     if (!g_dash_batt) { std::fprintf(stderr, "[ROSTER] dash speed hook NOT installed (no battle overlay function at %08X)\n", DASH_MOVE); return; }
     psp_dispatch_register(DASH_MOVE, dash_move_hook);
 }
@@ -2563,7 +2600,7 @@ void land_install() {
     g_land_log = std::getenv("PSPRECOMP_LAND_LOG") != nullptr;
     g_touchdown = psp_dispatch_probe_lookup(TOUCHDOWN);
     g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
-    g_start_action = ovl_battle_lookup(START_ACTION);
+    g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_touchdown || !g_start_action || !g_plya_select) {
         std::fprintf(stderr, "[ROSTER] touchdown action hook NOT installed (touchdown %s, start action %s, selector %s)\n",
                      g_touchdown ? "ok" : "missing", g_start_action ? "ok" : "missing", g_plya_select ? "ok" : "missing");
@@ -2618,7 +2655,7 @@ void chain_add_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(CHAIN_ADD) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(CHAIN_ADD) : nullptr) f(rdram, ctx);
         return;
     }
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]), rec = static_cast<uint32_t>(ctx->r[5]);
@@ -2805,7 +2842,7 @@ void hit_spawn_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(MAGI_SPAWN) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(MAGI_SPAWN) : nullptr) f(rdram, ctx);
         return;
     }
     int id = static_cast<int>(static_cast<uint32_t>(ctx->r[4]) & 0xFFFFu);
@@ -2836,7 +2873,7 @@ bool pick_wanted() {
 void spawn_hook_install(bool hit_any) {     // FUN_08AD0978: hitact= and magipick= share the one wrapper
     const bool pick_any = pick_wanted();
     if (!hit_any && !pick_any) return;
-    g_magi_spawn = ovl_battle_lookup(MAGI_SPAWN);
+    g_magi_spawn = dissidia_ovl_battle_lookup(MAGI_SPAWN);
     if (!g_magi_spawn) { std::fprintf(stderr, "[ROSTER] magi spawn hook (hitact= / magipick=) NOT installed (no battle overlay function at %08X)\n", MAGI_SPAWN); return; }
     psp_dispatch_register(MAGI_SPAWN, hit_spawn_hook);
     for (const Entry& e : g_entries) {
@@ -2851,8 +2888,8 @@ void spawn_hook_install(bool hit_any) {     // FUN_08AD0978: hitact= and magipic
 void chain_install() {
     if (!chain_wanted()) { if (pick_wanted()) spawn_hook_install(false); return; }
     g_chain_log = std::getenv("PSPRECOMP_CHAIN_LOG") != nullptr;
-    g_chain_add = ovl_battle_lookup(CHAIN_ADD);
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    g_chain_add = dissidia_ovl_battle_lookup(CHAIN_ADD);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     if (!g_chain_add || !g_start_action || !g_plya_select) {
         std::fprintf(stderr, "[ROSTER] chain window hook NOT installed (chain add %s, start action %s, selector %s)\n",
@@ -2965,8 +3002,8 @@ void charge_tick(uint8_t* rdram, recomp_context* ctx, uint32_t actor) {
 void charge_install() {
     if (!charge_wanted()) return;
     g_chain_log = g_chain_log || std::getenv("PSPRECOMP_CHAIN_LOG") != nullptr;
-    g_hp_held = ovl_battle_lookup(HP_HELD);
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    g_hp_held = dissidia_ovl_battle_lookup(HP_HELD);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     if (!g_start_action || !g_plya_select) {
         std::fprintf(stderr, "[ROSTER] charge hook NOT installed (start action %s, selector %s)\n",
@@ -3576,7 +3613,7 @@ void apoc_fxdir_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(APOC_FXDIR) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(APOC_FXDIR) : nullptr) f(rdram, ctx);
         return;
     }
     g_apoc_fxdir(rdram, ctx);
@@ -3850,7 +3887,7 @@ void apoc_install() {
                          e.pin_spin[i].bone, e.pin_spin[i].deg, e.pin_spin[i].ax[0], e.pin_spin[i].ax[1], e.pin_spin[i].ax[2]);
     }
     g_apoc_log = std::getenv("PSPRECOMP_APOC_LOG") != nullptr;
-    g_apoc_fxdir = ovl_battle_lookup(APOC_FXDIR);
+    g_apoc_fxdir = dissidia_ovl_battle_lookup(APOC_FXDIR);
     if (!g_apoc_fxdir) { std::fprintf(stderr, "[ROSTER] Apocalypsis arms hook NOT installed (no battle overlay function at %08X)\n", APOC_FXDIR); return; }
     psp_dispatch_register(APOC_FXDIR, apoc_fxdir_hook);
 }
@@ -4089,7 +4126,7 @@ void dash13_hook(uint8_t* rdram, recomp_context* ctx) {
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u) {
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(DASH13_START) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(DASH13_START) : nullptr) f(rdram, ctx);
         return;
     }
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]), ra = static_cast<uint32_t>(ctx->r[31]);
@@ -4113,7 +4150,7 @@ void dash_start_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, "[WARPDASH] FUN_08A50C08 reached: actor %08X kind %d overlay id %u, called from %08X\n", actor, kind, ovl, ra);
     }
     if (ovl != 1u) {                                    // not the battle overlay: its own code at this address, if any
-        if (FuncPtr f = ovl == 2u ? ovl_menu_lookup(DASH_START) : nullptr) f(rdram, ctx);
+        if (FuncPtr f = ovl == 2u ? dissidia_ovl_menu_lookup(DASH_START) : nullptr) f(rdram, ctx);
         return;
     }
     if (wd_entry(rdram, actor)) {
@@ -4290,19 +4327,19 @@ void warpdash_install() {
         }
     if (!any) return;
     g_wd_log = std::getenv("PSPRECOMP_WARPDASH_LOG") != nullptr;
-    g_dash_start = ovl_battle_lookup(DASH_START);
-    g_dash_target = ovl_battle_lookup(DASH_TARGET);
-    g_lock_target = ovl_battle_lookup(LOCK_TARGET);
-    g_enemy_of = ovl_battle_lookup(ENEMY_OF);
-    g_slot_ability = ovl_battle_lookup(SLOT_ABILITY);
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    g_dash_start = dissidia_ovl_battle_lookup(DASH_START);
+    g_dash_target = dissidia_ovl_battle_lookup(DASH_TARGET);
+    g_lock_target = dissidia_ovl_battle_lookup(LOCK_TARGET);
+    g_enemy_of = dissidia_ovl_battle_lookup(ENEMY_OF);
+    g_slot_ability = dissidia_ovl_battle_lookup(SLOT_ABILITY);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     g_airborne = psp_dispatch_probe_lookup(AIRBORNE);
     g_sel_context = psp_dispatch_probe_lookup(SEL_CONTEXT);
     g_hit_land = psp_dispatch_probe_lookup(HIT_LAND);
     g_state_set = psp_dispatch_probe_lookup(STATE_SET);
     g_script_play = psp_dispatch_probe_lookup(SCRIPT_PLAY);
-    g_dash13 = ovl_battle_lookup(DASH13_START);
-    g_control = ovl_battle_lookup(CONTROL_FN);
+    g_dash13 = dissidia_ovl_battle_lookup(DASH13_START);
+    g_control = dissidia_ovl_battle_lookup(CONTROL_FN);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     if (!g_dash_start || !g_dash_target || !g_lock_target || !g_slot_ability || !g_start_action || !g_airborne || !g_sel_context ||
         !g_plya_select || !g_hit_land || !g_state_set) {
@@ -5221,7 +5258,7 @@ uint32_t cpu_ovl_id(const uint8_t* rdram) { uint32_t o; std::memcpy(&o, rdram + 
 bool cpu_forward(uint8_t* rdram, recomp_context* ctx, uint32_t addr) {
     const uint32_t id = cpu_ovl_id(rdram);
     if (id == 1u) return false;
-    FuncPtr f = id == 2u ? ovl_menu_lookup(addr) : id == 3u ? ovl_extra_lookup(addr) : nullptr;
+    FuncPtr f = id == 2u ? dissidia_ovl_menu_lookup(addr) : id == 3u ? dissidia_ovl_extra_lookup(addr) : nullptr;
     if (f) f(rdram, ctx);
     return true;
 }
@@ -5409,9 +5446,9 @@ void cpu_install() {
                  g_cpu_ps_lookup ? "ok" : "missing", g_cpu_str_src ? "ok" : "missing", g_cpu_str ? "ok" : "missing",
                  g_cpu_ps_copy ? "ok" : "missing", g_cpu_log ? ", CPU log on" : "");
     if (!g_cpu_log) return;
-    g_cpu_tick = ovl_battle_lookup(CPU_TICK);
-    g_cpu_pick = ovl_battle_lookup(CPU_PICK);
-    for (int k = 0; k < 8; k++) g_cpu_fn[k] = ovl_battle_lookup(CPU_ADDRS[k]);
+    g_cpu_tick = dissidia_ovl_battle_lookup(CPU_TICK);
+    g_cpu_pick = dissidia_ovl_battle_lookup(CPU_PICK);
+    for (int k = 0; k < 8; k++) g_cpu_fn[k] = dissidia_ovl_battle_lookup(CPU_ADDRS[k]);
     if (g_cpu_tick) psp_dispatch_register(CPU_TICK, cpu_tick_hook);
     bool all = g_cpu_pick != nullptr;
     for (int k = 0; k < 8; k++) all = all && g_cpu_fn[k] != nullptr;
@@ -5432,12 +5469,19 @@ void cpu_install() {
 void dissidia_roster_grid_install() {
     // The menu overlay's grid bounds were raised to kGridRows (overlay_menu.toml), so the record table
     // accessor is always replaced: the extra rows must read as 0xFF (never a charId), not as whatever
-    // follows the retail table.
+    // follows the retail table. It starts from the table the game's own accessor gives, so a mod's longer
+    // table (an ISO patch's new character) is kept.
     psp_dispatch_register(0x08A85ECCu, grid_table_hook);
+    if (std::getenv("PSPRECOMP_ROSTER_LISTLOG") && (!g_enabled || extras().empty())) {   // debug: log the selectable list
+        g_orig_list_build = psp_dispatch_probe_lookup(0x088D5AC8u);
+        if (g_orig_list_build) psp_dispatch_register(0x088D5AC8u, list_build_hook);
+        g_orig_placer = dissidia_ovl_menu_lookup(0x08A7FB54u);
+        if (g_orig_placer) psp_dispatch_register(0x08A7FB54u, placer_wrap);
+    }
     if (!g_enabled || extras().empty()) return;
-    g_orig_placer = ovl_menu_lookup(0x08A7FB54u);
+    g_orig_placer = dissidia_ovl_menu_lookup(0x08A7FB54u);
     if (g_orig_placer) psp_dispatch_register(0x08A7FB54u, placer_wrap);
-    g_orig_cursor = ovl_menu_lookup(0x08A84458u);
+    g_orig_cursor = dissidia_ovl_menu_lookup(0x08A84458u);
     if (g_orig_cursor) psp_dispatch_register(0x08A84458u, cursor_wrap);
     g_orig_setframe = psp_dispatch_probe_lookup(0x088D0984u);
     if (g_orig_setframe) psp_dispatch_register(0x088D0984u, setframe_hook);
@@ -5445,7 +5489,7 @@ void dissidia_roster_grid_install() {
         static const uint32_t addr[4] = { 0x08AA43ECu, 0x08AA44ACu, 0x08AA46DCu, 0x08AA6148u };
         static const FuncPtr wrap[4] = { binder_wrap<0>, binder_wrap<1>, binder_wrap<2>, binder_wrap<3> };
         for (int i = 0; i < 4; i++) {
-            g_orig_binder[i] = ovl_menu_lookup(addr[i]);
+            g_orig_binder[i] = dissidia_ovl_menu_lookup(addr[i]);
             if (g_orig_binder[i]) psp_dispatch_register(addr[i], wrap[i]);
         }
     }
@@ -5461,7 +5505,7 @@ void dissidia_roster_grid_install() {
         static const FuncPtr wrap[3] = { cust_wrap<0, 7, 3u>, cust_wrap<1, 8, 4u>, cust_wrap<2, 6, 3u> };
         int n = 0;
         for (int i = 0; i < 3; i++) {
-            g_orig_cust[i] = g_orig_setframe ? ovl_menu_lookup(addr[i]) : nullptr;
+            g_orig_cust[i] = g_orig_setframe ? dissidia_ovl_menu_lookup(addr[i]) : nullptr;
             if (g_orig_cust[i]) { psp_dispatch_register(addr[i], wrap[i]); n++; }
         }
         g_orig_setframe_cust = g_orig_setframe;
@@ -5496,7 +5540,7 @@ void dissidia_roster_grid_install() {
     }
     g_orig_charinfo = psp_dispatch_probe_lookup(0x088B3B20u);
     if (g_orig_charinfo) psp_dispatch_register(0x088B3B20u, charinfo_hook);
-    g_orig_vsload = ovl_battle_lookup(0x08AF6B70u);
+    g_orig_vsload = dissidia_ovl_battle_lookup(0x08AF6B70u);
     if (g_orig_vsload && std::getenv("PSPRECOMP_ROSTER_DEBUG")) psp_dispatch_register(0x08AF6B70u, vsload_dbg);
     if (std::getenv("PSPRECOMP_ROSTER_LOADLOG")) {
         g_orig_loadreq = psp_dispatch_probe_lookup(0x088D0810u);
@@ -5648,6 +5692,57 @@ uint8_t* ablt_record(uint8_t* rdram, uint16_t id) {             // the loaded 'a
     }
     return nullptr;
 }
+// A moves mod's ability ids that the loaded table lacks (the mod is off, so its main.bin is not served; or another mod's
+// main.bin is used) get inert placeholder records: hidden from the Abilities screen, no command in battle. A save that
+// learnt or equipped them keeps them (the game reads the record of every learnt and equipped id without a null check),
+// and switched on again, the mod's own records are back with them. The table stays sorted by id; it moves to a host
+// block when the game's (808 records) is full.
+uint32_t g_ablt_host_block = 0, g_ablt_host_rows = 0;   // a table this file moved to host memory, and its room in records
+void retail_moves_placeholders(uint8_t* rdram) {
+    std::vector<std::pair<uint16_t, int>> need;   // id, charId
+    for (const RetailMoves& m : g_retail_moves)
+        for (uint16_t id : m.ids) if (!ablt_record(rdram, id)) need.push_back({id, m.charId});
+    if (need.empty()) return;
+    uint32_t blk = rd32(rdram, kAbltBlockPtr);
+    const uint32_t recs0 = rd32(rdram, kAbltRecsPtr);
+    if (blk < 0x08000000u || blk >= 0x0C000000u || recs0 != blk + 0x10u) {
+        std::fprintf(stderr, "[ROSTER] placeholders: table at %08X, records at %08X: not where expected\n", blk, recs0);
+        return;
+    }
+    uint32_t n = rd32(rdram, blk + 8u);
+    if (n == 0 || n > 0x1000u) return;
+    const uint32_t cap = g_ablt_host_block == blk ? g_ablt_host_rows : 0x328u;   // ABLT_ROWS (defined below)
+    if (n + need.size() > cap) {   // no room: a host block with it
+        const uint32_t bytes = 0x10u + (n + uint32_t(need.size())) * kAbltRecBytes;
+        const uint32_t nb = psp_kmem_bump_alloc_named((bytes + 0xFFu) & ~0xFFu, "ROSTER_ABLT_PH");
+        if (!nb) { std::fprintf(stderr, "[ROSTER] no host memory for %zu placeholder abilities\n", need.size()); return; }
+        std::memcpy(rdram + (nb & 0x07FFFFFFu), rdram + (blk & 0x07FFFFFFu), 0x10u + n * kAbltRecBytes);
+        put_u32(rdram, kAbltBlockPtr & 0x07FFFFFFu, nb);
+        put_u32(rdram, kAbltRecsPtr & 0x07FFFFFFu, nb + 0x10u);
+        g_ablt_host_block = nb;
+        g_ablt_host_rows = (((bytes + 0xFFu) & ~0xFFu) - 0x10u) / kAbltRecBytes;
+        blk = nb;
+    }
+    uint8_t* recs = rdram + ((blk + 0x10u) & 0x07FFFFFFu);
+    for (const auto& nd : need) {
+        const uint16_t id = nd.first;
+        const uint8_t* tmpl = nullptr;   // a record of the same character (else the first): the fields the game reads
+        for (uint32_t r = 0; r < n && !tmpl; r++) if (recs[kAbltRecBytes * r + kAbltOwnerByte] == uint8_t(nd.second)) tmpl = recs + kAbltRecBytes * r;
+        uint8_t rec[kAbltRecBytes];
+        std::memcpy(rec, tmpl ? tmpl : recs, kAbltRecBytes);
+        rec[0] = id & 0xFFu; rec[1] = id >> 8;
+        rec[kAbltOwnerByte] = kRetailOffOwner;
+        rec[0x0C] = kRetailOffCmd & 0xFFu; rec[0x0D] = kRetailOffCmd >> 8;
+        uint32_t at = 0;
+        while (at < n && uint16_t(recs[kAbltRecBytes * at] | recs[kAbltRecBytes * at + 1] << 8) < id) at++;
+        std::memmove(recs + kAbltRecBytes * (at + 1), recs + kAbltRecBytes * at, kAbltRecBytes * (n - at));
+        std::memcpy(recs + kAbltRecBytes * at, rec, kAbltRecBytes);
+        n++;
+    }
+    put_u32(rdram, (blk + 8u) & 0x07FFFFFFu, n);
+    std::fprintf(stderr, "[ROSTER] %zu placeholder abilit%s for moves mods whose records are not loaded (kept in saves, inert)\n",
+                 need.size(), need.size() == 1 ? "y" : "ies");
+}
 void retail_moves_hide(uint8_t* rdram) {                        // after the table is loaded: the lines switched off
     for (const RetailMoves& m : g_retail_moves) {
         if (m.on) continue;
@@ -5691,13 +5786,12 @@ void retail_moves_teach(uint8_t* rdram, uint32_t rec, int charId) {
 constexpr uint32_t ABLT_LOAD = 0x088B1CC0u, ABLT_HDR = 0x089D7290u, ABLT_RECS = 0x089D7294u;
 constexpr uint32_t ABLT_ROWS = 0x328u, ABLT_ROW = 0x28u;
 FuncPtr g_orig_ablt_load = nullptr;
-uint32_t g_ablt_host_block = 0, g_ablt_host_rows = 0;   // a table this file moved to host memory, and its room in records
 void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     saverec_block();   // the extra characters' save records: allocated at boot, while the host heap has room
     const uint32_t src = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
     if (src == 0 || size < 16u || rd32(rdram, src + 8) <= ABLT_ROWS) {
         g_orig_ablt_load(rdram, ctx);
-        if (size >= 16u) retail_moves_hide(rdram);
+        if (size >= 16u) { retail_moves_hide(rdram); retail_moves_placeholders(rdram); }
         return;
     }
     const uint32_t buf = psp_kmem_bump_alloc_named((size + 0xFFu) & ~0xFFu, "ROSTER_ABLT");
@@ -5716,6 +5810,7 @@ void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     ctx->r[5] = 0;     // the original now only loads ability.bin (a2 = the archive)
     g_orig_ablt_load(rdram, ctx);
     retail_moves_hide(rdram);
+    retail_moves_placeholders(rdram);
 }
 }  // namespace
 
@@ -5806,7 +5901,7 @@ int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, in
     uint32_t ovl;
     std::memcpy(&ovl, rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (ovl != 1u || !guest_ok(actor, 0x1070u)) return -1;
-    if (!g_start_action) g_start_action = ovl_battle_lookup(START_ACTION);
+    if (!g_start_action) g_start_action = dissidia_ovl_battle_lookup(START_ACTION);
     if (!g_plya_select) g_plya_select = psp_dispatch_probe_lookup(PLYA_SELECT);
     static bool hooked = false;
     if (!hooked && g_plya_select) { psp_dispatch_register(PLYA_SELECT, plya_select_hook); hooked = true; }

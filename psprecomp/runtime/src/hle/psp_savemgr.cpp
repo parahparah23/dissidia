@@ -184,7 +184,8 @@ std::vector<SaveInfo> scan(const std::string& root, bool only_dissidia) {
     std::error_code ec;
     for (auto it = fs::directory_iterator(P(root), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (!it->is_directory(ec)) continue;
-        SaveInfo s;   // only folders the game itself would find (a renamed copy is found by find_saves)
+        SaveInfo s;   // only folders the game itself would find (a renamed copy is found by find_saves); every save under a
+                      // Dissidia 012 disc ID counts, so a mod's own save (Emendatus' "EXTRA DATA") is included
         if (read_save(S(it->path()), &s, only_dissidia) && s.name == S(it->path().filename())) out.push_back(std::move(s));
     }
     std::sort(out.begin(), out.end(), [](const SaveInfo& a, const SaveInfo& b) { return a.name < b.name; });

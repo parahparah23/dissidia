@@ -168,6 +168,20 @@ mod tests {
     const BEQL_WORD: u32 = (0x14u32 << 26) | (4 << 21) | (5 << 16) | 2;
 
     #[test]
+    fn test_mid_entry_in_delay_slot() {
+        // j 0x08900000; nop; addu -- with a mid-entry at the nop (code jumping back to the word after a jump an ISO
+        // patch wrote): the nop's position holds the instruction itself, not the jump
+        let j_word = 0x0800_0000 | (0x0890_0000 >> 2);
+        let bytes = words_to_bytes(&[j_word, NOP_WORD, ADDU_WORD]);
+        let plain = decode_function(&bytes, 0x08800000, &[]).unwrap();
+        assert!(matches!(plain[1], MipsOp::J { .. }), "without the entry: plain swap, got {:?}", plain[1]);
+        let ops = crate::decode_function_with_entries(&bytes, 0x08800000, &[], &[0x08800004]).unwrap();
+        assert_eq!(ops.len(), 3);
+        assert!(matches!(ops[0], MipsOp::BranchHazardDelay { .. }), "got {:?}", ops[0]);
+        assert!(matches!(ops[1], MipsOp::DelaySlotRejoin { .. }), "got {:?}", ops[1]);
+    }
+
+    #[test]
     fn test_standard_delay_slot_order() {
         // Standard branch: beq + nop
         // Expected output: [nop, beq] — delay slot (nop) comes BEFORE the branch

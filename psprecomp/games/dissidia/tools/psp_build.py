@@ -133,7 +133,7 @@ def android_build(a, work, env, jobs, exe):
                     pass
     if fixed:
         say("Fixed %d files dated in the future (time zone of the archive)" % fixed)
-    ovl = ";".join(os.path.join(work, "overlays", n) for n in ("battle", "menu", "extra", "supacc"))
+    ovl = ";".join(os.path.join(work, "overlays", n) for n in ("battle", "menu", "extra", "supacc", "xmods"))
     run(["cmake", "-S", os.path.join(adir, "sdk"), "-B", bd, "-G", "Ninja", "-DCMAKE_TOOLCHAIN_FILE=" + tc, "-DCMAKE_BUILD_TYPE=Release",
          "-DPSPRECOMP_OUTPUT_DIR=" + os.path.join(work, "output"), "-DPSPRECOMP_OVERLAY_DIRS=" + ovl], env=env)
     step(5, "Compiling the game for Android (the long step)")
@@ -306,6 +306,11 @@ def main():
         step(2, "Translating the game to C++: up to date, skipping (--force to redo)")
         step(3, "Building the overlay sources: up to date, skipping")
 
+    # xdelta (ISO patch) mods that change code: their functions, recompiled into overlays/xmods (always written, empty
+    # without such mods, because the runtime links its table; quick, and only changed files are rewritten)
+    run([sys.executable, os.path.join(HERE, "xdelta_mod.py"), "build-code", "--work", work, "--psprecomp", psprecomp,
+         "--game", game], env=env)
+
     if a.no_compile:
         tag("DONE", work)
         return
@@ -330,7 +335,7 @@ def main():
             say("Build dir was configured from %s; reconfiguring from %s" % (m.group(1), src))
             os.remove(cache)
             shutil.rmtree(os.path.join(build, "CMakeFiles"), ignore_errors=True)
-    ovl = ";".join(os.path.join(work, "overlays", n) for n in ("battle", "menu", "extra", "supacc"))
+    ovl = ";".join(os.path.join(work, "overlays", n) for n in ("battle", "menu", "extra", "supacc", "xmods"))
     cfg = ["cmake", "-S", src, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DPSPRECOMP_OUTPUT_DIR=" + os.path.join(work, "output"),
            "-DPSPRECOMP_OVERLAY_DIRS=" + ovl]
     if not a.sdk:

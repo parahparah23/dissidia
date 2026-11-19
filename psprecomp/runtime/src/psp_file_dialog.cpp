@@ -147,7 +147,7 @@ bool start(Kind kind, const std::string& title, const std::string& start_dir, co
 #if defined(__ANDROID__)
     (void)start_dir;
     std::string err;
-    const char* what = kind == Kind::ImportFolder ? "import_folder" : kind == Kind::ImportArchive ? "import_file" : kind == Kind::ExportFolder ? "export_folder" : "export_zip";
+    const char* what = kind == Kind::ImportFolder ? "import_folder" : (kind == Kind::ImportArchive || kind == Kind::ImportPatch) ? "import_file" : kind == Kind::ExportFolder ? "export_folder" : "export_zip";
     const std::string r = call_str("start", {what, title, default_name}, &err);
     if (!err.empty() || r != "ok") { finish(gen, State::Failed, "", err.empty() ? r : err); }
 #else
@@ -166,6 +166,10 @@ bool start(Kind kind, const std::string& title, const std::string& start_dir, co
         case Kind::ImportArchive:
             g_open = std::make_unique<pfd::open_file>(title, dir, std::vector<std::string>{
                 "Save archives (.zip .7z .rar .tar.gz)", "*.zip *.ZIP *.7z *.7Z *.rar *.RAR *.tar *.gz *.tgz *.xz *.txz *.bz2", "All files", "*"});
+            break;
+        case Kind::ImportPatch:
+            g_open = std::make_unique<pfd::open_file>(title, dir, std::vector<std::string>{
+                "ISO patches (.xdelta .vcdiff)", "*.xdelta *.XDELTA *.vcdiff *.VCDIFF *.xd3 *.delta", "All files", "*"});
             break;
         case Kind::ExportZip:
             g_save = std::make_unique<pfd::save_file>(title, dir.empty() ? default_name : dir + default_name,
@@ -195,8 +199,8 @@ State poll(std::string* path, std::string* error) {
             g_uri = r;
             std::error_code ec;
             const fs::path s = fs::u8path(scratch.empty() ? "/data/local/tmp" : scratch);
-            if (kind == Kind::ImportFolder || kind == Kind::ImportArchive) {
-                const fs::path dst = s / (kind == Kind::ImportFolder ? "picked" : "picked.archive");
+            if (kind == Kind::ImportFolder || kind == Kind::ImportArchive || kind == Kind::ImportPatch) {
+                const fs::path dst = s / (kind == Kind::ImportFolder ? "picked" : kind == Kind::ImportPatch ? "picked.patch" : "picked.archive");
                 fs::remove_all(dst, ec);
                 fs::create_directories(s, ec);
                 const std::string e = call_str(kind == Kind::ImportFolder ? "copyTreeIn" : "copyFileIn", {r, dst.u8string()}, &err);

@@ -64,6 +64,8 @@ are read directly. Other formats (ZSO, DAX, `.bin`, PSN `.PBP`) need converting 
 - **Controllers, keyboard and touch**: gamepads work out of the box; Android has touch controls with an editable layout.
 - **Settings in the game**: from the title screen, the start menu or the battle pause menu.
 - **New characters and moves**: the Move Studio and Blender add-on, below.
+- **ISO patch mods**: community `.xdelta` patches for the disc install as mods you can switch off and on
+  ([details](psprecomp/games/dissidia/docs/xdelta-mods.md)).
 
 ### Controls
 

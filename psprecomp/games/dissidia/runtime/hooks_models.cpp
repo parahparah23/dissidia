@@ -192,9 +192,23 @@ void heap_init_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 // FUN_0884417C(mgr, id, heap, size, 0): model slot registration; 0x264000 is the staging size.
+// A patched game (an xdelta mod: Emendatus asks FUN_0888204C for a 0x3F5800 FILE heap, 0x3E4000 + 0x11800, for Aerith's
+// 3.6 MB p_sev120.objx) can make the heap bigger than retail while the slot is still registered with 0x264000; the file is
+// then read 0x264000 below the heap end and runs 1.1 MB past it. The slot follows the heap: heap size - 0x11800.
 void register_hook(uint8_t* rdram, recomp_context* ctx) {
     if (static_cast<uint32_t>(ctx->r[7]) == kRetailStaging && g_staging != kRetailStaging)
         ctx->r[7] = static_cast<int32_t>(g_staging);
+    const uint32_t heap = static_cast<uint32_t>(ctx->r[6]);
+    if (heap >= 0x08800000u && heap < 0x0C000000u) {
+        const uint32_t end = *reinterpret_cast<const uint32_t*>(rdram + ((heap + 4u) & 0x07FFFFFFu));
+        const uint32_t slot = static_cast<uint32_t>(ctx->r[7]);
+        if (g_trace) std::fprintf(stderr, "[MODELS] register slot id 0x%X heap 0x%08X end 0x%08X size %u\n", (uint32_t)ctx->r[5], heap, end, slot);
+        if (slot >= kRetailStaging && end > heap && end - heap <= 0x02000000u && end - heap > slot + (kRetailFile - kRetailStaging)) {
+            const uint32_t fit = end - heap - (kRetailFile - kRetailStaging);
+            std::fprintf(stderr, "[MODELS] slot 0x%X: heap 0x%08X holds %u B, staging slot raised from %u B\n", (uint32_t)ctx->r[5], heap, fit, slot);
+            ctx->r[7] = static_cast<int32_t>(fit);
+        }
+    }
     g_orig_register(rdram, ctx);
 }
 

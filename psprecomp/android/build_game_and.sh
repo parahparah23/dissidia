@@ -19,7 +19,7 @@ grep -q "^CMAKE_HOME_DIRECTORY:INTERNAL=$RT\$" core_and/CMakeCache.txt 2>/dev/nu
 cmake -S "$RT" -B core_and -G Ninja -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release $TLS -DPSPRECOMP_OUTPUT_DIR=$W/output $EXTRA >/dev/null
 cmake --build core_and --target psprecomp_core 2>&1 | tail -2
 rm -rf sdk_and && cmake --install core_and --component sdk --prefix sdk_and >/dev/null
-OV=""; for o in supacc battle menu extra; do [ -d $W/overlays/$o ] && OV="$OV;$W/overlays/$o"; done
+OV=""; for o in supacc battle menu extra xmods; do [ -d $W/overlays/$o ] && OV="$OV;$W/overlays/$o"; done
 cmake -S sdk_and -B game_and -G Ninja -DCMAKE_TOOLCHAIN_FILE=$TC -DCMAKE_BUILD_TYPE=Release $TLS -DPSPRECOMP_OUTPUT_DIR=$W/output -DPSPRECOMP_OVERLAY_DIRS="${OV#;}" $EXTRA >/dev/null
 cmake --build game_and --target psprecomp_runtime 2>&1 | tail -4
 ls -la game_and/libmain.so

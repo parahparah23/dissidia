@@ -285,6 +285,38 @@ int main() {
         CHECK(count(r, Action::Pushed) == 0);
     }
 
+    // a mod's companion save (an xdelta mod's code writes "Ext<slot>" next to the game's save, titled after the mod, e.g.
+    // Emendatus' "EXTRA DATA (Emendatus)"): synced with the game's saves and retargeted to the other region like them; a
+    // save of another game in the same folder stays out
+    {
+        const std::string cloud2 = T + "/cloud2";
+        auto p2 = make_folder_provider(cloud2);
+        Dev C{T + "/modC", "ULUS10566"}, D{T + "/modD", "ULES01505"};
+        make_save(C.saves(), "ULUS10566GameData00", "DISSIDIA 012 FINAL FANTASY", "PLAYER: Ender", "DISSIDIA.BIN", 7);
+        make_save(C.saves(), "ULUS10566ExtGameData00", "EXTRA DATA (Emendatus)", "", "EMSX.BIN", 8);
+        make_save(C.saves(), "ULUS98765DATA00", "SOME OTHER GAME", "", "DATA.BIN", 9);
+        r = sync_all(*p2, C.opts(), &err);
+        CHECK(err.empty() && count(r, Action::Pushed) == 2);
+        CHECK(fs::exists(cloud2 + "/ExtGameData00.save") && !fs::exists(cloud2 + "/DATA00.save"));
+        r = sync_all(*p2, D.opts(), &err);
+        CHECK(err.empty() && count(r, Action::Pulled) == 2);
+        CHECK(slurp(D.dir("ExtGameData00") / "EMSX.BIN") == slurp(C.dir("ExtGameData00") / "EMSX.BIN"));
+        Bytes sfo = slurp(D.dir("ExtGameData00") / "PARAM.SFO");
+        CHECK(std::search(sfo.begin(), sfo.end(), (const uint8_t*)"ULES01505ExtGameData00", (const uint8_t*)"ULES01505ExtGameData00" + 22) != sfo.end());
+        CHECK(hash_save(C.dir("ExtGameData00").string()) == hash_save(D.dir("ExtGameData00").string()));
+        // a later change to the mod's save alone goes up and comes down like any other
+        C.change("ExtGameData00", "EMSX.BIN", 11);
+        r = sync_all(*p2, C.opts(), &err);
+        CHECK(find(r, "ExtGameData00") && find(r, "ExtGameData00")->action == Action::Pushed);
+        r = sync_all(*p2, D.opts(), &err);
+        CHECK(find(r, "ExtGameData00") && find(r, "ExtGameData00")->action == Action::Pulled);
+        CHECK(slurp(D.dir("ExtGameData00") / "EMSX.BIN") == slurp(C.dir("ExtGameData00") / "EMSX.BIN"));
+        // without a Dissidia save in the folder, a lone non-Dissidia title is not taken for one
+        Dev E{T + "/modE", "ULUS10566"};
+        make_save(E.saves(), "ULUS10566ExtGameData00", "EXTRA DATA (Emendatus)", "", "EMSX.BIN", 8);
+        CHECK(psp_savemgr::scan(E.saves()).empty());
+    }
+
     std::error_code ec;
     fs::remove_all(T, ec);
     if (g_fail) { std::printf("%d check(s) failed\n", g_fail); return 1; }

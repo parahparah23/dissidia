@@ -180,11 +180,15 @@ static void psp_dump_lookup_misses() {
 // design; boot-time only.
 static bool g_probe_lookup = false;
 
+static FuncPtr (*g_probe_filter)(uint32_t, FuncPtr) = nullptr;
+
+void psp_dispatch_set_probe_filter(FuncPtr (*filter)(uint32_t vaddr, FuncPtr fn)) { g_probe_filter = filter; }
+
 FuncPtr psp_dispatch_probe_lookup(uint32_t vaddr) {
     g_probe_lookup = true;
     FuncPtr fn = RECOMP_LOOKUP(vaddr);
     g_probe_lookup = false;
-    return fn;
+    return g_probe_filter ? g_probe_filter(vaddr, fn) : fn;
 }
 
 /// Called by RECOMP_LOOKUP (in dispatch.cpp) when an address is not in the

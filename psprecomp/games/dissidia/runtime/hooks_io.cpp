@@ -33,6 +33,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <set>
+#include <map>
 #include <iterator>
 #include <string>
 #include <unistd.h>
@@ -47,8 +50,18 @@ extern int dissidia_roster_overlay_of(const char* lower_path);
 extern void dissidia_roster_patch_overlay(int mod, int64_t off, uint32_t size, uint8_t* dest);
 std::string dissidia_mods_dir();
 std::vector<std::string> dissidia_mod_roots();
+// xdelta_mods.cpp: installed xdelta (ISO patch) mods
+bool dissidia_xmod_folder_usable(const std::string& folder_dir, bool say);
+std::string dissidia_xmod_overlay_file(int ovl);
+std::string dissidia_xmod_package_tail();
+std::string dissidia_xmod_usrdir_file(const std::string& rel_upper);
+void dissidia_xmod_tail_read(uint64_t tail_off, uint32_t size, uint32_t addr);
+uint8_t* dissidia_xmod_rdram();
+uint64_t g_tail_start = 0;   // PACKAGE.BIN offset where an xdelta mod's appended data starts (0 = none)
 extern uint32_t dissidia_model_budget_request(uint32_t bytes);
 extern uint32_t dissidia_model_budget();
+
+void dissidia_xdelta_register_installer();   // xdelta_import.cpp
 
 namespace {
 
@@ -232,6 +245,7 @@ std::vector<std::string> mod_roots() {
         const std::string root = dir + "/" + n;
         if (::stat((root + "/mod.json").c_str(), &st) != 0 || ::stat((root + "/install").c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
         if (mod_json_off(root + "/mod.json")) { if (say) std::fprintf(stderr, "[MODS] mod folder %s: off\n", n.c_str()); continue; }
+        if (!dissidia_xmod_folder_usable(root, say)) continue;   // an xdelta mod whose code is not in this build
         out.push_back(root + "/install");
     }
     return out;
@@ -251,9 +265,33 @@ std::string work_parent() {
     return slash == std::string::npos ? "." : ms0.substr(0, slash);
 }
 bool is_dir(const std::string& d) { struct stat st; return ::stat(d.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
+bool is_file(const std::string& p) { struct stat st; return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode); }
 
 // DATA/MOVIE/X.PMF of the disc -> movie_jp/X.PMF when the voice is Japanese and that file exists
+// A disc file under PSP_GAME/USRDIR that an xdelta mod that is on replaces: its patched overlay (code/OVL_*_APP.ELF) or
+// another changed file (<mod>/usrdir/<PATH>). PACKAGE.BIN / PACKAGE_INFO.BIN are never replaced whole.
+std::string xmod_disc_path(const std::string& host) {
+    std::string up = host;
+    for (char& c : up) c = (char)std::toupper((unsigned char)c);
+    const size_t u = up.rfind("/USRDIR/");
+    if (u == std::string::npos) return "";
+    const std::string rel = up.substr(u + 8);
+    if (rel == "DATA/PACKAGE.BIN" || rel == "DATA/PACKAGE_INFO.BIN") return "";
+    if (rel == "DATA/OVL_BATTLE_APP.ELF") return dissidia_xmod_overlay_file(1);
+    if (rel == "DATA/OVL_MENU_APP.ELF") return dissidia_xmod_overlay_file(2);
+    if (rel == "DATA/OVL_EXTRA_APP.ELF") return dissidia_xmod_overlay_file(3);
+    return dissidia_xmod_usrdir_file(rel);
+}
+
 std::string remap_disc_path(const std::string& host) {
+    {
+        std::string x = xmod_disc_path(host);
+        if (!x.empty()) {
+            static int said = 0;
+            if (said++ < 16) std::fprintf(stderr, "[XMOD] %s -> %s\n", host.c_str(), x.c_str());
+            return x;
+        }
+    }
     if (!voice_jp_on() || !ends_with_nocase(host, ".pmf")) return "";
     const size_t slash = host.find_last_of('/');
     if (slash == std::string::npos) return "";
@@ -263,6 +301,80 @@ std::string remap_disc_path(const std::string& host) {
     std::string other = work_parent() + "/movie_jp/" + host.substr(slash + 1);
     struct stat st;
     return ::stat(other.c_str(), &st) == 0 && S_ISREG(st.st_mode) ? other : "";
+}
+
+// ---- Mods that lie loose in the mods folder: which files are whose -------------------------------------------------
+// A moves mod for a retail character (retail_moves.txt, e.g. Bartz's Dissidia (2008) moves) installs its files loose in
+// the mods folder. Its line names them ("files=a;b;..."; older installs: the shipped list below). Switched off, they are
+// left out, so the game runs exactly as without it; roster.cpp gives its ability ids inert placeholder records, so a
+// save that learnt or equipped them keeps them for when it is switched on again.
+struct MovesMod { std::string folder, name; bool on = true; std::vector<std::string> files; };
+std::vector<MovesMod> moves_mods(const std::string& dir) {
+    std::vector<MovesMod> out;
+    std::ifstream f(dir + "/retail_moves.txt");
+    std::string line;
+    while (std::getline(f, line)) {
+        MovesMod m;
+        if (line.compare(0, 6, "#off# ") == 0) { m.on = false; line = line.substr(6); }
+        else if (line.empty() || line[0] == '#') continue;
+        std::istringstream is(line);
+        std::string tok;
+        if (!(is >> m.folder)) continue;
+        while (is >> tok) {
+            if (tok.compare(0, 3, "nm=") == 0) { m.name = tok.substr(3); for (char& c : m.name) if (c == '_') c = ' '; }
+            else if (tok.compare(0, 6, "files=") == 0)
+                for (size_t a = 6; a < tok.size();) {
+                    size_t b = tok.find(';', a);
+                    if (b == std::string::npos) b = tok.size();
+                    if (b > a) m.files.push_back(dissidia::normalize_asset_path(tok.substr(a, b - a)));
+                    a = b + 1;
+                }
+        }
+        if (m.files.empty() && m.folder == "bartz-dff")   // installs before the files= field (games/dissidia/d1_moves/manifest.json)
+            for (const char* p : {"obj/p_fiv100.objx", "obj/p_fiv100_1p.gmo", "obj/p_fiv100_2p.gmo", "obj/p_fiv100_3p.gmo",
+                                  "obj/p_fiv100_zako.gmo", "voice/en/battle/voice_p_fiv100_00.scd"})
+                m.files.push_back(p);
+        if (m.name.empty()) m.name = m.folder;
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+// What roster_mainbin.py builds into the mods folder: main.bin with the new characters' / moves' records and the text
+// files their names live in. Needed only while something uses them.
+bool is_roster_output(const std::string& norm) {
+    if (norm == "by_crc/93307c1c.bin" || norm == "general_archive/main/main.bin") return true;
+    for (const char* lang : {"en", "fr", "de", "it", "es", "jp"})
+        if (norm == std::string("general_archive/main/") + lang + "/main_lang.bin" || norm == std::string("text/") + lang + "/mess_pk_customize_ability_0.bin")
+            return true;
+    return false;
+}
+bool roster_has_characters(const std::string& dir) {
+    std::ifstream f(dir + "/roster.txt");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        if (line.find_first_not_of(" \t\r") != std::string::npos) return true;
+    }
+    return false;
+}
+std::vector<std::string> list_files(const std::string& root, const std::string& rel = "") {   // loose files (not mod folders)
+    std::vector<std::string> out;
+    DIR* d = ::opendir((root + (rel.empty() ? "" : "/" + rel)).c_str());
+    if (!d) return out;
+    while (dirent* e = ::readdir(d)) {
+        const std::string n = e->d_name;
+        if (n.empty() || n[0] == '.') continue;
+        const std::string r = rel.empty() ? n : rel + "/" + n;
+        struct stat st;
+        if (::stat((root + "/" + r).c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (rel.empty() && n == "textures") continue;
+            if (::stat((root + "/" + r + "/mod.json").c_str(), &st) == 0) continue;
+            for (std::string& x : list_files(root, r)) out.push_back(std::move(x));
+        } else out.push_back(r);
+    }
+    ::closedir(d);
+    return out;
 }
 
 void ensure_built(const std::string& host_info_path) {
@@ -277,7 +389,8 @@ void ensure_built(const std::string& host_info_path) {
         if (is_dir(vd)) { extra.push_back(vd); jp_dir = vd; std::fprintf(stderr, "[VOICE] Japanese voice pack: %s\n", vd.c_str()); }
         else std::fprintf(stderr, "[VOICE] Japanese voice selected but %s does not exist (run tools/jp_audio.py): English voices\n", vd.c_str());
     }
-    if (!is_dir(dir) && extra.empty() && !g_net_possible) {
+    const std::string tail = dissidia_xmod_package_tail();   // data an xdelta mod appended to PACKAGE.BIN
+    if (!is_dir(dir) && extra.empty() && !g_net_possible && tail.empty()) {
         std::fprintf(stderr, "[MODS] no mods directory (%s): loose-file overrides off\n", dir.c_str());
         return;
     }
@@ -322,12 +435,151 @@ void ensure_built(const std::string& host_info_path) {
         }
         if (banks) { first = merged; rest.insert(rest.begin(), dir); }
     }
-    if (!g_mods.build(orig, (uint64_t)pst.st_size, first, &log, &err, g_index_capacity, rest)) {
+    {   // an ISO patch mod's files come first: its code was written for its own versions of them (a roster in main.bin, a
+        // model), so a loose file of another mod must not stand in for one (Emendatus's new characters vanished under an
+        // older mod's main.bin). Other loose files still apply.
+        std::vector<std::string> xd, order{first};
+        order.insert(order.end(), rest.begin(), rest.end());
+        for (auto it = order.begin(); it != order.end();) {
+            const std::string root = *it;
+            const size_t sl = root.find_last_of('/');
+            std::ifstream mj(sl == std::string::npos ? std::string() : root.substr(0, sl) + "/mod.json");
+            const std::string js((std::istreambuf_iterator<char>(mj)), std::istreambuf_iterator<char>());
+            const size_t k = js.find("\"kind\"");
+            if (k != std::string::npos && js.find("\"xdelta\"", k) != std::string::npos && js.find("\"xdelta\"", k) < js.find('\n', k)) {
+                xd.push_back(root);
+                it = order.erase(it);
+            } else ++it;
+        }
+        if (!xd.empty()) {
+            order.insert(order.begin(), xd.begin(), xd.end());
+            first = order.front();
+            rest.assign(order.begin() + 1, order.end());
+            std::fprintf(stderr, "[MODS] ISO patch mod files first: %s\n", xd.front().c_str());
+        }
+    }
+    uint64_t tail_size = 0;
+    if (!tail.empty()) {
+        struct stat tst;
+        if (::stat(tail.c_str(), &tst) == 0 && pst.st_size % dissidia::kSectorSize == 0 && tst.st_size > 0 && tst.st_size < (1ll << 31))
+            tail_size = (uint64_t)tst.st_size;
+        else
+            std::fprintf(stderr, "[XMOD] %s cannot be served (PACKAGE.BIN %lld B)\n", tail.c_str(), (long long)pst.st_size);
+    }
+    // moves mods that are off: their loose files are left out; the roster files too when nothing else needs them
+    const std::vector<MovesMod> moves = moves_mods(dir);
+    std::map<std::string, std::string> owner, owner_key;   // normalised loose path -> the mod it belongs to (name, row key)
+    {
+        std::set<std::string> skip;
+        bool moves_on = false;
+        for (const MovesMod& m : moves) {
+            moves_on |= m.on;
+            for (const std::string& f : m.files) { if (m.on) { owner[f] = m.name; owner_key[f] = m.folder; } else skip.insert(f); }
+        }
+        const bool roster_needed = moves_on || roster_has_characters(dir) || is_file(dir + "/bgm.txt");
+        for (const std::string& f : list_files(dir)) {
+            const std::string norm = dissidia::normalize_asset_path(f);
+            if (!is_roster_output(norm)) continue;
+            if (!roster_needed) skip.insert(norm);
+            else if (!owner.count(norm)) {
+                std::string who;
+                std::string key;
+                for (const MovesMod& m : moves) if (m.on) { who += (who.empty() ? "" : ", ") + m.name; if (key.empty()) key = m.folder; }
+                owner[norm] = who.empty() ? "the added characters" : who;
+                owner_key[norm] = key;
+            }
+        }
+        if (!skip.empty()) {
+            g_mods.set_skipped(dir, skip);
+            std::fprintf(stderr, "[MODS] %zu loose file(s) of mods that are off left out\n", skip.size());
+        }
+    }
+    if (!g_mods.build(orig, (uint64_t)pst.st_size + (tail_size + dissidia::kSectorSize - 1) / dissidia::kSectorSize * dissidia::kSectorSize, first, &log, &err,
+                      g_index_capacity, rest)) {
         std::fprintf(stderr, "[MODS] cannot parse %s: %s (overrides off)\n", host_info_path.c_str(), err.c_str());
         return;
     }
+    if (tail_size) {
+        if (g_mods.add_region((uint64_t)pst.st_size, tail, (uint32_t)tail_size)) {
+            g_tail_start = (uint64_t)pst.st_size;
+            std::fprintf(stderr, "[XMOD] PACKAGE.BIN bytes 0x%llX.. (%llu B appended by an xdelta mod) served from %s\n",
+                         (unsigned long long)pst.st_size, (unsigned long long)tail_size, tail.c_str());
+        }
+        else
+            std::fprintf(stderr, "[XMOD] %s overlaps a loose-file override: not served\n", tail.c_str());
+    }
     std::fputs(log.c_str(), stderr);
     std::fprintf(stderr, "[MODS] %s: %zu override(s) active\n", dir.c_str(), g_mods.overrides().size());
+    {   // Conflicts: two mods that change the same file. Only one version can be served; the Mods page shows the rest
+        // (<mods>/.conflicts.txt: "<row key>\t<note>", written at every start; settings reads it).
+        auto who = [&](const std::string& file, std::string* key) -> std::string {   // "" = not a mod (voice pack copies)
+            key->clear();
+            if (file.find("/.voice_jp_merged/") != std::string::npos || file.find("/voice_jp/") != std::string::npos) return "";
+            if (file.compare(0, dir.size() + 1, dir + "/") != 0) return "";
+            const std::string rel = file.substr(dir.size() + 1);
+            const size_t inst = rel.find("/install/");
+            if (inst != std::string::npos && rel.find('/') == inst) {   // <mods>/<folder>/install/...
+                *key = rel.substr(0, inst);
+                std::ifstream mj(dir + "/" + *key + "/mod.json");
+                const std::string js((std::istreambuf_iterator<char>(mj)), std::istreambuf_iterator<char>());
+                for (const char* k : {"\"display\"", "\"name\""}) {
+                    size_t a = js.find(k);
+                    if (a == std::string::npos) continue;
+                    a = js.find('"', js.find(':', a) + 1);
+                    const size_t b = a == std::string::npos ? a : js.find('"', a + 1);
+                    if (b != std::string::npos) return js.substr(a + 1, b - a - 1);
+                }
+                return *key;
+            }
+            const std::string norm = dissidia::normalize_asset_path(rel);
+            auto o = owner.find(norm);
+            if (o != owner.end()) { *key = owner_key[norm]; return o->second; }
+            return "loose files in the mods folder";
+        };
+        struct Pair { std::string used, unused, used_key, unused_key; std::vector<std::string> files; };
+        std::vector<Pair> pairs;
+        for (const auto& d : g_mods.duplicates()) {
+            std::string ku, kn;
+            const std::string u = who(d.used, &ku), n2 = who(d.unused, &kn);
+            if (u.empty() || n2.empty() || u == n2) continue;
+            Pair* p = nullptr;
+            for (Pair& x : pairs) if (x.used == u && x.unused == n2) p = &x;
+            if (!p) { pairs.push_back({u, n2, ku, kn, {}}); p = &pairs.back(); }
+            p->files.push_back(d.crc == 0x93307C1Cu ? std::string("general_archive/main/main.bin")   // shown by name, not by_crc
+                               : d.asset.empty() ? std::to_string(d.crc) : d.asset);
+        }
+        std::string txt;
+        for (const Pair& p : pairs) {
+            std::string list;
+            for (size_t i = 0; i < p.files.size() && i < 4; i++) list += (i ? ", " : "") + p.files[i];
+            if (p.files.size() > 4) list += " and " + std::to_string(p.files.size() - 4) + " more";
+            std::fprintf(stderr, "[MODS] conflict: %s and %s change the same %zu file(s) (%s): %s's are used\n", p.used.c_str(),
+                         p.unused.c_str(), p.files.size(), list.c_str(), p.used.c_str());
+            if (!p.unused_key.empty())
+                txt += p.unused_key + "\tNot fully active: " + p.used + " changes the same file" + (p.files.size() == 1 ? "" : "s") + " (" + list +
+                       ") and its version is used. Turn one of the two off.\n";
+            if (!p.used_key.empty())
+                txt += p.used_key + "\tConflict: " + p.unused + " also change" + (p.unused.find("files") != std::string::npos ? "" : "s") + " " + list +
+                       "; this mod's version is used.\n";
+        }
+        // An ISO patch mod that brings its own main.bin (its own characters: Emendatus's Aerith is charId 33) and characters
+        // added through roster.txt (charIds from 33 on) claim the same character slots.
+        if (roster_has_characters(dir))
+            for (const std::string& root : extra) {
+                const size_t sl = root.find_last_of('/');
+                if (sl == std::string::npos || root.compare(sl, std::string::npos, "/install") != 0) continue;
+                std::ifstream mj(root.substr(0, sl) + "/mod.json");
+                const std::string js((std::istreambuf_iterator<char>(mj)), std::istreambuf_iterator<char>());
+                if (js.find("\"xdelta\"") == std::string::npos) continue;
+                if (!is_file(root + "/by_crc/93307c1c.bin") && !is_file(root + "/general_archive/main/main.bin")) continue;
+                const std::string folder = root.substr(0, sl).substr(root.substr(0, sl).find_last_of('/') + 1);
+                std::fprintf(stderr, "[MODS] conflict: %s brings its own characters and roster.txt adds characters: they use the same character slots\n", folder.c_str());
+                txt += folder + "\tConflict: the added characters (roster.txt) use the same character slots as this mod's own characters. Turn this mod or the added characters off.\n";
+                txt += "roster.txt\tConflict: an ISO patch mod (" + folder + ") brings characters of its own in the slots the added characters use. Turn one of them off.\n";
+            }
+        std::ofstream cf(dir + "/.conflicts.txt", std::ios::trunc);
+        cf << txt;
+    }
     g_active = !g_mods.empty();
     {   // model files are staged in a fixed block (hooks_models.cpp): raise it for the largest override
         uint32_t biggest = 0; std::string which;
@@ -408,6 +660,11 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
                                   g_dbg_rdram ? (uint32_t)(dest - g_dbg_rdram) + 0x08000000u : 0u);
     if (pkg_trace && size >= 0x100000) psp_dump_func_ring("PKG-RING");
     bool hit = g_mods.read_package(off, size, dest, nread, base);
+    if (hit && g_tail_start && (uint64_t)off >= g_tail_start) {   // the appended data may hold code the mod runs (xdelta_mods.cpp)
+        uint8_t* rd = dissidia_xmod_rdram();
+        if (rd && dest >= rd && dest < rd + 0x08000000)
+            dissidia_xmod_tail_read((uint64_t)off - g_tail_start, *nread, (uint32_t)(dest - rd) + 0x08000000u);
+    }
     if (!asset_patches().empty()) {   // the built-in edits apply to retail entries, so the read is done here when no mod touched it
         if (!hit) { const int64_t got = base(dest, size, off); *nread = (uint32_t)std::max<int64_t>(got, 0); hit = true; }
         apply_asset_patches(off, *nread, dest);
@@ -480,6 +737,8 @@ void dissidia_install_mod_io() {
         for (const std::string& r : mod_roots()) if (is_dir(r + "/textures")) return true;
         return false;
     }});
+    // Settings > Mods > Install ISO Patch (.xdelta): xdelta_import.cpp
+    dissidia_xdelta_register_installer();
     // Texture packs (runtime/include/psp_tex_pack.h) live under <mods>/textures, and the textures/ of each installed mod folder that is on.
     psp_texpack_set_dir_provider([]() -> std::string { return mods_dir() + "/textures"; });
     psp_texpack_set_extra_dirs_provider([]() -> std::vector<std::string> {

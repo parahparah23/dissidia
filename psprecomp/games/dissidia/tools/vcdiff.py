@@ -22,12 +22,20 @@ adler32 flag and application header. Not supported (raises ValueError): secondar
 tables, VCD_TARGET windows, delta-compressed sections.  xdelta3 -S none output (what DeltaPatcher writes by
 default) uses none of those.
 
+`apply()` is the full decoder for when the source IS available (or partly available): it streams the target window by
+window, decodes xdelta3's LZMA secondary compression (header indicator bit 1, compressor id 2: one xz stream per section
+type that runs on across windows, flushed per window) and checks each window's adler32. The source is read through a
+callback that also says which source bytes are unknown; unknown bytes travel through COPYs, so the caller learns exactly
+which target bytes it could not reconstruct.
+
 Gotcha worth remembering: the SAME address modes (6, 7, 8) take ONE byte from the address stream, not a
 varint; SELF/HERE/NEAR take a varint.
 """
 import json
+import lzma
 import struct
 import sys
+import zlib
 from dataclasses import dataclass, field
 
 RUN, ADD, COPY = 1, 2, 3        # instruction types (0 = NOOP)
@@ -228,6 +236,167 @@ def decode(patch: bytes) -> Delta:
             merged.append((off, b))
     d.ranges = merged
     return d
+
+
+class Unknown:
+    """Sorted, merged list of [lo, hi) byte ranges."""
+
+    def __init__(self, ranges=()):
+        self.r = []
+        for lo, hi in sorted(ranges):
+            self.add(lo, hi)
+
+    def add(self, lo, hi):
+        if lo >= hi:
+            return
+        if not self.r or lo > self.r[-1][1]:          # the common case: in order
+            self.r.append([lo, hi])
+            return
+        if lo >= self.r[-1][0]:
+            self.r[-1][1] = max(self.r[-1][1], hi)
+            return
+        out, placed = [], False                       # out of order: insert and merge
+        for a, b in self.r:
+            if b < lo or a > hi:
+                if a > hi and not placed:
+                    out.append([lo, hi])
+                    placed = True
+                out.append([a, b])
+            else:
+                lo, hi = min(lo, a), max(hi, b)
+        if not placed:
+            out.append([lo, hi])
+        self.r = out
+
+    def __bool__(self):
+        return bool(self.r)
+
+    def overlaps(self, lo, hi):
+        return [(max(a, lo), min(b, hi)) for a, b in self.r if a < hi and b > lo]
+
+    def total(self):
+        return sum(b - a for a, b in self.r)
+
+
+def header(patch: bytes):
+    """(application header bytes, offset of the first window, secondary compressor id or None)."""
+    r = _Reader(patch)
+    if r.take(3) != b'\xd6\xc3\xc4':
+        raise ValueError('not a VCDIFF / xdelta3 file')
+    r.byte()
+    hind = r.byte()
+    sec = r.byte() if hind & 1 else None
+    if hind & 2:
+        raise ValueError('custom code tables are not supported')
+    app = r.take(r.varint()) if hind & 4 else b''
+    return app, r.p, sec
+
+
+@dataclass
+class WindowResult:
+    index: int
+    target_offset: int
+    data: bytes
+    unknown: list          # [(lo, hi)] target-window-relative byte ranges that depend on unknown source bytes
+    checksum_ok: object    # True / False / None (no checksum in the patch)
+    source: tuple          # (source position, source length)
+
+
+def apply(patch: bytes, read_source):
+    """Yield one WindowResult per target window.
+
+    read_source(pos, n) -> (bytes of length n, [(lo, hi), ...] absolute source ranges that are unknown).
+    Unknown source bytes are best supplied as zeros; the target bytes copied from them are reported."""
+    _, start, sec = header(patch)
+    if sec not in (None, 2):
+        raise ValueError('secondary compressor %d is not supported (only LZMA, id 2)' % sec)
+    r = _Reader(patch)
+    r.p = start
+    dec = [lzma.LZMADecompressor(), lzma.LZMADecompressor(), lzma.LZMADecompressor()]
+    tpos, wi = 0, 0
+    while not r.eof():
+        wind = r.byte()
+        if wind & 2:
+            raise ValueError('VCD_TARGET windows are not supported')
+        src_len = src_pos = 0
+        if wind & 1:
+            src_len, src_pos = r.varint(), r.varint()
+        body = _Reader(r.take(r.varint()))
+        tlen = body.varint()
+        dind = body.byte()
+        sizes = body.varint(), body.varint(), body.varint()
+        cksum = struct.unpack('>I', body.take(4))[0] if wind & 4 else None
+        sect = []
+        for k in range(3):
+            b = body.take(sizes[k])
+            if dind & (1 << k):
+                if sec is None:
+                    raise ValueError('compressed section without a secondary compressor')
+                q = _Reader(b)
+                n = q.varint()
+                b = dec[k].decompress(b[q.p:])
+                if len(b) != n:
+                    raise ValueError('window %d: LZMA section %d gave %d bytes, header says %d' % (wi, k, len(b), n))
+            sect.append(_Reader(b))
+        add, inst, addr = sect
+        S, s_unk = read_source(src_pos, src_len) if src_len else (b'', [])
+        su = Unknown((lo - src_pos, hi - src_pos) for lo, hi in s_unk)
+        T = bytearray()
+        tu = Unknown()
+        near, same, slot = [0] * NEAR_SIZE, [0] * (SAME_SIZE * 256), 0
+        while not inst.eof():
+            code = CODE_TABLE[inst.byte()]
+            for k in (0, 3):
+                typ, size, mode = code[k:k + 3]
+                if not typ:
+                    continue
+                if size == 0:
+                    size = inst.varint()
+                if typ == ADD:
+                    T += add.take(size)
+                    continue
+                if typ == RUN:
+                    T += add.take(1) * size
+                    continue
+                here = src_len + len(T)
+                if mode == 0:
+                    a = addr.varint()
+                elif mode == 1:
+                    a = here - addr.varint()
+                elif mode < 2 + NEAR_SIZE:
+                    a = near[mode - 2] + addr.varint()
+                else:
+                    a = same[(mode - 2 - NEAR_SIZE) * 256 + addr.byte()]
+                near[slot] = a
+                slot = (slot + 1) % NEAR_SIZE
+                same[a % (SAME_SIZE * 256)] = a
+                at = len(T)
+                if a < src_len:
+                    if a + size > src_len:
+                        raise ValueError('COPY crosses the end of the source segment')
+                    T += S[a:a + size]
+                    for lo, hi in su.overlaps(a, a + size):
+                        tu.add(at + lo - a, at + hi - a)
+                else:
+                    a -= src_len
+                    unk = tu.overlaps(a, a + size) if tu else []
+                    if a + size <= at:
+                        T += T[a:a + size]
+                    else:                       # overlapping: repeats the bytes written so far
+                        left = size
+                        while left:
+                            chunk = min(left, len(T) - a)
+                            T += T[a:a + chunk]
+                            a += chunk
+                            left -= chunk
+                    if unk:                     # conservative for overlapping copies: the whole run
+                        tu.add(at, at + size)
+        if len(T) != tlen:
+            raise ValueError('window %d decoded to %d bytes, header says %d' % (wi, len(T), tlen))
+        ok = None if cksum is None else (zlib.adler32(bytes(T)) & 0xFFFFFFFF) == cksum
+        yield WindowResult(wi, tpos, bytes(T), [tuple(x) for x in tu.r], ok, (src_pos, src_len))
+        tpos += tlen
+        wi += 1
 
 
 def main(argv):

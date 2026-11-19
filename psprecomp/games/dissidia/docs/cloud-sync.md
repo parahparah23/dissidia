@@ -44,6 +44,10 @@ locally or in the cloud.
 [savedata.md](savedata.md#backups)), and the saves are copied once a day before the start-up sync. *Settings > Saves > Restore a backup*
 puts any of them back; the restored save is then uploaded, so the other devices get it at their next sync.
 
+A save of a mod that sits next to the game's (an ISO patch's own save, e.g. Emendatus' `<id>ExtGameData00`) is synced
+like the game's: every save of a disc ID that has a Dissidia 012 save is included, whatever its title
+([xdelta-mods.md](xdelta-mods.md)).
+
 Saves are matched by their slot name without the region ID (`GameData00`, `FCard03`...), so a US and an EU install sync with each
 other; a downloaded save is renamed to the installed game's ID and its `PARAM.SFO` signed again (`psp_savemgr`).
 

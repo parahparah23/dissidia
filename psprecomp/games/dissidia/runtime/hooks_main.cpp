@@ -24,9 +24,9 @@
 #include <cstring>
 void dissidia_register_reflectivity();   // refl_materials.cpp
 
-extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
-extern FuncPtr ovl_menu_lookup(uint32_t vaddr);
-extern FuncPtr ovl_extra_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_battle_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);
 extern void ovl_battle_init_dispatch_table();
 extern void ovl_menu_init_dispatch_table();
 extern void ovl_extra_init_dispatch_table();
@@ -69,6 +69,14 @@ extern void dissidia_button_prompts_install();
 extern void dissidia_comm_battle_install(uint8_t* rdram);
 // framerate.cpp: native 60 Hz battle logic (PSPRECOMP_FPS / settings menu).
 extern void dissidia_framerate_install(uint8_t* rdram);
+// xdelta_mods.cpp: recompiled code of installed xdelta (ISO patch) mods.
+extern void dissidia_xmods_install();
+extern void dissidia_xmods_boot_patch(uint8_t* rdram);
+extern FuncPtr dissidia_xmod_dynamic_lookup(uint32_t vaddr);
+extern FuncPtr dissidia_xmod_changed_code(uint32_t vaddr);
+extern void dissidia_xmods_watch_begin(uint8_t* rdram);
+extern void dissidia_xmods_watch_boot();
+extern void dissidia_xmods_overlay_loaded(int ovl);
 
 bool dissidia_player_pos(float* P);   // camera.cpp
 int dissidia_ex_cores(float (*P)[3], int max);   // framerate.cpp
@@ -102,21 +110,26 @@ FuncPtr dissidia_overlay_resolver(uint32_t vaddr) {
     // LIBSUPPREACC's own internal indirect calls (function-pointer tables)
     // land here too: its set is not in the EBOOT dispatch map.
     if (vaddr >= SUPACC_BASE && vaddr < SUPACC_END) return supacc_lookup(vaddr);
-    if (vaddr < OVL_BASE || vaddr >= OVL_END || !g_rdram) return nullptr;
+    // code an xdelta mod loaded into the heap at run time (xdelta_mods.cpp)
+    if (vaddr >= OVL_END) if (FuncPtr f = dissidia_xmod_dynamic_lookup(vaddr)) return f;
+    if (vaddr < OVL_BASE) return dissidia_xmod_changed_code(vaddr);   // EBOOT code an xdelta mod changed
+    if (vaddr >= OVL_END || !g_rdram) return nullptr;
     uint32_t id;
     std::memcpy(&id, g_rdram + (OVL_BASE & 0x07FFFFFFu), 4);
     if (id != g_last_id) {
         std::fprintf(stderr, "[OVL] resident overlay id=%u (%s)\n", id,
                      id == 1 ? "battle" : id == 2 ? "menu" : id == 3 ? "extra" : "?");
         g_last_id = id;
+        dissidia_xmods_overlay_loaded((int)id);   // xdelta mods: functions of it that differ from the compiled code
     }
-    FuncPtr fn = nullptr;
+    FuncPtr fn = nullptr;   // (the lookups put an xdelta mod's version first: xdelta_mods.cpp)
     switch (id) {
-        case 1: fn = ovl_battle_lookup(vaddr); break;
-        case 2: fn = ovl_menu_lookup(vaddr); break;
-        case 3: fn = ovl_extra_lookup(vaddr); break;
+        case 1: fn = dissidia_ovl_battle_lookup(vaddr); break;
+        case 2: fn = dissidia_ovl_menu_lookup(vaddr); break;
+        case 3: fn = dissidia_ovl_extra_lookup(vaddr); break;
         default: break;
     }
+    if (!fn) fn = dissidia_xmod_changed_code(vaddr);   // code an xdelta mod added that nothing compiled covers
     static int logged = 0;
     if (logged < 40 || !fn) {
         if (logged < 40 || (logged < 400 && !fn)) {
@@ -312,6 +325,7 @@ void dissidia_register_hooks(uint8_t* rdram) {
     psp_savedata_set_shared_ids(kIds, 5);
     psp_set_window_title("Dissidia 012 Duodecim Final Fantasy");
     psp_set_window_icon(k_app_icon_rgba, k_app_icon_w, k_app_icon_h);
+    dissidia_xmods_install();    // xdelta mods' code first: the hooks below wrap the mod's version (xdelta_mods.cpp)
     psp_dispatch_register(0x089E0A88u, dissidia_menu_flag_cb<4>);
     psp_dispatch_register(0x089E0AA4u, dissidia_menu_flag_cb<2>);
     dissidia_index_install();    // package-index buffer relocation (hooks_index.cpp); before the first build
@@ -381,7 +395,10 @@ void dissidia_register_hooks(uint8_t* rdram) {
 }
 
 void dissidia_on_boot_context(uint8_t* rdram, recomp_context* /*ctx*/) {
-    dissidia_roster_boot_patch(rdram);   // EBOOT data is initialised by now
+    dissidia_xmods_watch_begin(rdram);   // the EBOOT as compiled, before an xdelta mod's bytes go in
+    dissidia_xmods_boot_patch(rdram);    // EBOOT data is initialised by now: xdelta mods' byte changes first
+    dissidia_xmods_watch_boot();
+    dissidia_roster_boot_patch(rdram);
 }
 void dissidia_on_thread_start(uint8_t* /*rdram*/, uint32_t /*k0_addr*/) {}
 

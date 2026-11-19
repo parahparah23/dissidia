@@ -133,7 +133,7 @@ def cmd_record(a):
     mod = json.load(open(os.path.join(HERE, '..', '..', '..', '..', 'mods', a.folder, 'mod.json'), encoding="utf-8"))
     code = mod['character']['code']
     lines = [l.split() for l in open(os.path.join(mods, 'retail_moves.txt'), encoding="utf-8").read().splitlines()]
-    char = next(int(l[-3]) for l in lines if a.folder in l)
+    char = next(int(l[l.index(a.folder) + 1]) for l in lines if a.folder in l)   # "[#off#] <folder> <charId> <ids> nm=... [files=...]"
     name = a.name or a.folder
     if len(name) > MAX_NAME:
         raise SystemExit('name %r: at most %d characters' % (name, MAX_NAME))
