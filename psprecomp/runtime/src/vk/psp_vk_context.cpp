@@ -247,8 +247,13 @@ bool Context::create_swapchain(int w, int h, bool vsync, std::string* err) {
 #endif
         if (hdr_supported_) hdr_reason_.clear();
         else if (!android_reason.empty()) hdr_reason_ = android_reason;
-        else hdr_reason_ = colorspace_ext_ ? "The display or the window system offers no HDR format. Turn HDR on in the system display settings, and use Wayland, Windows or gamescope (X11 has no HDR)."
-                                           : "The Vulkan driver has no VK_EXT_swapchain_colorspace.";
+        else if (!colorspace_ext_) hdr_reason_ = "The Vulkan driver has no VK_EXT_swapchain_colorspace.";
+#if defined(__linux__) && !defined(__ANDROID__)
+        else if (window_ && std::getenv("WAYLAND_DISPLAY") && !std::getenv("GAMESCOPE_WAYLAND_DISPLAY") && SDL_GetCurrentVideoDriver() &&
+                 !std::strcmp(SDL_GetCurrentVideoDriver(), "x11"))
+            hdr_reason_ = "The game window runs through XWayland (X11), which has no HDR. Start the game without SDL_VIDEODRIVER=x11 so it opens as a native Wayland window.";
+#endif
+        else hdr_reason_ = "The display or the window system offers no HDR format. Turn HDR on in the system display settings, and use Wayland, Windows or gamescope (X11 has no HDR).";
         if (hdr_wanted_ && hdr_supported_) {
             // PSPRECOMP_HDR_FORMAT=hdr10|scrgb picks by hand; scRGB first otherwise.
             const char* hf = std::getenv("PSPRECOMP_HDR_FORMAT");
