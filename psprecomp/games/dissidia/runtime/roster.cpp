@@ -756,8 +756,8 @@ std::vector<const Entry*> extras() {
     return v;
 }
 
-// The recompiled code does not keep $ra for calls, so the accessor cannot see its caller. The two
-// callers that read record field 0 for different textures are wrapped to say who is asking.
+// The accessor serves several callers that read record field 0 for different textures; the two that matter are
+// wrapped to say who is asking (simpler than telling them apart by $ra, which compiled calls now keep).
 enum Caller { CALLER_OTHER = 0, CALLER_TILE = 1, CALLER_ART = 2 };
 int g_caller = CALLER_OTHER;
 FuncPtr g_orig_placer = nullptr, g_orig_cursor = nullptr;
@@ -776,11 +776,43 @@ void cursor_wrap(uint8_t* rdram, recomp_context* ctx) {   // FUN_08A84458: f0 ->
 
 void grid_table_hook(uint8_t* rdram, recomp_context* ctx) {
     const int who = g_caller;
-    const uint8_t* src = rdram + (GRID_TABLE_SRC & 0x07FFFFFFu);
+    // The table the game's own accessor gives now: the retail one, or a mod's (an ISO patch's run-time code rewrites the
+    // accessor to return a table with more rows: Emendatus adds Aerith, charId 33, as row 33). Its rows after the
+    // retail 33 are kept when they hold a charId; the extra characters come after them.
+    uint32_t src_addr = GRID_TABLE_SRC;
+    if (FuncPtr game = dissidia_ovl_menu_lookup(0x08A85ECCu); game && game != grid_table_hook) {
+        const int32_t keep = ctx->r[2];
+        game(rdram, ctx);
+        const uint32_t got = static_cast<uint32_t>(ctx->r[2]);
+        if (got >= 0x08800000u && got < 0x0C000000u) src_addr = got;
+        ctx->r[2] = keep;
+    }
+    const uint8_t* src = rdram + (src_addr & 0x07FFFFFFu);
     uint8_t* dst = rdram + (GRID_TABLE_DST & 0x07FFFFFFu);
-    std::memcpy(dst, src, kGridRetailRows * 12);
-    std::memset(dst + kGridRetailRows * 12, 0xFF, (kGridRows - kGridRetailRows) * 12);
-    int row_no = kGridRetailRows;
+    int src_rows = kGridRetailRows;
+    if (src_addr != GRID_TABLE_SRC)
+        while (src_rows < kGridRows) {   // a row for a charId the table does not have yet (past its end: repeats or junk)
+            int16_t id; std::memcpy(&id, src + 12 * src_rows + 8, 2);
+            if (id <= 0 || id >= kRosterMax) break;
+            bool dup = false;
+            for (int r = 0; r < src_rows && !dup; r++) { int16_t o; std::memcpy(&o, src + 12 * r + 8, 2); dup = o == id; }
+            if (dup) break;
+            src_rows++;
+        }
+    std::memcpy(dst, src, static_cast<size_t>(src_rows) * 12);
+    std::memset(dst + src_rows * 12, 0xFF, static_cast<size_t>(kGridRows - src_rows) * 12);
+    static int said_rows = -1;
+    if (src_rows != said_rows) {
+        said_rows = src_rows;
+        if (src_rows != kGridRetailRows) {
+            std::fprintf(stderr, "[ROSTER] grid: the game's record table at 0x%08X has %d rows (retail %d): kept\n", src_addr, src_rows, kGridRetailRows);
+            for (int r = 0; r < src_rows; r++) {
+                int16_t f[6]; std::memcpy(f, src + 12 * r, 12);
+                std::fprintf(stderr, "[ROSTER]   row %2d: %d %d %d %d charId %d %d\n", r, f[0], f[1], f[2], f[3], f[4], f[5]);
+            }
+        }
+    }
+    int row_no = src_rows;
     for (const Entry* e : extras()) {
         if (row_no >= kGridRows) break;
         for (int i = 0; i < kGridRetailRows - 1; i++) {
@@ -1339,6 +1371,11 @@ void list_build_hook(uint8_t* rdram, recomp_context* ctx) {
         std::array<uint8_t, 8> e; std::memcpy(e.data(), rdram + ((list + 8u * i) & 0x07FFFFFFu), 8); v.push_back(e);
     }
     auto id_of = [](const std::array<uint8_t, 8>& e) { uint32_t id; std::memcpy(&id, e.data(), 4); return id; };
+    if (std::getenv("PSPRECOMP_ROSTER_LISTLOG")) {   // debug: what the game's own builder returned
+        std::string ids;
+        for (auto& e : v) ids += " " + std::to_string(id_of(e));
+        std::fprintf(stderr, "[ROSTER] selectable list (game): %u entries:%s\n", n, ids.c_str());
+    }
     auto have = [&](uint32_t id) { for (auto& e : v) if (id_of(e) == id) return true; return false; };
     // Debug aid PSPRECOMP_ROSTER_UNLOCK_ALL=1: list every playable charId 1..32, to see the full grid.
     static const bool unlock_all = std::getenv("PSPRECOMP_ROSTER_UNLOCK_ALL") != nullptr;
@@ -5432,8 +5469,15 @@ void cpu_install() {
 void dissidia_roster_grid_install() {
     // The menu overlay's grid bounds were raised to kGridRows (overlay_menu.toml), so the record table
     // accessor is always replaced: the extra rows must read as 0xFF (never a charId), not as whatever
-    // follows the retail table.
+    // follows the retail table. It starts from the table the game's own accessor gives, so a mod's longer
+    // table (an ISO patch's new character) is kept.
     psp_dispatch_register(0x08A85ECCu, grid_table_hook);
+    if (std::getenv("PSPRECOMP_ROSTER_LISTLOG") && (!g_enabled || extras().empty())) {   // debug: log the selectable list
+        g_orig_list_build = psp_dispatch_probe_lookup(0x088D5AC8u);
+        if (g_orig_list_build) psp_dispatch_register(0x088D5AC8u, list_build_hook);
+        g_orig_placer = dissidia_ovl_menu_lookup(0x08A7FB54u);
+        if (g_orig_placer) psp_dispatch_register(0x08A7FB54u, placer_wrap);
+    }
     if (!g_enabled || extras().empty()) return;
     g_orig_placer = dissidia_ovl_menu_lookup(0x08A7FB54u);
     if (g_orig_placer) psp_dispatch_register(0x08A7FB54u, placer_wrap);
