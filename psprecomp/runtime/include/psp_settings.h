@@ -8,8 +8,8 @@
 // the saved values win over PSPRECOMP_FULLSCREEN / PSPRECOMP_SCALE / PSPRECOMP_WINDOW / PSPRECOMP_RENDER_SCALE / PSPRECOMP_FPS.
 //
 // Categories (L / R shoulder, Q / E or Tab, the sidebar): Display, Graphics, Image (colour; sub-menu HDR), Effects (lighting; sub-menu Ray
-// Tracing), Controls (touch screens only), Network (applied at once through psp_adhoc_configure; Discord status, psp_discord.h), Cloud, System, Drivers (Android, Adreno)
-// and Debug.
+// Tracing), Controls (touch screens only), Network (applied at once through psp_adhoc_configure; Discord status, psp_discord.h), Saves (the save
+// manager, hle/psp_saves_page.h), Cloud, Mods, System, Drivers (Android, Adreno) and Debug.
 //
 // Open / close: Esc or F1 on the keyboard; Guide, or both stick buttons (L3 + R3), on a game controller; the touch controls' menu button;
 // psp_settings_request_open() from a game module's own menu entry. PSPRECOMP_SETTINGS_MENU=0 disables it.
@@ -72,6 +72,12 @@ bool psp_settings_menu_open();
 /// Any thread: ask for the menu to open (the game's own menu entries - title screen, main menu, pause menu - call this). Takes effect
 /// on the main thread's next tick; does nothing while the menu is already open or in a multiplayer session.
 void psp_settings_request_open();
+
+/// Any thread: open the menu on its Saves category (import / export, backups, cloud conflicts); the game's save list does this on Triangle.
+void psp_settings_request_open_saves();
+/// Counts the times the menu was opened: a caller that sees it change knows the saves may have changed meanwhile (the save list
+/// refreshes itself).
+unsigned psp_settings_open_serial();
 
 /// Main thread: true once after the menu was opened or closed from inside psp_settings_tick (not by an event), so the event loop can
 /// re-publish the (now gated, or released) input state.

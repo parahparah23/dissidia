@@ -17,6 +17,12 @@
 #include <mutex>
 #include <thread>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#elif !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 using namespace psp_cloud;
 
@@ -27,7 +33,7 @@ using Clock = std::chrono::steady_clock;
 using CloudProvider = psp_cloud::Provider;   // (psp_cloud_svc::Provider is the backend choice)
 
 struct Job {
-    enum Kind { Sync, Push, Resolve, Signin } kind = Sync;
+    enum Kind { Sync, Push, Resolve, Signin, Delete } kind = Sync;
     std::string suffix;
     Choice choice = Choice::Skip;
 };
@@ -139,6 +145,7 @@ Options make_options(const Config& c, const Paths& p, bool allow_pull) {
     o.backup_root = p.backup_root;
     o.state_path = (P(p.workdir) / "cloud" / "state.txt").u8string();
     o.disc_id = p.disc_id;
+    o.device_name = device_name();
     o.allow_pull = allow_pull;
     const std::string root = p.saves_root;
     o.existing = [root](const std::string& suffix) -> std::string {   // the folder already holding this slot, any region's ID
@@ -146,7 +153,8 @@ Options make_options(const Config& c, const Paths& p, bool allow_pull) {
         for (fs::directory_iterator it(P(root), ec), end; !ec && it != end; it.increment(ec)) {
             std::string d, x;
             const std::string n = it->path().filename().u8string();
-            if (psp_savemgr::split_name(n, &d, &x) && x == suffix && it->is_directory(ec)) return n;
+            if (psp_savemgr::split_name(n, &d, &x) && x == suffix && it->is_directory(ec) &&
+                psp_savemgr::is_dissidia012_save(d, "")) return n;   // not another game's save with the same slot name
         }
         return "";
     };
@@ -165,13 +173,14 @@ std::string ago(time_t t) {
 
 // ---- results -> status (call with the lock held) ----
 void summarise(const std::vector<Item>& items, const std::string& fatal, bool push_only) {
-    int up = 0, down = 0, conflicts = 0, errors = 0, skipped = 0;
+    int up = 0, down = 0, conflicts = 0, errors = 0, skipped = 0, removed = 0;
     std::string first_error;
     for (const Item& i : items) {
         up += i.action == Action::Pushed;
         down += i.action == Action::Pulled;
         conflicts += i.action == Action::Conflict;
         skipped += i.action == Action::Skipped;
+        removed += i.action == Action::Removed;
         if (i.action == Action::Error) { errors++; if (first_error.empty()) first_error = i.suffix + ": " + i.note; }
     }
     g.st.items = items;
@@ -183,6 +192,7 @@ void summarise(const std::vector<Item>& items, const std::string& fatal, bool pu
         std::string t = "Synced";
         if (up || down) t += " (" + std::string(up ? std::to_string(up) + " up" : "") + (up && down ? ", " : "") +
                              (down ? std::to_string(down) + " down" : "") + ")";
+        if (removed) t += ", " + std::to_string(removed) + " deleted (in the backups)";
         if (conflicts) { g.st.state = Status::NeedsChoice; t = std::to_string(conflicts) + " save" + (conflicts == 1 ? "" : "s") + " changed on both sides: choose which to keep"; }
         else g.st.state = Status::Idle;
         if (skipped && !conflicts && push_only) t += "; newer cloud saves arrive at the next start";
@@ -229,6 +239,25 @@ void do_resolve(std::unique_lock<std::mutex>& lk, const std::string& suffix, Cho
     for (Item& i : items) if (i.suffix == suffix) { i = done; found = true; }
     if (!found) items.push_back(done);
     summarise(items, "", false);
+}
+
+void do_delete(std::unique_lock<std::mutex>& lk, const std::string& suffix) {
+    const Config cfg = g.cfg;
+    const Paths paths = g.paths;
+    std::string err;
+    std::unique_ptr<CloudProvider> p = make_provider(cfg, &err);
+    if (!p) return;   // not set up: the deletion is local only
+    g.st.state = Status::Syncing;
+    g.st.text = "Deleting " + suffix + " in the cloud...";
+    touch();
+    lk.unlock();
+    const Item done = delete_remote(*p, make_options(cfg, paths, true), suffix);
+    lk.lock();
+    std::vector<Item> items;
+    for (const Item& i : g.st.items) if (i.suffix != suffix) items.push_back(i);
+    items.push_back(done);
+    summarise(items, "", false);
+    if (done.action == Action::Skipped || done.action == Action::Error) { g.st.text = suffix + ": " + done.note; touch(); }
 }
 
 void do_signin(std::unique_lock<std::mutex>& lk) {
@@ -300,6 +329,7 @@ void worker_main() {
         if (job.kind == Job::Signin) { do_signin(lk); g.cv.notify_all(); continue; }
         g.busy = true;
         if (job.kind == Job::Sync || job.kind == Job::Push) do_sync(lk, true);
+        else if (job.kind == Job::Delete) do_delete(lk, job.suffix);
         else do_resolve(lk, job.suffix, job.choice);
         g.busy = false;
         g.cv.notify_all();
@@ -317,6 +347,28 @@ void ensure_worker() {   // lock held
 }
 
 }  // namespace
+
+std::string device_name() {
+    std::string n;
+    if (const char* e = std::getenv("PSPRECOMP_DEVICE_NAME"); e && *e) n = e;
+#if defined(__ANDROID__)
+    if (n.empty()) {
+        char man[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "";
+        __system_property_get("ro.product.manufacturer", man);
+        __system_property_get("ro.product.model", model);
+        n = model;
+        if (man[0] && n.find(man) == std::string::npos && std::string(man).size() + n.size() < 40) n = std::string(man) + " " + n;
+        if (!man[0] && !model[0]) n = "Android device";
+    }
+#elif defined(_WIN32)
+    if (n.empty()) if (const char* c = std::getenv("COMPUTERNAME")) n = c;
+#else
+    if (n.empty()) { char h[256] = ""; if (gethostname(h, sizeof h - 1) == 0) n = h; }
+#endif
+    for (char& c : n) if (c == '\n' || c == '\r' || c == '=') c = ' ';
+    if (n.size() > 40) n.resize(40);
+    return n.empty() ? "another device" : n;
+}
 
 void init(const Paths& p) {
     std::lock_guard<std::mutex> lk(g.m);
@@ -390,6 +442,14 @@ void resolve(const std::string& suffix, Choice c) {
     std::lock_guard<std::mutex> lk(g.m);
     ensure_worker();
     g.jobs.push_back({Job::Resolve, suffix, c});
+    g.cv.notify_all();
+}
+
+void remove_save(const std::string& suffix) {
+    if (!configured()) return;
+    std::lock_guard<std::mutex> lk(g.m);
+    ensure_worker();
+    g.jobs.push_back({Job::Delete, suffix, Choice::Skip});
     g.cv.notify_all();
 }
 

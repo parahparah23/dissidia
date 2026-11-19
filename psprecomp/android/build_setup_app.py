@@ -30,7 +30,7 @@ def main():
     subprocess.check_call(["cmake", "-DFONT_DIR=" + REPO + "/runtime/assets/fonts", "-DOUT=" + fonts, "-P", REPO + "/runtime/assets/embed_fonts.cmake"])
     rtsrc = REPO + "/runtime/src/hle/"
     cxx = [REPO + "/setup/" + f for f in ("setup_main.cpp", "install.cpp", "proc.cpp", "payload.cpp", "android.cpp")] + \
-          [rtsrc + f for f in ("psp_savedata_dialog.cpp", "psp_savemgr.cpp", "psp_savedata_crypto.cpp")] + [fonts]
+          [rtsrc + f for f in ("psp_savedata_dialog.cpp", "psp_savemgr.cpp", "psp_savebackup.cpp", "psp_savedata_crypto.cpp")] + [fonts]
     c = [REPO + "/setup/third_party/miniz.c"]
     common = ["-target", "aarch64-linux-android", "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % API, "-fPIC", "-O2",
               "-fdata-sections", "-ffunction-sections", "-funwind-tables", "-fstack-protector-strong", "-Wno-everything",

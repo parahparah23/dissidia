@@ -63,12 +63,15 @@ void sync_now();                        // full sync
 void startup_sync();                    // sync_now when auto_sync is on
 void after_save();                      // debounced sync when auto_sync is on
 void resolve(const std::string& suffix, psp_cloud::Choice c);
+void remove_save(const std::string& suffix);   // the save manager deleted this slot here: delete it in the cloud too (psp_cloud::delete_remote)
 
 void signin_start();                    // Google device flow; status() shows user_code / verify_url meanwhile
 void signin_cancel();
 void signout();                         // forgets the Google sign-in
 
 Status status();
+// This device's name as the other devices see it in a conflict ("steamdeck", "Retroid Pocket 6", "DESKTOP-1234"); PSPRECOMP_DEVICE_NAME overrides.
+std::string device_name();
 // Waits until no sync is running (true) or the timeout passes (false). Conflicts waiting for a choice do not block it.
 bool wait_ready(int timeout_ms);
 

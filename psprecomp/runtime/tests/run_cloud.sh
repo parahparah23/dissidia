@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SRV=""; T=$(mktemp -d); trap 'kill $SRV 2>/dev/null || true; rm -rf "$T"' EXIT
-SRC="src/hle/psp_cloud_providers.cpp src/hle/psp_cloudsync.cpp src/hle/psp_http.cpp src/hle/psp_savemgr.cpp src/hle/psp_savedata_crypto.cpp"
+SRC="src/hle/psp_cloud_providers.cpp src/hle/psp_cloudsync.cpp src/hle/psp_http.cpp src/hle/psp_savemgr.cpp src/hle/psp_savebackup.cpp src/hle/psp_savedata_crypto.cpp"
 g++ -O1 -std=c++17 -Wall -Werror -Isrc/hle -Itests tests/test_cloud_providers.cpp $SRC -o "$T/test" -lpthread
 g++ -O1 -std=c++17 -Wall -Werror -Isrc/hle -Itests tests/test_cloud_service.cpp src/hle/psp_cloud_service.cpp $SRC -o "$T/test_svc" -lpthread
 mkfifo "$T/hold"

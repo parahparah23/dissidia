@@ -180,12 +180,13 @@ labels mark scope and priority.
       has never been run, the GitHub workflow has not run yet, and Android is tabled ([docs/installer.md](docs/installer.md)).
 - [ ] Optional content: HD texture packs in PPSSPP format (Niosa's D012FFRT; `games/dissidia/docs/texture-packs.md`) and Japanese voices
       from an undub disc (`games/dissidia/docs/audio.md`); both built and linked, neither confirmed in game yet.
-- [ ] Save import / export: the game's save list has a Triangle key opening **Manage saves** (import from PPSSPP, a PSP memory stick or any
-      folder, any region; export the other way; backups on replace; `games/dissidia/docs/savedata.md`). Unit-tested against a real PPSSPP save
-      folder; not yet used in the running game.
-- [ ] Cloud sync of saves between devices (a synced folder, WebDAV or Google Drive; Settings > Cloud and Triangle > Cloud sync on the
-      save list; `games/dissidia/docs/cloud-sync.md`). Host-tested against fake servers; not yet run in the game, and Google sign-in
-      not yet tried against Google itself.
+- [ ] Save manager, Settings > Saves (also Triangle on the game's save list): import from PPSSPP, a PSP memory stick, a folder or an
+      archive (.zip, .7z, .rar, .tar.gz) picked with the system's file dialog or the in-game browser, any region; export to a folder or a .zip;
+      automatic backups (before every replacement, daily) with restore; cloud conflicts shown side by side (`games/dissidia/docs/savedata.md`).
+      Run in the game on Linux (import, zip import/export through zenity, backup restore, a folder-sync conflict and its roll-back); Windows
+      compiles but is unrun; the Android document picker needs the next Android SDK release (its APK skeleton) and is untested.
+- [ ] Cloud sync of saves between devices (a synced folder, WebDAV or Google Drive; Settings > Cloud, choices in Settings > Saves;
+      `games/dissidia/docs/cloud-sync.md`). Folder sync run in the game; WebDAV / Google host-tested against fake servers.
 - [ ] Cross-platform: build and verify on Linux and Windows (#70 — see
       [docs/PLATFORMS.md](docs/PLATFORMS.md)).
 
