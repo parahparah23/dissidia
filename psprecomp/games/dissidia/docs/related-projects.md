@@ -75,6 +75,9 @@ top of 1 frame of delay covers about 100 to 130 ms without a stall. This is the 
 
 ### 3. Japanese voices: story scene scripts
 
+**Movies done** (18 November 2026, `tools/jp_audio.py`, [audio.md](audio.md)). The scenes are not: the undub disc changes no scene
+script, so this needs the Japanese disc (NPJH-50377).
+
 Source: [docs/port/japanese-voices.md](https://github.com/VCKing101/Dissidia012-pc/blob/main/docs/port/japanese-voices.md), "Story scenes".
 
 Our `jp_audio.py` swaps audio files only. They found that **302 voiced story scenes** (`talkevent/*.evex`, ARC
