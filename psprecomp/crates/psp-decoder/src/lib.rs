@@ -191,6 +191,20 @@ pub fn decode_function(
     base_vaddr: u32,
     xrefs: &[(u32, u32)],
 ) -> Result<Vec<MipsOp>, DecodeError> {
+    decode_function_with_entries(bytes, base_vaddr, xrefs, &[])
+}
+
+/// [`decode_function`] for a function with extra entry points (its mid-entries): one that is a delay slot's address
+/// is a branch-into-delay-slot target like an in-function branch target (BIDS, issue #56), so entering there runs the
+/// slot's instruction as a normal instruction and goes on after it, as on the CPU. Without this the entry's label
+/// lands on the reordered branch: code an ISO patch adds that jumps back to the word after a jump it wrote (`j hook`
+/// with a `nop` delay slot over the function's first two instructions) re-ran the jump and recursed forever.
+pub fn decode_function_with_entries(
+    bytes: &[u8],
+    base_vaddr: u32,
+    xrefs: &[(u32, u32)],
+    entries: &[u32],
+) -> Result<Vec<MipsOp>, DecodeError> {
     if bytes.len() % 4 != 0 {
         return Err(DecodeError::OutOfBounds);
     }
@@ -218,7 +232,7 @@ pub fn decode_function(
         .collect();
 
     // Second pass: apply delay slot reordering
-    reorder_delay_slots(&raw_ops, base_vaddr, func_end)
+    reorder_delay_slots(&raw_ops, base_vaddr, func_end, entries)
 }
 
 /// Collect every in-function static control-flow target: conditional branch
@@ -282,8 +296,10 @@ fn reorder_delay_slots(
     raw_ops: &[(u32, MipsOp)],
     func_start: u32,
     func_end: u32,
+    entries: &[u32],
 ) -> Result<Vec<MipsOp>, DecodeError> {
-    let branch_targets = in_function_branch_targets(raw_ops, func_start, func_end);
+    let mut branch_targets = in_function_branch_targets(raw_ops, func_start, func_end);
+    branch_targets.extend(entries.iter().copied().filter(|&e| e > func_start && e < func_end));
     let mut result: Vec<MipsOp> = Vec::with_capacity(raw_ops.len());
     let mut skip_next = false;
 

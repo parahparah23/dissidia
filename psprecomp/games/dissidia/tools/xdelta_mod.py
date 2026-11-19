@@ -337,7 +337,7 @@ def run_patch(patch, src, wanted, tmpdir, log=True):
                         s.unknown.add(ua - off, ub - off)
         if w.checksum_ok is False:
             touched = [p for off, size, p in spans if off < hi and off + size > lo and size]
-            bad.append((w.index, (lo, hi), touched))
+            bad.append((w.index, (lo, hi), touched, bool(w.unknown)))
 
     for w in vcdiff.apply(patch, src.read):
         if files is None:
@@ -435,6 +435,22 @@ def write_if_changed(path, data):
     return True
 
 
+VERSION_RE = re.compile(r"[\s_.-]*(?:v|ver\.?|version)?[\s_.-]*\d+(?:[._-]\d+)*[a-z]?$", re.I)
+
+
+def split_version(name):
+    """'Emendatus11.18.26' -> ('Emendatus', '11.18.26'); a name without a trailing version is returned as is."""
+    m = VERSION_RE.search(name)
+    if not m or m.start() == 0:
+        return name, ""
+    return name[:m.start()].rstrip(" _.-"), name[m.start():].strip(" _.-vV")
+
+
+def family_of(folder_name, meta):
+    """The mod a folder holds, whatever version: mod.json "family", else (older imports) its name without a version."""
+    return meta.get("family") or slug(split_version(meta.get("name") or folder_name)[0])
+
+
 def slug(name):
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.").lower()
     return s or "xdelta-mod"
@@ -461,18 +477,19 @@ def cmd_import(a):
     # the name: the patch file's, else the patched image's name in the patch header ("target//source/")
     target = re.split(r"[\\/]", app.decode("latin-1").split("//")[0])[-1] if app else ""
     base = os.path.splitext(os.path.basename(a.patch))[0] if not a.patch.startswith("fd:") else os.path.splitext(target)[0]
-    name = a.name or base or "xdelta-patch"
-    folder = os.path.join(mods, slug(name))
+    full = a.name or base or "xdelta-patch"
+    name, version = split_version(full)
+    family = slug(name)
+    folder = os.path.join(mods, family)
+    # earlier versions of this mod (any folder whose family matches): the new one replaces them
+    previous = [(n, p, m) for n, p, m in xdelta_folders(mods) if family_of(n, m) == family]
     patch_sha = hashlib.sha256(patch).hexdigest()
     mj = os.path.join(folder, "mod.json")
-    if os.path.isfile(mj) and not a.force:
-        try:
-            old = json.load(open(mj))
-        except ValueError:
-            old = {}
-        if old.get("patch_sha256") == patch_sha:
-            say("%s is already installed as %s (--force to redo)" % (shown, folder))
-            return 0
+    if not a.force:
+        for n, p, m in previous:
+            if m.get("patch_sha256") == patch_sha:
+                say("%s is already installed as %s (--force to redo)" % (shown, p))
+                return 0
     src_name = re.split(r"[\\/]", app.decode("latin-1").rstrip("/").split("//")[-1])[-1] if b"//" in app else ""
     say("Patch: %s (%.1f MB)%s" % (shown, len(patch) / 1048576.0, ", made for " + src_name if src_name else ""))
 
@@ -521,6 +538,14 @@ def cmd_import(a):
     if bad:   # expected where the base differs from the patch author's own disc (ISO header sectors, region files)
         say("  %d of the patch's blocks differ from its own checksum (%s); the files below are checked one by one"
             % (len(bad), ", ".join("#%d" % b[0] for b in bad)))
+    # a block that fails its checksum although every byte it copies was known: the base is not the one the patch was
+    # made for (block 0 holds the ISO header, which patch authors' own rebuilt discs often differ in)
+    unexplained = [b for b in bad if b[0] != 0 and not b[3]]
+    if unexplained and not a.ignore_checksums:
+        shutil.rmtree(tmp, ignore_errors=True)
+        die("%d block(s) of the patch (%s) do not match although the base was complete: this patch is not for a retail "
+            "Dissidia 012 disc (an update made for an earlier version of the mod? Those need the full patch from the mod's "
+            "author). Nothing was installed." % (len(unexplained), ", ".join("#%d" % b[0] for b in unexplained[:8])))
 
     disc = os.path.join(work, "disc0")
     usr = os.path.join(disc, "PSP_GAME", "USRDIR")
@@ -693,14 +718,21 @@ def cmd_import(a):
             else:
                 summary.append("%s: patched (code)" % key)
     stamp = code_stamp(staging)
-    meta = {"name": name, "kind": "xdelta", "enabled": True, "patch": shown, "patch_sha256": patch_sha,
+    meta = {"name": name + (" " + version if version else ""), "family": family, "version": version, "kind": "xdelta", "enabled": True, "patch": shown, "patch_sha256": patch_sha,
             "base": getattr(src, "layout", {}).get("id", src.name), "code": sorted(code), "code_stamp": stamp,
             "description": "Installed from %s. Settings > Mods turns it on and off (next start)." % shown}
-    if os.path.isfile(mj):                     # keep the user's on/off choice across a re-import
-        try:
-            meta["enabled"] = json.load(open(mj)).get("enabled", True) is not False
-        except ValueError:
-            pass
+    if previous:                               # keep the user's on/off choice across an update
+        meta["enabled"] = any(m.get("enabled", True) is not False for _n, _p, m in previous)
+        # run-time code the game recorded for the previous version: still valid where the new version carries the very
+        # same bytes at the same place (xdelta_mods.cpp, dynamic.txt), so the update needs no new learning run for it
+        carried = carry_dynamic(previous, staging)
+        if carried:
+            say("  %d block(s) of run-time code unchanged since %s: their record is kept" % (carried, ", ".join(n for n, _p, _m in previous)))
+    others = [(n, m) for n, p, m in xdelta_folders(mods) if family_of(n, m) != family and m.get("enabled", True) is not False
+              and (m.get("code") or os.path.isfile(os.path.join(p, "package_tail.bin")))]
+    if others and (code or os.path.isfile(os.path.join(staging, "package_tail.bin"))):
+        say("  note: %s is on too and also changes the game's code; only one such mod runs at a time (the first in name order). "
+            "Turn the other off in Settings > Mods." % ", ".join(n for n, _m in others))
     with open(os.path.join(staging, "mod.json"), "w") as f:
         json.dump(meta, f, indent=2)
         f.write("\n")
@@ -710,6 +742,10 @@ def cmd_import(a):
         if any("could not be rebuilt" in p or "encrypted" in p for p in problems) and not a.allow_partial:
             shutil.rmtree(staging, ignore_errors=True)
             die("the patch could not be applied completely (above); nothing was installed (--allow-partial to install anyway)")
+    for n, p, m in previous:                   # the earlier version(s), whatever their folder name
+        if os.path.isdir(p):
+            say("  replaces %s%s" % (n, " (%s)" % m.get("version") if m.get("version") else ""))
+            shutil.rmtree(p)
     if os.path.isdir(folder):
         shutil.rmtree(folder)
     os.replace(staging, folder)
@@ -719,6 +755,41 @@ def cmd_import(a):
     if code:
         say("This patch changes the game's code: it takes effect after the next build (pipeline.sh / the setup's Rebuild).")
     return 0
+
+
+def carry_dynamic(previous, staging):
+    """Copies the records of run-time code (code/dynamic.txt + snapshots) from an earlier version for every block whose
+    bytes in package_tail.bin are unchanged. Returns how many blocks were kept."""
+    new_tail = os.path.join(staging, "package_tail.bin")
+    if not os.path.isfile(new_tail):
+        return 0
+    keep_lines, kept = [], 0
+    for _n, p, _m in previous:
+        dyn = os.path.join(p, "code", "dynamic.txt")
+        old_tail = os.path.join(p, "package_tail.bin")
+        if not (os.path.isfile(dyn) and os.path.isfile(old_tail)):
+            continue
+        lines = [l.split() for l in open(dyn) if l.strip()]
+        same = set()
+        for f in lines:
+            if f[0] == "blob" and len(f) == 5:
+                off, size = int(f[1]), int(f[2])
+                with open(old_tail, "rb") as a, open(new_tail, "rb") as b:
+                    a.seek(off)
+                    b.seek(off)
+                    if a.read(size) == b.read(size) and os.path.isfile(os.path.join(p, "code", f[4])):
+                        same.add((off, size))
+                        os.makedirs(os.path.join(staging, "code"), exist_ok=True)
+                        shutil.copy2(os.path.join(p, "code", f[4]), os.path.join(staging, "code", f[4]))
+                        keep_lines.append(" ".join(f))
+                        kept += 1
+        for f in lines:
+            if f[0] == "write" and len(f) == 6 and (int(f[4]), int(f[5])) in same:
+                keep_lines.append(" ".join(f))
+    if keep_lines:
+        with open(os.path.join(staging, "code", "dynamic.txt"), "w") as f:
+            f.write("\n".join(sorted(set(keep_lines))) + "\n")
+    return kept
 
 
 def code_stamp(folder):
@@ -864,6 +935,7 @@ def main(argv=None):
     p.add_argument("--iso", help="read the base from this disc image instead of the install folder")
     p.add_argument("--force", action="store_true", help="re-import even when the same patch is installed")
     p.add_argument("--allow-partial", action="store_true", help="install even if some files could not be rebuilt")
+    p.add_argument("--ignore-checksums", action="store_true", help="install even if the patch does not match the base disc")
     p = sub.add_parser("build-code", help="recompile the code of the installed xdelta mods (before the C++ build)")
     p.add_argument("--work", required=True)
     p.add_argument("--mods")

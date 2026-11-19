@@ -437,6 +437,13 @@ pub fn emit_function(func: &DecodedFunction, gen: &mut dyn Generator, imports: &
         gen.emit_raw("uint32_t _ra_saved;");
         gen.emit_raw("bool _ra_active;");
     }
+    // The return address this function was called with, for `jr <reg>` back to it (`emit_jr_reg`). Declared before
+    // any label, so the mid-entry and internal gotos never cross it.
+    let entry_ra = func_has_jr_reg(func);
+    ENTRY_RA.with(|c| c.set(entry_ra));
+    if entry_ra {
+        gen.emit_raw("const uint32_t _entry_ra = (uint32_t)ctx->r[31];");
+    }
 
     // Mid-entry dispatch (faithful, re-entrant — see 19H).
     //
@@ -580,6 +587,7 @@ pub fn emit_function(func: &DecodedFunction, gen: &mut dyn Generator, imports: &
                 }
             }
 
+            emit_link_write(&instrs[i], gen, instr_vaddr);
             emit_op(&instrs[i], gen, imports, func.vaddr, func_end);
 
             // Terminal-`jal` epilogue reconstruction (recompiler LINK/RA class):
@@ -622,6 +630,31 @@ pub fn emit_function(func: &DecodedFunction, gen: &mut dyn Generator, imports: &
     }
 
     gen.emit_function_end();
+}
+
+thread_local! {
+    /// Set while `emit_function` emits a function that declared `_entry_ra` (see there).
+    static ENTRY_RA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True if the function has a `jr` through a register other than `$ra` (not a jump table).
+fn func_has_jr_reg(func: &DecodedFunction) -> bool {
+    func.blocks.iter().flat_map(|b| b.instrs.iter()).any(|op| match op {
+        MipsOp::Jr { rs } => !ra_is_ra(*rs),
+        MipsOp::BranchHazardDelay { branch, .. } => matches!(branch.as_ref(), MipsOp::Jr { rs } if !ra_is_ra(*rs)),
+        _ => false,
+    })
+}
+
+/// An indirect `jr <reg>` (not `$ra`): the value is the function's own return address when code keeps `$ra` in another
+/// register across its calls and returns through it (`move s4, ra` ... `jr s4`). Calls write `$ra` (`emit_link_write`),
+/// so `_entry_ra` holds that address and the jump is a return; anything else is a tail call through the dispatch table.
+fn emit_jr_reg(gen: &mut dyn Generator, value: &str) {
+    if ENTRY_RA.with(|c| c.get()) {
+        gen.emit_raw(&format!("if ((uint32_t)({value}) == _entry_ra) return;"));
+    }
+    gen.emit_call_lookup_reg(value);
+    gen.emit_return();
 }
 
 /// True if any op in the function is an EXIT `jr ra` (`jr $ra`). Functions that
@@ -865,6 +898,26 @@ pub(crate) fn emit_branch_or_tail(
     }
 }
 
+/// The link register a call writes, as the CPU does: `jal` / `jalr` / a link branch into another function set `$ra`
+/// (`jalr`: its rd) to the address after the delay slot before the callee runs. Recompiled callees do not need it (a
+/// return is a C++ return), but code that looks at its caller does: hooks an ISO patch installs compare `$ra` to tell
+/// their callers apart (games/dissidia/docs/xdelta-mods.md), and runtime hooks log or test it. `instr_vaddr` is the
+/// op's position after delay-slot reordering (the slot's address), so the return address is `instr_vaddr + 4`.
+/// Link branches link always (taken or not, in the function or not). Internal link branches of coalesced owners are
+/// lowered by the RA model and never reach this.
+fn emit_link_write(op: &MipsOp, gen: &mut dyn Generator, instr_vaddr: u32) {
+    let ret = instr_vaddr.wrapping_add(4);
+    match op {
+        MipsOp::Jal { .. } => gen.emit_gpr_write(Reg::Gpr(31), &format!("0x{ret:08X}u")),
+        // `jalr rd, rd` jumps to the old value: the write would change the target, so it is left out.
+        MipsOp::Jalr { rd, rs } if rd != rs => gen.emit_gpr_write(*rd, &format!("0x{ret:08X}u")),
+        // A link branch links whether or not it is taken, and also when it stays in the function: `bal 1f; nop; 1:`
+        // is how code reads its own address.
+        MipsOp::Bltzal { .. } | MipsOp::Bgezal { .. } => gen.emit_gpr_write(Reg::Gpr(31), &format!("0x{ret:08X}u")),
+        _ => {}
+    }
+}
+
 /// A link branch (`bltzal` / `bgezal`, `bal`). Into the same function it stays a branch, as before (the RA model of
 /// coalesced owners handles internal link branches separately). Into another function it is a conditional CALL: the
 /// callee returns here and execution continues after the delay slot, exactly like `jal` (no link value is written,
@@ -1092,10 +1145,7 @@ fn emit_branch_hazard_delay(
     }
     emit_op(delay, gen, imports, func_start, func_end);
     match branch {
-        MipsOp::Jr { .. } => {
-            gen.emit_call_lookup_reg(&s0);
-            gen.emit_return();
-        }
+        MipsOp::Jr { .. } => emit_jr_reg(gen, &s0),
         MipsOp::Jalr { .. } => {
             gen.emit_call_lookup_reg(&s0);
         }
@@ -1192,10 +1242,9 @@ fn emit_op(
                 // jr $ra — function return
                 gen.emit_return();
             } else {
-                // jr $reg — indirect jump (tail call via register)
+                // jr $reg — indirect jump (tail call via register, or a return through a saved `$ra`)
                 let rs_s = gen.emit_gpr_read(*rs);
-                gen.emit_call_lookup_reg(&rs_s);
-                gen.emit_return();
+                emit_jr_reg(gen, &rs_s);
             }
         }
         MipsOp::Jalr { rd, rs } => {

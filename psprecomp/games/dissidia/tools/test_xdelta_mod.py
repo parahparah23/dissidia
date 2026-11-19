@@ -274,6 +274,36 @@ def test_import_and_layout():
             assert e.code == 1
         assert not os.path.exists(os.path.join(work, 'mods', 'other'))
         os.rename(enc + '.away', enc)
+        # an update of the same mod (version in the file name) replaces it and keeps the on/off choice; a record of
+        # run-time code survives where the new version carries the same bytes
+        m = json.load(open(os.path.join(mod, 'mod.json'))); m['enabled'] = False
+        json.dump(m, open(os.path.join(mod, 'mod.json'), 'w'))
+        open(os.path.join(mod, 'code', 'dyn_00000000_0.bin'), 'wb').write(b'x' * 16)
+        open(os.path.join(mod, 'code', 'dynamic.txt'), 'w').write('blob 0 16 134217728 dyn_00000000_0.bin\nblob 16 16 134217744 gone.bin\n')
+        tfiles2 = dict(tfiles)
+        tfiles2['PSP_GAME/USRDIR/DATA/BGM/A.AT3'] = b'RIFF' + b'y' * 500
+        p2 = os.path.join(tmp, 'Test Mod v1.1.xdelta')
+        open(p2, 'wb').write(patch_file(encode(base, iso(tfiles2))))
+        assert X.main(['import', p2, '--work', work]) == 0
+        meta2 = json.load(open(os.path.join(mod, 'mod.json')))
+        assert meta2['version'] == '1.1' and meta2['family'] == 'test-mod' and meta2['enabled'] is False, meta2
+        assert open(os.path.join(mod, 'usrdir', 'DATA', 'BGM', 'A.AT3'), 'rb').read() == b'RIFF' + b'y' * 500
+        assert open(os.path.join(mod, 'code', 'dynamic.txt')).read() == 'blob 0 16 134217728 dyn_00000000_0.bin\n'
+        assert [d for d in os.listdir(os.path.join(work, 'mods')) if d.startswith('test')] == ['test-mod']
+        # a patch for another base (a block fails although all it copies was known) is refused
+        ws = encode(base, iso(tfiles2), win=8192)
+        bad = bytearray(ws[3])
+        k = bad.index(bytes(struct.pack('>I', zlib.adler32(iso(tfiles2)[3 * 8192:4 * 8192]))))
+        bad[k] ^= 1
+        ws[3] = bytes(bad)
+        p3 = os.path.join(tmp, 'Wrong.xdelta')
+        open(p3, 'wb').write(patch_file(ws))
+        try:
+            X.main(['import', p3, '--work', work])
+            raise AssertionError('should refuse')
+        except SystemExit as e:
+            assert e.code == 1
+        assert not os.path.exists(os.path.join(work, 'mods', 'wrong'))
         # the same files from the disc image itself
         X.main(['import', pp, '--work', work, '--iso', base_path, '--name', 'from iso'])
         assert os.path.isfile(os.path.join(work, 'mods', 'from-iso', 'package_tail.bin'))
@@ -320,6 +350,14 @@ def test_run_time_code_helpers():
             'write 0 142790088 248301704 4096 32768\n'
             'write 2 144682248 248303534 4096 32768\n'
             'write 0 1 2 999 999\n')                      # a block that is not recorded: ignored
+        # entries of loaded code: `bal` to pc+8 reads the PC (no entry); a pointer-like word into a delay slot is none
+        A = 0x0B330000
+        words = [0x04110001, 0, 0x0020F821,            # bal +8; nop; move ra, at
+                 0x1160000A, 0x27BDFFF0,               # beqz t3, ...; addiu sp, sp, -16 (delay slot)
+                 0x03E00008, 0,                        # jr ra; nop
+                 A + 16, A + 28]                       # pointers: into the delay slot, and after jr ra; nop
+        blob = struct.pack('<%dI' % len(words), *words)
+        assert XC.blob_entries(blob, A) == [A, A + 28], [hex(x) for x in XC.blob_entries(blob, A)]
         dyn = XC.read_dynamic(d)
         assert list(dyn) == [(4096, 32768)] and dyn[(4096, 32768)]['addr'] == 0x0B330000, dyn
         assert sorted(dyn[(4096, 32768)]['writes']) == [(0, 142790088, 248301704), (2, 144682248, 248303534)]

@@ -8,12 +8,14 @@
 //
 // Scope: the integer instruction set (with the Allegrex extras: ext/ins, seb/seh/wsbh/bitrev, min/max, clz/clo,
 // madd/msub, rotations), branches and jumps with their delay slots, the FPU's loads/stores/moves, arithmetic,
-// conversions and compares. Not supported (the call stops with one log line): VFPU, syscalls, traps. Calls go through
+// conversions and compares, and the VFPU through PPSSPP's interpreter (psp_vfpu_exec, the same code the recompiled
+// VFPU ops run). Not supported (the call stops with one log line): syscalls, traps. Calls go through
 // RECOMP_LOOKUP like recompiled code (so a call into the game runs the game's compiled function, a call to another
 // address of the loaded code comes back here). `jr $ra` returns from the call that entered here, as in the recompiled
 // code, which does not keep return addresses; a jump or branch out of [lo, hi) is a tail call.
 
 #include "recomp.h"
+#include "psp_vfpu.h"
 
 #include <cmath>
 #include <cstdint>
@@ -181,7 +183,8 @@ bool exec(uint32_t op, uint32_t pc, uint8_t* m, recomp_context* c) {
                 return false;
         }
     }
-    default: return false;
+    default:
+        return psp_vfpu_exec(c, m, op);                                                          // VFPU (incl. lv/sv, mfv/mtv)
     }
 }
 
@@ -192,6 +195,7 @@ bool is_control(uint32_t op) {
     if (o >= 2 && o <= 7) return true;
     if (o >= 0x14 && o <= 0x17) return true;
     if (o == 0x11 && ((op >> 21) & 31) == 0x08) return true;                                     // bc1x
+    if (o == 0x12 && ((op >> 21) & 31) == 0x08) return true;                                     // bvf / bvt
     return false;
 }
 
@@ -199,8 +203,12 @@ bool is_control(uint32_t op) {
 
 // Runs guest code at `pc` until it returns (jr $ra) or leaves [lo, hi). False when it met an instruction it cannot run.
 bool dissidia_xmod_interpret(uint32_t pc, uint32_t lo, uint32_t hi, uint8_t* m, recomp_context* c) {
+    const uint32_t entry = pc, entry_ra = (uint32_t)c->r[31];
     for (uint64_t steps = 0;; steps++) {
-        if (steps > 200000000ull) { say_once(pc, 0, "runaway loop"); return false; }
+        if (steps > 200000000ull) {
+            std::fprintf(stderr, "[XMOD] interpreter: entered at 0x%08X range [0x%08X, 0x%08X) ra=%08X\n", entry, lo, hi, (uint32_t)c->r[31]);
+            say_once(pc, rd(m, pc), "runaway loop"); return false;
+        }
         const uint32_t op = rd(m, pc);
         if (!is_control(op)) {
             if (!exec(op, pc, m, c)) { say_once(pc, op, (op >> 26) == 0 && (op & 63) == 0x0C ? "syscall" : "unsupported instruction"); return false; }
@@ -246,6 +254,12 @@ bool dissidia_xmod_interpret(uint32_t pc, uint32_t lo, uint32_t hi, uint8_t* m, 
                 likely = (nd & 2) != 0;
                 break;
             }
+            case 0x12: {                              // bvf / bvt / bvfl / bvtl on a VFPU condition bit
+                const bool bit = (c->vfpu_ctrl[3] >> ((op >> 18) & 7)) & 1;   // VFPU_CTRL_CC
+                taken = ((op >> 16) & 1) ? bit : !bit;
+                likely = ((op >> 17) & 1) != 0;
+                break;
+            }
         }
         if (likely && !taken) { pc += 8; continue; }
         if (call && link) c->r[link] = (int32_t)(pc + 8);
@@ -253,6 +267,7 @@ bool dissidia_xmod_interpret(uint32_t pc, uint32_t lo, uint32_t hi, uint8_t* m, 
         if (is_control(ds)) { say_once(pc + 4, ds, "branch in a delay slot"); return false; }
         if (!exec(ds, pc + 4, m, c)) { say_once(pc + 4, ds, "unsupported instruction"); return false; }
         if (!taken) { pc += 8; continue; }
+        if (call && !reg && target == pc + 8) { pc = target; continue; }   // `bal 1f; nop; 1:` reads the PC: no call
         if (call) {
             c->pc = target;
             RECOMP_LOOKUP(target)(m, c);
@@ -260,6 +275,7 @@ bool dissidia_xmod_interpret(uint32_t pc, uint32_t lo, uint32_t hi, uint8_t* m, 
             continue;
         }
         if (reg && rs == 31) return true;                                                         // jr $ra: return
+        if (reg && target == entry_ra) return true;          // jr to the return address kept in another register: return
         if (!reg && target >= lo && target < hi) {
             if (target <= pc && --c->preempt_budget <= 0) sched_preempt(c);
             pc = target;

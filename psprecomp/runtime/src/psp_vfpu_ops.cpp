@@ -263,3 +263,106 @@ MEM_OP(lvl_q, Int_SVQ, 53, 0, ((uint32_t)(vt >> 5) & 1))
 MEM_OP(lvr_q, Int_SVQ, 53, 2, ((uint32_t)(vt >> 5) & 1))
 MEM_OP(svl_q, Int_SVQ, 61, 0, ((uint32_t)(vt >> 5) & 1))
 MEM_OP(svr_q, Int_SVQ, 61, 2, ((uint32_t)(vt >> 5) & 1))
+
+// ---------------------------------------------------------------------------
+// One VFPU instruction word, decoded here (the encodings above, as PPSSPP's tables have them), for code that runs in an
+// interpreter rather than recompiled (code a mod loads or rewrites at run time; games/dissidia/runtime/xmod_interp.cpp).
+// Branches (bvf/bvt) are the caller's: false is returned for them and for words that are not a known VFPU instruction.
+// ---------------------------------------------------------------------------
+bool psp_vfpu_exec(recomp_context* ctx, uint8_t* rdram, uint32_t w) {
+    MIPSState& st = bind(ctx, rdram);
+    const MIPSOpcode op(w);
+    const uint32_t major = w >> 26, s23 = (w >> 23) & 7, g = (w >> 21) & 0x1F, sub = (w >> 16) & 0x1F;
+    switch (major) {
+    case 0x18:                                                        // VFPU0
+        if (s23 == 0 || s23 == 1 || s23 == 7) { MIPSInt::Int_VecDo3(&st, op); return true; }
+        if (s23 == 2) { MIPSInt::Int_Vsbn(&st, op); return true; }
+        return false;
+    case 0x19:                                                        // VFPU1
+        switch (s23) {
+            case 0: MIPSInt::Int_VecDo3(&st, op); return true;
+            case 1: MIPSInt::Int_VDot(&st, op); return true;
+            case 2: MIPSInt::Int_VScl(&st, op); return true;
+            case 4: MIPSInt::Int_VHdp(&st, op); return true;
+            case 5: MIPSInt::Int_Vcrs(&st, op); return true;
+            case 6: MIPSInt::Int_Vdet(&st, op); return true;
+            default: return false;
+        }
+    case 0x1B:                                                        // VFPU3
+        switch (s23) {
+            case 0: MIPSInt::Int_Vcmp(&st, op); return true;
+            case 2: case 3: MIPSInt::Int_Vminmax(&st, op); return true;
+            case 5: MIPSInt::Int_Vscmp(&st, op); return true;
+            case 6: MIPSInt::Int_Vsge(&st, op); return true;
+            case 7: MIPSInt::Int_Vslt(&st, op); return true;
+            default: return false;
+        }
+    case 0x12:                                                        // COP2: mfv / mtv / mfvc / mtvc
+        if (g == 3 || g == 7) { MIPSInt::Int_Mftv(&st, op); return true; }
+        return false;
+    case 0x32: case 0x3A: MIPSInt::Int_SV(&st, op); return true;      // lv.s / sv.s
+    case 0x35: case 0x36: case 0x3D: case 0x3E: MIPSInt::Int_SVQ(&st, op); return true;   // lvl/lvr/lv.q, svl/svr/sv.q
+    case 0x37:                                                        // VFPU6: prefixes, viim / vfim
+        if (((w >> 24) & 3) < 3) { MIPSInt::Int_VPFX(&st, op); return true; }
+        MIPSInt::Int_Viim(&st, op);
+        return true;
+    case 0x3F: return true;                                           // vnop / vsync / vflush
+    case 0x34:                                                        // VFPU4
+        if (g == 0) {
+            if (sub == 3) { MIPSInt::Int_Vidt(&st, op); return true; }
+            if (sub == 6 || sub == 7) { MIPSInt::Int_VVectorInit(&st, op); return true; }
+            MIPSInt::Int_VV2Op(&st, op);
+            return true;
+        }
+        if (g == 1) {
+            if (sub == 0) { MIPSInt::Int_Vrnds(&st, op); return true; }
+            if (sub <= 3) { MIPSInt::Int_VrndX(&st, op); return true; }
+            if (sub == 18) { MIPSInt::Int_Vf2h(&st, op); return true; }
+            if (sub == 19) { MIPSInt::Int_Vh2f(&st, op); return true; }
+            if (sub == 22) { MIPSInt::Int_Vsbz(&st, op); return true; }
+            if (sub == 23) { MIPSInt::Int_Vlgb(&st, op); return true; }
+            if (sub >= 24 && sub <= 27) { MIPSInt::Int_Vx2i(&st, op); return true; }
+            if (sub >= 28) { MIPSInt::Int_Vi2x(&st, op); return true; }
+            return false;
+        }
+        if (g == 2) {
+            switch (sub) {
+                case 0: MIPSInt::Int_Vsrt1(&st, op); return true;
+                case 1: MIPSInt::Int_Vsrt2(&st, op); return true;
+                case 2: case 3: MIPSInt::Int_Vbfy(&st, op); return true;
+                case 4: MIPSInt::Int_Vocp(&st, op); return true;
+                case 5: MIPSInt::Int_Vsocp(&st, op); return true;
+                case 6: MIPSInt::Int_Vfad(&st, op); return true;
+                case 7: MIPSInt::Int_Vavg(&st, op); return true;
+                case 8: MIPSInt::Int_Vsrt3(&st, op); return true;
+                case 9: MIPSInt::Int_Vsrt4(&st, op); return true;
+                case 10: MIPSInt::Int_Vsgn(&st, op); return true;
+                case 16: MIPSInt::Int_Vmfvc(&st, op); return true;
+                case 17: MIPSInt::Int_Vmtvc(&st, op); return true;
+                case 25: case 26: case 27: MIPSInt::Int_ColorConv(&st, op); return true;
+                default: return false;
+            }
+        }
+        if (g == 3) { MIPSInt::Int_Vcst(&st, op); return true; }
+        if (g >= 16 && g <= 19) { MIPSInt::Int_Vf2i(&st, op); return true; }
+        if (g == 20) { MIPSInt::Int_Vi2f(&st, op); return true; }
+        if (g == 21) { MIPSInt::Int_Vcmov(&st, op); return true; }
+        if (g >= 24) { MIPSInt::Int_Vwbn(&st, op); return true; }
+        return false;
+    case 0x3C:                                                        // VFPU5: matrices
+        switch (s23) {
+            case 0: MIPSInt::Int_Vmmul(&st, op); return true;
+            case 1: case 2: case 3: MIPSInt::Int_Vtfm(&st, op); return true;
+            case 4: MIPSInt::Int_Vmscl(&st, op); return true;
+            case 5: MIPSInt::Int_CrossQuat(&st, op); return true;
+            case 7:
+                if ((w >> 21) & 1) { MIPSInt::Int_Vrot(&st, op); return true; }
+                if (sub == 0) { MIPSInt::Int_Vmmov(&st, op); return true; }
+                if (sub == 3 || sub == 6 || sub == 7) { MIPSInt::Int_VMatrixInit(&st, op); return true; }
+                return false;
+            default: return false;
+        }
+    default:
+        return false;
+    }
+}

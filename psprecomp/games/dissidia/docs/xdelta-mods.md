@@ -109,11 +109,28 @@ recompile has seen none of it. It is handled in two steps:
    anywhere else it is interpreted and recorded again.
 
 `PSPRECOMP_XMOD_DYN_SKIP=4` (or `4@0B330000` for one block) keeps the compiled blocks off, `PSPRECOMP_XMOD_TRACE=N`
-logs the first N calls into them, `PSPRECOMP_SD_TRACE=1` logs every save-data call.
+logs the first N calls into them, `PSPRECOMP_SD_TRACE=1` logs every save-data call, `PSPRECOMP_XMOD_ABI=1` logs every
+interpreted function that returns with a callee-saved register or `$sp` changed, and every followed rewritten jump.
 
-Found with this: a link branch (`bal`, `bltzal`, `bgezal`) to another function was emitted as a tail call followed by
-`return`, skipping the rest of the caller. It is a call now (psp-emitter `emit_link_branch`). The retail game's output
-does not change (it has no such branch).
+Recompiler fixes this needed (the retail game's output does not change):
+
+- a link branch (`bal`, `bltzal`, `bgezal`) to another function was emitted as a tail call followed by `return`,
+  skipping the rest of the caller. It is a call now (psp-emitter `emit_link_branch`).
+- a call (`jal`, `jalr`, a link branch to another function) now writes the return address to `$ra` (`jalr`: its rd)
+  as the CPU does (psp-emitter `emit_link_write`). Compiled code returns by C++ return and never needed it, but a
+  mod's hook may test who called it: Emendatus's menu hook at 0x0889F290 compares `$ra` with 0x088D53FC.
+- a `jr` through another register to the address the function was called from is a return (`move s4, ra` ...
+  `jr s4`, as Emendatus's battle code does); it was a lookup of a return address, which no function answers. The
+  interpreter does the same. 80 retail functions get the check; it only fires where the old code missed.
+- a mid-entry at a delay slot's address (code a patch adds jumps back to the word after the `j` it wrote over a
+  function's first instruction) is decoded like a branch into a delay slot (issue #56): entering there runs that
+  instruction and goes on, instead of re-running the jump (endless recursion into the hook). One retail function
+  changes the same way (0x08882FF4, entry 0x08883018 in the delay slot of its `jr ra`).
+- `bal` to the next instruction but one (reading the PC) is not a function entry for code loaded at run time, and no
+  entry of such code is put in a delay slot.
+- the prologue scan no longer starts a function in a branch's delay slot (`addiu sp, sp, -N` right after a branch).
+  Such a split cut the delay slot off the branch at the end of the previous function: code a patch adds is not in the
+  retail analysis, so the scan is what divides it into functions.
 
 ## Saves and cloud sync
 

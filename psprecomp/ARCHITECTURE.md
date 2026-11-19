@@ -197,7 +197,14 @@ flowchart LR
   the render queue — game threads never call GL directly (macOS requirement).
 - Mid-function entries (jump targets inside a function, e.g. from vtables or cross-function
   branches) are handled by wrappers that set `ctx->entry_point`; the parent function's entry
-  switch dispatches to the matching label and clears the field before the goto.
+  switch dispatches to the matching label and clears the field before the goto. A mid-entry at a
+  delay slot's address is decoded like a branch into a delay slot (BIDS, issue #56): the slot's
+  instruction runs at its label as a normal instruction.
+- Calls keep `$ra` as the CPU does: `jal`, `jalr` (its rd) and link branches write the return
+  address before the callee runs, although compiled code returns by C++ `return`. Code that looks
+  at its caller needs it (hooks an ISO patch installs compare `$ra`; runtime hooks log it), and a
+  `jr <reg>` to the address the function was called from (`move s4, ra` ... `jr s4`) is a return.
+  The prologue scan never starts a function in a delay slot (the branch before it would lose it).
 
 ## Invariants and Conventions
 
