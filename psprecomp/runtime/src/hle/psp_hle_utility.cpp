@@ -132,7 +132,12 @@ static void hle_sceRtcGetCurrentClockLocalTime(
     if (time_ptr != 0) {
         // ScePspDateTime: year(u16), month(u16), day(u16),
         //   hour(u16), minute(u16), second(u16), microsecond(u32)
-        time_t now = std::time(nullptr);
+        // The microsecond field is real: Dissidia's menu seeds its random generator with it (random opponent / stage picks), so a constant
+        // 0 here made every first pick identical (issue #84).
+        const auto wall = std::chrono::system_clock::now();
+        time_t now = std::chrono::system_clock::to_time_t(wall);
+        const uint32_t usec = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(wall.time_since_epoch()).count() % 1000000);
         struct tm* local = std::localtime(&now);
         if (local) {
             psp_mem_write<uint16_t>(rdram, time_ptr,
@@ -147,7 +152,7 @@ static void hle_sceRtcGetCurrentClockLocalTime(
                 static_cast<uint16_t>(local->tm_min));
             psp_mem_write<uint16_t>(rdram, time_ptr + 10,
                 static_cast<uint16_t>(local->tm_sec));
-            psp_mem_write<uint32_t>(rdram, time_ptr + 12, 0);
+            psp_mem_write<uint32_t>(rdram, time_ptr + 12, usec);
         }
     }
 
