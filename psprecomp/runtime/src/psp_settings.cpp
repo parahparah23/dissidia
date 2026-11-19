@@ -157,7 +157,7 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -169,11 +169,13 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_ENV0, ROW_ENV_END = ROW_ENV0 + 63,               // a developer-options category page: one row per environment variable
            ROW_MOD0, ROW_MOD_END = ROW_MOD0 + 31, ROW_MODS_NONE,   // Mods page: one toggle per mod folder, or a note when there are none
            ROW_SEC_WINDOW, ROW_SEC_PERF, ROW_SEC_QUALITY, ROW_SEC_AA, ROW_SEC_TEX, ROW_SEC_ENGINE, ROW_SEC_COLOUR, ROW_SEC_HDR, ROW_SEC_LIGHT,
-           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD,   // section captions (not selectable)
+           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD, ROW_SEC_KEYBOARD,   // section captions (not selectable)
            ROW_COUNT };
 static_assert(ROW_COUNT < psp_sddialog::SET_MAX_IDS, "row ids are animation slots");
 bool is_section(Row r) { return r >= ROW_SEC_WINDOW && r < ROW_COUNT; }
 std::vector<Row> g_rows;
+std::vector<std::pair<std::string, std::string>> p1_choices();
+int p1_index(const std::vector<std::pair<std::string, std::string>>& v);
 int g_sel = 0;
 // Pages: the categories shown in the sidebar, and the sub-menus a row can open (PAGE_HDR under Image, PAGE_RT under Effects).
 enum Page { PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS, PAGE_CONTROLS, PAGE_NETWORK, PAGE_CLOUD, PAGE_SYSTEM, PAGE_GPU, PAGE_DEBUG, PAGE_MODS,
@@ -806,6 +808,30 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "Button prompts\nThe game's button symbols drawn as the buttons you press. Automatic: the controller you used last (Xbox, PlayStation or Nintendo, a Steam Deck's A B X Y and L1 / R1) or the keyboard's keys; the PSP's own when there is neither. Saved.";
             break;
         }
+        case ROW_LR_BUTTONS: {
+            const bool t = psp_input_lr_triggers();
+            m.label = "L / R Buttons";
+            m.value = t ? "Triggers" : "Shoulders";
+            m.can_dec = t;
+            m.can_inc = !t;
+            m.help = "L and R on the controller\nShoulders: the shoulder buttons (LB / RB, L1 / R1) press the PSP's L and R, as the triggers do. Triggers: the triggers (LT / RT, L2 / R2) press L and R and the shoulders do nothing; the game's prompts then show the triggers. Saved.";
+            break;
+        }
+        case ROW_P1_PAD: {
+            const auto v = p1_choices();
+            const int i = p1_index(v);
+            m.label = "Player 1 Controller";
+            m.value = v[size_t(i)].second;
+            m.can_dec = i > 0;
+            m.can_inc = i + 1 < int(v.size());
+            m.help = "Which controller plays\nAny Controller: every connected controller (the default). A controller by name: only that one, the others are ignored (a Steam Deck with a pad plugged in, a second pad for someone else). Keyboard Only: controllers are ignored. Saved.";
+            break;
+        }
+        case ROW_KEYS_INFO:
+            m.label = "Move Keys";
+            m.value = "D F E V 1 2";
+            m.help = "Keyboard keys for moves that take two buttons\nD: dodge (R + Cross). F: dash (R + Triangle). E: EX Mode (R + Square). V: summon (R + Circle). 1: Brave assist (L + Circle). 2: HP assist (L + Square). Both buttons go down together, as the game needs. The rest: arrows, X / Z / A / S for Cross / Circle / Square / Triangle, Q / W for L / R, Space START, Tab SELECT.";
+            break;
         case ROW_TOUCH_EDIT:
             m.label = "Edit Touch Controls";
             m.help = "Touch layout editor\nMove, resize or hide each on-screen control and add combination buttons (for example L+R, or R+Triangle). Press Cross to open it; the layout is saved.";
@@ -1013,6 +1039,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_SEC_RT: m.label = "Hardware"; break;
         case ROW_SEC_TOUCH: m.label = "Touch screen"; break;
         case ROW_SEC_PAD: m.label = "Controller"; break;
+        case ROW_SEC_KEYBOARD: m.label = "Keyboard"; break;
         case ROW_SEC_GAME: m.label = "Game"; break;
         case ROW_SEC_SESSION: m.label = "Session"; break;
         case ROW_SEC_REFL: m.label = "Reflections"; break;
@@ -1333,6 +1360,7 @@ bool slider_of(Row r, int* steps, int* cur) {
     case ROW_SYNC: *steps = 5; *cur = std::clamp(ge_draw_sync_mode(), 0, 4); return true;
     case ROW_TOUCH: *steps = 3; *cur = std::clamp(psp_touch_mode(), 0, 2); return true;
     case ROW_PROMPTS: *steps = 6; *cur = std::clamp(psp_input_prompt_setting() + 1, 0, 5); return true;
+    case ROW_P1_PAD: { const auto v = p1_choices(); *steps = int(v.size()); *cur = p1_index(v); return true; }
     default: return false;
     }
 }
@@ -1343,7 +1371,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
-    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
+    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_TEXPACK: case ROW_UPDATES: case ROW_LR_BUTTONS: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
@@ -1352,7 +1380,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_QUIT: return K::Danger;
     case ROW_SUB_HDR: case ROW_SUB_RT: return K::Submenu;
     case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_CLOUD_FOLDER: case ROW_CLOUD_URL: case ROW_CLOUD_USER: case ROW_CLOUD_PASS: return K::Text;
-    case ROW_NET_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: return K::Info;
+    case ROW_NET_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: case ROW_KEYS_INFO: return K::Info;
     default: return is_section(r) ? K::Header : K::Choice;
     }
 }
@@ -1551,6 +1579,28 @@ bool updates_choice() {
 }
 void apply_updates(bool on) { save("check_updates", on ? "1" : "0"); }
 // Discord Rich Presence: applies at once (psp_discord), saved as discord=0|1 (exported as PSPRECOMP_DISCORD at the next start).
+// Controls > Player 1 Controller: "any", each connected controller (by GUID), "keyboard"; a saved controller that is not connected
+// stays a choice ("(not connected)") until another is picked.
+std::vector<std::pair<std::string, std::string>> p1_choices() {
+    std::vector<std::pair<std::string, std::string>> v{{"any", "Any Controller"}};
+    for (auto& pd : psp_input_pads()) v.push_back(pd);
+    const std::string cur = psp_input_p1_controller();
+    if (!cur.empty() && cur != "keyboard") {
+        bool found = false;
+        for (auto& e : v) found |= e.first == cur;
+        if (!found) {
+            auto it = g_saved.find("p1_controller_name");
+            v.emplace_back(cur, (it != g_saved.end() ? it->second : std::string("Controller")) + " (not connected)");
+        }
+    }
+    v.emplace_back("keyboard", "Keyboard Only");
+    return v;
+}
+int p1_index(const std::vector<std::pair<std::string, std::string>>& v) {
+    const std::string cur = psp_input_p1_controller().empty() ? "any" : psp_input_p1_controller();
+    for (size_t i = 0; i < v.size(); i++) if (v[i].first == cur) return int(i);
+    return 0;
+}
 void apply_discord(bool on) {
     if (on == psp_discord::enabled()) return;
     psp_discord::set_enabled(on);
@@ -1622,6 +1672,18 @@ void change(int d) {   // left / right on the selected row
     case ROW_TEXPACK: apply_texpack(d > 0); break;
     case ROW_UPDATES: apply_updates(d > 0); break;
     case ROW_DISCORD: apply_discord(d > 0); break;
+    case ROW_LR_BUTTONS:
+        if ((d > 0) != psp_input_lr_triggers()) { psp_input_set_lr_triggers(d > 0); save("lr_buttons", d > 0 ? "triggers" : "shoulders"); }
+        break;
+    case ROW_P1_PAD: {
+        const auto v = p1_choices();
+        const int i = std::clamp(p1_index(v) + d, 0, int(v.size()) - 1);
+        psp_input_set_p1_controller(v[size_t(i)].first);
+        save("p1_controller", v[size_t(i)].first);
+        if (v[size_t(i)].first != "any" && v[size_t(i)].first != "keyboard") save("p1_controller_name", v[size_t(i)].second);
+        break;
+    }
+    case ROW_KEYS_INFO: break;
     case ROW_PROMPTS: {
         const int v = std::clamp(psp_input_prompt_setting() + 1 + d, 0, 5);
         psp_input_set_prompt_setting(v - 1);
@@ -1883,7 +1945,8 @@ void build_rows() {
         add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
         break;
     case PAGE_CONTROLS:
-        add(ROW_SEC_PAD); add(ROW_PROMPTS);
+        add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_P1_PAD);
+        add(ROW_SEC_KEYBOARD); add(ROW_KEYS_INFO);
         if (g_touch_ui) { add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT); }
         break;
     case PAGE_GPU:
@@ -2178,6 +2241,9 @@ void confirm_row() {
     case ROW_DISCORD_STATUS: break;
     case ROW_TOUCH: change(psp_touch_mode() >= 2 ? -2 : 1); return;
     case ROW_PROMPTS: change(psp_input_prompt_setting() >= PSP_PROMPT_KEYBOARD ? -5 : 1); return;
+    case ROW_LR_BUTTONS: change(psp_input_lr_triggers() ? -1 : 1); return;
+    case ROW_P1_PAD: { const auto v = p1_choices(); change(p1_index(v) + 1 >= int(v.size()) ? -p1_index(v) : 1); return; }
+    case ROW_KEYS_INFO: break;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
     case ROW_NET_MODE: change(g_net_internet ? 1 : -1); return;
     case ROW_NET_SERVER: edit_begin(0); return;
@@ -2534,6 +2600,8 @@ void psp_settings_load_early() {
         else put("PSPRECOMP_GPU_DRIVER", it->second);
     }
     if ((it = g_saved.find("button_prompts")) != g_saved.end()) put("PSPRECOMP_BUTTON_PROMPTS", it->second);
+    if ((it = g_saved.find("lr_buttons")) != g_saved.end()) put("PSPRECOMP_LR_TRIGGERS", it->second == "triggers" ? "1" : "0");
+    if ((it = g_saved.find("p1_controller")) != g_saved.end()) put("PSPRECOMP_P1_CONTROLLER", it->second);
     if ((it = g_saved.find("touch")) != g_saved.end() && (it->second == "auto" || it->second == "on" || it->second == "off"))
         put("PSPRECOMP_TOUCH", it->second);
     if ((it = g_saved.find("window_size")) != g_saved.end() && g_saved.count("display") && g_saved["display"] == "window"
