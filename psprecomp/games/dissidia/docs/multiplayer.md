@@ -80,6 +80,13 @@ group with others, the game runs at the **lowest rate any of them asked for**, s
 both run at 30. It returns to the player's own setting when the group ends. A message at the top of the screen tells you the rate for five seconds ("Online: 30 fps (lowest player's setting)"), and again when the group ends. This logic is in
 `runtime/framerate.cpp` (`psp_adhoc_group_fps_cap()`).
 
+Above 30 fps a fight runs on 30 Hz logic ([frame-rate.md](frame-rate.md)): the game advances on one displayed frame in two, three or
+four. Its network manager task (`FUN_0890E794`, which runs the battle's per-frame pad exchange `FUN_0890D664`) only runs on those logic
+frames. Until 19 November 2026 it ran on every displayed frame; on the in-between frames the other copy's pad for the next frame was
+not there yet, the exchange counted a waiting frame, and after the game's 900 waiting frames it ended the session without a message:
+about 10 s into every online fight at 120 fps (two copies on one machine, LAN; 30 fps was fine). `PSPRECOMP_L30_NET_EVERY_FRAME=1`
+brings the old behaviour back for tests.
+
 ## Options
 
 | Variable | Meaning |
