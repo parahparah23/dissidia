@@ -103,6 +103,24 @@ A network warning is not replaced by the frame-rate note when a session ends, so
 
 The in-game settings menu (Esc / F1, Guide) pauses the game, which would stall the other players, so it does not open while you are in a group with others: a message says so and the game carries on. Change settings before joining a room.
 
+## Direct paths through the party server (hole punching)
+
+In Internet mode everything used to go through the party server, so every packet paid the extra trip. Now, once two players are in
+one group, each asks the server to introduce it to the other (relay op INTRO, server version 2). The server sends both of them the
+other's public address (what it sees) and the LAN address the other reported (relay op PEER); both then send small T_PUNCH packets
+to those addresses every 100 ms for up to 6 s, which opens most home routers to the other side. The first punch that arrives sets
+the direct path, and from then on packets to that player go straight to the address it came from; broadcasts (lobby beacons) still
+go through the server. A direct path is kept alive with a punch every 0.5 s; silent for 3 s, it is dropped and traffic goes through
+the server again (tried again after 15 s). Packets from outside the server are accepted only from the address a punch confirmed
+for that player. An older server ignores INTRO and an older game never sends it: they play through the server as before.
+`PSPRECOMP_ADHOC_DIRECT=0` keeps everything on the server. The `[ADHOC] direct:` log lines say what happened.
+
+Tested 19 Nov 2026 with two copies and a local server: introduced, the direct path up on both, the battle link linked over it;
+in the fight's minute the server forwarded 357 packets (the presence beacons) where a fight through it forwards about 4,200. With
+one copy at `PSPRECOMP_ADHOC_DIRECT=0` the punches got no answer, both stayed on the server and the fight ran (359 checks agreed).
+Not tested: real routers (strict or carrier-grade NAT gets no direct path and stays on the server), two players behind one router.
+The party server has to run the new `tools/adhoc_relay` for any of this.
+
 ## Battles: our pad link
 
 A 1-on-1 fight nobody watches runs on our own pad link (`games/dissidia/runtime/comm_battle.cpp`) instead of the game's exchange. The
@@ -114,6 +132,22 @@ every packet, so a lost packet is covered by the next. The other copy's pad for 
 works online. Every tenth frame the game's own check value (`FUN_0890CD90`) is compared; a difference ends the fight with the game's
 error. When a pad is late the game waits that frame, as before, so the game's own timeout still ends a fight whose peer is gone (and
 the link ends it after 10 s with nothing heard). The lobby, setup, results and Group Battle fights with watchers stay the game's.
+
+**Watched fights (Group Battle).** The members who are not fighting watch each fight (the game's role 1, `FUN_0890DF58`). The
+leading fighter (the game's player 0) keeps both pads of every frame it played and streams them to each watcher (STREAM, up to 36
+frames a packet, from the first frame the watcher lacks; its WATCH packets say which); a watcher runs the fight from the stream,
+injecting both pads as the fighters do, and compares the game's check values with the leader's. The fighters announce themselves to
+the whole group and learn which member is the other fighter from its answer; they only link once both have seen every watcher the
+game counts (`net+0x358`) announce itself, otherwise the fight (and its watchers) stays on the game's exchange. Link version 2;
+version 1 copies count as older builds. Tested 19 Nov 2026 with three copies on one machine (Group Battle, Tournament, Lightning
+against Lightning, one watcher): all three linked, 90 checks agreed on the watcher by frame 900, no waits, the watcher's picture
+the leader's; with the watcher at `PSPRECOMP_NET_LINK=0` the fighters fell back after 5 s and the fight ran on the game's exchange
+on all three.
+
+**Group Battle rooms.** Until 19 November 2026 starting a Group Battle always failed with "Room has been deleted due to a
+connection error": a member's request to enter waits for the host's answer without sending anything, and the matching layer
+dropped any peer silent for 6 s, so by the time the host started, its `MatchingSelectTarget` (the accept) found nobody and
+returned an error. Waiting requests are now dropped only when the player is gone from the network (its beacons stop).
 
 Both copies announce the link at the fight's first frame; one that hears nothing within 5 s (an older build, or `PSPRECOMP_NET_LINK=0`)
 keeps the game's exchange for that fight, so mixed versions still play. Injected sticks are never turned by the receiving copy's camera
