@@ -886,7 +886,13 @@ void periodic() {
             MPeer& p = it->second;
             bool drop = false;
             if (p.s == MPeer::HELLO) drop = t - p.last_seen > 6000000;  // host vanished
-            else if (t - p.last_seen > timeout) {
+            else if (p.s != MPeer::ESTAB) {
+                // A join request waiting for the host's answer (Group Battle: the host takes everyone in at once, often long after
+                // they asked) sends nothing while it waits: it is dropped only when the player itself is gone (its beacons stop),
+                // not after the established peers' silence timeout. Dropping it after 6 s made the host's accept fail and the game
+                // delete the room ("connection error") whenever the room took longer than that to fill.
+                drop = !g_peers.count(it->first);
+            } else if (t - p.last_seen > timeout) {
                 if (p.s == MPeer::ESTAB) queue_match(m, M_TIMEOUT, it->first, {});
                 drop = true;
             }
