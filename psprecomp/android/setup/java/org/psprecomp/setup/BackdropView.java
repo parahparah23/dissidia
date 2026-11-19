@@ -171,6 +171,29 @@ final class BackdropView extends View {
         } else postInvalidateOnAnimation();
     }
 
+    private final android.graphics.RectF ringBox = new android.graphics.RectF();
+
+    /** Half of the tilted ring around the crystal (front = the lower, nearer half) and its light when it is on that half. */
+    private void orbit(Canvas c, float cx, float cy, float size, boolean front) {
+        c.save();
+        c.translate(cx, cy);
+        c.rotate(-12);
+        float rw = size * 1.55f, rh = size * 0.32f;
+        line.setStrokeWidth(Theme.dpf(1.1f));
+        line.setColor(Theme.alpha(Theme.GOLD, front ? 0.38f : 0.18f));
+        ringBox.set(-rw, -rh, rw, rh);
+        c.drawArc(ringBox, front ? 0 : 180, 180, false, line);
+        float oa = t * 0.9f, sy = (float) Math.sin(oa);
+        if ((sy > 0) == front) {
+            float d = 0.7f + 0.3f * sy;
+            paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.85f * d));
+            c.drawCircle((float) Math.cos(oa) * rw, sy * rh, Theme.dpf(2.2f) * d, paint);
+            paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.15f * d));
+            c.drawCircle((float) Math.cos(oa) * rw, sy * rh, Theme.dpf(7) * d, paint);
+        }
+        c.restore();
+    }
+
     private void drawCrystal(Canvas c, float cx, float cy, float size) {
         float ay = t * 0.35f, ax = 0.35f + 0.08f * (float) Math.sin(t * 0.5f);
         float[][] p = new float[V.length][3];
@@ -185,6 +208,7 @@ final class BackdropView extends View {
             p[i][1] = cy + bob + y1 * size * persp;
             p[i][2] = z2;
         }
+        orbit(c, cx, cy + bob, size, false);   // the ring's far half behind the crystal
         // faces, faintly filled (back to front is not needed at this alpha)
         paint.setColor(Theme.alpha(moodColor, 0.05f));
         int[][] faces = {{0, 2, 3}, {0, 3, 4}, {0, 4, 5}, {0, 5, 2}, {1, 2, 3}, {1, 3, 4}, {1, 4, 5}, {1, 5, 2}};
@@ -206,18 +230,6 @@ final class BackdropView extends View {
             line.setColor(Theme.alpha(Theme.mix(moodColor, 0xFFFFFFFF, 0.4f), a));
             c.drawLine(p[e[0]][0], p[e[0]][1], p[e[1]][0], p[e[1]][1], line);
         }
-        // the inner ring orbiting the crystal
-        line.setColor(Theme.alpha(Theme.GOLD, 0.28f));
-        c.save();
-        c.translate(cx, cy + bob);
-        c.rotate(-12);
-        float rw = size * 1.55f, rh = size * 0.32f;
-        c.drawOval(-rw, -rh, rw, rh, line);
-        float oa = t * 0.9f;
-        paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.85f));
-        c.drawCircle((float) Math.cos(oa) * rw, (float) Math.sin(oa) * rh, Theme.dpf(2.2f), paint);
-        paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.15f));
-        c.drawCircle((float) Math.cos(oa) * rw, (float) Math.sin(oa) * rh, Theme.dpf(7), paint);
-        c.restore();
+        orbit(c, cx, cy + bob, size, true);   // the ring's near half in front of the crystal
     }
 }
