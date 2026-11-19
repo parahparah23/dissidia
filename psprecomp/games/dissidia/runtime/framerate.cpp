@@ -1721,6 +1721,19 @@ bool battle_scene_list(uint32_t list) {   // the battle scene's task list: the o
     no = list;
     return false;
 }
+// The network manager task (FUN_0890E794, called from the frame pump FUN_088EC010 once a displayed frame) runs a Communications
+// battle's per-frame pad exchange (role 0 handler FUN_0890D664). With 30 Hz logic above 30 fps it ran on the drawn-only frames too:
+// the battle frame had not advanced, the other copy's pad for the next frame was not there yet, so the handler counted a waiting
+// frame each time, and after the game's 900 waiting frames (VCKing101's notes, docs/port/communication-mode.md 4.2) it ended the
+// session without a message: about 10 s into every online fight at 120 fps (19 Nov 2026). It now runs on logic frames only, as on
+// the PSP. PSPRECOMP_L30_NET_EVERY_FRAME=1 restores the old behaviour (tests).
+FuncPtr g_orig_net_task = nullptr;
+void net_task_hook(uint8_t* rdram, recomp_context* ctx) {
+    static const bool every = std::getenv("PSPRECOMP_L30_NET_EVERY_FRAME") != nullptr;
+    if (!every && l30_active() && !g_l30_logic_now) return;
+    g_orig_net_task(rdram, ctx);
+}
+
 void task_run_hook(uint8_t* rdram, recomp_context* ctx) {
     if (l30_active() && !g_l30_logic_now && ctx->r[5] == 1 && ctx->r[6] == 1 && battle_scene_list(static_cast<uint32_t>(ctx->r[4]))) {
         ctx->r[5] = 4; ctx->r[6] = 4;   // a drawn-only frame: the battle runs as if paused
@@ -2577,6 +2590,7 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* rl = std::getenv("PSPRECOMP_TASK_RUNLOG"))
         for (const char* q = rl; *q;) { g_runlog_ticks.push_back(std::strtoull(q, nullptr, 10)); const char* c = std::strchr(q, ','); if (!c) break; q = c + 1; }
     if ((g_logic30 || !g_runlog_ticks.empty()) && (g_orig_task_run = psp_dispatch_probe_lookup(0x0888245Cu))) psp_dispatch_register(0x0888245Cu, task_run_hook);
+    if (g_logic30 && (g_orig_net_task = psp_dispatch_probe_lookup(0x0890E794u))) psp_dispatch_register(0x0890E794u, net_task_hook);
     if (std::getenv("PSPRECOMP_TASK_TRACE")) {
         if ((g_orig_task_exec = psp_dispatch_probe_lookup(0x088413D0u))) psp_dispatch_register(0x088413D0u, task_exec_hook);
         if ((g_orig_task_draw = psp_dispatch_probe_lookup(0x088881BCu))) psp_dispatch_register(0x088881BCu, task_draw_hook);
