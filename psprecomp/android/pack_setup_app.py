@@ -2,12 +2,12 @@
 """Assemble the Android setup app (APK): the wizard, the tools it runs on the phone, and the payload they work from.
 
   pack_setup_app.py --android-part DIR --ndk NDK --zig-tree DIR --python-tree DIR --musl FILE --psprecomp FILE --pspdecrypt FILE
-                    --skeleton APK --libmain SO [--game DIR] [--patchelf PATCHELF] -o setup.apk
+                    --skeleton APK --engine SO [--game DIR] [--patchelf PATCHELF] -o setup.apk
 
 Executables go into lib/arm64-v8a/ as lib*.so (the only place an app may run files from since Android 10): libzig.so (zig 0.15, static,
 clang + lld in one), libpsprecomp.so (the recompiler, static musl), libpspdecrypt.so, libpython.so (python-build-standalone, musl; its
-interpreter is patched to /data/data/org.psprecomp.setup/files/ld-musl, a link the app makes to libmusl.so = Alpine's musl loader), libmain.so
-(the wizard) and libSDL2.so. Everything else (Python's library, zig's lib, the NDK sysroot, the Android core + libraries, the game's tools
+interpreter is patched to /data/data/org.psprecomp.setup/files/ld-musl, a link the app makes to libmusl.so = Alpine's musl loader) and
+libsetupcore.so (the install engine behind the app's Java pages, android/build_setup_app.py). Everything else (Python's library, zig's lib, the NDK sysroot, the Android core + libraries, the game's tools
 and analysis) is one zip, lib/arm64-v8a/libpayload.so, that the wizard unpacks on its first start. Standard library only (+ patchelf).
 """
 import argparse, hashlib, os, shutil, subprocess, sys, tempfile, zipfile
@@ -32,7 +32,7 @@ def add_tree(z, src, arc, skip=lambda rel: False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    for n in ("android-part", "ndk", "zig-tree", "python-tree", "musl", "psprecomp", "pspdecrypt", "skeleton", "libmain"):
+    for n in ("android-part", "ndk", "zig-tree", "python-tree", "musl", "psprecomp", "pspdecrypt", "skeleton", "engine"):
         ap.add_argument("--" + n, required=True)
     ap.add_argument("--game", default=os.path.join(REPO, "games", "dissidia"))
     ap.add_argument("--patchelf", default="patchelf")
@@ -117,8 +117,7 @@ def main():
     shutil.copy2(os.path.join(a.python_tree, "bin", "python3.13"), py)
     subprocess.check_call([a.patchelf, "--set-interpreter", INTERP, py])
 
-    libs = [("libmain.so", a.libmain), ("libSDL2.so", os.path.join(a.android_part, "deps", "deps", "lib", "libSDL2.so")),
-            ("libzig.so", os.path.join(a.zig_tree, "zig")), ("libpsprecomp.so", a.psprecomp), ("libpspdecrypt.so", a.pspdecrypt),
+    libs = [("libsetupcore.so", a.engine), ("libzig.so", os.path.join(a.zig_tree, "zig")), ("libpsprecomp.so", a.psprecomp), ("libpspdecrypt.so", a.pspdecrypt),
             ("libpython.so", py), ("libmusl.so", a.musl), ("libpayload.so", payload)]
     cmd = [sys.executable, "-I", os.path.join(HERE, "apk_pack.py"), "--skeleton", a.skeleton, "--key", os.path.join(a.android_part, "apk", "debug_key.json"), "-o", a.output]
     for name, path in libs:

@@ -10,8 +10,8 @@ Everything downloaded is checked against a pinned sha256 (toolchain/versions.jso
   1. the Android part         release/build_android_sdk.py: prebuilt core + SDL2/FreeType/FFmpeg for arm64 with the NDK, APK skeleton
   2. recompiler               psprecomp for aarch64-linux-musl (static; runs from the app's lib folder), linked with zig
   3. pspdecrypt               static aarch64, built with zig against pinned OpenSSL + zlib
-  4. setup app skeleton       SDL's Java activity + android/setup/ (manifest, SetupActivity)
-  5. wizard                   setup/ as libmain.so (android/build_setup_app.py: zig + the NDK sysroot)
+  4. setup app skeleton       android/setup/ (manifest, the app's Java pages, theme) + the fonts as assets
+  5. engine                   setup/'s install logic as libsetupcore.so (android/build_setup_app.py: zig + the NDK sysroot)
   6. pack                     android/pack_setup_app.py: the APK, with the tools as lib*.so and the payload zip
 """
 import argparse
@@ -170,21 +170,26 @@ def main():
         run([tools["cxx"], "-o", pspdecrypt, "-s"] + objs + [os.path.join(zl, "libz.a"), os.path.join(ssl, "libcrypto.a")], env=zenv)
         shutil.copy2(os.path.join(psrc, "LICENSE.TXT"), os.path.join(work, "pspdecrypt-LICENSE.txt"))
 
-    # ---- 4. the setup app's skeleton (SDL's Java activity + our SetupActivity)
+    # ---- 4. the setup app's skeleton (its Java pages, theme and fonts; no SDL)
     skeleton = os.path.join(work, "setup_skeleton.apk")
-    run([sys.executable, "-I", os.path.join(REPO, "android", "make_skeleton.py"), "--sdk", sdk, "--sdl-src", os.path.join(work, "android-work", "deps", "src-sdl2"),
+    assets = os.path.join(work, "setup_assets")
+    shutil.rmtree(assets, ignore_errors=True)
+    os.makedirs(os.path.join(assets, "fonts"))
+    for fn in ("Cinzel.ttf", "NotoSans-Regular.ttf", "NotoSans-Bold.ttf", "OFL-Cinzel.txt", "OFL-NotoSans.txt"):
+        shutil.copy2(os.path.join(REPO, "runtime", "assets", "fonts", fn), os.path.join(assets, "fonts", fn))
+    run([sys.executable, "-I", os.path.join(REPO, "android", "make_skeleton.py"), "--sdk", sdk, "--no-sdl",
          "--package", "org.psprecomp.setup", "--label", "Dissidia Recomp Setup", "--manifest", os.path.join(REPO, "android", "setup", "AndroidManifest.xml"),
-         "--extra-java", os.path.join(REPO, "android", "setup", "java"), "--icon-res", os.path.join(REPO, "android", "icon", "setup_res"), "--api", str(av["api"]), "--version", a.version, "-o", skeleton])
+         "--extra-java", os.path.join(REPO, "android", "setup", "java"), "--icon-res", os.path.join(REPO, "android", "icon", "setup_res"),
+         "--extra-res", os.path.join(REPO, "android", "setup", "res"), "--assets", assets, "--api", str(av["api"]), "--version", a.version, "-o", skeleton])
 
-    # ---- 5. the wizard
-    libmain = os.path.join(work, "setup_libmain.so")
-    run([sys.executable, "-I", os.path.join(REPO, "android", "build_setup_app.py"), "--zig", zig, "--ndk", ndk, "--deps", os.path.join(part, "deps", "deps"),
-         "--out", libmain, "--jobs", j], env=zenv)
+    # ---- 5. the install engine
+    engine = os.path.join(work, "setup_libsetupcore.so")
+    run([sys.executable, "-I", os.path.join(REPO, "android", "build_setup_app.py"), "--zig", zig, "--ndk", ndk, "--out", engine, "--jobs", j], env=zenv)
 
     # ---- 6. the APK
     out = a.output or os.path.join(work, "DissidiaRecomp-Setup-%s-android.apk" % a.version)
     run([sys.executable, "-I", os.path.join(REPO, "android", "pack_setup_app.py"), "--android-part", part, "--ndk", ndk, "--zig-tree", zig_a64,
-         "--python-tree", py_tree, "--musl", musl, "--psprecomp", recompiler, "--pspdecrypt", pspdecrypt, "--skeleton", skeleton, "--libmain", libmain,
+         "--python-tree", py_tree, "--musl", musl, "--psprecomp", recompiler, "--pspdecrypt", pspdecrypt, "--skeleton", skeleton, "--engine", engine,
          "-o", out])
     import hashlib
     h = hashlib.sha256(open(out, "rb").read()).hexdigest()

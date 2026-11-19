@@ -35,6 +35,8 @@ import subprocess
 import sys
 import tempfile
 
+# On Android the bundled Python runs through the app's loader (setup/proc.cpp): child pythons need the same prefix
+PYEXE = ([os.environ['PSPRECOMP_PY_LOADER']] if os.environ.get('PSPRECOMP_PY_LOADER') else []) + [sys.executable]
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import charmod_gmo as G  # noqa: E402
@@ -387,10 +389,10 @@ def cmd_install(a):
     if not os.path.exists(os.path.join(mods, 'roster.txt')):
         open(os.path.join(mods, 'roster.txt'), 'w', encoding="utf-8").close()       # (roster_mainbin would make up a character without one)
     print('PROGRESS 75', flush=True)
-    if subprocess.call([sys.executable, os.path.join(HERE, 'roster_mainbin.py'), os.path.join(a.work, 'disc0'), mods]):
+    if subprocess.call(PYEXE + [os.path.join(HERE, 'roster_mainbin.py'), os.path.join(a.work, 'disc0'), mods]):
         raise SystemExit('roster_mainbin.py failed')
     print('PROGRESS 90', flush=True)
-    subprocess.call([sys.executable, os.path.join(HERE, 'netpack.py'), 'deltas', mods, '--disc', os.path.join(a.work, 'disc0')])
+    subprocess.call(PYEXE + [os.path.join(HERE, 'netpack.py'), 'deltas', mods, '--disc', os.path.join(a.work, 'disc0')])
     print('PROGRESS 100', flush=True)
     print('Bartz\'s Dissidia 1 moves installed (Settings > Mods switches them)')
 

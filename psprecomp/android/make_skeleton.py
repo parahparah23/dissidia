@@ -2,7 +2,7 @@
 """Build the unsigned APK skeleton (manifest + compiled resources + classes.dex of SDL's Java activity), zip-aligned, for apk_pack.py.
 Release-time tool (needs a JDK, the Android SDK build-tools + platform, SDL2 source): the player's machine only runs apk_pack.py.
 
-  make_skeleton.py --sdk SDK --sdl-src SDL2_SRC [--package org.psprecomp.game] [--label "Dissidia 012"] [--api 29] -o skeleton.apk
+  make_skeleton.py --sdk SDK (--sdl-src SDL2_SRC | --no-sdl) [--package org.psprecomp.game] [--label "Dissidia 012"] [--api 29] -o skeleton.apk
 """
 import argparse, glob, os, shutil, subprocess, sys, tempfile
 
@@ -14,7 +14,10 @@ def run(cmd):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--sdk", required=True); ap.add_argument("--sdl-src", required=True)
+    ap.add_argument("--sdk", required=True); ap.add_argument("--sdl-src")
+    ap.add_argument("--no-sdl", action="store_true", help="no SDL Java classes (the setup app: plain Android views)")
+    ap.add_argument("--extra-res", help="a second resource folder (the setup app's theme)")
+    ap.add_argument("--assets", help="a folder packed as the APK's assets/ (the setup app's fonts)")
     ap.add_argument("--package", default="org.psprecomp.game"); ap.add_argument("--label", default="Dissidia 012")
     ap.add_argument("--api", default="29"); ap.add_argument("-o", "--output", required=True)
     ap.add_argument("--manifest", help="manifest template (default: hello/AndroidManifest.xml); its package is replaced by --package")
@@ -28,7 +31,9 @@ def main():
     jar = sorted(glob.glob(sdk + "/platforms/android-*/android.jar"))[-1]
     work = tempfile.mkdtemp(prefix="skeleton-")
     classes = work + "/classes"; os.makedirs(classes)
-    srcs = glob.glob(os.path.abspath(a.sdl_src) + "/android-project/app/src/main/java/org/libsdl/app/*.java")
+    if not a.no_sdl and not a.sdl_src:
+        ap.error("--sdl-src is needed (or --no-sdl)")
+    srcs = [] if a.no_sdl else glob.glob(os.path.abspath(a.sdl_src) + "/android-project/app/src/main/java/org/libsdl/app/*.java")
     if a.extra_java:
         srcs += glob.glob(os.path.abspath(a.extra_java) + "/**/*.java", recursive=True)
     run(["javac", "-source", "8", "-target", "8", "-Xlint:-options", "-cp", jar, "-d", classes] + srcs)
@@ -46,7 +51,12 @@ def main():
     base = work + "/base.apk"
     compiled = work + "/res.zip"
     run([bt + "/aapt2", "compile", "--dir", os.path.abspath(a.icon_res) if a.icon_res else here + "/icon/res", "-o", compiled])   # launcher icon (icon/make_icon.py)
-    run([bt + "/aapt2", "link", "-o", base, "-I", jar, "--manifest", man, "-R", compiled, "--min-sdk-version", a.api, "--target-sdk-version", "34"])
+    extra = []
+    if a.extra_res:
+        extra = [work + "/res_extra.zip"]   # a base input (not an overlay): it adds resources
+        run([bt + "/aapt2", "compile", "--dir", os.path.abspath(a.extra_res), "-o", extra[0]])
+    run([bt + "/aapt2", "link", "-o", base, "-I", jar, "--manifest", man, "-R", compiled] + extra + [ "--min-sdk-version", a.api, "--target-sdk-version", "34"] +
+        (["-A", os.path.abspath(a.assets)] if a.assets else []))
     import zipfile
     unaligned = work + "/unaligned.apk"
     shutil.copy(base, unaligned)

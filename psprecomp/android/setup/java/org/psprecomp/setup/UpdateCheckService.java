@@ -188,7 +188,7 @@ public class UpdateCheckService extends JobService {
         Intent open = ctx.getPackageManager().getLaunchIntentForPackage(ctx.getPackageName());
         PendingIntent pi = PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(ctx, CHANNEL) : new Notification.Builder(ctx);
-        b.setSmallIcon(ctx.getApplicationInfo().icon).setContentTitle(title).setContentText(text)
+        b.setSmallIcon(ctx.getResources().getIdentifier("ic_stat_crystal", "drawable", ctx.getPackageName())).setContentTitle(title).setContentText(text)
                 .setStyle(new Notification.BigTextStyle().bigText(text)).setContentIntent(pi).setAutoCancel(true);
         nm.notify(JOB_ID, b.build());
         return true;
