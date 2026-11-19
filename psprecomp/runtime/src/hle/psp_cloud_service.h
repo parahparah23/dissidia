@@ -69,6 +69,8 @@ void signin_cancel();
 void signout();                         // forgets the Google sign-in
 
 Status status();
+// This device's name as the other devices see it in a conflict ("steamdeck", "Retroid Pocket 6", "DESKTOP-1234"); PSPRECOMP_DEVICE_NAME overrides.
+std::string device_name();
 // Waits until no sync is running (true) or the timeout passes (false). Conflicts waiting for a choice do not block it.
 bool wait_ready(int timeout_ms);
 

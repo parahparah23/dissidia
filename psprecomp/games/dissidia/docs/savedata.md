@@ -9,46 +9,83 @@ Saves are PSP save folders in `<workdir>/ms0/PSP/SAVEDATA/`, named `<disc ID><su
 | `ULUS10566Quest00`, `...Replay00` | quest and replay saves |
 
 Each holds `PARAM.SFO`, `ICON0.PNG` and the game's encrypted files (`DISSIDIA.BIN`, `FCARD.BIN` ...). The files are
-the same for every region (the key and the format are shared); a disc only looks for the folder with its own ID. The
-disc IDs seen so far: `ULUS10566` (US), `ULES01505` (Europe). A Japanese disc has its own `ULJM...` ID, which
-`savemgr` takes from the install, or from `--id`.
+the same for every region (the key and the format are shared); a disc only looks for the folder with its own ID. Disc IDs:
+`ULUS10566` (US), `ULES01505` (Europe), `ULJM05814` (Japan, UMD), `NPJH50377` (Japan, PSN).
 
 ## One save set for every region
 
-The runtime treats `ULUS10566`, `ULES01505` and `ULJM05681` as the same game (`psp_savedata_set_shared_ids`, called
-from the Dissidia module; more IDs can be added with `PSPRECOMP_SAVE_IDS=ID1,ID2`). When the game asks for
-`<its ID><slot>`, the runtime uses whichever region's folder exists, so a US save loads on an EU install with no copying
-or renaming, and the save list shows each slot once. Saving writes back into the folder that was found; a slot that
-exists nowhere is created under the running disc's own ID. Test: `runtime/tests/test_savedata_hle.cpp`.
+The runtime treats `ULUS10566`, `ULES01505`, `ULJM05814`, `NPJH50377` (and `ULJM05681`, listed before the Japanese IDs were checked)
+as the same game (`psp_savedata_set_shared_ids`, called from the Dissidia module; more IDs can be added with
+`PSPRECOMP_SAVE_IDS=ID1,ID2`). When the game asks for `<its ID><slot>`, the runtime uses whichever region's folder exists, so a US
+save loads on an EU install with no copying or renaming, and the save list shows each slot once. Saving writes back into the folder
+that was found; a slot that exists nowhere is created under the running disc's own ID. Test: `runtime/tests/test_savedata_hle.cpp`.
 
-## In-game: Manage saves
+## Settings > Saves (the save manager)
 
-Open the game's save list (Load Game / Save Game) and press **Triangle** (the hint is in the bottom bar; with no saves
-yet the list says so and still offers it). The **Manage Saves** screen has:
+**Settings > Saves**, or **Triangle** on the game's save list (Load Game / Save Game; the hint is in the bottom bar and says when cloud
+saves wait for a choice). It is a category of the Settings menu, so the pad, the keyboard, the mouse and touch all work; the game is
+paused while it is open and the save list behind it is refreshed when it closes.
 
-- **Import saves**: lists the places a Dissidia 012 save may be: PPSSPP's `PSP/SAVEDATA` (Linux `~/.config/ppsspp`,
-  Flatpak, macOS, Windows `Documents\PPSSPP` and `%APPDATA%`), PSP memory sticks mounted under `/media`, `/run/media`,
-  `/mnt` (two levels) and Windows drive letters, with the number of saves in each; or **Type a path...** (host
-  keyboard, or the pad keyboard; any folder holding save folders, or a memory stick / PPSSPP root). Then pick saves
-  (**All saves** toggles the default set: one save per slot, this game's region first; Cross toggles a save,
-  Start imports) and **Import selected**. Saves go in under this disc's ID (or into the other region's folder if the
-  game already uses one, see above), `PARAM.SFO` signed again as `savemgr` does.
-- **Export saves**: the same in reverse: pick PPSSPP / a memory stick / a typed folder, pick saves, choose
-  **Folder names**: *keep region* or *as ULES01505* (this game's ID, so a matching PPSSPP game finds them).
+- **Needs your choice** (only when cloud sync found a save changed on two devices): one screen per save with both sides - this device
+  and the cloud, the device that uploaded it by name, when each was saved (the newer one marked) and the save's own description - and
+  *Keep this device's save* / *Use the cloud save* / *Decide later*; *Keep the newer save of each* settles all of them. The side that
+  loses is never lost: this device's save goes to Backups, the cloud's is kept in the cloud as `<slot>.bak`.
+- **Cloud sync** (at the top, when cloud sync runs): status, *Sync now*, and a jump to Settings > Cloud.
+- **Import saves**
+  - *From PPSSPP / a memory stick*: found automatically (PPSSPP's `PSP/SAVEDATA` on Linux, Flatpak, macOS, Windows; memory sticks and
+    disks under `/media`, `/run/media`, `/mnt` and Windows drive letters), with the number of saves in each. The search runs in the
+    background (a sleeping disk can take seconds).
+  - *Choose a folder...* / *Choose an archive...*: the system's file dialog (Windows' own, zenity / kdialog / matedialog / qarma on Linux,
+    macOS; Android's document picker). An archive (.zip, .tar, .tar.gz built in; .7z, .rar, .tar.xz through 7-Zip / bsdtar / unrar when
+    installed) is unpacked into `savemgr_tmp/` in the game folder and removed afterwards; entries that would land outside it are refused.
+  - *Browse in the game...*: an in-game file browser (places: the game folder, home, Downloads, Documents, drives), for setups without a
+    file dialog (Steam Deck game mode, an Android build without the picker).
+  - *Type a path...*: a folder or an archive.
 
-Nothing is replaced silently: when a save already exists you choose **Replace them** (the old copy is moved to
-`ms0/PSP/SAVEDATA_BACKUP/<name>.bak`, never inside `SAVEDATA`, which the game lists) or **Skip existing**. Results are
-listed per save and logged as `[SAVEMGR]`. `PSPRECOMP_SAVEMGR=0` removes the Triangle key. The logic lives in
-`runtime/src/hle/psp_savemgr.cpp` (shared with `tools/savemgr`) and the screen in `psp_savemgr_ui.cpp`; tests:
-`runtime/tests/test_savemgr.cpp` (synthetic folders, every flow driven by pad presses, and the real PPSSPP folder
-read-only when `~/.config/ppsspp/PSP/SAVEDATA` exists; `PSPRECOMP_TEST_PPSSPP_SAVES` overrides it).
+  Saves are found **anywhere below** the picked place (a `PSP/SAVEDATA` folder, one save folder, a folder of saves, or a save's files
+  with any folder name: the name then comes from `PARAM.SFO`'s `SAVEDATA_DIRECTORY`), from every region; Dissidia 012 saves are
+  recognised by their disc ID or by the English or Japanese title, other games' saves (and the first Dissidia's) are left out. Then
+  pick saves: one per slot (this game's region first, then the newest); each row's description says whether it replaces one of yours
+  and which is newer. They go in under this game's folder name (or the other region's, if the game already uses that), `PARAM.SFO`
+  signed again as `savemgr` does.
+- **Export saves**: *Export to a folder...* or *Export as a .zip file...* (the system's dialog), PPSSPP / a memory stick, the in-game
+  browser, or a typed path (a name ending in `.zip` writes a zip). A memory stick or PPSSPP folder gets the saves in its `PSP/SAVEDATA`;
+  a zip holds them under `PSP/SAVEDATA/`. **Folder names**: *Keep region* or *As ULES01505* (this game's ID).
+- **Backups** (*Back up now*, *Restore a backup*), see below.
+
+Nothing is replaced silently: when a save already exists you choose *Replace* or *Only new ones*. Results are logged as `[SAVEMGR]`.
+`PSPRECOMP_SAVEMGR=0` removes the Triangle key; `PSPRECOMP_FILE_DIALOG=none` always uses the in-game browser instead of the system's
+dialog.
+
+## Backups
+
+Every save that is about to be replaced - by a cloud download, by *Use the cloud save* in a conflict, by an import or by a restore - is
+moved into a dated backup first, and once a day (the first start of a day, before the start-up sync) every save is copied while
+they have changed. They live in `ms0/PSP/SAVEDATA_BACKUP/` (never inside `SAVEDATA`, which the game lists):
+
+| Folder | What |
+|---|---|
+| `20261119-210405_cloud-download/ULES01505GameData00/` | one backup: local date and time, the reason (`cloud-download`, `cloud-conflict`, `import`, `restore`, `daily`, `manual`), the save folders as they were |
+| `ULES01505GameData00.bak` | an older runtime's single backup: listed as "Older backup" |
+
+Saves replaced by one occasion within two minutes (a sync that downloads three saves) share one backup. The newest 40 automatic and
+14 daily backups are kept; *Back up now* backups stay until deleted. **Restore** puts a backup's save back (the current one is backed up
+first, so a restore can be undone too); with cloud sync on, the restored save is uploaded at once, so rolling back a bad cloud download
+also fixes the other devices.
+
+The logic lives in `runtime/src/hle/psp_savemgr.cpp` (regions, finding, copying, shared with `tools/savemgr`), `psp_savebackup.cpp`,
+`psp_savearchive.cpp`, `psp_saves_page.cpp` (the page) and `runtime/src/psp_file_dialog.cpp` (the system's dialog, through the installer's
+portable-file-dialogs; Android: `android/game_java/.../FilePicker.java`). Test: `runtime/tests/test_savemgr.cpp` (synthetic saves in every
+layout, archives in and out and refused ones, backups, the page driven like the menu with a fake file dialog and a fake cloud, and the
+real PPSSPP folder read-only when `~/.config/ppsspp/PSP/SAVEDATA` exists; `PSPRECOMP_TEST_PPSSPP_SAVES` overrides it; `DUMP_SAVES=/dir`
+writes pictures of the page).
 
 ## savemgr
 
 `tools/savemgr/savemgr.cpp` is a small stand-alone tool (C++17, no libraries beyond `psp_savedata_crypto`):
 
 ```
-g++ -O2 -std=c++17 -Iruntime/src/hle tools/savemgr/savemgr.cpp runtime/src/hle/psp_savemgr.cpp runtime/src/hle/psp_savedata_crypto.cpp -o savemgr
+g++ -O2 -std=c++17 -Iruntime/src/hle tools/savemgr/savemgr.cpp runtime/src/hle/psp_savemgr.cpp runtime/src/hle/psp_savebackup.cpp runtime/src/hle/psp_savedata_crypto.cpp -o savemgr
 
 savemgr list   [--from DIR]
 savemgr import --from DIR [--workdir DIR | --to DIR] [--id ULUS10566] [--force] [NAME...]

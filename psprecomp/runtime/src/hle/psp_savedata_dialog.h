@@ -152,11 +152,15 @@ public:
     // Bumped whenever what render() would draw changes (selection/scroll/begin).
     uint32_t revision() const { return rev_; }
     void render(Canvas& c) const;
-    // Shows the "Triangle: Manage saves" hint (the HLE opens psp_savemgr_ui on that button).
-    void set_manage_hint(bool on) { if (manage_ != on) { manage_ = on; ++rev_; } }
+    // Shows the "Triangle: Manage saves" hint (the HLE opens Settings > Saves on that button); `label` replaces its text
+    // (e.g. when cloud saves wait for a choice).
+    void set_manage_hint(bool on, const std::string& label = "Triangle: Manage saves") {
+        if (manage_ != on || manage_label_ != label) { manage_ = on; manage_label_ = label; ++rev_; }
+    }
 
 private:
     bool manage_ = false;
+    std::string manage_label_ = "Triangle: Manage saves";
     Kind kind_ = Kind::Load;
     std::vector<SaveEntry> entries_;
     bool confirm_cross_ = true;
@@ -212,7 +216,7 @@ struct SetRow {
     int steps = 0, cur = 0;     // Slider: number of positions (>= 2) and the current one
     bool selectable() const { return kind != SetKind::Header; }
 };
-constexpr int SET_MAX_IDS = 320;
+constexpr int SET_MAX_IDS = 640;
 struct SetCat { std::string name; int icon = 0; };   // icon: see settings_icon()
 struct SetKeyboardState {    // the text-entry modal
     bool active = false;

@@ -2,6 +2,7 @@
 // provider: first upload, download across regions, no-op resync, one-sided changes, conflicts (never silent, both
 // resolutions, backups), damaged downloads, unsafe containers and the content hash. No network, no game data.
 #include "psp_cloudsync.h"
+#include "psp_savebackup.h"
 #include "psp_savemgr.h"
 #include "cloud_fixture.h"
 
@@ -108,6 +109,12 @@ int main() {
     CHECK(it.action == Action::Pulled);
     CHECK(slurp(B.dir("GameData00") / "DISSIDIA.BIN") == aData);
     CHECK(backups(B) == bBackups + 1);
+    {   // the replaced save is in a dated "cloud conflict" backup (psp_savebackup), listed for Settings > Saves
+        bool found = false;
+        for (auto& b : psp_savebackup::list(B.root + "/backup"))
+            if (b.reason == psp_savebackup::kCloudConflict && !b.saves.empty() && b.saves[0].suffix == "GameData00") found = true;
+        CHECK(found);
+    }
     CHECK(count(sync_all(*prov, B.opts()), Action::Same) == 2);
 
     // conflict again; this time the choice callback keeps the local one: remote gets it, the old remote becomes .bak
@@ -216,6 +223,12 @@ int main() {
         CHECK(n.blob == m.blob && n.hash == m.hash && n.device == "dev" && n.disc == m.disc && n.mtime == 12345);
         CHECK(!meta_from_text("hash=zz\n").valid());
         CHECK(!meta_from_text("").valid());
+        // the conflict screen's fields: device name, the save's own words (one line, bounded, old metas without them still parse)
+        m.device_name = "steamdeck"; m.savetitle = "Slot"; m.detail = "Ender\nLevel 99";
+        n = meta_from_text(meta_to_text(m));
+        CHECK(n.device_name == "steamdeck" && n.savetitle == "Slot" && n.detail == "Ender Level 99" && n.valid());
+        m.detail = std::string(600, 'x');
+        CHECK(meta_from_text(meta_to_text(m)).detail.size() == 256);
     }
 
     // an unreachable remote stops the run with an error and touches nothing

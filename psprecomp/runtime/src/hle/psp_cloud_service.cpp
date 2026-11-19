@@ -17,6 +17,12 @@
 #include <mutex>
 #include <thread>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#elif !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 using namespace psp_cloud;
 
@@ -139,6 +145,7 @@ Options make_options(const Config& c, const Paths& p, bool allow_pull) {
     o.backup_root = p.backup_root;
     o.state_path = (P(p.workdir) / "cloud" / "state.txt").u8string();
     o.disc_id = p.disc_id;
+    o.device_name = device_name();
     o.allow_pull = allow_pull;
     const std::string root = p.saves_root;
     o.existing = [root](const std::string& suffix) -> std::string {   // the folder already holding this slot, any region's ID
@@ -146,7 +153,8 @@ Options make_options(const Config& c, const Paths& p, bool allow_pull) {
         for (fs::directory_iterator it(P(root), ec), end; !ec && it != end; it.increment(ec)) {
             std::string d, x;
             const std::string n = it->path().filename().u8string();
-            if (psp_savemgr::split_name(n, &d, &x) && x == suffix && it->is_directory(ec)) return n;
+            if (psp_savemgr::split_name(n, &d, &x) && x == suffix && it->is_directory(ec) &&
+                psp_savemgr::is_dissidia012_save(d, "")) return n;   // not another game's save with the same slot name
         }
         return "";
     };
@@ -317,6 +325,28 @@ void ensure_worker() {   // lock held
 }
 
 }  // namespace
+
+std::string device_name() {
+    std::string n;
+    if (const char* e = std::getenv("PSPRECOMP_DEVICE_NAME"); e && *e) n = e;
+#if defined(__ANDROID__)
+    if (n.empty()) {
+        char man[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "";
+        __system_property_get("ro.product.manufacturer", man);
+        __system_property_get("ro.product.model", model);
+        n = model;
+        if (man[0] && n.find(man) == std::string::npos && std::string(man).size() + n.size() < 40) n = std::string(man) + " " + n;
+        if (!man[0] && !model[0]) n = "Android device";
+    }
+#elif defined(_WIN32)
+    if (n.empty()) if (const char* c = std::getenv("COMPUTERNAME")) n = c;
+#else
+    if (n.empty()) { char h[256] = ""; if (gethostname(h, sizeof h - 1) == 0) n = h; }
+#endif
+    for (char& c : n) if (c == '\n' || c == '\r' || c == '=') c = ' ';
+    if (n.size() > 40) n.resize(40);
+    return n.empty() ? "another device" : n;
+}
 
 void init(const Paths& p) {
     std::lock_guard<std::mutex> lk(g.m);

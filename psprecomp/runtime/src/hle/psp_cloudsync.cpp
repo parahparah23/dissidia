@@ -1,6 +1,7 @@
 // Cloud sync of save folders: see psp_cloudsync.h.
 #include "psp_cloudsync.h"
 
+#include "psp_savebackup.h"
 #include "psp_savemgr.h"
 
 #include <thread>
@@ -212,6 +213,7 @@ struct Run {
     std::map<std::string, std::string> local_hash;
     std::map<std::string, Meta> remote;
     std::set<std::string> remote_blobs;
+    const char* pull_reason = psp_savebackup::kCloudDownload;   // the backup a replaced local save goes into
 
     Run(Provider& p_, const Options& o_) : p(p_), o(o_) { st = load_state(o.state_path); }
 
@@ -291,6 +293,9 @@ struct Run {
         m.device = st.device;
         m.disc = s.disc;
         m.mtime = s.mtime;
+        m.device_name = o.device_name;
+        m.savetitle = psp_savemgr::one_line(s.savetitle);
+        m.detail = psp_savemgr::one_line(s.detail);
         const std::string t = meta_to_text(m);
         if (std::string e = p.put(sfx + ".meta", Bytes(t.begin(), t.end())); !e.empty()) return e;
         remote[sfx] = m;
@@ -320,7 +325,7 @@ struct Run {
         std::string d, x;
         if (!existing.empty() && psp_savemgr::split_name(existing, &d, &x)) local_disc = d;
         std::string name;
-        if (std::string e = psp_savemgr::copy_save(info, o.saves_root, local_disc, true, &name, o.backup_root); !e.empty())
+        if (std::string e = psp_savemgr::copy_save(info, o.saves_root, local_disc, true, &name, o.backup_root, pull_reason); !e.empty())
             return e;
         st.base[sfx] = m.hash;
         return "";
@@ -378,7 +383,9 @@ struct Run {
             it.action = err.empty() ? Action::Pushed : Action::Error;
             it.note = err.empty() ? "kept this device's save (the cloud copy is kept as " + sfx + ".bak)" : err;
         } else if (c == Choice::KeepRemote) {
+            pull_reason = psp_savebackup::kCloudConflict;
             err = pull(sfx);
+            pull_reason = psp_savebackup::kCloudDownload;
             it.action = err.empty() ? Action::Pulled : Action::Error;
             it.note = err.empty() ? "took the cloud save (yours is in the backup folder)" : err;
         } else {
@@ -464,9 +471,25 @@ std::string unpack_save(const Bytes& blob, const std::string& dir) {
     return "";
 }
 
+namespace {
+std::string meta_value(std::string v, size_t max) {   // one line, bounded (a UTF-8 sequence is never cut)
+    for (char& c : v) if (c == '\n' || c == '\r') c = ' ';
+    if (v.size() > max) {
+        size_t n = max;
+        while (n > 0 && (uint8_t(v[n]) & 0xC0) == 0x80) --n;
+        v.resize(n);
+    }
+    return v;
+}
+}  // namespace
+
 std::string meta_to_text(const Meta& m) {
-    return "hash=" + m.hash + "\nblob=" + m.blob + "\nmtime=" + std::to_string(static_cast<long long>(m.mtime)) + "\ndevice=" + m.device +
-           "\ndisc=" + m.disc + "\n";
+    std::string t = "hash=" + m.hash + "\nblob=" + m.blob + "\nmtime=" + std::to_string(static_cast<long long>(m.mtime)) + "\ndevice=" + m.device +
+                    "\ndisc=" + m.disc + "\n";
+    if (!m.device_name.empty()) t += "name=" + meta_value(m.device_name, 48) + "\n";
+    if (!m.savetitle.empty()) t += "title=" + meta_value(m.savetitle, 128) + "\n";
+    if (!m.detail.empty()) t += "detail=" + meta_value(m.detail, 256) + "\n";
+    return t;
 }
 
 Meta meta_from_text(const std::string& text) {
@@ -482,6 +505,9 @@ Meta meta_from_text(const std::string& text) {
         else if (k == "mtime") m.mtime = time_t(std::strtoll(v.c_str(), nullptr, 10));
         else if (k == "device" && v.size() <= 32) m.device = v;
         else if (k == "disc" && v.size() <= 16) m.disc = v;
+        else if (k == "name") m.device_name = meta_value(v, 48);
+        else if (k == "title") m.savetitle = meta_value(v, 128);
+        else if (k == "detail") m.detail = meta_value(v, 256);
     }
     return m;
 }

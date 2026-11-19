@@ -6,7 +6,8 @@
 // What is stored: per save, keyed by its REGION-NEUTRAL SUFFIX ("GameData00", "FCard03", so a US and an EU install
 // sync with each other):
 //   <suffix>.save   the files that travel with the save folder, in one container (pack/unpack below)
-//   <suffix>.meta   text: content hash, container checksum, PARAM.SFO mtime, the device that wrote it, the disc ID it was saved under
+//   <suffix>.meta   text: content hash, container checksum, PARAM.SFO mtime, the device that wrote it (ID and name), the disc ID it
+//                   was saved under, the save's own title / detail line
 // The blob is written first and the meta last, so a half-finished upload is never seen as a newer save.
 //
 // Deciding what to do (three-way): each install remembers the hash of every save as of its last sync (the "base").
@@ -73,6 +74,9 @@ struct Meta {
     std::string device;
     std::string disc;
     time_t mtime = 0;
+    std::string device_name;   // "steamdeck", "Pixel 9", ... (the uploading device's Options::device_name; "" = older meta)
+    std::string savetitle;     // SAVEDATA_TITLE / SAVEDATA_DETAIL of the uploaded save (one line each; for the conflict screen)
+    std::string detail;
     bool valid() const { return !hash.empty(); }
 };
 std::string meta_to_text(const Meta& m);
@@ -103,6 +107,7 @@ struct Options {
     std::string backup_root;     // where a replaced local save goes (not inside saves_root: the game lists that)
     std::string state_path;      // the file that remembers the base hashes and this device's ID (created)
     std::string disc_id;         // disc ID under which a pulled save is created locally
+    std::string device_name;     // this device's name, written into the metadata of uploads (shown to the other devices)
     // The local folder name already holding `suffix` under any shared region's ID ("" = none). Null: disc_id+suffix.
     std::function<std::string(const std::string& suffix)> existing;
     // Conflicts: null = report them (Action::Conflict) and do nothing; else decide here.

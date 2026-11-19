@@ -14,8 +14,8 @@ Controls
 | Mouse | Hover highlights, click selects, the arrows and slider bars are clickable and draggable, wheel scrolls, right click = Back |
 | Touch | Tap a row, drag the list to scroll (it coasts), slide on a bar to adjust, tap a category on the left; the on-screen game controls are hidden |
 
-Layout: a category sidebar (Display, Graphics, Image, Effects, Controls (touch screens only), Network, Cloud, System, Drivers (Android),
-Debug), the rows of the category (some open a sub-menu: Image > HDR, Effects > Ray Tracing), and a description of the selected row below.
+Layout: a category sidebar (Display, Graphics, Image, Effects, Controls (touch screens only), Network, Saves (the save manager:
+[savedata.md](savedata.md)), Cloud, Mods, System, Drivers (Android), Debug), the rows of the category (some open a sub-menu: Image > HDR, Effects > Ray Tracing), and a description of the selected row below.
 A long description scrolls by itself. The chip next to a description's title says how the choice is kept: **Saved**, **Next start**
 (restart the game to apply) or **This session**.
 

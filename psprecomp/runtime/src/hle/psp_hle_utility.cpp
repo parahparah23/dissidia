@@ -7,7 +7,7 @@
 #include "psp_runtime.h"
 #include "psp_savedata_crypto.h"
 #include "psp_savedata_dialog.h"
-#include "psp_savemgr_ui.h"
+#include "psp_settings.h"
 #include "psp_cloud_glue.h"
 #include "psp_scheduler.h"
 #include "psp_tex_pack.h"   // psp_png_decode_rgba (ICON0.PNG thumbnails)
@@ -2179,21 +2179,25 @@ static bool sd_auto_mode() {
     return e && *e && std::strcmp(e, "0") != 0;
 }
 
-// The Manage-saves screen is part of the interactive list only (a headless PSPRECOMP_SAVEDATA_AUTO run never
-// shows it); PSPRECOMP_SAVEMGR=0 turns it off.
+// Triangle on the interactive list opens Settings > Saves (the save manager, psp_saves_page.h). A headless
+// PSPRECOMP_SAVEDATA_AUTO run never shows it; PSPRECOMP_SAVEMGR=0 (or the settings menu switched off) turns it off.
 static bool sd_manager_enabled() {
     const char* e = std::getenv("PSPRECOMP_SAVEMGR");
-    return !(e && e[0] == '0') && !sd_auto_mode();
+    const char* m = std::getenv("PSPRECOMP_SETTINGS_MENU");
+    return !(e && e[0] == '0') && !(m && m[0] == '0') && !sd_auto_mode();
 }
-// Old copies of replaced saves go next to SAVEDATA (the game lists everything inside it).
-static std::string sd_backup_dir() { return psp_path_to_host("ms0:/PSP/SAVEDATA_BACKUP"); }
+// The hint on the list: names the cloud saves waiting for a choice, if any.
+static std::string sd_manage_label() {
+    const psp_saves::Env env = psp_cloud_glue_saves_env();
+    const int n = env.cloud_status ? env.cloud_status().conflicts : 0;
+    if (n <= 0) return "Triangle: Manage saves";
+    return "Triangle: Manage saves (" + std::to_string(n) + (n == 1 ? " needs" : " need") + " a choice)";
+}
 
 struct SavedataUi {
     int stage = 0;               // 0 = not started, 1 = dialog running
     psp_sddialog::ListDialog dlg;
-    // The "Manage saves" screen (import / export), opened with Triangle from the list.
-    psp_sddialog::ManagerDialog mgr;
-    bool mgr_open = false;
+    unsigned settings_serial = 0;   // psp_settings_open_serial() when the list was built: the menu opened since = saves may have changed
     bool load = true;
     uint32_t prev_buttons = 0;
     // What was last published: re-render only when the dialog state or the
@@ -2290,8 +2294,8 @@ static bool sd_ui_step(uint8_t* rdram, uint32_t p, uint32_t mode,
             if (entries[i].slot == cur) initial = int(i);
         g_sd_ui.dlg.begin(load ? Kind::Load : Kind::Save, std::move(entries),
                           confirm_cross, initial);
-        g_sd_ui.dlg.set_manage_hint(sd_manager_enabled());
-        g_sd_ui.mgr_open = false;
+        g_sd_ui.dlg.set_manage_hint(sd_manager_enabled(), sd_manage_label());
+        g_sd_ui.settings_serial = psp_settings_open_serial();
         g_sd_ui.prev_buttons = sd_pad_buttons();
         g_sd_ui.stage = 1;
         g_sd_ui.pub_scale = 0;
@@ -2302,50 +2306,29 @@ static bool sd_ui_step(uint8_t* rdram, uint32_t p, uint32_t mode,
     int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     const uint32_t buttons = sd_pad_buttons();
-    if (g_sd_ui.mgr_open) {   // the import / export screen replaces the list while it is open
-        const Result mr = g_sd_ui.mgr.update(buttons, now_ms);
-        g_sd_ui.prev_buttons = buttons;
-        if (mr != Result::Running) {
-            g_sd_ui.mgr_open = false;
-            if (g_sd_ui.mgr.changed()) {   // saves arrived: rebuild the list behind it
-                auto entries = sd_collect_entries(rdram, p, load);
-                bool cc = psp_mem_read<int32_t>(rdram, p + 8) == 1;
-                if (const char* e = std::getenv("PSPRECOMP_SAVEDATA_CONFIRM")) cc = std::strcmp(e, "circle") != 0;
-                g_sd_ui.dlg.begin(load ? Kind::Load : Kind::Save, std::move(entries), cc, 0);
-                g_sd_ui.dlg.set_manage_hint(true);
-            }
-            g_sd_ui.pub_scale = 0;
-            return false;
-        }
-        const int scale = output_scale();
-        if (scale != g_sd_ui.pub_scale || g_sd_ui.mgr.revision() != g_sd_ui.pub_rev) {
-            g_sd_ui.canvas = Canvas(scale);
-            g_sd_ui.mgr.render(g_sd_ui.canvas);
-            overlay_publish(g_sd_ui.canvas);
-            g_sd_ui.pub_scale = scale;
-            g_sd_ui.pub_rev = g_sd_ui.mgr.revision();
-        }
+    // The settings menu was opened since the list was built (Triangle, or the Guide button): the saves may have changed there
+    // (import, restore, a cloud download). The game is paused while the menu is open, so this runs once it has closed.
+    if (sd_manager_enabled() && psp_settings_open_serial() != g_sd_ui.settings_serial && !psp_settings_menu_open()) {
+        g_sd_ui.settings_serial = psp_settings_open_serial();
+        const int keep = g_sd_ui.dlg.selected();
+        auto entries = sd_collect_entries(rdram, p, load);
+        bool cc = psp_mem_read<int32_t>(rdram, p + 8) == 1;
+        if (const char* e = std::getenv("PSPRECOMP_SAVEDATA_CONFIRM")) cc = std::strcmp(e, "circle") != 0;
+        const int n = int(entries.size());
+        g_sd_ui.dlg.begin(load ? Kind::Load : Kind::Save, std::move(entries), cc, std::clamp(keep, 0, std::max(0, n - 1)));
+        g_sd_ui.dlg.set_manage_hint(true, sd_manage_label());
+        g_sd_ui.pub_scale = 0;
+        g_sd_ui.prev_buttons = buttons;   // the press that closed the menu is not taken by the list
         return false;
     }
     if (sd_manager_enabled() && (buttons & BTN_TRIANGLE) && !(g_sd_ui.prev_buttons & BTN_TRIANGLE)) {
         g_sd_ui.prev_buttons = buttons;
-        psp_sddialog::ManagerConfig mc;
-        mc.saves_root = sd_base();
-        mc.backup_root = sd_backup_dir();
-        mc.disc_id = sd_cstr(rdram, p + SD_GAMENAME, 13);
-        mc.existing = [mc_game = mc.disc_id](const std::string& suffix) -> std::string {
-            for (auto& id : sd_game_ids(mc_game))
-                if (sd_is_dir(sd_base() + "/" + id + suffix)) return id + suffix;
-            return "";
-        };
-        psp_cloud_glue_manager_hooks(mc);
-        mc.confirm_cross = psp_mem_read<int32_t>(rdram, p + 8) == 1;
-        if (const char* e = std::getenv("PSPRECOMP_SAVEDATA_CONFIRM")) mc.confirm_cross = std::strcmp(e, "circle") != 0;
-        g_sd_ui.mgr.begin(mc);
-        g_sd_ui.mgr_open = true;
-        g_sd_ui.pub_scale = 0;
-        g_sd_ui.pub_rev = 0;
+        psp_settings_request_open_saves();   // the menu pauses the game (this thread waits at its next vblank) until it closes
         return false;
+    }
+    {   // the hint follows the cloud status (a conflict found by the start-up sync)
+        static int64_t next_hint = 0;
+        if (sd_manager_enabled() && now_ms >= next_hint) { next_hint = now_ms + 1000; g_sd_ui.dlg.set_manage_hint(true, sd_manage_label()); }
     }
     g_sd_ui.prev_buttons = buttons;
     Result r = g_sd_ui.dlg.update(buttons, now_ms);
