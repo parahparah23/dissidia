@@ -32,6 +32,7 @@ Short guides next to the tools, and the full reference here:
 - [spawned-objects.md](spawned-objects.md): the `wpnp` table and the objects `hold_prop` / `summon_object` spawn (Gilgamesh's swords, Yuna's aeons).
 - [effects.md](effects.md): how the game draws effects (placement, timing, colour and blending, every component), and corrections to the FEP notes.
 - [audio.md](audio.md): extra BGM tracks, voice banks.
+- [related-projects.md](related-projects.md): other Dissidia 012 projects (VCKing101's port, DissidiaDecompProject, RecompLauncher), credited, and what is worth taking from them.
 - [recomp-status.md](recomp-status.md): how the native build came together (October 2026), and soak-test findings. Historical.
 - [character-lighting.md](character-lighting.md): live key and rim lighting on character bodies in the native build (`body.lighting`).
 - [spring-bones.md](spring-bones.md): how the game swings capes, hair, skirts and weapon chains, and giving a mod character a physics cape.
