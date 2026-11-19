@@ -114,25 +114,25 @@ def decode(delta, src, max_out=64 << 20):
 
 # ---------------------------------------------------------------- the list
 def load():
-    return json.load(open(PACKS_JSON)) if os.path.exists(PACKS_JSON) else {'_info': __doc__.split('\n\n')[1], 'packs': []}
+    return json.load(open(PACKS_JSON, encoding="utf-8")) if os.path.exists(PACKS_JSON) else {'_info': __doc__.split('\n\n')[1], 'packs': []}
 
 
 def save(j):
-    with open(PACKS_JSON, 'w') as f:
+    with open(PACKS_JSON, 'w', encoding="utf-8") as f:
         json.dump(j, f, indent=1)
         f.write('\n')
 
 
 def cmd_record(a):
     mods, disc = a.mods, pe.Package(a.disc)
-    owner = json.load(open(os.path.join(mods, RETAIL_STATE)))
+    owner = json.load(open(os.path.join(mods, RETAIL_STATE), encoding="utf-8"))
     files = sorted(gp for gp, n in owner.items() if n == a.folder)
     if not files:
         raise SystemExit('%s installs no retail files in %s (build it first)' % (a.folder, mods))
-    abil = json.load(open(os.path.join(mods, ABILITIES)))
-    mod = json.load(open(os.path.join(HERE, '..', '..', '..', '..', 'mods', a.folder, 'mod.json')))
+    abil = json.load(open(os.path.join(mods, ABILITIES), encoding="utf-8"))
+    mod = json.load(open(os.path.join(HERE, '..', '..', '..', '..', 'mods', a.folder, 'mod.json'), encoding="utf-8"))
     code = mod['character']['code']
-    lines = [l.split() for l in open(os.path.join(mods, 'retail_moves.txt')).read().splitlines()]
+    lines = [l.split() for l in open(os.path.join(mods, 'retail_moves.txt'), encoding="utf-8").read().splitlines()]
     char = next(int(l[-3]) for l in lines if a.folder in l)
     name = a.name or a.folder
     if len(name) > MAX_NAME:
@@ -166,7 +166,7 @@ def cmd_inc(_a=None):
         for x in p['abilities']:
             out.append('    {%s, %s, %s, %d, %d},' % (x['id'], x['copy'], x['cmd'], x['type'], x['phase']))
         out.append('  }},')
-    with open(PACKS_INC, 'w') as f:
+    with open(PACKS_INC, 'w', encoding="utf-8") as f:
         f.write('\n'.join(out) + '\n')
 
 

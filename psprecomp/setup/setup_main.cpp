@@ -23,6 +23,7 @@
 
 #ifdef __ANDROID__
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 #include <algorithm>
 #include <chrono>
@@ -249,6 +250,8 @@ struct App {
     int64_t check_start = 0;
     std::string check_result;
     std::string msg_title, msg_text;
+    Screen msg_back = Screen::Welcome;   // where the Message page's OK goes (then back to Welcome for the next message)
+    Pick msg_pick = Pick::Iso;           // msg_back PickInfo: the file to choose again
 
     // native (system) file dialogs; the built-in browser is the fallback
     std::unique_ptr<pfd::open_file> file_dlg;
@@ -430,7 +433,7 @@ struct App {
                 p.title = "THE UNDUB FILE";
                 p.tab = "Japanese voices";
                 p.rows = {row("A second disc image", "The Japanese voices and movies come from a Japanese or undub version of Dissidia 012, as a disc image: a .iso or .cso. It is only read once; your own disc stays the base of the game.", ".iso or .cso"),
-                          row("Valid: the undub / Japanese disc", "A Dissidia 012 image that has the Japanese voices, for example the Japanese release or an undub patch of the game. The same game as your own disc, just with different voice and movie files.", "Japanese / undub"),
+                          row("Valid: the undub / Japanese disc", "A Dissidia 012 image that has the Japanese voices, for example the Japanese release or an undub patch of the game. The same game as your own disc, just with different voice and movie files. A disc with the English voices, or another game, is refused with a message.", "Japanese / undub"),
                           row("Choose the file", how),
                           row("Back")};
             }
@@ -644,12 +647,26 @@ struct App {
         case Screen::Failed:
             p.title = "NOT FINISHED";
             p.tab = "Stopped";
-            p.rows = {row("Try again", fail_msg + " Trying again continues where it stopped."), row("Back to the start"), row("Quit")};
+            p.rows = {row("Try again", fail_msg + " Trying again continues where it stopped.")};
+            if (can_open_log()) {
+                p.rows.push_back(row("Open setup.log", "The log of this install: every step's output and why it stopped. " + log_path));
+                p.rows.push_back(row("Show setup.log in its folder", "Opens the install folder with setup.log selected, e.g. to send the file. " + log_path));
+            }
+            p.rows.push_back(row("Back to the start"));
+            p.rows.push_back(row("Quit"));
             break;
         }
         return p;
     }
 
+    bool can_open_log() const {   // a desktop with a setup.log to show (Android: the app's storage, not reachable from here)
+#ifdef __ANDROID__
+        return false;
+#else
+        std::error_code ec;
+        return !log_path.empty() && std::filesystem::is_regular_file(log_path, ec);
+#endif
+    }
     std::string cur_workdir() const { return !state.workdir.empty() ? state.workdir : workdir; }
     bool is_browser() const { return screen == Screen::PickIso || screen == Screen::PickUndub || screen == Screen::BrowseDir; }
     int row_count() { return is_browser() ? (int)br.list.size() : (int)page().rows.size(); }
@@ -742,11 +759,13 @@ struct App {
 
     // setup.log in the install folder: every build line plus the failure reason (the wizard has no console on Windows)
     FILE* logf = nullptr;
+    std::string log_path;   // setup.log of this run (the failure page opens it)
     void log_open(const std::string& dir) {
         if (logf) { std::fclose(logf); logf = nullptr; }
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        logf = std::fopen((std::filesystem::path(dir) / "setup.log").string().c_str(), "ab");
+        log_path = (std::filesystem::path(dir) / "setup.log").string();
+        logf = std::fopen(log_path.c_str(), "ab");
         if (logf) { std::fprintf(logf, "\n===== psprecomp_setup run =====\n"); std::fflush(logf); }
     }
     void log_line(const std::string& l) {
@@ -1037,6 +1056,21 @@ struct App {
             workdir = path;
             if (before_pick == Screen::Options) go(Screen::Options, 0); else go(Screen::InstallDir);
         } else if (pick == Pick::Undub || pick == Pick::D1) {
+            {                                    // the right game, before anything is installed with it
+                const std::string why = pick == Pick::D1 ? setup::d1_disc_problem(path) : setup::undub_disc_problem(path);
+                if (!why.empty()) {
+#ifdef __ANDROID__
+                    if (path.compare(0, 3, "fd:") == 0) ::close(std::atoi(path.c_str() + 3));   // the picker's descriptor of the refused file
+#endif
+                    (pick == Pick::D1 ? opt.d1_iso : opt.undub_iso).clear();
+                    msg_title = "WRONG DISC";
+                    msg_text = why;
+                    msg_back = Screen::PickInfo;   // OK: choose that file again (msg_pick)
+                    msg_pick = pick;
+                    go(Screen::Message);
+                    return;
+                }
+            }
             (pick == Pick::Undub ? opt.undub_iso : opt.d1_iso) = path;
             go_options();
             start_install_or_ask();
@@ -1320,9 +1354,12 @@ struct App {
             else if (launch_mode) play();
             else go(Screen::Welcome);
             break;
-        case Screen::Message:
-            go(Screen::Welcome);
+        case Screen::Message: {
+            const Screen back = msg_back;
+            msg_back = Screen::Welcome;
+            if (back == Screen::PickInfo) begin_pick(msg_pick, Screen::Options); else go(back);
             break;
+        }
         case Screen::Done:
 #ifdef __ANDROID__
             if (sel == 0) {
@@ -1342,11 +1379,23 @@ struct App {
             else if (sel == 1 && setup::android_build_exists(cur_workdir())) start_plan(false, false, true);
             else quit = true;
             break;
-        case Screen::Failed:
+        case Screen::Failed: {
+            const int extra = can_open_log() ? 2 : 0;   // rows 1 and 2: open setup.log / show it in its folder
             if (sel == 0) { if (!plan.empty()) start_plan(rebuild_only && !updating && !android_inst, updating, android_inst); else go(Screen::Welcome); }
-            else if (sel == 1) go(Screen::Welcome);
+            else if (sel <= extra) {
+                if (logf) std::fflush(logf);
+                std::string err;
+                if (!setup::open_on_desktop(log_path, sel == 2, &err)) {
+                    msg_title = "SETUP LOG";
+                    msg_text = "Could not open it (" + err + "). The file is " + log_path;
+                    msg_back = Screen::Failed;
+                    go(Screen::Message);
+                }
+            }
+            else if (sel == extra + 1) go(Screen::Welcome);
             else quit = true;
             break;
+        }
         case Screen::TypePath:
             break;
         }
@@ -1393,9 +1442,12 @@ struct App {
             quit = true;
             break;
         case Screen::Failed:
-        case Screen::Message:
-            go(Screen::Welcome);
+        case Screen::Message: {
+            const Screen back = msg_back;
+            msg_back = Screen::Welcome;
+            if (back == Screen::PickInfo) begin_pick(msg_pick, Screen::Options); else go(back);
             break;
+        }
         case Screen::UpdateAvail:
             if (launch_mode) play(); else go(Screen::Welcome);
             break;
@@ -1886,6 +1938,10 @@ int main(int argc, char** argv) {
         app.pick = Pick::Iso; app.go(Screen::PickInfo, 0); shot("2c_pick_info");
         app.pick = Pick::Undub; app.go(Screen::PickInfo, 0); shot("2d_pick_info_undub");
         app.pick = Pick::D1; app.go(Screen::PickInfo, 0); shot("2e_pick_info_d1");
+        app.msg_title = "WRONG DISC";   // a refused pick (setup::d1_disc_problem's words for a Dissidia 012 image)
+        app.msg_text = "This is Dissidia 012, DISSIDIA duodecim FINAL FANTASY (ULUS10566). The moves come from the first game: pick your "
+                       "Dissidia Final Fantasy (2008, USA, ULUS-10437) disc image instead.";
+        app.go(Screen::Message, 0); shot("2f_refused_d1");
         app.pick = Pick::Iso;
         app.go(Screen::InstallDir); shot("3_install_dir");
         app.go(Screen::Options, 0); shot("4_options");
@@ -1901,8 +1957,11 @@ int main(int argc, char** argv) {
         app.prog.start_ms = (long long)now_ms() - 7 * 60 * 1000; app.prog.compile_i = 183; app.prog.compile_n = 474; app.prog.compile_start_ms = (long long)now_ms() - 4 * 60 * 1000;
         app.go(Screen::Build, 3); shot("5_build");
         app.go(Screen::Done); shot("6_done");
-        app.fail_msg = "The installation was cancelled.";
-        app.go(Screen::Failed); shot("7_failed");
+        app.fail_msg = "A step failed (exit code 1); see setup.log in the install folder.";
+        app.log_path = (std::filesystem::path(shots) / "setup.log").string();   // a log to offer (the rows need the file)
+        { std::ofstream(app.log_path) << "example\n"; }
+        app.go(Screen::Failed, 1); shot("7_failed");
+        { std::error_code ec; std::filesystem::remove(app.log_path, ec); }
         app.osk.begin(u"Folder path", u"/home/player", 200, true);
         app.go(Screen::TypePath); shot("8_type_path");
         std::printf("%d screenshots in %s\n", n, shots.c_str());
