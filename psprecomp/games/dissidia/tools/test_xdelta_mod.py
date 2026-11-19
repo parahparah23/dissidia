@@ -310,6 +310,39 @@ def test_code_helpers():
         shutil.rmtree(d)
 
 
+def test_run_time_code_helpers():
+    import base64
+    d = tempfile.mkdtemp()
+    try:
+        # the runtime's record of code a mod loads while the game runs
+        open(os.path.join(d, 'dynamic.txt'), 'w').write(
+            'blob 4096 32768 187891712 dyn_0B330000_1000.bin\n'
+            'write 0 142790088 248301704 4096 32768\n'
+            'write 2 144682248 248303534 4096 32768\n'
+            'write 0 1 2 999 999\n')                      # a block that is not recorded: ignored
+        dyn = XC.read_dynamic(d)
+        assert list(dyn) == [(4096, 32768)] and dyn[(4096, 32768)]['addr'] == 0x0B330000, dyn
+        assert sorted(dyn[(4096, 32768)]['writes']) == [(0, 142790088, 248301704), (2, 144682248, 248303534)]
+    finally:
+        shutil.rmtree(d)
+    # entry points of a block: its start, bal / jal targets and pointer words into it; jumps into the game are not
+    addr = 0x0B330000
+    code = bytearray(64)
+    struct.pack_into('<I', code, 4, (1 << 26) | (0x11 << 16) | 3)                          # bal -> 0x0B330014 (pc + 4 + 3 words)
+    struct.pack_into('<I', code, 12, (3 << 26) | ((0x0B330030 >> 2) & 0x3FFFFFF))          # jal 0x0B330030
+    struct.pack_into('<I', code, 20, (2 << 26) | ((0x0887A814 >> 2) & 0x3FFFFFF))          # j into the game
+    struct.pack_into('<I', code, 40, 0x0B330020)                                           # a pointer
+    assert XC.blob_entries(bytes(code), addr) == [0x0B330000, 0x0B330014, 0x0B330020, 0x0B330030], XC.blob_entries(bytes(code), addr)
+    # a rewritten instruction gets a check in front of it that follows what memory holds then
+    seg = [{'p_vaddr': '0x08800000', 'data_b64': base64.b64encode(struct.pack('<4I', 0x27BDFFF0, 0x0E271616, 0, 0x03E00008)).decode()}]
+    body = ('RECOMP_FUNC void FUN_08800000(uint8_t* rdram, recomp_context* ctx) { /* 0x08800000 */\nL_08800000:\n    x;\n'
+            'L_08800004:\n    y;\nL_08800008:\n    RECOMP_LOOKUP(0x089C5858)(rdram, ctx);\nL_0880000C:\n    return;\n}\n')
+    keep = {}
+    XC.guard_sites(keep, {0x08800000: ('FUN_08800000', body)}, [0x08800004], seg, 'test')
+    out = keep[0x08800000][1]
+    assert 'L_08800004:\n    if ((uint32_t)MEM_W(rdram, 0x08800004U) != 0x0E271616U) { switch (dissidia_xmod_site(rdram, ctx, 0x08800004U)) { case 1: goto L_0880000C; case 2: return;' in out, out
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_') and callable(fn):

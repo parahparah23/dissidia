@@ -45,6 +45,8 @@ std::string one_line(const std::string& detail);   // newlines -> spaces
 // any game's save.
 bool read_save(const std::string& dir, SaveInfo* out, bool only_dissidia = true);
 // The saves directly inside `root`, sorted by folder name.
+// The saves of a SAVEDATA folder. `only_dissidia`: Dissidia 012 saves (by title) and the other saves of the same disc
+// IDs (a mod's companion save, e.g. one an xdelta mod writes); false = every save.
 std::vector<SaveInfo> scan(const std::string& root, bool only_dissidia = true);
 
 // SAVEDATA folders of other installs of the same kind, existing on this machine: PPSSPP (Linux, flatpak, macOS,

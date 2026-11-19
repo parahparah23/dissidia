@@ -36,6 +36,10 @@ install that already has its own save). A conflict is **never resolved silently*
 choose *keep this device's save* (the cloud copy is kept once as `<slot>.bak` in the cloud), *take the cloud save* (yours goes to
 `ms0/PSP/SAVEDATA_BACKUP/`) or *decide later*. A sync never deletes a save, locally or in the cloud.
 
+A save of a mod that sits next to the game's (an ISO patch's own save, e.g. Emendatus' `<id>ExtGameData00`) is synced
+like the game's: every save of a disc ID that has a Dissidia 012 save is included, whatever its title
+([xdelta-mods.md](xdelta-mods.md)).
+
 Saves are matched by their slot name without the region ID (`GameData00`, `FCard03`...), so a US and an EU install sync with each
 other; a downloaded save is renamed to the installed game's ID and its `PARAM.SFO` signed again (`psp_savemgr`).
 

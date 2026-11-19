@@ -123,6 +123,10 @@ bool dissidia_xmod_folder_usable(const std::string& folder_dir, bool say) {
     if (!is_xdelta(js) || !has_code(js)) return true;
     const std::string name = base_name(folder_dir);
     if (built_in(name, json_str(js, "code_stamp"))) return true;
+    {
+        std::ofstream st(folder_dir + "/status.txt", std::ios::trunc);
+        st << "Not active yet: this mod changes the game's code, so the game has to be rebuilt once (Rebuild in the setup, or pipeline.sh).\n";
+    }
     if (say)
         std::fprintf(stderr, "[XMOD] %s changes the game's code, which this build does not have yet: kept off until the "
                              "game is rebuilt (pipeline.sh, or Rebuild in the setup)\n", name.c_str());
@@ -338,9 +342,15 @@ void learn(TailRead& r, bool overlay_only = false, bool rescan = false) {
     std::ofstream f(code + "/dynamic.txt", std::ios::trunc);
     for (const std::string& l : lines) f << l << "\n";
     if (overlay_only || rescan) {
+        std::ofstream st(g_tail_dir + "/status.txt", std::ios::trunc);
+        st << "This mod changed more of the game's code while it ran: rebuild the game once more to follow it (Rebuild in the setup, or pipeline.sh).\n";
         std::fprintf(stderr, "[XMOD] %s: the code at 0x%08X rewrote %d more game instruction(s) (recorded; followed after the next build)\n",
                      base_name(g_tail_dir).c_str(), r.addr, (int)(lines.size() - before));
         return;
+    }
+    {   // shown on the Settings > Mods page until the next build compiled it (xdelta_code.py removes the note)
+        std::ofstream st(g_tail_dir + "/status.txt", std::ios::trunc);
+        st << "This mod runs code it loads while the game runs: it works now, faster and completely after the game is rebuilt once (Rebuild in the setup, or pipeline.sh).\n";
     }
     std::fprintf(stderr, "[XMOD] %s loads code at run time (%u B at 0x%08X, %d game call(s) redirected into it): run in the "
                          "interpreter now, compiled after the next build (recorded in %s/dynamic.txt)\n",

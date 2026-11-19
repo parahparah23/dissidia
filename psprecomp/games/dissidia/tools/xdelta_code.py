@@ -483,6 +483,10 @@ def build(a):
         if not mods_in and not dyn:
             continue
         stamp = meta.get("code_stamp") or X.code_stamp(path)
+        try:                                   # the note the game leaves until a build has the mod's code (status.txt)
+            os.remove(os.path.join(path, "status.txt"))
+        except OSError:
+            pass
         if meta.get("code_stamp") and meta["code_stamp"] != X.code_stamp(path):
             say("xmods: %s: code/ changed since the import; using it as it is now" % folder)
         say("xmods: %s (%s)" % (folder, ", ".join(mods_in + (["code loaded at run time"] if dyn else []))))

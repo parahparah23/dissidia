@@ -166,13 +166,21 @@ bool read_save(const std::string& dir, SaveInfo* out, bool only_dissidia) {
 }
 
 std::vector<SaveInfo> scan(const std::string& root, bool only_dissidia) {
-    std::vector<SaveInfo> out;
+    std::vector<SaveInfo> all;
     std::error_code ec;
     for (auto it = fs::directory_iterator(P(root), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (!it->is_directory(ec)) continue;
         SaveInfo s;
-        if (read_save(S(it->path()), &s, only_dissidia)) out.push_back(std::move(s));
+        if (read_save(S(it->path()), &s, false)) all.push_back(std::move(s));
     }
+    // Dissidia 012 saves by title, plus every other save under the same disc ID: a mod's own save next to the game's
+    // (an ISO patch's code can write one, e.g. Emendatus' "EXTRA DATA" save) belongs with them, for import and cloud sync
+    std::set<std::string> ids;
+    for (const SaveInfo& s : all)
+        if (is_dissidia012(s.title)) ids.insert(s.disc);
+    std::vector<SaveInfo> out;
+    for (SaveInfo& s : all)
+        if (!only_dissidia || ids.count(s.disc)) out.push_back(std::move(s));
     std::sort(out.begin(), out.end(), [](const SaveInfo& a, const SaveInfo& b) { return a.name < b.name; });
     return out;
 }
