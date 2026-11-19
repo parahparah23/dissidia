@@ -10,7 +10,9 @@ writes only what differs and is audio:
   <workdir>/voice_jp/<asset path>        entries of the voice/en/* tree that differ (the game requests English paths; the
                                          loose-file layer serves these instead when the Voice setting is Japanese)
   <workdir>/voice_jp/by_crc/<crc>.bin    audio entries (RIFF / SSCF data) whose path is not in package_paths.txt but that differ
-  <workdir>/movie_jp/<NAME>.PMF          DATA/MOVIE movies of the undub disc that differ from the installed ones
+  <workdir>/movie_jp/<NAME>.PMF          DATA/MOVIE movies whose sound differs: the installed movie's picture with the undub
+                                         disc's sound spliced in (splice_movie_audio; a whole copy of the undub movie only if
+                                         the two sound streams cannot be lined up)
 
 Nothing else is copied (menus, text and the other languages stay the player's own). The runtime offers a "Voice" row in the
 settings menu once <workdir>/voice_jp exists (games/dissidia/runtime/hooks_io.cpp). Re-running skips files already extracted.
@@ -29,6 +31,7 @@ import setup_from_iso as sfi          # noqa: E402  (Iso9660 / CSO reader)
 
 SECTOR = 2048
 AUDIO_MAGICS = (b"RIFF", b"SSCF")
+ATRAC_FRAME = 752
 PROGRESS = False
 
 
@@ -92,6 +95,53 @@ def file_md5(path):
         for b in iter(lambda: f.read(4 << 20), b""):
             h.update(b)
     return h.digest()
+
+
+def _pes_audio(data):
+    """[(start, size)] of the ATRAC3plus bytes of every private-stream-1 (0xBD) packet of a PMF, after each packet's 4-byte
+    header, and whether the frame starts that header gives fit 752-byte frames from the stream's first byte."""
+    off = struct.unpack(">I", data[8:12])[0]
+    out, pos, ok = [], 0, True
+    for p in range(off, len(data) - 13, SECTOR):
+        if data[p:p + 4] != b"\x00\x00\x01\xba":
+            continue
+        q, end = p + 14 + (data[p + 13] & 7), p + SECTOR
+        while q + 6 <= end and data[q:q + 3] == b"\x00\x00\x01":
+            length = struct.unpack(">H", data[q + 4:q + 6])[0]
+            if data[q + 3] == 0xBD:
+                s = q + 9 + data[q + 8]
+                first = struct.unpack(">H", data[s + 2:s + 4])[0]
+                n = q + 6 + length - s - 4
+                if n < 0 or (first != 0xFFFF and (pos + first) % ATRAC_FRAME):
+                    ok = False
+                out.append((s + 4, n))
+                pos += max(n, 0)
+            q += 6 + length
+    return out, ok and pos % ATRAC_FRAME == 0
+
+
+def splice_movie_audio(mine, undub):
+    """The installed movie with the undub movie's sound: a PMF is 2,048-byte packs of whole PES packets, the sound private
+    stream 1 with a 4-byte header (stream number, where the first frame starts) and then 752-byte ATRAC3plus frames, from the
+    first sound byte on, on both discs. So the undub's sound byte n goes where the installed sound byte n is and every header
+    stays right. Where the undub's sound is longer (DES01_010.PMF, one frame) the rest is left out; where shorter, the
+    installed sound fills in. None when either stream does not have that layout. The picture is the player's own (the undub
+    disc's END, UP_END, UP_GIL, UP_OPN, UP_PRI and DES01_010 have another one). Same method as VCKing101's port
+    (https://github.com/VCKing101/Dissidia012-pc, docs/port/japanese-voices.md, "Movies")."""
+    a, ok_a = _pes_audio(mine)
+    b, ok_b = _pes_audio(undub)
+    if not (ok_a and ok_b and a and b):
+        return None
+    sound = b"".join(undub[s:s + n] for s, n in b)
+    out = bytearray(mine)
+    pos = 0
+    for s, n in a:
+        take = sound[pos:pos + n]
+        out[s:s + len(take)] = take
+        pos += n
+        if pos >= len(sound):
+            break
+    return bytes(out)
 
 
 def main():
@@ -193,13 +243,31 @@ def main():
                     hash_range(iso.f, r["extent"] * SECTOR, 0, r["size"]) == file_md5(mine_path):
                 continue
             dest = os.path.join(out_movie, r["name"])
-            if os.path.isfile(dest) and os.path.getsize(dest) == r["size"]:
-                n_skip += 1
-                continue
+            spliced = None
+            if mine_path:
+                iso.f.seek(r["extent"] * SECTOR)
+                with open(mine_path, "rb") as mf:
+                    spliced = splice_movie_audio(mf.read(), iso.f.read(r["size"]))
+            if os.path.isfile(dest):
+                # by content, not size: an earlier version copied the undub's movie whole, and UP_GIL's is the same size
+                if spliced is not None:
+                    with open(dest, "rb") as df:
+                        same = df.read() == spliced
+                else:
+                    same = os.path.getsize(dest) == r["size"]
+                if same:
+                    n_skip += 1
+                    continue
             n_movie += 1
             if a.dry_run:
-                say("  would write movie %s (%d bytes)" % (r["name"], r["size"]))
+                say("  would write movie %s (%s)" % (r["name"], "your picture, Japanese sound" if spliced else "whole undub movie"))
+            elif spliced is not None:
+                os.makedirs(out_movie, exist_ok=True)
+                with open(dest + ".tmp", "wb") as o:
+                    o.write(spliced)
+                os.replace(dest + ".tmp", dest)
             else:
+                say("  %s: the sound streams do not line up, using the undub disc's whole movie" % r["name"])
                 copy_range(iso.f, r["extent"] * SECTOR, 0, r["size"], dest)
     else:
         say("the undub disc has no DATA/MOVIE folder: movies stay as they are")

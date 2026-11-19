@@ -686,6 +686,27 @@ uint32_t psp_texpack_ppsspp_content_hash(const uint8_t* mem, size_t mem_len, int
 
 bool psp_texpack_ppsspp_active() { pp_init(); return pp.on; }
 
+std::string psp_texpack_ppsspp_key(const PspPpssppTex& t) {
+    const uint32_t dim = t.size_reg & 0xF0F;
+    uint64_t cachekey = dim;
+    if (t.has_clut) cachekey ^= (uint64_t)(psp_texpack_xxh32(t.clut, t.clut_len, 0xC0108888u) ^ (t.clut_format | 0xC5000000u));
+    const uint32_t chash = psp_texpack_ppsspp_content_hash(t.mem, t.mem_len, t.fmt, t.width, t.height, t.bufw, 2 /* xxh64, as PPSSPP's Dump textures */, t.addr);
+    char key[40];
+    std::snprintf(key, sizeof key, "%016llx%08x", (unsigned long long)(cachekey & 0xFFFFFFFFull), chash);
+    return key;
+}
+
+namespace {
+std::atomic<PspTexEditKeyedFn> g_edit_keyed{nullptr};
+std::atomic<PspTexEditFn> g_edit_fn{nullptr};
+std::atomic<unsigned> g_edit_epoch{0};
+}  // namespace
+void psp_texpack_set_editor(PspTexEditKeyedFn keyed, PspTexEditFn edit) { g_edit_keyed = keyed; g_edit_fn = edit; g_edit_epoch++; }
+PspTexEditKeyedFn psp_texpack_editor_keyed() { return g_edit_keyed.load(std::memory_order_relaxed); }
+PspTexEditFn psp_texpack_editor() { return g_edit_fn.load(std::memory_order_relaxed); }
+void psp_texpack_editor_changed() { g_edit_epoch++; }
+unsigned psp_texpack_editor_epoch() { return g_edit_epoch.load(std::memory_order_relaxed); }
+
 bool psp_texpack_ppsspp_lookup(const PspPpssppTex& t, std::vector<uint8_t>& rgba, int& w, int& h) {
     pp_init();
     if (!pp.on) return false;

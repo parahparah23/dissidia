@@ -1,4 +1,7 @@
 #pragma once
+#include <string>
+#include <utility>
+#include <vector>
 #include <atomic>
 #include <thread>
 #include <cstdint>
@@ -27,6 +30,9 @@ extern std::atomic<uint32_t> g_host_analog;
 /// the game was last handed (for recording a play session).
 void psp_ctrl_set_script(bool on, uint32_t buttons, uint32_t analog);
 void psp_ctrl_last_sample(uint32_t* buttons, uint32_t* analog);
+/// The pad as a sceCtrl read would give it right now (buttons, analog x | y << 8), without a guest read: for a game module that
+/// needs this machine's input at a moment of its own choosing (an online battle's pad exchange).
+void psp_ctrl_sample_now(uint32_t* buttons, uint32_t* analog);
 /// A game module can reshape the button state the game is handed (after keyboard / pad / script input): called for every pad poll with the PSP button
 /// mask, returns the mask to give the game. Any thread that polls (the game's). nullptr removes it.
 void psp_ctrl_set_filter(uint32_t (*filter)(uint32_t buttons));
@@ -90,3 +96,29 @@ void psp_runtime_shutdown();
 /// Install signal handlers for SIGTERM and SIGINT that set g_should_exit.
 /// Implemented in Plan 05.
 void psp_install_signal_handlers();
+
+// ---- Button prompts: what the game's button symbols should look like (games/<id>/runtime redraws them) ----
+enum PspPromptStyle { PSP_PROMPT_PSP = 0, PSP_PROMPT_XBOX = 1, PSP_PROMPT_PLAYSTATION = 2, PSP_PROMPT_NINTENDO = 3, PSP_PROMPT_KEYBOARD = 4 };
+enum PspPromptPos { PSP_POS_SOUTH = 0, PSP_POS_EAST = 1, PSP_POS_WEST = 2, PSP_POS_NORTH = 3 };
+struct PspPrompts {
+    int style;                                // PspPromptStyle
+    int cross, circle, square, triangle;      // PspPromptPos of the pad button that sends each PSP face button
+    bool numbered_shoulders;                  // L1 / R1 (PlayStation, Steam Deck) instead of LB / RB
+    bool lr_on_triggers;                      // the PSP's L and R are on the triggers (Controls > Swap shoulders and triggers)
+    char key_names[8][12];                    // keyboard style: the key for cross, circle, square, triangle, L, R, START, SELECT ("" none)
+};
+/// The setting: -1 Automatic (the device player 1 used last), else a PspPromptStyle.
+void psp_input_set_prompt_setting(int setting);
+int psp_input_prompt_setting();
+/// What to draw now (thread-safe; any thread).
+PspPrompts psp_input_prompts();
+/// Controls > L / R Buttons: false shoulders (LB / RB press L / R, as the triggers do unless PSPRECOMP_PAD_L2 / R2 say otherwise),
+/// true triggers (LT / RT press L / R, the shoulders nothing; the prompts name the triggers).
+void psp_input_set_lr_triggers(bool on);
+bool psp_input_lr_triggers();
+/// Connected controllers (GUID, name) and Controls > Player 1 Controller: "" (or "any") every controller, "keyboard" keyboard only,
+/// else one controller's GUID; the others are ignored.
+std::vector<std::pair<std::string, std::string>> psp_input_pads();
+void psp_input_set_p1_controller(const std::string& choice);
+std::string psp_input_p1_controller();
+

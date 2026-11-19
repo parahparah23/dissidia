@@ -17,10 +17,13 @@
 //   'M' 1 nuse {name[24] u16 version u8 state(1 = shareable, 2 = in use, not shareable)}*  nready {name[24] u16 version}*
 //   'R' sha256[32] u32 offset u16 length          request a piece of a delta (at most kChunk bytes)
 //   'D' sha256[32] u32 total u32 offset bytes     a piece of a delta (total = the delta's size)
+//   'B' ...                                        the battle pad link, handed to comm_battle.cpp
 // A sender serves only the deltas tools/netpack.py wrote for packs whose files it has installed byte for byte
 // (<mods>/.net/<sha256 of the result>.dlt).
 #include "psp_game_module.h"
 #include "hle/psp_hle_adhoc.h"
+
+void dissidia_comm_on_side(const uint8_t mac[6], const uint8_t* data, size_t len);   // comm_battle.cpp
 #include "package_mods.h"
 #include "net_delta.h"
 #include "voice_merge.h"
@@ -220,6 +223,7 @@ std::vector<uint8_t> manifest() {   // g_mu held
 // ---- network thread: copy and queue only ----
 void on_side(const uint8_t mac[6], const uint8_t* data, size_t len) {
     if (!len || len > PSP_ADHOC_SIDE_MAX) return;
+    if (data[0] == 'B') { dissidia_comm_on_side(mac, data, len); return; }   // the battle pad link (comm_battle.cpp)
     Mac m;
     std::memcpy(m.data(), mac, 6);
     std::lock_guard<std::mutex> lk(g_mu);

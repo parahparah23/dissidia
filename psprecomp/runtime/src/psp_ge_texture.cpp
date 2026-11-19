@@ -641,6 +641,11 @@ GLuint ge_texture_bind(
         g_aniso_seen_epoch = g_aniso_epoch.load();
         ge_texture_invalidate_all();
     }
+    {   // the texture editor draws something else now (another controller style): reload every texture
+        static unsigned seen = 0;
+        const unsigned ep = psp_texpack_editor_epoch();
+        if (seen != ep) { seen = ep; ge_texture_invalidate_all(); }
+    }
     if (!state.texture_enable) {
         bind_tex2d(0);
         return 0;
@@ -870,7 +875,8 @@ GLuint ge_texture_bind(
         replaced = psp_texpack_load_replacement(tid, pack_px, pack_w, pack_h);
 
     // PPSSPP-style pack (textures.ini + hash-named files): its key comes from the raw guest memory, not from the decoded texels.
-    if (!replaced && fmt <= GE_TFMT_CLUT8 && psp_texpack_ppsspp_active() && masked_addr < PSP_MEM_SIZE) {
+    // The same description of the texture gives the texture editor its key (psp_texpack_set_editor), pack or no pack.
+    auto ppsspp_tex = [&]() {
         PspPpssppTex pt{};
         pt.addr = psp_addr;
         pt.size_reg = key.size_reg;
@@ -891,6 +897,10 @@ GLuint ge_texture_bind(
             pt.clut = rdram + ca;
             pt.clut_len = ext;
         }
+        return pt;
+    };
+    if (!replaced && fmt <= GE_TFMT_CLUT8 && psp_texpack_ppsspp_active() && masked_addr < PSP_MEM_SIZE) {
+        const PspPpssppTex pt = ppsspp_tex();
         replaced = psp_texpack_ppsspp_lookup(pt, pack_px, pack_w, pack_h);
     }
     // HD text: a CLUT4 buffer the game filled with sceFontGetCharGlyphImage (psp_hle_font.h) is replaced by the glyphs
@@ -953,12 +963,23 @@ GLuint ge_texture_bind(
         }
         break;
     }
+    // A game module's redraw of this texture (button symbols in the controller's style), over the decoded pixels.
+    if (fmt <= GE_TFMT_CLUT8 && masked_addr < PSP_MEM_SIZE) {
+        const PspTexEditKeyedFn keyed = psp_texpack_editor_keyed();
+        const PspTexEditFn edit = psp_texpack_editor();
+        if (keyed && edit && keyed(width, height)) {
+            const std::string pkey = psp_texpack_ppsspp_key(ppsspp_tex());
+            std::vector<uint8_t> ed;
+            int ew = 0, eh = 0;
+            if (edit(pkey, rgba.data(), width, height, ed, ew, eh)) { pack_px.swap(ed); pack_w = ew; pack_h = eh; }
+        }
+    }
     if (pack_on) {
         PspTexMeta meta{width, height, fmt, is_pal ? (int)(state.clut_format & 3) : -1, psp_addr};
-        psp_texpack_note(tid, meta, rgba.data());
+        psp_texpack_note(tid, meta, rgba.data());   // dumps keep the game's own picture
         std::vector<uint8_t> up;
         int uw = 0, uh = 0;
-        if (psp_texpack_upscale(tid, rgba.data(), width, height, up, uw, uh)) {
+        if (pack_px.empty() && psp_texpack_upscale(tid, rgba.data(), width, height, up, uw, uh)) {
             pack_px.swap(up); pack_w = uw; pack_h = uh;
         }
     }
