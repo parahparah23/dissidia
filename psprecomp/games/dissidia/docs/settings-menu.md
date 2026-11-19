@@ -40,7 +40,7 @@ someone else holds), or Keyboard Only. A saved controller that is not connected 
 `docs/port/keyboard-controls.md`; our keys, as our keyboard layout is fixed.) `PSPRECOMP_KEY_LOG=1` logs every change of the buttons
 the game reads.
 
-Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard.
+Text fields (server, room, sync folder, WebDAV) open an on-screen keyboard: pad, mouse or touch, or just type on a keyboard. Its **Paste** key (or Ctrl+V) types the clipboard's text in: printable characters only, line breaks dropped, up to the field's length. The game's own name entry (Data Config > Player Name) has a Paste key and Ctrl+V too.
 
 ## Categories, restart and mods
 

@@ -30,6 +30,9 @@ extern std::atomic<uint32_t> g_host_analog;
 /// the game was last handed (for recording a play session).
 void psp_ctrl_set_script(bool on, uint32_t buttons, uint32_t analog);
 void psp_ctrl_last_sample(uint32_t* buttons, uint32_t* analog);
+/// The pad as a sceCtrl read would give it right now (buttons, analog x | y << 8), without a guest read: for a game module that
+/// needs this machine's input at a moment of its own choosing (an online battle's pad exchange).
+void psp_ctrl_sample_now(uint32_t* buttons, uint32_t* analog);
 /// A game module can reshape the button state the game is handed (after keyboard / pad / script input): called for every pad poll with the PSP button
 /// mask, returns the mask to give the game. Any thread that polls (the game's). nullptr removes it.
 void psp_ctrl_set_filter(uint32_t (*filter)(uint32_t buttons));
