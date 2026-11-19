@@ -357,6 +357,29 @@ void ensure_built(const std::string& host_info_path) {
         }
         if (banks) { first = merged; rest.insert(rest.begin(), dir); }
     }
+    {   // an ISO patch mod's files come first: its code was written for its own versions of them (a roster in main.bin, a
+        // model), so a loose file of another mod must not stand in for one (Emendatus's new characters vanished under an
+        // older mod's main.bin). Other loose files still apply.
+        std::vector<std::string> xd, order{first};
+        order.insert(order.end(), rest.begin(), rest.end());
+        for (auto it = order.begin(); it != order.end();) {
+            const std::string root = *it;
+            const size_t sl = root.find_last_of('/');
+            std::ifstream mj(sl == std::string::npos ? std::string() : root.substr(0, sl) + "/mod.json");
+            const std::string js((std::istreambuf_iterator<char>(mj)), std::istreambuf_iterator<char>());
+            const size_t k = js.find("\"kind\"");
+            if (k != std::string::npos && js.find("\"xdelta\"", k) != std::string::npos && js.find("\"xdelta\"", k) < js.find('\n', k)) {
+                xd.push_back(root);
+                it = order.erase(it);
+            } else ++it;
+        }
+        if (!xd.empty()) {
+            order.insert(order.begin(), xd.begin(), xd.end());
+            first = order.front();
+            rest.assign(order.begin() + 1, order.end());
+            std::fprintf(stderr, "[MODS] ISO patch mod files first: %s\n", xd.front().c_str());
+        }
+    }
     uint64_t tail_size = 0;
     if (!tail.empty()) {
         struct stat tst;
