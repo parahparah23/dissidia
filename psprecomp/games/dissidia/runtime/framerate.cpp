@@ -1149,18 +1149,6 @@ void task_dump_frame();
 void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t timer = static_cast<uint32_t>(ctx->r[4]);
     g_tick++;
-    // Issue #84: the game seeds its rand() LCG (word 0x09AF84D0) with the constant 1 at boot and from the battle setup at a fight's start,
-    // never from the clock, so a menu's "random" pick (a random opponent) repeats on every run after loading the same save: the number of
-    // rand() draws since boot is the same each time. Outside a fight the clock is mixed in every frame (a fight reseeds it itself, from
-    // its setup seed, so lock-step online fights and the 30/120 fps parity runs are not touched). PSPRECOMP_RNG_FIXED=1 keeps the old
-    // constant behaviour for deterministic test runs.
-    {
-        static const bool rng_fixed = [] { const char* e = std::getenv("PSPRECOMP_RNG_FIXED"); return e && e[0] && e[0] != '0'; }();
-        if (!rng_fixed && overlay_id() != 1) {
-            const uint64_t ns = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-            w32(0x09AF84D0u, (r32(0x09AF84D0u) * 1103515245u + 12345u) ^ static_cast<uint32_t>(ns ^ (ns >> 32)));
-        }
-    }
     ge_draw_perf_set_gameplay(battle_running());   // the performance overlay's average / 1% low count battle frames only
     if (ok(timer)) {
         // In an ad-hoc session every player runs at the lowest rate any of them asked for, so the
