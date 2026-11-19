@@ -242,6 +242,7 @@ set(RUNTIME_SOURCES
     src/hle/psp_hle_ctrl.cpp
     src/hle/psp_hle_utility.cpp
     src/hle/psp_hle_adhoc.cpp
+    src/hle/psp_upnp.cpp
     src/hle/psp_savedata_crypto.cpp
     src/hle/psp_savedata_dialog.cpp
     ${PSP_SAVE_SOURCES}

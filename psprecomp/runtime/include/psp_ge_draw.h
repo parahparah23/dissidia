@@ -95,6 +95,9 @@ void ge_draw_set_fx_shaders(bool on);
 /// Simple fps counter: just the frames-per-second number, white and partly transparent, in the top-right
 /// corner (PSPRECOMP_FPS_COUNTER=1 turns it on at start).
 bool ge_draw_fps_counter();
+/// Ping to the other players next to the fps number, while in an online group (Network page "Show Ping", off by default).
+bool ge_draw_ping_overlay();
+void ge_draw_set_ping_overlay(bool on);
 void ge_draw_set_fps_counter(bool on);
 /// Performance overlay (debugging): frames per second, average / worst frame time, presents per second, render
 /// scale and process memory, in the top-left corner (PSPRECOMP_PERF_HUD=1 turns it on at start).

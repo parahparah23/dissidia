@@ -18,10 +18,13 @@
 #include "recomp.h"
 
 #include "psp_platform.h"
+#include "psp_ge_draw.h"
+#include "hle/psp_upnp.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdarg>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -62,8 +65,8 @@ constexpr uint8_t MO_HELLO = 1, MO_JOIN = 2, MO_ACCEPT = 3, MO_CANCEL = 4, MO_ES
                   MO_DATA = 7, MO_DATA_ACK = 8, MO_PING = 9;
 
 // ---- wire packet types ----
-constexpr uint8_t T_BEACON = 1, T_PDP = 2, T_MATCH = 3, T_PTP = 4, T_RELAY = 5, T_FRAG = 6;
-constexpr uint8_t RO_HELLO = 1, RO_CHALLENGE = 2, RO_OK = 3, RO_BYE = 4;   // relay server ops (tools/adhoc_relay)
+constexpr uint8_t T_BEACON = 1, T_PDP = 2, T_MATCH = 3, T_PTP = 4, T_RELAY = 5, T_FRAG = 6, T_PUNCH = 7;   // 7: direct path (never through the relay)
+constexpr uint8_t RO_HELLO = 1, RO_CHALLENGE = 2, RO_OK = 3, RO_BYE = 4, RO_INTRO = 5, RO_PEER = 6;   // relay server ops (tools/adhoc_relay)
 constexpr uint8_t P_SYN = 1, P_SYNACK = 2, P_DATA = 3, P_ACK = 4, P_FIN = 5, P_RST = 6;
 
 using Mac = std::array<uint8_t, 6>;
@@ -99,6 +102,18 @@ struct Peer {
     bool in_group = false;
     uint8_t fps = 0;
     int64_t last_seen = 0;
+};
+
+// Ping: a PDP datagram to a reserved port, once a second to every player in our group, answered at once (any build with this
+// code; older builds never answer and simply show no ping). Over the relay it travels like any PDP packet.
+constexpr uint16_t PING_PORT = 0xD1D2;
+struct PingStat {
+    double srtt_ms = -1;                    // smoothed round trip
+    uint32_t seq = 0;
+    std::map<uint32_t, int64_t> outstanding;   // seq -> sent at
+    std::deque<bool> window;                // the last answers: true answered, false lost (2 s)
+    bool ever = false;                      // this peer answered once (an older build never does)
+    int high = 0;                           // seconds in a row over the latency limit
 };
 
 struct Ev {  // queued guest callback
@@ -179,6 +194,22 @@ bool g_relay_resolved = false, g_relay_resolve_failed = false, g_relay_ok = fals
 uint64_t g_relay_cookie = 0;
 int g_relay_players = 0;
 int64_t g_relay_hello_next = 0, g_relay_resolve_next = 0, g_relay_ok_at = 0, g_relay_resolved_at = 0;
+int64_t g_relay_last_rx = 0;              // anything heard from the server
+// Direct paths (Internet mode): the relay introduces two players of a room (INTRO / PEER, relay version 2), both send T_PUNCH to
+// the other's public and LAN address, and once one arrives, packets to that player go straight to the address it came from. The
+// relay stays the path for broadcasts and the fallback: a direct path silent for 3 s is dropped and tried again later.
+struct Direct {
+    sockaddr_in pub{}, lan{}, active{};
+    int state = 0;                     // 0 none, 1 punching, 2 up
+    int64_t started = 0, last_rx = 0, next_punch = 0, asked = 0;
+};
+std::map<Mac, Direct> g_direct;
+int g_relay_version = 0;
+bool g_direct_off = false;             // PSPRECOMP_ADHOC_DIRECT=0
+uint32_t g_lan_ip = 0;                 // this machine's address toward the relay (network order), for two players behind one router
+int64_t g_ctl_init_at = 0;                // when the game started using the network (adhocctl init)
+std::map<Mac, PingStat> g_ping;
+int64_t g_next_net_check = 0;
 bool g_cfg_dirty = false;                 // set by psp_adhoc_configure; the network thread applies it
 std::string g_relay_host_shown;
 // Peers other players told us about (address -> give-up time). They are probed with beacons and, if
@@ -255,6 +286,13 @@ bool same_group_peer_known(const Mac& m) {   // caller holds g_mu
 
 // Caller holds g_mu. Sends to one MAC (or, for broadcast, every peer in our group).
 void send_to_mac(const Mac& dst, uint8_t type, const std::vector<uint8_t>& body) {
+    if (g_relay_mode && !is_bcast(dst)) {   // a direct path to this player: straight to it
+        auto dit = g_direct.find(dst);
+        if (dit != g_direct.end() && dit->second.state == 2 && now_us() - dit->second.last_rx < 3000000) {
+            send_raw(dit->second.active, type, body);
+            return;
+        }
+    }
     if (g_relay_mode) {   // everything goes through the server, which fans broadcasts out itself
         if (g_relay_ok && (is_bcast(dst) || same_group_peer_known(dst))) send_raw(g_relay_addr, type, body);
         return;
@@ -411,6 +449,29 @@ void handle_pdp(const Mac& src, const uint8_t* body, size_t len) {
     if (dst != g_mac && !is_bcast(dst)) return;
     if (!same_group(src)) return;
     uint16_t sport = get16(body + 6), dport = get16(body + 8);
+    if (dport == PING_PORT) {   // ping: 0 = ask (answered at once), 1 = answer
+        if (len < 10 + 13) return;
+        const uint8_t* q = body + 10;
+        if (q[0] == 0) {
+            std::vector<uint8_t> b(src.begin(), src.end());
+            put16(b, PING_PORT); put16(b, PING_PORT);
+            b.insert(b.end(), q, q + 13);
+            b[10] = 1;   // after dst MAC (6) and the two ports (4): the kind byte
+            send_to_mac(src, T_PDP, b);
+        } else if (q[0] == 1) {
+            PingStat& st = g_ping[src];
+            const uint32_t seq = get32(q + 1);
+            auto it = st.outstanding.find(seq);
+            if (it == st.outstanding.end()) return;
+            const double rtt = (now_us() - it->second) / 1000.0;
+            st.outstanding.erase(it);
+            st.srtt_ms = st.srtt_ms < 0 ? rtt : st.srtt_ms * 0.75 + rtt * 0.25;
+            st.ever = true;
+            st.window.push_back(true);
+            if (st.window.size() > 20) st.window.pop_front();
+        }
+        return;
+    }
     if (dport == PSP_ADHOC_SIDE_PORT) {      // (g_mu is held: the handler only copies the bytes and returns)
         if (g_side_handler && len - 10 <= PSP_ADHOC_SIDE_MAX) g_side_handler(src.data(), body + 10, len - 10);
         return;
@@ -599,7 +660,24 @@ void on_packet(const uint8_t* d, size_t n, const sockaddr_in& from) {
     const uint8_t* body = d + HDR;
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_relay_mode) {   // Internet: only the relay server may talk to us
-        if (!g_relay_resolved || from.sin_addr.s_addr != g_relay_addr.sin_addr.s_addr || from.sin_port != g_relay_addr.sin_port) return;
+        const bool from_relay = g_relay_resolved && from.sin_addr.s_addr == g_relay_addr.sin_addr.s_addr && from.sin_port == g_relay_addr.sin_port;
+        if (!from_relay) {   // a direct path: a punch from an introduced player, or traffic from the address its punch came from
+            auto dit = g_direct.find(src);
+            if (dit == g_direct.end() || g_direct_off) return;
+            Direct& dp = dit->second;
+            if (d[4] == T_PUNCH) {
+                if (blen < 6 || std::memcmp(body, g_mac.data(), 6) != 0) return;
+                if (dp.state != 2) ANOTE("direct: path to %s is up (%s:%u)", mac_str(src).c_str(), inet_ntoa(from.sin_addr), ntohs(from.sin_port));
+                dp.active = from; dp.state = 2; dp.last_rx = now_us();
+                return;
+            }
+            if (dp.state != 2 || dp.active.sin_addr.s_addr != from.sin_addr.s_addr || dp.active.sin_port != from.sin_port) return;
+            dp.last_rx = now_us();
+            if (d[4] == T_RELAY || d[4] == T_BEACON) return;
+            dispatch_packet(d[4], src, from, body, blen);
+            return;
+        }
+        g_relay_last_rx = now_us();
         if (d[4] == T_RELAY) {
             if (blen < 1) return;
             if (body[0] == RO_CHALLENGE && blen >= 9) {
@@ -609,6 +687,34 @@ void on_packet(const uint8_t* d, size_t n, const sockaddr_in& from) {
                 if (!g_relay_ok) ANOTE("connected to %s", g_relay_host_shown.c_str());
                 g_relay_ok = true; g_relay_ok_at = now_us();
                 g_relay_players = get16(body + 1);
+                if (blen >= 4) g_relay_version = body[3];
+            } else if (body[0] == RO_PEER && blen >= 19 && !g_direct_off) {   // introduced: punch to both of its addresses
+                Mac m; std::memcpy(m.data(), body + 1, 6);
+                Direct& dp = g_direct[m];
+                if (dp.state == 2) return;
+                auto addr = [](const uint8_t* p) {
+                    sockaddr_in a{}; a.sin_family = AF_INET;
+                    std::memcpy(&a.sin_addr.s_addr, p, 4);
+                    a.sin_port = htons(get16(p + 4));
+                    return a;
+                };
+                dp.pub = addr(body + 7);
+                dp.lan = addr(body + 13);
+                if (dp.state == 0) { dp.started = now_us(); dp.next_punch = 0; }
+                dp.state = 1;
+                if (now_us() - dp.asked > 2000000) {   // introduced by the other side's request: send ours too, so the relay learns our LAN
+                    dp.asked = now_us();                // address and introduces us again with both (two players behind one router)
+                    std::vector<uint8_t> b{RO_INTRO};
+                    b.insert(b.end(), m.begin(), m.end());
+                    const uint8_t* ip = (const uint8_t*)&g_lan_ip;
+                    b.insert(b.end(), ip, ip + 4);
+                    put16(b, (uint16_t)g_my_port);
+                    send_raw(g_relay_addr, T_RELAY, b);
+                }
+                char pub[32], lan[32];
+                std::snprintf(pub, sizeof pub, "%s:%u", inet_ntoa(dp.pub.sin_addr), ntohs(dp.pub.sin_port));
+                std::snprintf(lan, sizeof lan, "%s:%u", inet_ntoa(dp.lan.sin_addr), ntohs(dp.lan.sin_port));
+                ANOTE("direct: introduced to %s (%s, LAN %s)", mac_str(m).c_str(), pub, lan);
             }
             return;
         }
@@ -660,6 +766,73 @@ void send_beacons() {
     for (auto& a : targets) send_raw(a, T_BEACON, b);
 }
 
+// Once a second (network thread, g_mu held): pings to the players in our group, and what the player is told about network trouble.
+void net_check(int64_t t) {
+    // the party server
+    if (g_relay_mode && g_ctl_init && !g_relay_ok && t - g_ctl_init_at > 6000000)
+        psp_net_notice("server", 30, "Network: no answer from the party server %s. Check your internet connection or the Server setting.", g_cfg_server.c_str());
+    if (g_relay_mode && g_relay_ok && g_relay_last_rx && t - g_relay_last_rx > 6000000)
+        psp_net_notice("server_lost", 30, "Network: lost the connection to the party server (nothing for %d s).", (int)((t - g_relay_last_rx) / 1000000));
+    if (!g_connected) { g_ping.clear(); g_direct.clear(); return; }
+    if (g_relay_mode && g_relay_ok && g_relay_version >= 2 && !g_direct_off) {   // ask the relay to introduce us to the others
+        if (!g_lan_ip) {   // our address toward the relay (the route's source address; no packet is sent)
+            const int fd = (int)socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd >= 0) {
+                if (connect(fd, (const sockaddr*)&g_relay_addr, sizeof g_relay_addr) == 0) {
+                    sockaddr_in me{}; socklen_t ml = sizeof me;
+                    if (getsockname(fd, (sockaddr*)&me, &ml) == 0) g_lan_ip = me.sin_addr.s_addr;
+                }
+                psp_plat::close_socket(fd);
+            }
+        }
+        for (auto& [mac, p] : g_peers) {
+            if (!same_group(mac)) continue;
+            Direct& dp = g_direct[mac];
+            if (dp.state == 0 && t - dp.asked > 15000000) {
+                dp.asked = t;
+                std::vector<uint8_t> b{RO_INTRO};
+                b.insert(b.end(), mac.begin(), mac.end());
+                const uint8_t* ip = (const uint8_t*)&g_lan_ip;
+                b.insert(b.end(), ip, ip + 4);
+                put16(b, (uint16_t)g_my_port);
+                send_raw(g_relay_addr, T_RELAY, b);
+            }
+        }
+    }
+    for (auto it = g_direct.begin(); it != g_direct.end();)   // players who left
+        if (!g_peers.count(it->first) || !same_group(it->first)) it = g_direct.erase(it); else ++it;
+    for (auto it = g_ping.begin(); it != g_ping.end();)   // forget players who left the group
+        if (!g_peers.count(it->first) || !same_group(it->first)) it = g_ping.erase(it); else ++it;
+    for (auto& [mac, p] : g_peers) {
+        if (!same_group(mac)) continue;
+        const char* who = p.nick[0] ? p.nick : "a player";
+        const std::string id = mac_str(mac);
+        if (t - p.last_seen > 2500000)
+            psp_net_notice(("silent:" + id).c_str(), 15, "Network: nothing from %s for %d s (unstable connection)", who, (int)((t - p.last_seen) / 1000000));
+        PingStat& st = g_ping[mac];
+        for (auto o = st.outstanding.begin(); o != st.outstanding.end();)   // unanswered for 2 s: lost
+            if (t - o->second > 2000000) {
+                if (st.ever) { st.window.push_back(false); if (st.window.size() > 20) st.window.pop_front(); }
+                o = st.outstanding.erase(o);
+            } else ++o;
+        std::vector<uint8_t> b(mac.begin(), mac.end());
+        put16(b, PING_PORT); put16(b, PING_PORT);
+        b.push_back(0); put32(b, ++st.seq);
+        for (int i = 0; i < 8; i++) b.push_back(0);
+        st.outstanding[st.seq] = t;
+        send_to_mac(mac, T_PDP, b);
+        if (!st.ever) continue;
+        st.high = st.srtt_ms > 150 ? st.high + 1 : 0;
+        if (st.high >= 3) psp_net_notice(("lat:" + id).c_str(), 30, "Network: high latency to %s: %d ms", who, (int)st.srtt_ms);
+        if (st.window.size() >= 10) {
+            int lost = 0;
+            for (bool ok : st.window) lost += !ok;
+            const int pct = lost * 100 / (int)st.window.size();
+            if (pct >= 15) psp_net_notice(("loss:" + id).c_str(), 30, "Network: packet loss to %s: %d%%", who, pct);
+        }
+    }
+}
+
 void periodic() {
     int64_t t = now_us();
     std::lock_guard<std::mutex> lk(g_mu);
@@ -667,10 +840,33 @@ void periodic() {
     for (auto it = g_peers.begin(); it != g_peers.end();) {
         if (t - it->second.last_seen > 4000000) {
             ANOTE("peer %s left", mac_str(it->first).c_str());
+            if (g_connected && same_group(it->first))
+                psp_net_notice(("left:" + mac_str(it->first)).c_str(), 10, "Network: lost %s (nothing received for 4 s)", it->second.nick[0] ? it->second.nick : "a player");
             it = g_peers.erase(it);
         } else ++it;
     }
     if (g_scan_due && t >= g_scan_due) { g_scan_due = 0; queue_ctl(CTL_SCAN, 0); }
+    if (t >= g_next_net_check) { g_next_net_check = t + 1000000; net_check(t); }
+    for (auto& [mac, dp] : g_direct) {   // punch while trying, keep the path (and the routers' mappings) alive once up
+        if (dp.state == 0 || t < dp.next_punch) continue;
+        if (dp.state == 1 && t - dp.started > 6000000) {
+            ANOTE("direct: no answer from %s; staying on the relay", mac_str(mac).c_str());
+            dp.state = 0;
+            continue;
+        }
+        if (dp.state == 2 && t - dp.last_rx > 3000000) {
+            ANOTE("direct: path to %s went quiet; back to the relay", mac_str(mac).c_str());
+            dp.state = 0;
+            continue;
+        }
+        dp.next_punch = t + (dp.state == 1 ? 100000 : 500000);
+        std::vector<uint8_t> b(mac.begin(), mac.end());
+        if (dp.state == 2) send_raw(dp.active, T_PUNCH, b);
+        else {
+            if (dp.pub.sin_port) send_raw(dp.pub, T_PUNCH, b);
+            if (dp.lan.sin_port && dp.lan.sin_addr.s_addr && dp.lan.sin_addr.s_addr != dp.pub.sin_addr.s_addr) send_raw(dp.lan, T_PUNCH, b);
+        }
+    }
     for (auto it = g_reasm.begin(); it != g_reasm.end();)   // drop half-received messages
         if (t - it->second.first > 3000000) it = g_reasm.erase(it); else ++it;
     // matching timers
@@ -690,7 +886,13 @@ void periodic() {
             MPeer& p = it->second;
             bool drop = false;
             if (p.s == MPeer::HELLO) drop = t - p.last_seen > 6000000;  // host vanished
-            else if (t - p.last_seen > timeout) {
+            else if (p.s != MPeer::ESTAB) {
+                // A join request waiting for the host's answer (Group Battle: the host takes everyone in at once, often long after
+                // they asked) sends nothing while it waits: it is dropped only when the player itself is gone (its beacons stop),
+                // not after the established peers' silence timeout. Dropping it after 6 s made the host's accept fail and the game
+                // delete the room ("connection error") whenever the room took longer than that to fill.
+                drop = !g_peers.count(it->first);
+            } else if (t - p.last_seen > timeout) {
                 if (p.s == MPeer::ESTAB) queue_match(m, M_TIMEOUT, it->first, {});
                 drop = true;
             }
@@ -783,6 +985,7 @@ void apply_pending_config() {
     }
     std::vector<sockaddr_in> ps;
     if (!relay && !peers.empty()) ps = parse_peers_list(peers);   // DNS lookups happen without the lock
+    psp_upnp_port(relay ? 0 : (uint16_t)g_my_port);
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_relay_mode) g_extra_peers = ps;
 }
@@ -870,6 +1073,7 @@ bool ensure_net() {
     std::call_once(once, [] {
         const char* en = std::getenv("PSPRECOMP_ADHOC");
         if (en && en[0] == '0') { g_enabled = false; return; }
+        if (const char* dr = std::getenv("PSPRECOMP_ADHOC_DIRECT"); dr && dr[0] == '0') g_direct_off = true;
         const char* lg = std::getenv("PSPRECOMP_ADHOC_LOG");
         g_log = lg && lg[0] == '1';
         if (const char* bp = std::getenv("PSPRECOMP_ADHOC_PORT")) g_base_port = std::atoi(bp);
@@ -891,6 +1095,8 @@ bool ensure_net() {
                 g_my_port = ntohs(got.sin_port);
             }
         }
+        if (const char* up = std::getenv("PSPRECOMP_ADHOC_UPNP"); up && up[0] == '1') psp_upnp_set_enabled(true);
+        if (g_my_port) psp_upnp_port(g_relay_mode ? 0 : (uint16_t)g_my_port);   // direct (LAN) play only: Internet goes through the server
         if (!g_my_port) { ANOTE("could not bind UDP ports %d-%d; ad-hoc networking off", g_base_port, g_base_port + g_span - 1); psp_plat::close_socket(g_sock); g_sock = -1; g_off_reason = "Off: could not bind a UDP port"; g_enabled = false; return; }
 
         const char* mc = std::getenv("PSPRECOMP_ADHOC_MAC");
@@ -965,7 +1171,7 @@ void h_AdhocTerm(uint8_t*, recomp_context* ctx) {
 }
 
 // ================= sceNetAdhocctl =================
-void h_CtlInit(uint8_t*, recomp_context* ctx) { ensure_net(); g_ctl_init = true; ret(ctx, 0); }
+void h_CtlInit(uint8_t*, recomp_context* ctx) { ensure_net(); if (!g_ctl_init) g_ctl_init_at = now_us(); g_ctl_init = true; ret(ctx, 0); }
 void h_CtlTerm(uint8_t*, recomp_context* ctx) {
     std::lock_guard<std::mutex> lk(g_mu);
     g_ctl_init = false; g_connected = false; std::memset(g_group, 0, 8); g_handlers.clear();
@@ -1746,4 +1952,36 @@ void psp_hle_register_adhoc() {
     psp_hle_register("sceNetAdhocMatchingCancelTarget", t_h_MCancel);
     psp_hle_register("sceNetAdhocMatchingSendData", t_h_MSendData);
     psp_hle_register("sceNetAdhocMatchingSetHelloOpt", h_MSetHelloOpt);
+}
+
+static std::atomic<int64_t> g_notice_at{-100000000};
+// ---- network notices: one line on screen (and in the log), at most once per min_interval_s per key ----
+void psp_net_notice(const char* key, int min_interval_s, const char* fmt, ...) {
+    static std::mutex mu;
+    static std::map<std::string, int64_t> last;
+    char msg[256];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    const int64_t t = now_us();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = last.find(key ? key : "");
+        if (it != last.end() && t - it->second < (int64_t)min_interval_s * 1000000) return;
+        last[key ? key : ""] = t;
+    }
+    std::fprintf(stderr, "[NET] %s\n", msg);
+    ge_draw_toast(msg, 6000);
+    g_notice_at.store(t, std::memory_order_relaxed);
+}
+bool psp_net_notice_showing() { return now_us() - g_notice_at.load(std::memory_order_relaxed) < 6000000; }
+
+int psp_adhoc_ping_ms() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return -1;
+    double worst = -1;
+    for (auto& [mac, st] : g_ping)
+        if (st.ever && st.srtt_ms >= 0 && same_group(mac)) worst = std::max(worst, st.srtt_ms);
+    return worst < 0 ? -1 : (int)(worst + 0.5);
 }

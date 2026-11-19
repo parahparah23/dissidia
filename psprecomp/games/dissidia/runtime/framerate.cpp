@@ -1058,18 +1058,22 @@ void fighter_dump_frame();
 
 // A multiplayer group agrees on a frame rate: tell the player (a few seconds, top centre), and again when it
 // changes or the group ends.
-void note_negotiated_rate(int cap) {
+void note_negotiated_rate(int cap, bool own_rate) {
     static int shown = 0;
-    if (cap == shown) return;
+    static bool shown_own = false;
+    if (cap == shown && own_rate == shown_own) return;
+    shown_own = own_rate;
     const int own = g_target.load(std::memory_order_relaxed);
     char msg[96];
-    if (cap) {
+    if (cap && own_rate) {
+        std::snprintf(msg, sizeof msg, "Online: %d fps (everyone above 30 keeps their own rate)", own);
+    } else if (cap) {
         std::snprintf(msg, sizeof msg, cap < own ? "Online: %d fps (lowest player's setting)" : "Online: %d fps (all players agree)", cap);
     } else {
         std::snprintf(msg, sizeof msg, "Online session ended: back to %d fps", own);
     }
     std::fprintf(stderr, "[FPS] negotiated frame rate %d (own setting %d)\n", cap, own);
-    ge_draw_toast(msg, 5000);
+    if (!psp_net_notice_showing()) ge_draw_toast(msg, 5000);   // a network warning (why the session ended) stays on screen
     shown = cap;
 }
 
@@ -1150,11 +1154,16 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         // In an ad-hoc session every player runs at the lowest rate any of them asked for, so the
         // lock-step battle stays in sync (psp_adhoc_group_fps_cap() is 0 when not connected).
         const int cap = psp_adhoc_group_fps_cap();
-        note_negotiated_rate(cap);
+        // With 30 Hz logic every player above 30 fps runs the fight's logic at 30 Hz, the frames between are only drawn: each keeps
+        // their own rate. A player at 30 runs plain 30 fps, which is not bit-identical to 30 Hz logic in every move (the frame-rate
+        // parity tests), so then everyone runs at 30, as before. PSPRECOMP_NET_SAME_FPS=1 keeps the old rule (lowest setting for all).
+        static const bool same_fps = [] { const char* v = std::getenv("PSPRECOMP_NET_SAME_FPS"); return v && v[0] && v[0] != '0'; }();
+        const bool own_rate = cap > 30 && g_logic30 && !same_fps && g_target.load(std::memory_order_relaxed) > 30;
+        note_negotiated_rate(cap, own_rate);
         int rate = 30;
         if (g_scope_all || overlay_id() == 1) {
             rate = g_target.load(std::memory_order_relaxed);
-            if (cap > 0 && cap < rate) rate = cap;   // never above what the slowest player asked for
+            if (cap > 0 && cap < rate && !own_rate) rate = cap;   // never above what the slowest player asked for
         }
         if (rate < 30) rate = 30;
         const int interval = rate > 30 ? 1 : 2;      // vblanks per frame: the vblank clock itself runs faster above 60
@@ -1728,9 +1737,12 @@ bool battle_scene_list(uint32_t list) {   // the battle scene's task list: the o
 // session without a message: about 10 s into every online fight at 120 fps (19 Nov 2026). It now runs on logic frames only, as on
 // the PSP. PSPRECOMP_L30_NET_EVERY_FRAME=1 restores the old behaviour (tests).
 FuncPtr g_orig_net_task = nullptr;
+}  // namespace
+void dissidia_comm_note_pad();   // comm_battle.cpp: presses between two logic frames reach the next pad sent
+namespace {
 void net_task_hook(uint8_t* rdram, recomp_context* ctx) {
     static const bool every = std::getenv("PSPRECOMP_L30_NET_EVERY_FRAME") != nullptr;
-    if (!every && l30_active() && !g_l30_logic_now) return;
+    if (!every && l30_active() && !g_l30_logic_now) { dissidia_comm_note_pad(); return; }
     g_orig_net_task(rdram, ctx);
 }
 

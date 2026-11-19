@@ -285,13 +285,14 @@ std::vector<std::vector<SetKey>> settings_keyboard(bool shift, bool symbols) {
         }
         out.push_back(std::move(row));
     }
-    std::vector<SetKey> bot(6);
+    std::vector<SetKey> bot(7);
     bot[0].label = symbols ? "abc" : (shift ? "SHIFT" : "Shift"); bot[0].kind = 1;
     bot[1].label = symbols ? "ABC" : "#+="; bot[1].kind = 2;
     bot[2].label = "Space"; bot[2].kind = 3; bot[2].ch = ' ';
-    bot[3].label = "Delete"; bot[3].kind = 4;
-    bot[4].label = "Done"; bot[4].kind = 5;
-    bot[5].label = "Cancel"; bot[5].kind = 6;
+    bot[3].label = "Paste"; bot[3].kind = 7;   // the clipboard's text (Ctrl+V on a keyboard)
+    bot[4].label = "Delete"; bot[4].kind = 4;
+    bot[5].label = "Done"; bot[5].kind = 5;
+    bot[6].label = "Cancel"; bot[6].kind = 6;
     out.push_back(std::move(bot));
     return out;
 }
@@ -1097,10 +1098,10 @@ struct SettingsDraw {
                 const float kw = (gw - 9.f * gap) / 10.f;
                 for (size_t k = 0; k < keys[r].size(); ++k) keys[r][k].r = SetRect{gx0 + float(k) * (kw + gap), y, kw, kh};
             } else {
-                const float ws[6] = {48.f, 48.f, 0.f, 52.f, 52.f, 52.f};
+                const float ws[7] = {44.f, 44.f, 0.f, 46.f, 46.f, 46.f, 46.f};
                 float fixed = 0.f;
                 for (float w : ws) fixed += w;
-                const float space = gw - fixed - 5.f * gap;
+                const float space = gw - fixed - 6.f * gap;
                 float x = gx0;
                 for (size_t k = 0; k < keys[r].size(); ++k) {
                     const float w = k == 2 ? space : ws[k];
@@ -1125,7 +1126,7 @@ struct SettingsDraw {
                 const bool on = (key.kind == 1 && (S.kb.shift || S.kb.symbols)) || (key.kind == 2 && S.kb.symbols);
                 Col top = rgb(255, 255, 255), bot = rgb(222, 226, 246), edge = rgb(160, 168, 214);
                 if (key.kind == 5) { top = rgb(255, 232, 150); bot = rgb(226, 172, 56); edge = rgb(160, 116, 30); }
-                else if (key.kind == 6 || key.kind == 4) { top = rgb(236, 238, 250); bot = rgb(200, 206, 236); }
+                else if (key.kind == 6 || key.kind == 4 || key.kind == 7) { top = rgb(236, 238, 250); bot = rgb(200, 206, 236); }
                 else if (on) { top = rgb(255, 232, 150); bot = rgb(230, 180, 70); edge = rgb(160, 116, 30); }
                 P.rrect(key.r.x, key.r.y, key.r.w, key.r.h, 4.f, edge, 0.7f);
                 P.rrect(key.r.x, key.r.y, key.r.w, key.r.h, 4.f, Ramp(top, bot, key.r.y, key.r.y + key.r.h));
