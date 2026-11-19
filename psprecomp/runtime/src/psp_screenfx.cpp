@@ -1155,6 +1155,9 @@ const char* const k_rt_lights = R"GLSL(
         vec3 Pw = (u_view_inv * vec4(P, 1.0)).xyz;
         vec3 nw = normalize((u_view_inv * vec4(n, 0.0)).xyz);
         vec3 acc = vec3(0.0), acc_fx = vec3(0.0);
+        // a fighter is not shadowed by its own body from these lights either (as k_rt_code does for the sun): without it the hair cards
+        // threw blocky shadows over the face under Kefka's Tower's stage lights (issue #94)
+        bool self_l = u_fmask != 0 && fighter_at(v_uv);
         for (int li = 0; li < u_n_lights; ++li) {
             vec3 d = u_lp[li].xyz - Pw;
             float dist = length(d), rad = u_lp[li].w;
@@ -1166,8 +1169,19 @@ const char* const k_rt_lights = R"GLSL(
             if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
-            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
-            while (rayQueryProceedEXT(rl)) {}
+            if (self_l) {   // every triangle a candidate; a fighter's own (low bit of its coverage) within u_rt_self_len is passed through
+                rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
+                while (rayQueryProceedEXT(rl)) {
+                    if (rayQueryGetIntersectionTypeEXT(rl, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+                    uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rl, false) + rayQueryGetIntersectionPrimitiveIndexEXT(rl, false)];
+                    if ((pc & 0x01000000u) != 0u && rayQueryGetIntersectionTEXT(rl, false) < u_rt_self_len) continue;
+                    rayQueryConfirmIntersectionEXT(rl);
+                    rayQueryTerminateEXT(rl);
+                }
+            } else {
+                rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
+                while (rayQueryProceedEXT(rl)) {}
+            }
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
             if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
         }
