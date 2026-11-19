@@ -37,15 +37,25 @@ fields*) become new 'ablt' records of the retail charId (`roster_mainbin.retail_
 map are left alone. The build lists each such folder in `<mods>/retail_moves.txt`:
 
 ```
-bartz-dff 9 0910,0911,0912,0913,0914,0915,0916,0917 nm=Bartz:_Dissidia_(2008)_moves
+bartz-dff 9 0910,0911,0912,0913,0914,0915,0916,0917 nm=Bartz:_Dissidia_(2008)_moves files=obj/p_fiv100.objx;obj/p_fiv100_1p.gmo;...
 ```
 
 and the runtime (`roster.cpp`, retail moves) reads it at start:
 - **on**: the abilities are taught to the character's save record whenever the game fetches it (FUN_088CB164), so a save of
   any level has them at once (AP still has to be earned to master them);
-- **off** (`#off# ` in front of the line; **Settings > Mods** switches it, at the next start): the records are hidden and
-  inert the way `"disabled"` makes them (owner 0xFE, command -2), so a save that learnt or equipped them stays valid (an
-  equipped slot shows empty). The folder's files stay installed: only the new commands use what they add.
+- **off** (`#off# ` in front of the line; **Settings > Mods** switches it, at the next start): the game runs as without
+  the mod. Its files (`files=`; lines written before that field: the shipped list for `bartz-dff`) are left out of the
+  mods folder's overrides (`hooks_io.cpp`), and so are the files `roster_mainbin.py` built for it (main.bin, main_lang.bin,
+  the ability help pack) when nothing else needs them (no character in `roster.txt`, no `bgm.txt`, no other moves line
+  on). The save keeps what it learnt and equipped: each of the mod's ability ids the loaded table lacks gets an inert
+  placeholder record (owner 0xFE, command -2, sorted in; `retail_moves_placeholders`), as the game reads the record of
+  every learnt and equipped id without a null check. An equipped slot shows empty; switched on again, the mod's
+  records, and with them the moves, are back.
+
+The same placeholders cover a moves line that is on while another mod's main.bin is used (an ISO patch mod's files win
+over loose files, see docs/xdelta-mods.md). Two mods that change the same file are a conflict: the game logs it at start
+and **Settings > Mods** marks both rows "(conflict)", with the files and which version is used in the help text
+(`<mods>/.conflicts.txt`, written at every start).
 
 A rebuild keeps a line's `#off#`. A folder deleted or set `"enabled": false` keeps its new abilities as disabled records
 (from the previous `extra_abilities.json`), for the same reason. Settings > Mods shows one row per line instead of the

@@ -80,12 +80,13 @@ RETAIL_CODES = ('one100 one200 two100 two200 thr100 thr200 for100 for110 for200 
                 'gst200 org200 org210').split()
 
 
-def retail_moves_txt(mods, disc, retail_moves):
+def retail_moves_txt(mods, disc, retail_moves, owned=None):
     """<mods>/retail_moves.txt: "<folder> <charId> <ability id>,... nm=<display>" for each retail mod that adds moves
     (the game's own abilities of the character are not listed). The runtime (roster.cpp, retail moves) teaches them to
     the character's save record, or, for a line the Settings menu switched off ("#off# " in front), hides them and makes
     them inert the way roster_mainbin's "disabled" does, so a save that holds them stays valid. A rebuild keeps the
-    "#off# " of a folder's line."""
+    "#off# " of a folder's line. `owned` ({game path: folder}): each line's "files=" lists the folder's own files, which
+    the runtime leaves out while the line is off (hooks_io.cpp), so a switched-off mod changes nothing."""
     import roster_mainbin as RM
     off = set()
     p = os.path.join(mods, RETAIL_MOVES)
@@ -105,7 +106,8 @@ def retail_moves_txt(mods, disc, retail_moves):
             ids = ','.join('%04X' % ((c << 8) | int(k, 16)) for k, v in sorted(m['move_names'].items())
                            if not k.startswith('_') and 'copy' in v)
             nm = (m.get('display') or '%s: new moves' % ch(m)['name']).replace(' ', '_')
-            lines.append('%s%s %d %s nm=%s' % ('#off# ' if n in off else '', n, c, ids, nm))
+            own = sorted(gp for gp, f in (owned or {}).items() if f == n and ' ' not in gp and ';' not in gp)
+            lines.append('%s%s %d %s nm=%s%s' % ('#off# ' if n in off else '', n, c, ids, nm, ' files=' + ';'.join(own) if own else ''))
     return ''.join(l + '\n' for l in lines)
 
 
@@ -803,7 +805,7 @@ def _build(a, added):
             continue                     # the record of every such id without a check, so they stay, hidden and inert
         abil[code] = {k: dict(v, disabled=True) for k, v in tab.items() if 'copy' in v}
         print('%-10s new moves of retail %s kept as disabled abilities (saves may hold them)' % ('', code))
-    files[RETAIL_MOVES] = retail_moves_txt(a.mods, disc, retail_moves).encode()
+    files[RETAIL_MOVES] = retail_moves_txt(a.mods, disc, retail_moves, retail).encode()
     abil_bytes = (json.dumps(abil, indent=2, ensure_ascii=False) + '\n').encode()
 
     if a.check:

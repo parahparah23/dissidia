@@ -173,6 +173,7 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
                         const std::string& mods_dir, std::string* log, std::string* err,
                         uint32_t index_capacity, const std::vector<std::string>& extra_dirs) {
     overrides_.clear();
+    duplicates_.clear();
     patched_ = original_index;
     package_size_ = package_size;
     PackageIndex idx;
@@ -224,8 +225,17 @@ bool PackageMods::build(const std::vector<uint8_t>& original_index, uint64_t pac
             crc = package_crc(norm);
         }
         if (st.st_size <= 0 || (uint64_t)st.st_size > kSizeMask) { note("[MODS] skip (size out of range): " + rel); continue; }
+        {
+            auto sk = skipped_.find(src.dir);
+            if (sk != skipped_.end() && sk->second.count(norm)) { note("[MODS] skip (its mod is off): " + rel); continue; }
+        }
         bool dup = false;
-        for (auto& o : overrides_) if (o.crc == crc) { note("[MODS] skip (duplicate of " + o.file + "): " + rel); dup = true; }
+        for (auto& o : overrides_)
+            if (o.crc == crc) {
+                note("[MODS] skip (duplicate of " + o.file + "): " + rel);
+                duplicates_.push_back({crc, asset, o.file, src.dir + "/" + rel});
+                dup = true;
+            }
         if (dup) continue;
 
         Override ov;

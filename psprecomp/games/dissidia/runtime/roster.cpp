@@ -5648,6 +5648,57 @@ uint8_t* ablt_record(uint8_t* rdram, uint16_t id) {             // the loaded 'a
     }
     return nullptr;
 }
+// A moves mod's ability ids that the loaded table lacks (the mod is off, so its main.bin is not served; or another mod's
+// main.bin is used) get inert placeholder records: hidden from the Abilities screen, no command in battle. A save that
+// learnt or equipped them keeps them (the game reads the record of every learnt and equipped id without a null check),
+// and switched on again, the mod's own records are back with them. The table stays sorted by id; it moves to a host
+// block when the game's (808 records) is full.
+uint32_t g_ablt_host_block = 0, g_ablt_host_rows = 0;   // a table this file moved to host memory, and its room in records
+void retail_moves_placeholders(uint8_t* rdram) {
+    std::vector<std::pair<uint16_t, int>> need;   // id, charId
+    for (const RetailMoves& m : g_retail_moves)
+        for (uint16_t id : m.ids) if (!ablt_record(rdram, id)) need.push_back({id, m.charId});
+    if (need.empty()) return;
+    uint32_t blk = rd32(rdram, kAbltBlockPtr);
+    const uint32_t recs0 = rd32(rdram, kAbltRecsPtr);
+    if (blk < 0x08000000u || blk >= 0x0C000000u || recs0 != blk + 0x10u) {
+        std::fprintf(stderr, "[ROSTER] placeholders: table at %08X, records at %08X: not where expected\n", blk, recs0);
+        return;
+    }
+    uint32_t n = rd32(rdram, blk + 8u);
+    if (n == 0 || n > 0x1000u) return;
+    const uint32_t cap = g_ablt_host_block == blk ? g_ablt_host_rows : 0x328u;   // ABLT_ROWS (defined below)
+    if (n + need.size() > cap) {   // no room: a host block with it
+        const uint32_t bytes = 0x10u + (n + uint32_t(need.size())) * kAbltRecBytes;
+        const uint32_t nb = psp_kmem_bump_alloc_named((bytes + 0xFFu) & ~0xFFu, "ROSTER_ABLT_PH");
+        if (!nb) { std::fprintf(stderr, "[ROSTER] no host memory for %zu placeholder abilities\n", need.size()); return; }
+        std::memcpy(rdram + (nb & 0x07FFFFFFu), rdram + (blk & 0x07FFFFFFu), 0x10u + n * kAbltRecBytes);
+        put_u32(rdram, kAbltBlockPtr & 0x07FFFFFFu, nb);
+        put_u32(rdram, kAbltRecsPtr & 0x07FFFFFFu, nb + 0x10u);
+        g_ablt_host_block = nb;
+        g_ablt_host_rows = (((bytes + 0xFFu) & ~0xFFu) - 0x10u) / kAbltRecBytes;
+        blk = nb;
+    }
+    uint8_t* recs = rdram + ((blk + 0x10u) & 0x07FFFFFFu);
+    for (const auto& nd : need) {
+        const uint16_t id = nd.first;
+        const uint8_t* tmpl = nullptr;   // a record of the same character (else the first): the fields the game reads
+        for (uint32_t r = 0; r < n && !tmpl; r++) if (recs[kAbltRecBytes * r + kAbltOwnerByte] == uint8_t(nd.second)) tmpl = recs + kAbltRecBytes * r;
+        uint8_t rec[kAbltRecBytes];
+        std::memcpy(rec, tmpl ? tmpl : recs, kAbltRecBytes);
+        rec[0] = id & 0xFFu; rec[1] = id >> 8;
+        rec[kAbltOwnerByte] = kRetailOffOwner;
+        rec[0x0C] = kRetailOffCmd & 0xFFu; rec[0x0D] = kRetailOffCmd >> 8;
+        uint32_t at = 0;
+        while (at < n && uint16_t(recs[kAbltRecBytes * at] | recs[kAbltRecBytes * at + 1] << 8) < id) at++;
+        std::memmove(recs + kAbltRecBytes * (at + 1), recs + kAbltRecBytes * at, kAbltRecBytes * (n - at));
+        std::memcpy(recs + kAbltRecBytes * at, rec, kAbltRecBytes);
+        n++;
+    }
+    put_u32(rdram, (blk + 8u) & 0x07FFFFFFu, n);
+    std::fprintf(stderr, "[ROSTER] %zu placeholder abilit%s for moves mods whose records are not loaded (kept in saves, inert)\n",
+                 need.size(), need.size() == 1 ? "y" : "ies");
+}
 void retail_moves_hide(uint8_t* rdram) {                        // after the table is loaded: the lines switched off
     for (const RetailMoves& m : g_retail_moves) {
         if (m.on) continue;
@@ -5691,13 +5742,12 @@ void retail_moves_teach(uint8_t* rdram, uint32_t rec, int charId) {
 constexpr uint32_t ABLT_LOAD = 0x088B1CC0u, ABLT_HDR = 0x089D7290u, ABLT_RECS = 0x089D7294u;
 constexpr uint32_t ABLT_ROWS = 0x328u, ABLT_ROW = 0x28u;
 FuncPtr g_orig_ablt_load = nullptr;
-uint32_t g_ablt_host_block = 0, g_ablt_host_rows = 0;   // a table this file moved to host memory, and its room in records
 void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     saverec_block();   // the extra characters' save records: allocated at boot, while the host heap has room
     const uint32_t src = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
     if (src == 0 || size < 16u || rd32(rdram, src + 8) <= ABLT_ROWS) {
         g_orig_ablt_load(rdram, ctx);
-        if (size >= 16u) retail_moves_hide(rdram);
+        if (size >= 16u) { retail_moves_hide(rdram); retail_moves_placeholders(rdram); }
         return;
     }
     const uint32_t buf = psp_kmem_bump_alloc_named((size + 0xFFu) & ~0xFFu, "ROSTER_ABLT");
@@ -5716,6 +5766,7 @@ void ablt_load_hook(uint8_t* rdram, recomp_context* ctx) {
     ctx->r[5] = 0;     // the original now only loads ability.bin (a2 = the archive)
     g_orig_ablt_load(rdram, ctx);
     retail_moves_hide(rdram);
+    retail_moves_placeholders(rdram);
 }
 }  // namespace
 

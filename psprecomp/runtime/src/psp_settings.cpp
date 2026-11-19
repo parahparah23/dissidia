@@ -451,7 +451,7 @@ void edit_move(int dr, int dc, const psp_sddialog::SetGeom* geom) {
 // A mod folder has a mod.json; "enabled": false in it keeps the mod out of the game. Folders are looked for in the mods source
 // (PSPRECOMP_MODS_SRC, set by run.sh: mods/ in the repository) and in the game's mods directory (PSPRECOMP_MODS, else <work>/mods).
 // The mods are built into the game when it starts, so a change applies at the next start.
-struct ModEntry { std::string dir, name, where, status; bool on = true; int roster_line = -1; };   // roster_line >= 0: a line of <mods>/roster.txt or retail_moves.txt (dir = that file)
+struct ModEntry { std::string dir, name, where, status, key; bool on = true, conflict = false; int roster_line = -1; };   // key: folder (rows of <mods>/.conflicts.txt)   // roster_line >= 0: a line of <mods>/roster.txt or retail_moves.txt (dir = that file)
 std::vector<ModEntry> g_mods;
 bool g_restart_pending = false;        // something was changed that only applies at the next start
 std::string read_text_file(const std::string& p) { std::ifstream f(p, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); return ss.str(); }
@@ -488,6 +488,7 @@ void mods_scan(const std::string& root, const char* where) {
         if (g_mods.size() >= size_t(ROW_MOD_END - ROW_MOD0 + 1)) return;
         ModEntry m;
         m.dir = root + "/" + n;
+        m.key = n;
         const std::string js = read_text_file(m.dir + "/mod.json");
         m.on = mod_json_enabled(js);
         const std::string disp = mod_json_display(js);
@@ -543,6 +544,7 @@ void mods_scan_moves(const std::string& root) {
         m.dir = root + "/retail_moves.txt"; m.roster_line = n; m.on = on;
         m.name = nm.empty() ? folder : nm;
         m.where = "moves";
+        m.key = folder;
         g_moves_folders.push_back(folder);
         g_mods.push_back(std::move(m));
     }
@@ -558,6 +560,17 @@ void mods_load() {
         return std::find(g_moves_folders.begin(), g_moves_folders.end(), folder) != g_moves_folders.end();
     }), g_mods.end());
     mods_scan_roster(mods_dir_path());
+    {   // conflicts the game found at its last start (games/dissidia/runtime/hooks_io.cpp): "<key>\t<note>" lines
+        std::ifstream cf(mods_dir_path() + "/.conflicts.txt");
+        std::string line;
+        while (std::getline(cf, line)) {
+            const size_t t = line.find('\t');
+            if (t == std::string::npos) continue;
+            const std::string key = line.substr(0, t), note = line.substr(t + 1);
+            for (ModEntry& m : g_mods)
+                if (!m.key.empty() && m.key == key && m.on) { m.conflict = true; m.status += (m.status.empty() ? "" : "\n") + note; }
+        }
+    }
 }
 bool mod_set_enabled(size_t i, bool on) {
     if (i >= g_mods.size()) return false;
@@ -653,7 +666,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         if (is_mod_row(r)) {
             const size_t i = size_t(r - ROW_MOD0);
             if (i < g_mods.size()) {
-                m.label = g_mods[i].name;
+                m.label = g_mods[i].name + (g_mods[i].conflict ? "  (conflict)" : "");
                 m.value = g_mods[i].on ? "On" : "Off";
                 m.help = g_mods[i].name + (g_mods[i].where == "moves" ? "\nNew moves for a character. On: the character knows them and you can equip them in the Abilities menu. Off: they are hidden and do nothing (a save that has them equipped shows an empty slot). Takes effect the next time the game starts."
                                           : g_mods[i].roster_line >= 0 ? "\nTurn this extra character on or off (its line in roster.txt). Its files stay in the mods folder. Takes effect the next time the game starts."

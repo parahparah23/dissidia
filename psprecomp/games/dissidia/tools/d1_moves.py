@@ -344,7 +344,8 @@ def cmd_install(a):
         json.dump(ab, fh, indent=2, ensure_ascii=False)
         fh.write('\n')
     ids = ','.join('%04X' % ((9 << 8) | int(k, 16)) for k in sorted(names))
-    line = '%s 9 %s nm=%s' % (man['folder'], ids, man['display'].replace(' ', '_'))
+    # files=: the mod's own files, left out by the game while the line is off (hooks_io.cpp)
+    line = '%s 9 %s nm=%s files=%s' % (man['folder'], ids, man['display'].replace(' ', '_'), ';'.join(f['path'] for f in man['files']))
     rt = os.path.join(mods, 'retail_moves.txt')
     lines = open(rt).read().splitlines() if os.path.exists(rt) else []
     off = any(l.startswith('#off# ' + man['folder'] + ' ') for l in lines)
