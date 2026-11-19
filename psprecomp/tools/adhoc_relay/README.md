@@ -18,3 +18,11 @@ How it behaves:
 - It logs joins and leaves, and a one-line summary every minute. It does not log message contents, and it has no authentication or encryption: a room name is the only secret.
 
 Run it as a service: `adhoc-relay.service` is a systemd user unit (`cp` it to `~/.config/systemd/user/`, put the binary at `~/.local/lib/adhoc_relay/adhoc_relay`, `systemctl --user enable --now adhoc-relay`, `loginctl enable-linger $USER`). Forward UDP 27500 on the router to the host.
+
+## Version 2: introductions for direct paths
+
+A client may send op 5 INTRO (target MAC, its LAN address and port); the server answers both players of that room with op 6 PEER
+(the other's MAC, public address and port as the server sees them, and the LAN address it reported), so they can open a direct
+path (hole punching; `games/dissidia/docs/multiplayer.md`). The server still forwards everything else as before, and version 1
+clients never send INTRO. OK carries version 2.
+
