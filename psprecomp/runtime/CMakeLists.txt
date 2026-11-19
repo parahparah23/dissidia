@@ -204,7 +204,20 @@ if(NOT TARGET psp::recomp)
 endif()
 
 # Runtime sources
+# xz-embedded: the .xz / LZMA2 decoder for xdelta3 patches with LZMA secondary compression (src/psp_vcdiff.cpp)
+set(PSP_XZ_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xz-embedded/xz_crc32.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xz-embedded/xz_crc64.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xz-embedded/xz_dec_lzma2.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xz-embedded/xz_dec_stream.c
+)
+set_source_files_properties(${PSP_XZ_SOURCES} PROPERTIES COMPILE_DEFINITIONS "XZ_USE_CRC64;XZ_DEC_ANY_CHECK" COMPILE_OPTIONS "-w")
+set_source_files_properties(src/psp_vcdiff.cpp PROPERTIES COMPILE_DEFINITIONS "XZ_USE_CRC64")
+
 set(RUNTIME_SOURCES
+    ${PSP_XZ_SOURCES}
+    src/psp_vcdiff.cpp
+    src/psp_file_dialog.cpp
     src/psp_memory.cpp
     src/psp_dispatch.cpp
     src/psp_fn_watch.cpp
@@ -393,6 +406,7 @@ target_link_libraries(psprecomp_core PUBLIC
     $<$<NOT:$<OR:$<PLATFORM_ID:Windows>,$<PLATFORM_ID:Android>>>:pthread>
     $<$<PLATFORM_ID:Android>:GLESv3 log android>
     $<$<PLATFORM_ID:Windows>:ws2_32>   # debug socket + ad-hoc (Winsock)
+    $<$<PLATFORM_ID:Windows>:ole32 oleaut32 shell32 comdlg32 uuid user32>   # the system file dialog (psp_file_dialog.cpp: portable-file-dialogs, COM)
 )
 # The core calls into the recompiled code (dispatch tables) and the recompiled code calls the HLE in the core: one group.
 target_link_libraries(psprecomp_runtime PRIVATE

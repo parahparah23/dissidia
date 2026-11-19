@@ -62,7 +62,8 @@ def main():
     os.makedirs(os.path.join(out, "apk"))
     sdl_src = os.path.join(deps, "src-sdl2")
     run([sys.executable, "-I", os.path.join(REPO, "android", "make_skeleton.py"), "--sdk", sdk, "--sdl-src", sdl_src,
-         "--package", ver["package"], "--api", str(ver["api"]), "-o", os.path.join(out, "apk", "skeleton.apk")], env=env)
+         "--package", ver["package"], "--api", str(ver["api"]), "--extra-java", os.path.join(REPO, "android", "game_java"),   # the system document picker (psp_file_dialog.cpp)
+         "-o", os.path.join(out, "apk", "skeleton.apk")], env=env)
     for f in ("apk_pack.py", "debug_key.json"):
         shutil.copy2(os.path.join(REPO, "android", f), os.path.join(out, "apk", f))
     # the shader list (android/shaders/: what phones recorded) as the pack the game compiles at start; the player's APK carries it as assets/shaders.pack

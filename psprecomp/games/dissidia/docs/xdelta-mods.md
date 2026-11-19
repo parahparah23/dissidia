@@ -4,9 +4,30 @@ Many Dissidia 012 mods are shared as an `.xdelta` patch for the disc image (made
 native port installs such a patch as a mod folder: what the patch changes is kept, everything else is read from your
 own disc as usual, and *Settings > Mods* turns it off and on (next start).
 
+**In the game:** *Settings > Mods > Install ISO Patch (.xdelta)* opens the system's file picker (it starts in Downloads;
+on Android the system document picker), applies the chosen patch to your own game files and installs the result as a
+mod folder; it shows up below, on, from the next start. An update of an installed mod replaces it (and keeps it off if
+you had turned it off); the same patch twice is recognised. A Dissidia 012 install folder with an extracted disc is all
+it needs (no disc image, no PC, no Python). Where no file picker exists (Steam Deck game mode, or
+`PSPRECOMP_FILE_DIALOG=none`), put the `.xdelta` in the mods folder and choose the row: the newest one there is
+installed. Code the patch changes runs in the interpreter until the game is rebuilt (below), unless the build already
+has it (a rebuild with the same patch: the code stamps match).
+
+`games/dissidia/runtime/xdelta_import.cpp` is the C++ twin of the tool below and writes the same folder (same entries,
+`package_tail.bin`, `code/`, `eboot.patch`, `code_stamp`): the patch is decoded by `runtime/src/psp_vcdiff.cpp`
+(xdelta3's LZMA sections by `runtime/third_party/xz-embedded`), the base disc is rebuilt from `disc0/` (+
+`EBOOT.enc.bin` when the folder has it; a phone's does not, and a patched EBOOT needs none) with
+`runtime/disc_layouts.inc` (generated from `tools/disc_layouts.json`: `xdelta_mod.py layout-table`), PACKAGE.BIN entries
+go to `install/by_crc/`, and `eboot.patch` is computed against the retail EBOOT image compiled into the game. A big
+patched file is not copied: only the 64 KB pieces that differ from your own file are kept while the patch runs (Emendatus:
+~330 MB for PACKAGE.BIN's appended data instead of a second 1.3 GB file). Emendatus installs in about 7 s on a desktop.
+`PSPRECOMP_XMOD_IMPORT=<patch>` installs a patch at start the same way, prints the result and quits (tests).
+
+**From a PC / the build tools:**
+
 ```
-tools/xdelta_mod.py import Emendatus11.11.26.xdelta --work <workdir>     # -> <workdir>/mods/emendatus11.11.26
-games/dissidia/tools/pipeline.sh <workdir>                                # only if the patch changes code (it says so)
+tools/xdelta_mod.py import Emendatus11.11.26.xdelta --work <workdir>     # -> <workdir>/mods/emendatus
+games/dissidia/tools/pipeline.sh <workdir>                                # compiles the patch's code (optional)
 ```
 
 In the setup program: *Options > ISO patch (xdelta)* on a new install, or *Change extras* on an installed game (the
@@ -76,9 +97,9 @@ At start, for every xdelta mod folder that is on (`hooks_io.cpp` `mod_roots`):
 - its EBOOT byte changes (`code/eboot.patch`) are written to memory at boot (data the patched code reads),
 - the overlay files are read from `code/` instead of the disc (`remap_disc_path`, so sizes match too).
 
-A mod whose code is not in the build (imported after the last build, or whose `code/` changed since) is kept off
-completely until the next build, with `[XMOD] ... kept off until the game is rebuilt` in the log: its data without its
-code would not work. Only one mod's `package_tail.bin` can be served (the first that is on; the log names the others).
+A mod whose code is not in the build (imported after the last build, or whose `code/` changed since) runs its changed
+code in the interpreter (`[XMOD] <name>: its code changes are not compiled in this build: interpreted until the next
+build`): the game compares memory with what its compiled code was made from and interprets every function that differs. Only one mod's `package_tail.bin` can be served (the first that is on; the log names the others).
 
 Log lines: `[XMOD] <name>: on (N function(s) in M module(s))`, `[XMOD] PACKAGE.BIN bytes 0x... served from ...`,
 `[XMOD] .../OVL_MENU_APP.ELF -> <mods>/<name>/code/OVL_MENU_APP.ELF`, `[XMOD] <name>: N EBOOT byte run(s) written`.

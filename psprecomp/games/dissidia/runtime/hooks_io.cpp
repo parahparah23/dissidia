@@ -58,6 +58,8 @@ uint64_t g_tail_start = 0;   // PACKAGE.BIN offset where an xdelta mod's appende
 extern uint32_t dissidia_model_budget_request(uint32_t bytes);
 extern uint32_t dissidia_model_budget();
 
+void dissidia_xdelta_register_installer();   // xdelta_import.cpp
+
 namespace {
 
 enum { TAG_NONE = 0, TAG_INDEX = 1, TAG_PACKAGE = 2, TAG_OVL_BASE = 10 };   // TAG_OVL_BASE + roster module id
@@ -536,6 +538,8 @@ void dissidia_install_mod_io() {
         for (const std::string& r : mod_roots()) if (is_dir(r + "/textures")) return true;
         return false;
     }});
+    // Settings > Mods > Install ISO Patch (.xdelta): xdelta_import.cpp
+    dissidia_xdelta_register_installer();
     // Texture packs (runtime/include/psp_tex_pack.h) live under <mods>/textures, and the textures/ of each installed mod folder that is on.
     psp_texpack_set_dir_provider([]() -> std::string { return mods_dir() + "/textures"; });
     psp_texpack_set_extra_dirs_provider([]() -> std::vector<std::string> {

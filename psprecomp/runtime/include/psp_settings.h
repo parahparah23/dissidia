@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 union SDL_Event;
 
@@ -44,6 +45,21 @@ struct PspTexPackHook {
     bool (*available)();
 };
 void psp_settings_set_texpack_hook(const PspTexPackHook& hook);
+
+/// A game module that can install mods from a file (Dissidia: an .xdelta ISO patch) registers this: the Mods page then has
+/// an Install row that opens the system's file picker (psp_file_dialog.h) and hands the picked file to `start`, which works
+/// on its own thread; `status` is polled while the page is open (`revision` changes with the text, `busy` while it works).
+/// Without a file picker (Steam Deck game mode), files ending in `extension` in the mods folder are installed instead.
+/// The strings must stay valid (string literals).
+struct PspModInstaller {
+    const char* label;
+    const char* help;
+    const char* dialog_title;
+    const char* extension;
+    bool (*start)(const std::string& path);   // false: another install is running
+    void (*status)(unsigned* revision, bool* busy, std::string* text);
+};
+void psp_settings_set_mod_installer(const PspModInstaller& inst);
 
 /// A game module adds on/off rows to the Debug page (this session only, not saved): `get` says whether it is on, `set` switches it.
 /// Up to 6 rows; the label and help text must stay valid (string literals).
