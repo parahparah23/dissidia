@@ -65,19 +65,81 @@ Tailscale or WireGuard). Both players should list each other; a third and later 
 because beacons carry the addresses of the peers each player hears (unknown addresses are probed for 15 s and dropped
 if they do not answer).
 
+**UPnP.** Turn on UPnP Port Forward on the Network page (LAN mode; or `PSPRECOMP_ADHOC_UPNP=1`) and the game asks the router to
+forward its UDP port to this machine (`runtime/src/hle/psp_upnp.cpp`: SSDP discovery, the router's WANIPConnection or
+WANPPPConnection service, AddPortMapping with a one-hour lease renewed every 30 minutes). The UPnP row then shows the public address
+(`1.2.3.4:27312`) to give to friends for their Direct Peers. The forward is removed when UPnP is turned off or the game quits. Most
+routers have UPnP off by default (UniFi among them); when no router answers or it refuses, the game says so and the port has to be
+forwarded by hand. Only the router on the local network is contacted.
+
 **Expect latency to matter.** The game runs a lock-step battle over reliable streams, and nothing here delays or
 predicts input. It was built for a few milliseconds of WiFi latency. A relay adds the trip to the server on top of the
 direct path; how much round-trip time the game tolerates has not been measured, so try a nearby partner first.
+
+## Ping and network warnings
+
+Each copy pings the players in its group once a second (a PDP datagram to a reserved port, which the relay forwards like any other;
+older builds do not answer and show `--`). **Show Ping** on the Network page (off by default; `PSPRECOMP_PING_OVERLAY=1`) puts the
+round trip to the slowest other player at the top right while you are in a group, next to the frame rate if that is shown.
+
+Network trouble is shown on screen for six seconds (and logged as `[NET]`), each kind at most every 10 to 60 s:
+
+| Message | When |
+|---|---|
+| no answer from the party server | Internet mode, 6 s after Communications mode started without an answer |
+| lost the connection to the party server | nothing from the server for 6 s (it answers every second) |
+| nothing from *player* for N s (unstable connection) | a player in your group silent for 2.5 s |
+| lost *player* (nothing received for 4 s) | the player is dropped |
+| high latency to *player*: N ms | the round trip over 150 ms for 3 s |
+| packet loss to *player*: N % | 15 % or more of the last pings unanswered |
+| waiting for the other player's input | the fight had to wait more than 5 frames within 2 s (battle link) |
+| the other player's game is an older version | the battle link fell back to the game's exchange |
+| *reason*. The battle ends. | the battle link ended a fight (the other player left, out of sync, nothing for 10 s) |
+| UPnP: ... | the router forwarded the port (with your public address), or why not |
+
+A network warning is not replaced by the frame-rate note when a session ends, so the reason stays on screen.
 
 ## Settings menu
 
 The in-game settings menu (Esc / F1, Guide) pauses the game, which would stall the other players, so it does not open while you are in a group with others: a message says so and the game carries on. Change settings before joining a room.
 
+## Battles: our pad link
+
+A 1-on-1 fight nobody watches runs on our own pad link (`games/dissidia/runtime/comm_battle.cpp`) instead of the game's exchange. The
+game's exchange (`FUN_0890D664`) sends a 16-bit word a frame (12 buttons and 4 stick directions after its dead zone), so online
+fighters only moved 8 ways; its input delay grows to 2 frames and never shrinks, and every late word freezes the fight. The link
+replaces that function while the fight runs: each frame this copy's whole pad (buttons, stick at full resolution, turned by this copy's
+free camera before sending) for frame f + delay goes over the ad-hoc side channel (type byte `B`), with this copy's last 8 frames in
+every packet, so a lost packet is covered by the next. The other copy's pad for frame f is injected next to ours, and the analogue walk
+works online. Every tenth frame the game's own check value (`FUN_0890CD90`) is compared; a difference ends the fight with the game's
+error. When a pad is late the game waits that frame, as before, so the game's own timeout still ends a fight whose peer is gone (and
+the link ends it after 10 s with nothing heard). The lobby, setup, results and Group Battle fights with watchers stay the game's.
+
+Both copies announce the link at the fight's first frame; one that hears nothing within 5 s (an older build, or `PSPRECOMP_NET_LINK=0`)
+keeps the game's exchange for that fight, so mixed versions still play. Injected sticks are never turned by the receiving copy's camera
+and, while the link runs, are processed with the default stick constants whatever the local settings, so both copies compute the same
+fight.
+
+| Variable | Meaning |
+|---|---|
+| `PSPRECOMP_NET_LINK=0` | the game's own exchange |
+| `PSPRECOMP_NET_DELAY=<frames>` | input delay, default 2 (about 67 ms; covers a round trip up to about 130 ms without waiting), 1 to 8 |
+| `PSPRECOMP_NET_LINK_LOG=1` | log the link (linked, every 900 frames: checks agreed, frames waited, how a fight ended) |
+| `PSPRECOMP_NET_LINK_DROP=<percent>` | drop that share of the pad packets sent (tests) |
+
+Tested 19 Nov 2026, two copies on one machine (LAN, Online Lobby 1-on-1, Lightning vs Lightning): linked, fights in sync with both
+attacking (same Bravery and HP on both screens), 1,800 frames with no wait; copy A at 60 fps and copy B at 240 with 30 % of the pad
+packets dropped: 79 checks agreed by frame 900, 16 frames waited; a copy with `PSPRECOMP_NET_LINK=0` against one with the link: the
+link gave up after 5 s and the fight ran on the game's exchange. Not tested yet: two machines, through the relay, real latency.
+Design from VCKing101's port (https://github.com/VCKing101/Dissidia012-pc, `docs/port/communication-mode.md`, MIT); our own code.
+
 ## Frame rate
 
-Every player's wanted frame rate (30 or 60, from the settings menu) is shared in the beacons. While a player is in a
-group with others, the game runs at the **lowest rate any of them asked for**, so a 60 fps player and a 30 fps player
-both run at 30. It returns to the player's own setting when the group ends. A message at the top of the screen tells you the rate for five seconds ("Online: 30 fps (lowest player's setting)"), and again when the group ends. This logic is in
+Every player's wanted frame rate (from the settings menu) is shared in the beacons. When every player in a group asked for more
+than 30, each keeps their own rate: above 30 a fight's logic runs at 30 Hz (30 Hz logic) and only the frames between are drawn
+(tested: 60 against 240 fps, in sync). If anyone asked for 30 the game runs at the **lowest rate any of them asked for**, so a
+60 fps player and a 30 fps player both run at 30 (plain 30 fps is not bit-identical to 30 Hz logic in every move).
+`PSPRECOMP_NET_SAME_FPS=1` always uses the lowest rate. It returns to the player's own setting when the group ends. A message at the top of the screen tells you the rate for five seconds ("Online: 30 fps (lowest player's setting)"), and again when the group ends. This logic is in
 `runtime/framerate.cpp` (`psp_adhoc_group_fps_cap()`).
 
 Above 30 fps a fight runs on 30 Hz logic ([frame-rate.md](frame-rate.md)): the game advances on one displayed frame in two, three or
