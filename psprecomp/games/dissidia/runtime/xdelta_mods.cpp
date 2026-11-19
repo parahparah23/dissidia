@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -344,7 +345,7 @@ void learn(TailRead& r, bool overlay_only = false, bool rescan = false) {
     r.learned = true;
     if (rescan) overlay_only = false;
     const std::string code = g_tail_dir + "/code";
-    ::mkdir(code.c_str(), 0755);
+    { std::error_code ec; std::filesystem::create_directories(code, ec); }
     char name[64];
     std::snprintf(name, sizeof name, "dyn_%08X_%llX.bin", r.addr, (unsigned long long)r.off);
     if (first && !overlay_only) {
