@@ -560,6 +560,21 @@ int psp_runtime_init_sdl() {
     // Text input is only wanted while the on-screen keyboard is open, and SDL must not summon the
     // Steam Deck keyboard by itself (SDL_StartTextInput does on a Deck): steam_keyboard() below does it.
     SDL_SetHint("SDL_ENABLE_SCREEN_KEYBOARD", "0");
+#if defined(__linux__) && !defined(__ANDROID__)
+    // SDL2 tries X11 before Wayland, so on a Wayland desktop (GNOME, KDE) the game opened through XWayland, which has no HDR: the surface
+    // offered no HDR format and HDR Output read "Unavailable" with HDR on in the system settings. With the Vulkan renderer ask for a
+    // native Wayland window first (X11 stays the fallback). Not under gamescope, which shows only X11 windows, and never over a
+    // SDL_VIDEODRIVER the user set. Reads PSPRECOMP_RENDERER (the settings file is already in the environment) instead of calling
+    // vk_renderer_requested(): its Vulkan probe starts SDL's video layer, which would pick X11 before this hint exists.
+    {
+        const char* wl = std::getenv("WAYLAND_DISPLAY");
+        const char* drv = std::getenv("SDL_VIDEODRIVER");
+        const char* rr = std::getenv("PSPRECOMP_RENDERER");
+        const bool want_vk = rr && (!std::strcmp(rr, "vulkan") || !std::strcmp(rr, "vk"));
+        if (want_vk && wl && wl[0] && !(drv && drv[0]) && !std::getenv("GAMESCOPE_WAYLAND_DISPLAY"))
+            SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+    }
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr,
             "[RT] SDL_Init failed: %s\n", SDL_GetError());

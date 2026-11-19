@@ -423,7 +423,10 @@ scene snapshot and is left at paper white. The Vulkan swapchain asks for
 `R16G16B16A16_SFLOAT` + `EXTENDED_SRGB_LINEAR` (scRGB, 1.0 = 80 nits) first and `A2B10G10R10` + `HDR10_ST2084` (PQ, encoded in the
 shader) second; the default framebuffer becomes fp16 while HDR is live. Toggling the row rebuilds the swapchain at the next present.
 HDR needs the system's HDR mode on and a compositor that exposes it (Windows, Wayland compositors with HDR, gamescope, Android
-panels); X11 offers none, and the row then reads Unavailable with the reason.
+panels); X11 offers none, and the row then reads Unavailable with the reason. SDL2 tries X11 before Wayland, so on a Wayland
+desktop with X authorization (any session started from the desktop) the game opened through XWayland and never saw an HDR format.
+With the Vulkan renderer `psp_runtime_init_sdl` therefore sets `SDL_HINT_VIDEODRIVER=wayland,x11` when `WAYLAND_DISPLAY` is set,
+unless the user set `SDL_VIDEODRIVER` or the game runs under gamescope (which shows only X11 windows).
 
 **HDR Scene (native HDR, opt-in).** With it on (and an HDR swapchain live, so the Vulkan renderer only) the scene targets
 (`make_target`, the render-scale resize, the feedback / fx scratch copies, the screen-fx colour and effect buffers, the SMAA
