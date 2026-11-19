@@ -1,6 +1,6 @@
 // Save-folder manager: find, list, import and export PSP save folders between regions and between this runtime and
 // PPSSPP / a PSP memory stick. Pure library (std::filesystem, no runtime dependency): used by the in-game
-// "Manage saves" screen (psp_savemgr_ui.cpp) and by tools/savemgr.
+// save manager (Settings > Saves, psp_saves_page.cpp), cloud sync and tools/savemgr.
 //
 // A PSP save is a folder `<DISC_ID><suffix>` (ULUS10566GameData00, ULES01505FCard03 ...) with PARAM.SFO and the
 // game's encrypted files. The files are the same for every region (key and format are shared); moving a save to
@@ -38,14 +38,22 @@ bool split_name(const std::string& folder, std::string* disc, std::string* suffi
 bool valid_disc_id(const std::string& s);          // "ULUS10566"
 const char* region_of(const std::string& disc);    // "US" "EU" "JP" "Asia" "?"
 const char* kind_of(const std::string& suffix);    // "game data" "friend card" "quest" "replay" "other"
-bool is_dissidia012(const std::string& title);     // PARAM.SFO TITLE of a Dissidia 012 save
+bool is_dissidia012(const std::string& title);     // PARAM.SFO TITLE of a Dissidia 012 save (English or Japanese title)
+// Disc IDs of Dissidia 012 (US, EU, JP UMD and PSN): a save under one of them is taken whatever its TITLE says.
+const std::vector<std::string>& dissidia012_ids();
+bool is_dissidia012_save(const std::string& disc, const std::string& title);
 std::string one_line(const std::string& detail);   // newlines -> spaces
 
-// Reads one save folder (PARAM.SFO must parse and the name must look like a save). `only_dissidia`: false accepts
-// any game's save.
+// Reads one save folder (PARAM.SFO must parse). The folder name gives the disc ID and slot; a folder with another name
+// (a save copied out as "My save", an archive's root) uses PARAM.SFO's SAVEDATA_DIRECTORY instead. `only_dissidia`: false
+// accepts any game's save.
 bool read_save(const std::string& dir, SaveInfo* out, bool only_dissidia = true);
 // The saves directly inside `root`, sorted by folder name.
 std::vector<SaveInfo> scan(const std::string& root, bool only_dissidia = true);
+// The saves anywhere below `root` (root itself included, `max_depth` folder levels, at most `max_dirs` folders looked at):
+// a picked folder or an unpacked archive may hold PSP/SAVEDATA/..., a SAVEDATA folder, one save folder or a save's files.
+// Sorted by folder name, then path.
+std::vector<SaveInfo> find_saves(const std::string& root, int max_depth = 5, int max_dirs = 4000);
 
 // SAVEDATA folders of other installs of the same kind, existing on this machine: PPSSPP (Linux, flatpak, macOS,
 // Windows), PSP memory sticks mounted under /media, /run/media, /mnt (two levels) and Windows drive letters.
@@ -54,11 +62,16 @@ std::vector<SaveInfo> scan(const std::string& root, bool only_dissidia = true);
 std::vector<Source> detect_sources(bool with_saves, const std::string& exclude = "");
 
 // Copies `s` into `dest_root/<new_disc><suffix>` with PARAM.SFO retargeted and signed again. An existing target is
-// refused ("already exists") unless `replace`; then the old folder is moved to `backup_root/<name>.bak[N]`
-// (`backup_root` empty = next to it in dest_root). Returns "" on success, else an error text. `dest_name` receives
+// refused ("already exists") unless `replace`; then the old folder is moved into an automatic backup in `backup_root`
+// (psp_savebackup: a dated folder per occasion, `backup_reason` says why, e.g. psp_savebackup::kCloudDownload), or, when
+// `backup_root` is empty, next to it as `<name>.bak[N]`. Returns "" on success, else an error text. `dest_name` receives
 // the folder name written.
 std::string copy_save(const SaveInfo& s, const std::string& dest_root, const std::string& new_disc, bool replace,
-                      std::string* dest_name, const std::string& backup_root = "");
+                      std::string* dest_name, const std::string& backup_root = "", const std::string& backup_reason = "");
+
+// Changes the name the save list shows for the save in `dir` (PARAM.SFO's SAVEDATA_TITLE, e.g. "GAME DATA"; signed again). The game
+// writes its own name back the next time it saves into that slot. "" on success, else an error text.
+std::string set_title(const std::string& dir, const std::string& title);
 
 // The file names that travel with the save folder `dir` (PARAM.SFO, the icons and the files PARAM.SFO lists) that
 // exist on disk, sorted. Empty when PARAM.SFO is unreadable.

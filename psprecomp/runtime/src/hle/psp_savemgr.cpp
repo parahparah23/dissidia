@@ -1,5 +1,6 @@
 #include "psp_savemgr.h"
 
+#include "psp_savebackup.h"
 #include "psp_savedata_crypto.h"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <set>
 #include <sys/stat.h>
@@ -127,7 +129,16 @@ const char* kind_of(const std::string& suffix) {
 }
 bool is_dissidia012(const std::string& title) {
     const std::string t = lower(title);
-    return t.find("dissidia") != std::string::npos && (t.find("012") != std::string::npos || t.find("duodecim") != std::string::npos);
+    if (t.find("dissidia") != std::string::npos && (t.find("012") != std::string::npos || t.find("duodecim") != std::string::npos)) return true;
+    return title.find("\xE3\x83\x87\xE3\x83\xA5\xE3\x82\xAA\xE3\x83\x87\xE3\x82\xB7\xE3\x83\xA0") != std::string::npos;   // "デュオデシム" (Japanese title)
+}
+const std::vector<std::string>& dissidia012_ids() {
+    static const std::vector<std::string> ids = {"ULUS10566", "ULES01505", "ULJM05814", "NPJH50377", "ULJM05681"};
+    return ids;
+}
+bool is_dissidia012_save(const std::string& disc, const std::string& title) {
+    const auto& ids = dissidia012_ids();
+    return std::find(ids.begin(), ids.end(), disc) != ids.end() || is_dissidia012(title);
 }
 std::string one_line(const std::string& detail) {
     std::string r;
@@ -141,19 +152,22 @@ bool read_save(const std::string& dir, SaveInfo* out, bool only_dissidia) {
     SaveInfo s;
     std::string n = S(d.filename());
     if (n.empty()) n = S(d.parent_path().filename());   // a trailing slash
-    if (!split_name(n, &s.disc, &s.suffix)) return false;
-    s.name = n;
-    s.path = dir;
     std::error_code ec;
     const fs::path sfop = d / "PARAM.SFO";
     if (!fs::is_regular_file(sfop, ec)) return false;
     Sfo sfo;
     sfo.d = read_file(sfop);
     if (!sfo.parse()) return false;
+    if (!split_name(n, &s.disc, &s.suffix)) {   // renamed folder: the name PARAM.SFO was written for
+        n = sfo.str("SAVEDATA_DIRECTORY");
+        if (!split_name(n, &s.disc, &s.suffix)) return false;
+    }
+    s.name = n;
+    s.path = dir;
     s.title = sfo.str("TITLE");
     s.savetitle = sfo.str("SAVEDATA_TITLE");
     s.detail = sfo.str("SAVEDATA_DETAIL");
-    if (only_dissidia && !is_dissidia012(s.title)) return false;
+    if (only_dissidia && !is_dissidia012_save(s.disc, s.title)) return false;
     struct stat st;
     if (::stat(sfop.string().c_str(), &st) == 0) s.mtime = st.st_mtime;
     for (const std::string& f : files_to_copy(sfo)) {
@@ -170,10 +184,42 @@ std::vector<SaveInfo> scan(const std::string& root, bool only_dissidia) {
     std::error_code ec;
     for (auto it = fs::directory_iterator(P(root), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (!it->is_directory(ec)) continue;
-        SaveInfo s;
-        if (read_save(S(it->path()), &s, only_dissidia)) out.push_back(std::move(s));
+        SaveInfo s;   // only folders the game itself would find (a renamed copy is found by find_saves)
+        if (read_save(S(it->path()), &s, only_dissidia) && s.name == S(it->path().filename())) out.push_back(std::move(s));
     }
     std::sort(out.begin(), out.end(), [](const SaveInfo& a, const SaveInfo& b) { return a.name < b.name; });
+    return out;
+}
+
+std::vector<SaveInfo> find_saves(const std::string& root, int max_depth, int max_dirs) {
+    std::vector<SaveInfo> out;
+    std::set<std::string> seen;
+    int budget = max_dirs;
+    std::function<void(const fs::path&, int)> walk = [&](const fs::path& d, int depth) {
+        if (--budget < 0) return;
+        SaveInfo s;
+        std::error_code ec;
+        if (read_save(S(d), &s)) {
+            const std::string canon = S(fs::weakly_canonical(d, ec));
+            if (seen.insert(canon).second) out.push_back(std::move(s));
+            return;   // a save folder holds no other saves
+        }
+        if (depth >= max_depth) return;
+        std::vector<fs::path> kids;
+        for (auto it = fs::directory_iterator(d, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            std::error_code e2;
+            if (it->is_directory(e2) && !it->is_symlink(e2)) kids.push_back(it->path());
+        }
+        std::sort(kids.begin(), kids.end());
+        for (const fs::path& k : kids) {
+            const std::string kn = S(k.filename());
+            if (!kn.empty() && kn[0] == '.') continue;   // .git, .Trash ...
+            walk(k, depth + 1);
+            if (budget < 0) return;
+        }
+    };
+    walk(P(root), 0);
+    std::sort(out.begin(), out.end(), [](const SaveInfo& a, const SaveInfo& b) { return a.name != b.name ? a.name < b.name : a.path < b.path; });
     return out;
 }
 
@@ -241,20 +287,23 @@ std::vector<Source> detect_sources(bool with_saves, const std::string& exclude) 
 }
 
 std::string copy_save(const SaveInfo& s, const std::string& dest_root_s, const std::string& new_disc, bool replace,
-                      std::string* dest_name, const std::string& backup_root_s) {
+                      std::string* dest_name, const std::string& backup_root_s, const std::string& backup_reason) {
     const fs::path dest_root = P(dest_root_s);
     const std::string name = new_disc + s.suffix;
     if (dest_name) *dest_name = name;
     const fs::path dest = dest_root / P(name);
     std::error_code ec;
     if (fs::exists(dest, ec)) {
-        if (!replace) return "already exists (the old one is kept as " + name + ".bak when replaced)";
-        const fs::path broot = backup_root_s.empty() ? dest_root : P(backup_root_s);
-        fs::create_directories(broot, ec);
-        fs::path bak = broot / P(name + ".bak");
-        for (int i = 1; fs::exists(bak, ec); i++) bak = broot / P(name + ".bak" + std::to_string(i));
-        fs::rename(dest, bak, ec);
-        if (ec) return "cannot move the old save aside: " + ec.message();
+        if (!replace) return "already exists (the old one is kept as a backup when replaced)";
+        if (!backup_root_s.empty()) {
+            const std::string e = psp_savebackup::set_aside(S(dest), backup_root_s, backup_reason.empty() ? psp_savebackup::kReplaced : backup_reason);
+            if (!e.empty()) return "cannot back up the old save: " + e;
+        } else {
+            fs::path bak = dest_root / P(name + ".bak");
+            for (int i = 1; fs::exists(bak, ec); i++) bak = dest_root / P(name + ".bak" + std::to_string(i));
+            fs::rename(dest, bak, ec);
+            if (ec) return "cannot move the old save aside: " + ec.message();
+        }
     }
     fs::create_directories(dest, ec);
     if (ec) return "cannot create " + S(dest) + ": " + ec.message();
@@ -281,6 +330,27 @@ std::string copy_save(const SaveInfo& s, const std::string& dest_root_s, const s
         if (ec) return "cannot copy " + f + ": " + ec.message();
     }
     return "";
+}
+
+std::string set_title(const std::string& dir, const std::string& title) {
+    Sfo sfo;
+    sfo.d = read_file(P(dir) / "PARAM.SFO");
+    if (!sfo.parse()) return "PARAM.SFO is not valid";
+    const SfoEntry* t = sfo.find("SAVEDATA_TITLE");
+    if (!t) return "this save has no name to change";
+    if (title.size() + 1 > t->max) return "the name is too long (at most " + std::to_string(t->max - 1) + " bytes)";
+    if (!sfo.set_str("SAVEDATA_TITLE", title)) return "cannot change the name";
+    const SfoEntry* sp = sfo.find("SAVEDATA_PARAMS");
+    if (sp && sp->max == 128 && sfo.d.size() % 16 == 0) {
+        const size_t off = sfo.datatab + sp->off;
+        const int mode = psp_sdcrypto::crypt_mode_from_params_flag(sfo.d[off]);
+        if (mode > 0 && psp_sdcrypto::update_sfo_hash(sfo.d, off, mode) != 0) return "could not sign PARAM.SFO";
+    }
+    const fs::path tmp = P(dir) / "PARAM.SFO.tmp";
+    if (!write_file(tmp, sfo.d)) return "cannot write PARAM.SFO";
+    std::error_code ec;
+    fs::rename(tmp, P(dir) / "PARAM.SFO", ec);
+    return ec ? "cannot write PARAM.SFO: " + ec.message() : "";
 }
 
 std::vector<std::string> save_files(const std::string& dir) {

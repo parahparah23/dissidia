@@ -11,8 +11,8 @@
 //   savemgr export [--from DIR] --to-dir DIR [--id ULES01505] [NAME...]
 //   savemgr import --from DIR [--workdir DIR | --to DIR] [--id ULUS10566] [--force] [NAME...]
 //
-// The logic is runtime/src/hle/psp_savemgr.cpp, shared with the game's in-game "Manage saves" screen.
-// Build (from psprecomp/): g++ -O2 -std=c++17 -Iruntime/src/hle tools/savemgr/savemgr.cpp runtime/src/hle/psp_savemgr.cpp runtime/src/hle/psp_savedata_crypto.cpp -o savemgr
+// The logic is runtime/src/hle/psp_savemgr.cpp, shared with the game's Settings > Saves page.
+// Build (from psprecomp/): g++ -O2 -std=c++17 -Iruntime/src/hle tools/savemgr/savemgr.cpp runtime/src/hle/psp_savemgr.cpp runtime/src/hle/psp_savebackup.cpp runtime/src/hle/psp_savedata_crypto.cpp -o savemgr
 
 #include "psp_savemgr.h"
 
