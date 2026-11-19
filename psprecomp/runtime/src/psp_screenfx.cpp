@@ -425,6 +425,15 @@ bool psp_rt_refl_fx_enabled() {
     return v != 0;
 }
 void psp_rt_refl_fx_set_enabled(bool on) { g_rt_refl_fx.store(on ? 1 : 0); }
+// Character Shadows (issue #94): 0 Off, a fighter's own body never shadows it (#68); 1 Soft, its own triangles near the pixel let part
+// of the light through (their coverage x PSPRECOMP_RT_CHAR_AMT), fewer contact specks, a gentler fade at grazing angles.
+static std::atomic<int> g_rt_char{-1};
+int psp_rt_char_shadows() {
+    int v = g_rt_char.load();
+    if (v < 0) { const char* e = std::getenv("PSPRECOMP_RT_CHAR_SHADOWS"); v = e && e[0] ? (std::atoi(e) ? 1 : 0) : 0; g_rt_char.store(v); }
+    return v;
+}
+void psp_rt_char_set_shadows(int v) { g_rt_char.store(v ? 1 : 0); }
 const char* psp_rt_unavailable_reason() {
     if (psp_rt_available()) return "";
     if (g_psp_rt.unavailable_reason) { const char* r = g_psp_rt.unavailable_reason(); if (r && r[0]) return r; }
@@ -954,6 +963,8 @@ uniform int u_sun;           // 0: the sky light casts no shadows (stage_no_sun)
 uniform mat4 u_view_inv;    // view space -> PSP world space (where the triangles are)
 uniform vec3 u_light_w;     // world space, towards the light
 uniform float u_rt_len;     // ray length, world units
+uniform int u_char_soft;     // Character Shadows Soft: a fighter's own body shadows it partly (psp_rt_char_shadows)
+uniform float u_char_amt;    // how much of the light one of its own triangles takes, x the triangle's coverage
 uniform float u_rt_self_len; // on a fighter, fighter triangles nearer than this along the shadow ray are its own body (PSPRECOMP_RT_SELF_LEN)
 uniform int u_rt_rays;      // shadow rays per pixel (quality level: 1, 3, 6), jittered across the light disc for a soft edge
 uniform float u_rt_soft;    // half angle of the light disc, radians-ish
@@ -1169,12 +1180,17 @@ const char* const k_rt_lights = R"GLSL(
             if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
-            if (self_l) {   // every triangle a candidate; a fighter's own (low bit of its coverage) within u_rt_self_len is passed through
+            float ltrans = 1.0;
+            if (self_l) {   // every triangle a candidate; a fighter's own (low bit of its coverage) within u_rt_self_len: passed through (Off) / part of the light (Soft)
                 rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
                 while (rayQueryProceedEXT(rl)) {
                     if (rayQueryGetIntersectionTypeEXT(rl, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
                     uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rl, false) + rayQueryGetIntersectionPrimitiveIndexEXT(rl, false)];
-                    if ((pc & 0x01000000u) != 0u && rayQueryGetIntersectionTEXT(rl, false) < u_rt_self_len) continue;
+                    float th = rayQueryGetIntersectionTEXT(rl, false);
+                    if ((pc & 0x01000000u) != 0u && th < u_rt_self_len) {
+                        if (u_char_soft != 0 && th > 0.12) ltrans *= 1.0 - u_char_amt * float(pc >> 24) / 255.0;
+                        continue;
+                    }
                     rayQueryConfirmIntersectionEXT(rl);
                     rayQueryTerminateEXT(rl);
                 }
@@ -1183,6 +1199,7 @@ const char* const k_rt_lights = R"GLSL(
                 while (rayQueryProceedEXT(rl)) {}
             }
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
+            att *= ltrans;
             if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
         }
         vec3 alb = texture(u_color, v_uv).rgb;
@@ -1208,22 +1225,30 @@ const char* const k_rt_code = R"GLSL(
                     rayQueryEXT rq;
                     if (self_rx) {
                         // on a fighter: every triangle is a candidate; a fighter's triangle (low bit of its coverage, psp_ge_draw.cpp
-                        // rt_capture) within u_rt_self_len is its own body and is passed through, anything else blocks
+                        // rt_capture) within u_rt_self_len is its own body: passed through (Off) or taking part of the light (Soft:
+                        // coverage x u_char_amt, hits right at the start skipped: the faceted body's own surface), anything else blocks
+                        float trans = 1.0;
                         rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
                         while (rayQueryProceedEXT(rq)) {
                             if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
                             uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false) + rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)];
-                            if ((pc & 0x01000000u) != 0u && rayQueryGetIntersectionTEXT(rq, false) < u_rt_self_len) continue;
+                            float th = rayQueryGetIntersectionTEXT(rq, false);
+                            if ((pc & 0x01000000u) != 0u && th < u_rt_self_len) {
+                                if (u_char_soft != 0 && th > 0.12) trans *= 1.0 - u_char_amt * float(pc >> 24) / 255.0;
+                                continue;
+                            }
                             rayQueryConfirmIntersectionEXT(rq);
                             rayQueryTerminateEXT(rq);
                         }
+                        if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) { blocked += 1.0 - trans; continue; }
                     } else {
                         rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
                         while (rayQueryProceedEXT(rq)) {}
                     }
                     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) blocked += 1.0;
                 }
-                if (blocked > 0.0) sh = facing * fd * blocked / float(u_rt_rays);
+                float fc = (self_rx && u_char_soft != 0) ? smoothstep(0.05, 0.75, dot(n, u_light)) : facing;   // Soft: a gentler terminator on the low-poly body
+                if (blocked > 0.0) sh = fc * fd * blocked / float(u_rt_rays);
               }
             } else
 )GLSL";
@@ -1830,6 +1855,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform3f(loc(mp.id, "u_light_w"), wl_n[0], wl_n[1], wl_n[2]);
         glUniform1f(loc(mp.id, "u_rt_len"), env_float("PSPRECOMP_RT_LEN", 40.f));
         glUniform1f(loc(mp.id, "u_rt_self_len"), env_float("PSPRECOMP_RT_SELF_LEN", 3.f));
+        glUniform1i(loc(mp.id, "u_char_soft"), psp_rt_char_shadows()); glUniform1f(loc(mp.id, "u_char_amt"), env_float("PSPRECOMP_RT_CHAR_AMT", 0.45f));
         { const int q = psp_rt_quality(); glUniform1i(loc(mp.id, "u_rt_rays"), q >= 3 ? 6 : q == 2 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_soft"), psp_rt_soft_angle());
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);
