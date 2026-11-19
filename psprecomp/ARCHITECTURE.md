@@ -205,6 +205,11 @@ flowchart LR
   at its caller needs it (hooks an ISO patch installs compare `$ra`; runtime hooks log it), and a
   `jr <reg>` to the address the function was called from (`move s4, ra` ... `jr s4`) is a return.
   The prologue scan never starts a function in a delay slot (the branch before it would lose it).
+- A link branch (`bal`) into another function, or into a mid-entry of its own function (a subroutine
+  the sibling coalescer merged), is a call; the caller resumes after it only when `$ra` still holds the
+  link address (`bal` over an inline table never comes back: its target leaves with the caller's
+  return address), else it returns as well. Only the RA-modeled coalesced owners lower internal links
+  as gotos.
 
 ## Invariants and Conventions
 

@@ -441,6 +441,8 @@ pub fn emit_function(func: &DecodedFunction, gen: &mut dyn Generator, imports: &
     // any label, so the mid-entry and internal gotos never cross it.
     let entry_ra = func_has_jr_reg(func);
     ENTRY_RA.with(|c| c.set(entry_ra));
+    // (RA-modeled coalesced owners lower their internal links themselves: their sibling calls stay gotos)
+    MID_ENTRIES.with(|m| *m.borrow_mut() = if ra_ctx.is_some() { Vec::new() } else { func.mid_entry_addrs.clone() });
     if entry_ra {
         gen.emit_raw("const uint32_t _entry_ra = (uint32_t)ctx->r[31];");
     }
@@ -635,6 +637,10 @@ pub fn emit_function(func: &DecodedFunction, gen: &mut dyn Generator, imports: &
 thread_local! {
     /// Set while `emit_function` emits a function that declared `_entry_ra` (see there).
     static ENTRY_RA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The mid-entry addresses of the function `emit_function` is emitting (`emit_link_branch`).
+    static MID_ENTRIES: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The return address the link branch being emitted wrote (`emit_link_write`, read by `emit_link_branch`); 0 = none.
+    static LINK_RET: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// True if the function has a `jr` through a register other than `$ra` (not a jump table).
@@ -913,7 +919,10 @@ fn emit_link_write(op: &MipsOp, gen: &mut dyn Generator, instr_vaddr: u32) {
         MipsOp::Jalr { rd, rs } if rd != rs => gen.emit_gpr_write(*rd, &format!("0x{ret:08X}u")),
         // A link branch links whether or not it is taken, and also when it stays in the function: `bal 1f; nop; 1:`
         // is how code reads its own address.
-        MipsOp::Bltzal { .. } | MipsOp::Bgezal { .. } => gen.emit_gpr_write(Reg::Gpr(31), &format!("0x{ret:08X}u")),
+        MipsOp::Bltzal { .. } | MipsOp::Bgezal { .. } => {
+            gen.emit_gpr_write(Reg::Gpr(31), &format!("0x{ret:08X}u"));
+            LINK_RET.with(|c| c.set(ret));
+        }
         _ => {}
     }
 }
@@ -932,7 +941,12 @@ pub(crate) fn emit_link_branch(
     func_start: u32,
     func_end: u32,
 ) {
-    if target >= func_start && target < func_end {
+    // A target inside the function that is one of its mid-entries is the start of a sibling the coalescer merged into
+    // it (a subroutine of its own, reached by `bal`): still a call. As a branch, the sibling's `jr ra` would return
+    // from the whole function and skip the rest of the caller (Emendatus' timeline wrapper, block + 0x3FD8 calling its
+    // helper at + 0x42C4: Aerith's timelines never ran). Coalesced owners on the RA model never get here.
+    let is_mid = MID_ENTRIES.with(|m| m.borrow().contains(&target));
+    if target >= func_start && target < func_end && !is_mid {
         emit_branch_or_tail(gen, cond, target, likely, ds_comment, func_start, func_end);
         return;
     }
@@ -942,7 +956,18 @@ pub(crate) fn emit_link_branch(
     } else {
         String::new()
     };
-    gen.emit_raw(&format!("if ({cond}) {{ {ds}RECOMP_LOOKUP(0x{target:08X}u)(rdram, ctx); }}"));
+    // `bal` is also how code reads an address and jumps over what follows (`bal 1f; nop; <table>; 1: ... uses $ra`):
+    // that target never comes back here, it leaves with its caller's return address. A callee that returns comes back
+    // with $ra still holding the link value; anything else means this function is done too (its code after the delay
+    // slot may be data: Emendatus' block + 0x54F0 jumps over an id table).
+    let ret = LINK_RET.with(|c| c.replace(0));
+    if ret != 0 {
+        gen.emit_raw(&format!(
+            "if ({cond}) {{ {ds}RECOMP_LOOKUP(0x{target:08X}u)(rdram, ctx); if ((uint32_t)ctx->r[31] != 0x{ret:08X}u) return; }}"
+        ));
+    } else {
+        gen.emit_raw(&format!("if ({cond}) {{ {ds}RECOMP_LOOKUP(0x{target:08X}u)(rdram, ctx); }}"));
+    }
 }
 
 /// Emit a branch-likely instruction with its captured delay-slot C++ code.
@@ -2283,6 +2308,30 @@ mod tests {
         let rc = build_ra_ctx(&seq, start, start + 0x40);
         // jal at idx 0 -> 0x08804004 ; bltzal at idx 2 -> 0x0880400C
         assert_eq!(rc.link_returns, vec![0x08804004, 0x0880400C]);
+    }
+
+    #[test]
+    fn bal_to_own_mid_entry_is_a_call() {
+        // A coalesced owner that also calls out (no RA model) and reaches a merged sibling (a mid-entry) with `bal`:
+        // the sibling is a subroutine, so the bal must call it and continue, not branch into it.
+        let ops = vec![
+            MipsOp::Bgezal { rs: Reg::Gpr(0), target: 0x08804010, likely: false }, // 0x4000 bal sibling
+            MipsOp::Nop {},                                                            // 0x4004
+            MipsOp::Jal { target: 0x09000000 },                                         // 0x4008 external call
+            MipsOp::Jr { rs: Reg::Gpr(31) },                                            // 0x400C EXIT
+            MipsOp::Jr { rs: Reg::Gpr(31) },                                            // 0x4010 sibling: return
+        ];
+        let mut func = make_func(ops);
+        func.size = 0x14;
+        func.coalesced = true;
+        func.is_mid_entry_parent = true;
+        func.mid_entry_addrs = vec![0x08804010];
+        let mut gen = TestGenerator::new();
+        emit_function(&func, &mut gen, &ImportMap::new());
+        let out = gen.output.join("\n");
+        assert!(out.contains("RECOMP_LOOKUP(0x08804010u)(rdram, ctx); if ((uint32_t)ctx->r[31] != 0x08804004u) return; }"),
+                "bal to a mid-entry is a call that resumes when the callee returns to the link address:\n{out}");
+        assert!(!out.contains(">= 0) goto L_08804010"), "not a branch into the sibling:\n{out}");
     }
 
     #[test]

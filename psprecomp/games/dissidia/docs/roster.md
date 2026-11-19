@@ -380,6 +380,12 @@ automatically, the largest `obj/*` override size rounded up to 4 KiB; ceiling 18
 heap layout and the 16 MiB ceiling" below for what actually fits). With retail files nothing changes (the hooks pass
 through). The `.objx` is a separate, much smaller file (retail 1.56 MB) and obeys the same limit.
 
+A patched EBOOT can make the FILE heap itself bigger without touching the slot size: Gojo's memory expansion (in
+Emendatus' EBOOT) asks for 0x3F5800 (0x3E4000 + 0x11800) while `FUN_08B45310` still registers 0x264000, and the
+3,646,160 B `p_sev120.objx` (Aerith) was read 0x264000 below the heap end, 1.1 MB past it. `register_hook` makes the
+slot follow the heap it is registered with (heap end - heap - 0x11800, read from the heap object, when that is more
+than the slot size) and logs `[MODELS] slot ...: heap ... holds N B, staging slot raised`.
+
 #### Battle model pool (17 Oct regression: both fighters invisible, Ifrit drawn in place of both)
 
 With the Noctis files (`p_fiv100_1p.gmo` 3.72 MB) Quick Battle against Vaan (not Lightning, not Cloud) drew neither

@@ -149,6 +149,16 @@ Recompiler fixes this needed (the retail game's output does not change):
   changes the same way (0x08882FF4, entry 0x08883018 in the delay slot of its `jr ra`).
 - `bal` to the next instruction but one (reading the PC) is not a function entry for code loaded at run time, and no
   entry of such code is put in a delay slot.
+- a link branch whose target is a mid-entry of the same function (the start of a subroutine the sibling coalescer
+  merged into it, `PSPRECOMP_CROSS_MID`) is a call, not a branch: as a branch the subroutine's `jr ra` returned from
+  the whole function. Emendatus's timeline wrapper (plugin block + 0x3FD8, which the patch puts in front of the
+  game's timeline runner 0x08828E94) calls its helper at + 0x42C4 with `bal`; the helper's return ended the wrapper,
+  so no timeline of Aerith's ever ran (no "may move" flag, no hit, no recovery: she stood still and ignored the pad
+  and the AI, while her forced actions played).
+- after a link branch's callee comes back, the caller resumes only if `$ra` still holds the link address; otherwise
+  it returns too. `bal` is also used to jump over a table and read its address (Emendatus block + 0x54F0:
+  `bal 1f; nop; .word ids...; 1: ... (ra)`): that target leaves with its caller's return address and the code after
+  the delay slot is data. The interpreter does the same.
 - the prologue scan no longer starts a function in a branch's delay slot (`addiu sp, sp, -N` right after a branch).
   Such a split cut the delay slot off the branch at the end of the previous function: code a patch adds is not in the
   retail analysis, so the scan is what divides it into functions.

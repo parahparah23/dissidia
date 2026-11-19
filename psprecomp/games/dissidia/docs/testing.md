@@ -267,6 +267,14 @@ The picture-by-picture menu walk takes about 100 s to reach the fight. `--direct
 
 ## Finding a stat the HUD shows (BRV, HP...) in guest RAM, and what keeps a test fight alive
 
+**Which functions one run calls and another does not** (Aerith inert, 19 Nov): run both with
+`PSPRECOMP_FIRSTCALL=08800100:/tmp/fc_<run>.txt` and mark phases in the test script with `gate 08800100 <1..15>` (`gate 08800100 0`
+ends the last one; the byte is unused kernel space). The file gets `F <phase> <fn> prev=<last fn entered>` for each first call and
+`C <phase> <fn> <count>` per function when the phase ends; diff the `C` sets of an idle phase and an input phase across the two runs.
+`prev` is the last function entered, not the caller: for the caller use `PSPRECOMP_TRACE_CALLS=<fn>` (EBOOT functions only, first
+400 calls each) or `PSPRECOMP_MEM_WATCH=<addr>` on the field the function should have written. Test-script button names are upper
+case (`tap CIRCLE 100`); a lower-case name is ignored with `[TEST] unknown button`.
+
 Notes from the Jecht combo work (2026-11-11), for whoever needs a live value again.
 
 - The fighter struct (`actor`, the block `g_fighters` points at) holds only *base* stats at `+0x10A8..+0x10B8` (`450 <BRV base> <HP> 100 23`);

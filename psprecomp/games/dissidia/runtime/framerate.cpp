@@ -321,6 +321,9 @@ void parse_script(std::istream& in, std::vector<TestEvent>& ev) {
         } else if (cmd == "vsync") {   // vsync <0|1>: vertical sync off / on while running (psp_vsync_set), for pacing A/B in one run
             int v = 1; ss >> v;
             ev.push_back({t, 30, static_cast<uint32_t>(v), 0, "", rel});
+        } else if (cmd == "gate") {   // gate <hex guest addr> <byte>: write one guest byte (PSPRECOMP_FIRSTCALL phase gate: diff the functions two runs call in a phase)
+            std::string a; int v = 0; ss >> a >> v;
+            ev.push_back({t, 31, static_cast<uint32_t>(std::strtoul(a.c_str(), nullptr, 16)), static_cast<uint32_t>(v), "", rel});
         } else if (cmd == "poke") {   // poke <player|cpu> <hex offset into the fighter> <int value>: write one word of a fighter (finding which stat a number on the HUD comes from)
             std::string who = "player", off; long v = 0; ss >> who >> off >> v;
             ev.push_back({t, 15, static_cast<uint32_t>(std::strtoul(off.c_str(), nullptr, 16)), static_cast<uint32_t>(v), who, rel});
@@ -637,6 +640,7 @@ void testdrive_frame(uint8_t* rdram, recomp_context* ctx) {
             continue;
         }
         if (e.kind == 16) { psp_fx_lights_set(e.a != 0); continue; }
+        if (e.kind == 31) { g_ram[e.a & 0x07FFFFFFu] = static_cast<uint8_t>(e.b); continue; }
         if (e.kind == 17) {   // rstick: the debug socket's right-stick injection, held until the next rstick
             g_injected_ranalog.store(e.b, std::memory_order_relaxed);
             g_injected_ranalog_deadline_ms.store(e.b == 0x8080u ? 0 : INT64_MAX, std::memory_order_relaxed);

@@ -271,6 +271,10 @@ bool dissidia_xmod_interpret(uint32_t pc, uint32_t lo, uint32_t hi, uint8_t* m, 
         if (call) {
             c->pc = target;
             RECOMP_LOOKUP(target)(m, c);
+            // A link branch (`bal`) that jumps over a table to code reading it through $ra never comes back: its target
+            // leaves with the caller's return address. Resume only when the callee came back to the link address (as
+            // the recompiled code does, psp-emitter emit_link_branch).
+            if (o == 0x01 && (uint32_t)c->r[31] != pc + 8) return true;
             pc += 8;
             continue;
         }
