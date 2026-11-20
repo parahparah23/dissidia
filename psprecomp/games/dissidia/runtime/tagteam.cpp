@@ -6123,8 +6123,13 @@ bool partner_broken_panel_whole(uint32_t side) {
     return false;
 }
 FuncPtr g_orig_hudanim = nullptr;
+// debug: PSPRECOMP_TAGTEAM_HUDCALLLOG=1 logs every call of the side-panel HUD entries (animation start, side mode / flag, break word) with ra and the callee-saved registers
+void hudcall_log(const char* what, recomp_context* ctx) {
+    static const bool on = std::getenv("PSPRECOMP_TAGTEAM_HUDCALLLOG") != nullptr; if (!on || !g_bs) return;
+    std::fprintf(stderr, "[HUDCALL] t=%.2fs %s a0 %08X a1 %08X a2 %08X a3 %08X ra %08X s0 %08X s1 %08X s2 %08X s3 %08X\n", dissidia_battle_age() / 60.0f, what, static_cast<uint32_t>(ctx->r[4]), static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]), static_cast<uint32_t>(ctx->r[31]), static_cast<uint32_t>(ctx->r[16]), static_cast<uint32_t>(ctx->r[17]), static_cast<uint32_t>(ctx->r[18]), static_cast<uint32_t>(ctx->r[19]));
+}
 void hudanim_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram;
+    g_ram = rdram; hudcall_log("anim", ctx);
     const uint32_t hud = static_cast<uint32_t>(ctx->r[4]), type = static_cast<uint32_t>(ctx->r[5]);
     if ((type == 2u || type == 3u) && g_bs && g_nextra && g_hud && hud == g_hud && static_cast<uint32_t>(ctx->r[6]) == hud + 204u && !std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY")) {
         const uint32_t grp = hud + (type == 2u ? 120u : 36u);   // the broken side's group (the animation is read from the other side's: the bonus goes there)
@@ -6154,7 +6159,7 @@ uint32_t sidebrk_foreign_extra(recomp_context* ctx, uint32_t side) {
 // FUN_08889F70(side, kind) -> FUN_089DE568 -> FUN_089DFB68(group, kind): clears the group's flag byte +28+kind; kind 0 is called by the same break start / early end
 // (FUN_08AE1040 / 08AE1300) right before the steady BREAK call: an extra's handler copy is kept off the slot fighter's panel the same way.
 void sideflag_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram;
+    g_ram = rdram; hudcall_log("sideflag", ctx);
     static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
     if (static_cast<uint32_t>(ctx->r[5]) == 0u && !any) if (const uint32_t x = sidebrk_foreign_extra(ctx, static_cast<uint32_t>(ctx->r[4]))) {
         if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: panel flag 0 reset dropped: it is %s's break\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[4]), role_of(x));
@@ -6177,7 +6182,7 @@ uint32_t brkword_foreign_extra(uint32_t sub) {   // the extra owning handler cop
     return x != P ? x : 0u;
 }
 void brkshow_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram;
+    g_ram = rdram; hudcall_log("brkshow", ctx);
     static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
     const uint32_t sub = static_cast<uint32_t>(ctx->r[4]);
     if (!any) {
@@ -6190,7 +6195,7 @@ void brkshow_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_brkshow(rdram, ctx);
 }
 void brkhide_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram;
+    g_ram = rdram; hudcall_log("brkhide", ctx);
     static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
     const uint32_t sub = static_cast<uint32_t>(ctx->r[4]);
     if (!any) {
@@ -6201,7 +6206,7 @@ void brkhide_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_brkhide(rdram, ctx);
 }
 void sidebrk_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram;
+    g_ram = rdram; hudcall_log("sidemode", ctx);
     const uint32_t side = static_cast<uint32_t>(ctx->r[4]), kind = static_cast<uint32_t>(ctx->r[5]), on = static_cast<uint32_t>(ctx->r[6]) & 0xFFu;
     static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
     static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; g_sidebrk_by[0] = g_sidebrk_by[1] = 0; }
@@ -8204,6 +8209,8 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x20)) { wr(st + 0x14u, (rd(st + 0x14u) & 0xFFFF0000u) | (v & 0xFFFFu)); std::fprintf(stderr, "[SETBRV] %s %08X brv -> %u\n", role_of(f[i]), f[i], v); held = f[i]; } break; }
         }
     }
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_HUDGATE")) {   // debug (with PSPRECOMP_FIRSTCALL=0BFFF000:<file>): "<a>:<b>:<c>:<d>" FIRSTCALL phase 1 = battle age [a, b) s, phase 2 = [c, d) s
+        float a = 0, b = 0, c = 0, d = 0; if (std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_HUDGATE"), "%f:%f:%f:%f", &a, &b, &c, &d) == 4) { const float t = dissidia_battle_age() / 60.0f; g_ram[0x0BFFF000u & 0x07FFFFFFu] = (t >= a && t < b) ? 1 : (t >= c && t < d) ? 2 : 0; } }
     if (g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_XHSTATE")) {   // debug: "<partner|enemy2>:<s>:<state>": write that extra's damage handler copy state (+8) once at battle age s, its BRV 0
         static bool done = false; char who[16] = {}; float at = 0; unsigned v = 0;
         if (std::getenv("PSPRECOMP_TAGTEAM_XHSTATE_FC") && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_XHSTATE"), "%15[^:]:%f:%u", who, &at, &v) == 3) {   // FIRSTCALL gate (PSPRECOMP_FIRSTCALL=0BFFF000:<file>): phase 1 the second before, 2 the second after +1 s

@@ -3592,3 +3592,26 @@ Two causes, both found with `PSPRECOMP_TAGTEAM_EXBAT` + window screenshots every
 - **Not verified:** a naturally started burst (EX gauge + HP hit) on a device; a burst in multiplayer (two machines; the changes use battle state only); an extra bursting
   while another chase / entrance camera runs; the victim being a human-driven extra of a multiplayer battle (it already has its own slot 4 + index: the code reuses a slot
   that holds the block).
+## Partner BRV-0 state on the big panel (20 Nov, tree tthud; host-only, window shots; NOT fixed)
+RP6 log `rp6logs/rp6_1120_partner_hp.log`: every partner / enemy-partner `[XBRKST] ... state 2 -> 0` logs only the two OFF drops (`panel flag 0 reset dropped`, `steady BREAK off ... dropped`), never an ON line;
+t=269.80 `extraP ... state 0 -> 1 (BRV 0)` (HP attack that spent all BRV) and the user saw "BREAK animation and text on my BRV".
+- **The missing ON lines are expected.** The OFF calls come from `08AE137C` -> `08AE16AC` (state 1 entry, `CALLLOG` ra `08AE13F4`, a0 = the extra's handler) and from the state 2 -> 0 path (`08AE1300`
+  at state 0 entry, ra `08AE1334` / `08AE1348` / `08AE1350`: sideflag, sidemode, brkhide, all s0 = the handler copy): they run when a BRV-0 state ENDS, not a break. A break's ON (`08AE1040`, state 3
+  update) never ran for those extras (the log has no state 3 for extraP; extraE's 3/4 at 113.7 - 121.7 s is on the enemy side where it can be the panel's fighter, so its ON passes by design). So
+  `sidebrk_foreign_extra` / `g_sidebrk_by` are consistent: nothing to fix in the owner detection (s0 = handler at 08AE1040 / 08AE1300 / 08AE16AC, checked in the generated code).
+- **Reproduced on the host** (`_HPMATRIX=10089 _HPM_NODOWN=1 _HPM_SWEEP=2` = extraP's HP attack on slotC, menu-walk-less Quick Battle, `go3.sh`-style run, `AGESHOTS_WIN`, crop of the left big panel): at the
+  attack the extra's handler copy goes 0 -> 1 (19.10 s) -> 2 (20.77 s) -> 0 (21.53 s) with the same log pattern as the device (only the two OFF drops). In the window shots the player's BRV number
+  (1291, unchanged) gets a purple pulsing ghost reading "3000" (the partner's spent BRV) three times (19.2 - 19.5, 19.9 - 20.1, 20.5 - 20.8 s), i.e. the "BRV 0" feedback of the panel; the same pulse is
+  drawn for the slot fighter's own HP attack (`_HPM_SWEEP=0`, ghost "3000" on its own number) = retail behaviour. No BREAK word / steady break appears on the big panel in this case (the break hooks work).
+  Shots in `/tmp/tthud/{b2s,b6s,c0s,d5s}`.
+- **Where it does NOT come from (all ruled out with logs / shots):** `08889FB8` / `08889F70` / `08ADFC84` / `08ADFCC4` (no calls in the pulse window, `PSPRECOMP_TAGTEAM_HUDCALLLOG=1`), `089DE6EC`
+  (never called), the report channels (every `08AE3710` of the handler copy is an `extra-obj` drop), `08AE9AE0` (effect-controller search of `handler+48`; skipping it for the copy changed nothing),
+  hud struct / number-group words (unchanged during the pulse).
+- **What was found:** the pulse is a popup pool object (`08CE6F4C`-style pool of 124-byte slots, started by `FUN_089EB7D0(buf, 2)` for entries `0x0E / 0xB2` and `0x156 / 0x81` of the slot fighter's report
+  object list `+1520`, count `+1584`, from `FUN_08B15D70` (call sites ra `08B15E88` / `08B15F20`), entries pushed by `FUN_08AEDF5C` / `FUN_08AEDA5C` / `FUN_08ADDAD8` through `FUN_088BF4CC`). Dropping that
+  `089EB7D0` call for the partner's BRV-0 state (tried as a hook, `[HUDBREAK] ... BRV-0 popup ... dropped` at 19.07 / 23.07 / 26.57 s) did NOT remove the ghost in a verified run (the ghost then showed the
+  slot's own number): there is a second spawn path not found. The hook was removed again. Open: which function draws the ghost (candidates: the other `089EB7D0` callers `08ADD828` / `08AEBE38` / `08AECF30`, the
+  object update `089EB3E8`); the next step is `FUNC_TRACE` + `MEM_WATCH` on the pool slot flag (`+144` of the pool object, printed by `HUDGRPLOG`-style dumps) with the same env var count in both runs (heap
+  addresses move with the number of env vars; the harness schedule is not deterministic: the first attack came at 19.07 s in most runs and at 23.07 s in one).
+- **Debug switches added (diagnostics only):** `PSPRECOMP_TAGTEAM_HUDCALLLOG=1` (every side-panel HUD entry call with ra and s0..s3: `anim`, `sideflag`, `sidemode`, `brkshow`, `brkhide`),
+  `PSPRECOMP_TAGTEAM_HUDGATE=a:b:c:d` (FIRSTCALL phases by battle age).
