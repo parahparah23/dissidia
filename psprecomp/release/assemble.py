@@ -239,8 +239,12 @@ def main():
                     zi = zipfile.ZipInfo.from_file(p, os.path.join(base, os.path.relpath(p, out)))
                     zi.date_time = stamp
                     zi.compress_type = zipfile.ZIP_DEFLATED
-                    zi._compresslevel = 9   # (open() reads the level from the entry: 3.7-3.12 name)
-                    zi.compress_level = 9   # (3.13+ name)
+                    # open() reads the level from the entry: `compress_level` from 3.13, `_compresslevel` before (ZipInfo has
+                    # __slots__, so setting the other name raises AttributeError, e.g. on the CI runner's 3.10)
+                    if hasattr(zi, "compress_level"):
+                        zi.compress_level = 9
+                    else:
+                        zi._compresslevel = 9
                     with open(p, "rb") as src, z.open(zi, "w", force_zip64=True) as dst:
                         shutil.copyfileobj(src, dst, 1 << 20)
     else:
