@@ -928,7 +928,7 @@ GLuint ge_texture_bind(
 
     // Convert to RGBA8888
     std::vector<uint8_t> rgba;
-    if (!replaced) {
+    auto decode_original = [&]() {
     rgba.resize((size_t)width * height * 4);
 
     switch (fmt) {
@@ -963,6 +963,24 @@ GLuint ge_texture_bind(
         }
         break;
     }
+    };
+    // The button symbols follow the controller even where a texture pack (the HD upscales) supplies the sheet: the module redraws
+    // the game's own pixels, and its result wins; with nothing to draw (the PSP style) the pack's image stays.
+    if (replaced && fmt <= GE_TFMT_CLUT8 && masked_addr < PSP_MEM_SIZE) {
+        const PspTexEditKeyedFn keyed = psp_texpack_editor_keyed();
+        const PspTexEditFn edit = psp_texpack_editor();
+        bool edited = false;
+        if (keyed && edit && keyed(width, height)) {
+            decode_original();
+            const std::string pkey = psp_texpack_ppsspp_key(ppsspp_tex());
+            std::vector<uint8_t> ed;
+            int ew = 0, eh = 0;
+            if (edit(pkey, rgba.data(), width, height, ed, ew, eh)) { pack_px.swap(ed); pack_w = ew; pack_h = eh; edited = true; }
+        }
+        if (!edited) rgba.clear();
+    }
+    if (!replaced) {
+    decode_original();
     // A game module's redraw of this texture (button symbols in the controller's style), over the decoded pixels.
     if (fmt <= GE_TFMT_CLUT8 && masked_addr < PSP_MEM_SIZE) {
         const PspTexEditKeyedFn keyed = psp_texpack_editor_keyed();
