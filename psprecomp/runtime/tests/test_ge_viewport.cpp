@@ -7,6 +7,7 @@
 // only -- pure float/int math, no SDL/GL/scheduler deps.
 
 #include "psp_ge_draw.h"
+#include "psp_ge.h"
 
 #include <cmath>
 #include <cstdio>
@@ -136,7 +137,42 @@ static void test_reversed_z_range() {
     }
 }
 
+// Field-of-view setting: perspective focal scales change, aspect and everything else stay; orthographic is untouched.
+static void test_fov_offset() {
+    const float kPi = 3.14159265f;
+    auto persp = [&](float* p, float fovdeg, float asp) {
+        for (int i = 0; i < 16; ++i) p[i] = 0;
+        const float f = 1.0f / std::tan(fovdeg * 0.5f * kPi / 180.0f);
+        p[0] = f / asp; p[5] = f; p[10] = -1.1f; p[11] = -1.f; p[14] = -0.5f;
+    };
+    float p[16];
+    ge_fov_use_projection(true);
+    ge_set_fov_offset(0);
+    persp(p, 60.f, 480.f / 272.f);
+    const float p0 = p[0], p5 = p[5];
+    ge_apply_fov(p);
+    ASSERT_NEAR(p[0], p0, "fov 0: x unchanged"); ASSERT_NEAR(p[5], p5, "fov 0: y unchanged");
+    ge_set_fov_offset(20);
+    ge_apply_fov(p);
+    ASSERT_NEAR(2.0f * std::atan(1.0f / p[5]) * 180.f / kPi, 80.0f, "fov +20: 60 -> 80 deg");
+    ASSERT_NEAR(p[5] / p[0], 480.f / 272.f, "aspect preserved");
+    ASSERT_NEAR(p[11], -1.f, "w row untouched");
+    persp(p, 60.f, 1.f);
+    ge_set_fov_offset(-20);
+    ge_apply_fov(p);
+    ASSERT_NEAR(2.0f * std::atan(1.0f / p[5]) * 180.f / kPi, 40.0f, "fov -20: 60 -> 40 deg");
+    float o[16] = {0}; o[0] = 0.01f; o[5] = 0.02f; o[10] = -0.001f; o[15] = 1.f;   // orthographic
+    ge_apply_fov(o);
+    ASSERT_NEAR(o[0], 0.01f, "ortho x unchanged"); ASSERT_NEAR(o[5], 0.02f, "ortho y unchanged");
+    ge_set_fov_offset(1000);
+    ASSERT_EQ(ge_fov_offset(), 40, "offset clamped high");
+    ge_set_fov_offset(-1000);
+    ASSERT_EQ(ge_fov_offset(), -20, "offset clamped low");
+    ge_set_fov_offset(0);
+}
+
 int main() {
+    test_fov_offset();
     test_fullscreen_default_matches_hardcoded();
     test_fullscreen_depth_range();
     test_negative_yscale_uses_abs();
