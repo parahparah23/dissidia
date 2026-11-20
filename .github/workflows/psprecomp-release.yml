@@ -89,6 +89,31 @@ jobs:
           name: release-files-linux
           path: psprecomp/dist/*
 
+  install-test:
+    # Installs the just-built Linux release from a real Dissidia 012 ISO and plays a Quick Battle, as a desktop install and as an
+    # Android-style install (Python only through a loader): release/test_install.py. Needs the game files, so it runs on the
+    # maintainer's self-hosted runner (label dissidia-install; ISO paths in the runner's .env). Fork PRs never reach this runner:
+    # only this workflow (tag pushes and manual runs) uses the label, and outside contributors' workflows need approval.
+    needs: [build-linux]
+    runs-on: [dissidia-install]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files-linux
+          path: psprecomp/dist
+      - name: Install and play
+        run: python3 release/test_install.py --setup dist/DissidiaRecomp-Setup-*-linux-x86_64
+      - name: Notify on failure
+        if: failure()
+        working-directory: .
+        run: |
+          CFG="$HOME/.config/gotify/cli.json"
+          [ -f "$CFG" ] || exit 0
+          curl -s -o /dev/null -X POST "$(jq -r .url "$CFG")/message" -H "X-Gotify-Key: $(jq -r .token "$CFG")" \
+            -F "title=Dissidia $VERSION install test FAILED" -F "message=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" -F "priority=8"
+
   build-windows:
     runs-on: ubuntu-22.04
     needs: recompiler-windows
@@ -216,7 +241,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [build-linux, build-windows, android-app, manifest]
+    needs: [build-linux, build-windows, android-app, manifest, install-test]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

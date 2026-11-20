@@ -1,5 +1,6 @@
 #include "proc.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -91,6 +92,28 @@ static std::vector<std::string> android_wrap(const std::vector<std::string>& arg
 }
 #endif
 
+#ifndef _WIN32
+// The command as exec'd. Android: android_wrap. Elsewhere unchanged, except for the release install test
+// (release/test_install.py): PSPRECOMP_TEST_PY_LOADER=<ld.so> with a release whose python/python is not executable makes
+// the desktop run Python the way Android does (only through a loader, which child Pythons find in PSPRECOMP_PY_LOADER),
+// so a tool that starts sys.executable directly fails the test instead of the player's Android install.
+static std::vector<std::string> wrap_argv(const std::vector<std::string>& argv) {
+#ifdef __ANDROID__
+    return android_wrap(argv);
+#else
+    const char* loader = std::getenv("PSPRECOMP_TEST_PY_LOADER");
+    const std::string& a0 = argv[0];
+    if (loader && *loader && a0.size() > 14 && a0.compare(a0.size() - 14, 14, "/python/python") == 0) {
+        std::vector<std::string> out = argv;
+        out.insert(out.begin(), loader);
+        setenv("PSPRECOMP_PY_LOADER", loader, 1);
+        return out;
+    }
+    return argv;
+#endif
+}
+#endif
+
 bool Proc::start(const std::vector<std::string>& argv, const EnvList& env, const std::string& cwd) {
     if (argv.empty()) { error_ = "empty command"; return false; }
     if (impl_) { kill(); if (reader_.joinable()) reader_.join(); delete impl_; impl_ = nullptr; }
@@ -136,14 +159,9 @@ bool Proc::start(const std::vector<std::string>& argv, const EnvList& env, const
         int nul = open("/dev/null", O_RDONLY); if (nul >= 0) { dup2(nul, 0); close(nul); }
         if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
         for (auto& kv : env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
-#ifdef __ANDROID__
-        std::vector<std::string> wrapped = android_wrap(argv);
+        std::vector<std::string> wrapped = wrap_argv(argv);
         std::vector<char*> av;
         for (auto& a : wrapped) av.push_back(const_cast<char*>(a.c_str()));
-#else
-        std::vector<char*> av;
-        for (auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
-#endif
         av.push_back(nullptr);
         execvp(av[0], av.data());
         std::fprintf(stderr, "cannot run %s: %s\n", av[0], std::strerror(errno));
@@ -260,14 +278,9 @@ bool spawn_detached(const std::vector<std::string>& argv, const EnvList& env, co
             if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
         }
         for (auto& kv : env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
-#ifdef __ANDROID__
-        std::vector<std::string> wrapped = android_wrap(argv);
+        std::vector<std::string> wrapped = wrap_argv(argv);
         std::vector<char*> av;
         for (auto& a : wrapped) av.push_back(const_cast<char*>(a.c_str()));
-#else
-        std::vector<char*> av;
-        for (auto& a : argv) av.push_back(const_cast<char*>(a.c_str()));
-#endif
         av.push_back(nullptr);
         execvp(av[0], av.data());
         _exit(127);
