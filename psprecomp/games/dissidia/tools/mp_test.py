@@ -15,8 +15,8 @@ Examples:
 Each work folder needs a save in ms0/ (copied for the run, the folder's own is not touched) and a runtime built with
 games/dissidia/runtime/netplay.cpp. The copies get a private settings file (30 fps, LAN), debug ports 9311 / 9312 and
 PSPRECOMP_NET_TRACE=1. Rendering goes to the GPU without a window (SDL offscreen + the NVIDIA EGL vendor file when present).
-Prints, per copy: frames, frames the battle waited for input ("stalled"), the run-ahead (lead = local input delay) and
-the desync check's summary. Exit 1 when the walk fails or the desync check found a mismatch (unless --expect-desync)."""
+Prints, per copy: the last lock-step statistics line (frame, checks that agreed, frames waited for the other copy) and
+a check mismatch if there was one. Exit 1 when the walk fails or the desync check found a mismatch (unless --expect-desync)."""
 import argparse
 import os
 import re
@@ -26,7 +26,6 @@ import socket
 import subprocess
 import sys
 import time
-from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BTN = {'up': 0x10, 'down': 0x40, 'cross': 0x4000, 'circle': 0x2000, 'right': 0x20, 'left': 0x80}
@@ -143,7 +142,7 @@ def walk(a, b):
         c.press('cross', gap=0.2)                          # Enter Battle
     end = time.time() + 90
     while time.time() < end:                               # "Next" on the opponent pages until the lock-step runs
-        busy = [c for c in both if 'lock-step battle: input delay' not in c.text()]
+        busy = [c for c in both if not any(m in c.text() for m in IN_BATTLE)]
         if not busy:
             return
         time.sleep(3)
@@ -162,23 +161,25 @@ def exercise(a, b, secs, moves=MOVES):
         time.sleep(0.7)
 
 
+# log lines that say the lock-step battle runs: plain battles link the two copies' pads, a tag battle prints its network delay
+IN_BATTLE = ('[NETLINK] linked with', '[NETPLAY] tag lock-step battle: network delay')
+
+
+def desynced(c):
+    t = c.text()
+    return 'the battles differ' in t or 'DESYNC' in t
+
+
 def stats(c):
-    rows = []
+    last = None
     for l in c.text().splitlines():
-        m = re.match(r'\[NETLS\] f=(\d+) rc=(\d+) frame=(\d+) seq=(\d+) lead=(-?\d+)', l)
-        if m and m.group(2) in ('0', '1'):
-            rows.append(tuple(int(x) for x in m.groups()))
-    rows = [r for r in rows if r[2] > 60]   # past the first 2 s
-    if not rows:
-        return '%s: no lock-step frames' % c.side
-    stalls = sum(1 for r in rows if r[1] == 1)
-    leads = Counter(r[4] for r in rows)
-    sync = [l for l in c.text().splitlines() if l.startswith('[NETSYNC]')]
-    summ = [l for l in sync if 'so far' in l or 'battle over' in l]
-    first = [l for l in sync if 'DESYNC' in l]
-    return '%s: update calls %d, stalled %d (%.1f%%), lead %s\n   %s%s' % (
-        c.side, len(rows), stalls, 100.0 * stalls / len(rows), ' '.join('%d:%d' % kv for kv in sorted(leads.items())),
-        summ[-1] if summ else '(no desync summary yet)', ('\n   ' + first[0]) if first else '')
+        m = re.match(r'\[NETLINK\] (?:watching )?frame (\d+): (\d+) checks agreed, (\d+) frames waited', l)
+        if m:
+            last = tuple(int(x) for x in m.groups())
+    if not last:
+        return '%s: no lock-step statistics yet (one line per 900 frames)' % c.side
+    bad = [l for l in c.text().splitlines() if 'the battles differ' in l or 'DESYNC' in l]
+    return '%s: frame %d, %d checks agreed, %d frames waited%s' % (c.side, last[0], last[1], last[2], ('\n   ' + bad[0]) if bad else '')
 
 
 def main(argv):
@@ -209,7 +210,7 @@ def main(argv):
         time.sleep(11)   # one more desync summary
         for c in (A, B):
             print(stats(c))
-        desync = any('DESYNC' in c.text() for c in (A, B))
+        desync = any(desynced(c) for c in (A, B))
         return 0 if desync == a.expect_desync else 1
     finally:
         if not a.keep:

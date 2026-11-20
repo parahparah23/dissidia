@@ -2216,6 +2216,32 @@ bool xas_spawn(int idx, bool forced = false) {
     g_ctx->r[29] = static_cast<int32_t>(sp0);
     return true;
 }
+// The destructor (FIGHTER_DTOR) unlinks the actor from the fighter list (head world+20, tail world+24, link +0x1114) by walking from the head until a node whose
+// link is the actor: an actor that is not on the list (or a list that is cut / cyclic before it) makes that walk run for ever (the hang at the first KO of a 2-player
+// tag battle). So the list is checked first (bounded walk, no other side effect) and an actor missing from it is appended at the tail, where the destructor takes it off again.
+static void xas_list_ready(uint32_t a) {
+    const uint32_t world = rd(0x089D4958u);
+    if (!ok(world, 0x40)) return;
+    uint32_t last = 0; bool found = false, bad = false; int n = 0;
+    for (uint32_t p = rd(world + 20u); p; p = rd(p + 0x1114u), n++) {
+        if (!ok(p, 0x12D0) || n >= 64) { bad = true; break; }
+        if (p == a) { found = true; break; }
+        last = p;
+    }
+    if (found) return;
+    if (g_log) std::fprintf(stderr, "[XAS] assist %08X is not on the fighter list (%d nodes walked%s, head %08X tail %08X): linked at the tail for the destructor\n", a, n, bad ? ", list broken" : "", rd(world + 20u), rd(world + 24u));
+    if (bad) { // a broken list: rebuild it from the nodes that were walked, then the assist
+        std::vector<uint32_t> v; int m = 0;
+        for (uint32_t p = rd(world + 20u); p && ok(p, 0x12D0) && m < 64 && std::find(v.begin(), v.end(), p) == v.end(); p = rd(p + 0x1114u), m++) v.push_back(p);
+        v.push_back(a);
+        for (size_t i = 0; i < v.size(); i++) wr(v[i] + 0x1114u, i + 1 < v.size() ? v[i + 1] : 0u);
+        wr(world + 20u, v.front()); wr(world + 24u, a);
+        return;
+    }
+    wr(a + 0x1114u, 0u);
+    if (last) wr(last + 0x1114u, a); else wr(world + 20u, a);
+    wr(world + 24u, a);
+}
 void xas_release(uint32_t extra, const char* why) {
     auto it = g_xas.find(extra); if (it == g_xas.end()) return;
     XAs x = it->second; g_xas.erase(it);
@@ -2223,6 +2249,7 @@ void xas_release(uint32_t extra, const char* why) {
     if (ok(extra, 0x12D0) && rd(extra + 0x1108u) == x.assist) wr(extra + 0x1108u, 0);
     if (ok(x.assist, 0x12D0)) {
         for (const auto& u : x.undo) wr(u.first, u.second);   // (a not yet ready assist: its registrations go back first)
+        xas_list_ready(x.assist);
         g_rebuild_dtor = true; call(FIGHTER_DTOR, x.assist, 0); g_rebuild_dtor = false;
         g_xas_dead.push_back({x.assist, x.ctl, x.mgr, dissidia_battle_age(), x.fid});
     }
@@ -3116,6 +3143,8 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         if (!set && std::getenv("PSPRECOMP_TAGTEAM_STATDUMP") && dissidia_battle_age() / 60.0f >= at - 1.0f) { static bool d = false; if (!d) { d = true; const uint32_t a = srd(g_bs + 56u + 4u * ((!std::strcmp(who, "human")) ? hs : 1u - hs)); const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[STATDUMP] actor %08X status %08X:", a, st); for (uint32_t o = 0; o < 0x60; o += 4) std::fprintf(stderr, " +%02X=%X", o, rd(st + o)); std::fprintf(stderr, "\n[STATDUMP] actor words +10A0..:"); for (uint32_t o = 0x10A0; o < 0x10D4; o += 4) std::fprintf(stderr, " %X=%X", o, rd(a + o)); std::fprintf(stderr, "\n"); } }
         if (vic && owner == vic) { const uint32_t st = rd(vic + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0x14u, rd(st + 0x14u) & 0xFFFF0000u); static int lasthp = -1; const int h = static_cast<int32_t>(rd(st + 0xCu)); if (h != lasthp) { std::fprintf(stderr, "[TAGTEAM] t=%.2fs NATKO victim live HP %d script %d\n", dissidia_battle_age() / 60.0f, h, static_cast<int16_t>(rd(vic + 0x180u) & 0xFFFF)); lasthp = h; } } }
     }
+    // Lock-step: only with KOLIST_NAT and side-based names (slot0 / slot1 / extra0 / extra1). HP 0 on a slot fighter without _NAT reaches the retail KO chain, whose finish step runs the
+    // LOCAL fighter's win / lose script per machine (two machines KO'd 'their own' fighter at the same age in a lock-step run): a split caused by the aid, not a per-machine KO detection.
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_KOLIST")) {   // debug: "<who>:<s>,<who>:<s>,...": HP 0 (status +0xC = 0) on that fighter at each battle age; who = human, cpu, enemy2, partner (again in each battle)
         static std::vector<std::pair<std::string, float>> list; static size_t next = 0; static uint32_t bs_seen = 0; static float last_age = 1e9f;
         const float age_now = dissidia_battle_age(); const bool restarted = age_now < last_age; last_age = age_now;

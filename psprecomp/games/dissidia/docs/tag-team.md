@@ -3336,3 +3336,33 @@ User: "When the CPU assist is called, can we have them use their normal assist m
 - **Not verified**: a natural (hit) break of an extra after the fix (the idle quick-battle CPUs never attacked Terra in 4 tries on this host); the lock-on case (the enemy
   panel showing extraE, whose break then goes through by design); anything on a device.
 - Side note: `partner_break_report` compares `dissidia_battle_age() - kv.second < 10.f` in FRAMES (0.17 s), its comment says 10 s; not changed here.
+
+## Own assists for extras: the release at a KO no longer hangs (20 Nov, tree ttfa; host-only, two headless copies on one host)
+**Bug:** a 2-player tag battle with CPU partners (default settings, extras' own assists on) hung on both machines at the first KO of a slot fighter: `[XAS] ... assist ... released (its master is down)`, then
+the GE frames stopped and a guest thread spun at 100 % in `FIGHTER_DTOR` (`0x08B2EDC4`). Cause (read from the generated code, `batch_0117.cpp` at `L_08B2EECC`): the destructor takes the actor off the
+**fighter list** (head `world+20`, tail `world+24`, link `actor+0x1114`) by walking from the head until a node whose link is the actor. An assist that is not on that list (here: after the slot-swap rebuild
+of the KO'd slot; the list is 7 nodes and does not contain it) never ends the walk: it runs past the tail (reads of address 0 + 0x1114) for ever. `PSPRECOMP_TAGTEAM_XASSIST=0` avoided it (no assist, no release).
+SP releases of the same kind had worked only because the assist was still on the list there (no KO'd body swapped with a mate extra's body).
+**Fix** (`tagteam.cpp`, `xas_list_ready()`, called by `xas_release()` right before `FIGHTER_DTOR(assist, 0)`): a bounded walk (64 nodes, every node checked with `ok()`); an assist that is on the list is left
+alone; one that is not is appended at the tail (`+0x1114 = 0`, tail node link, `world+24`) so the destructor takes it off again (the list ends as it was); a broken / cyclic list is rebuilt from its distinct
+nodes plus the assist. Log line `[XAS] assist X is not on the fighter list (N nodes walked ...): linked at the tail for the destructor`. Nothing but guest memory words and the same frame / the same state
+on both machines is read, so it is lock-step safe (the release runs at the same lock-step frame on both: `xas_frame` at the scene tick, age based).
+**Results** (`~/dissidia/tt/ttfa_mp`, rig = the test agent's `tsmp/rig`, `runall.sh TAG SECS "env"`; A and B boot the same save, `save.bin`):
+- `keep1` (t1, default settings, 3 KOs: slot 0 at 204.8 s, slot 0 at 288.4 s, final): the release that used to hang printed the repair line on both machines and went on; the second and third KO released
+  without repair. Hashes equal for 232 `[TTSYNC]` lines (to frame 6930), then **A and B diverged at the call-in of Vaan (frame 6960): `character record for char 30: his own save record ... (level 58)` on A,
+  `(level 57)` on B** (the two test saves had drifted apart: A's save had been rewritten by an earlier run), so Vaan's HP differs (6012 / 5951). NOT a bug of this fix. It is a property of the call-in: a
+  member's record is read from the LOCAL save, so two players with different levels desync a call-in (not changed here; every a2-a6 run used equal saves).
+- `keep3` (t3, same save on both, `KOLIST=slot0:20,slot1:50,slot0:80 + KOLIST_NAT`, default settings): KOs of slot 0 (21.6 s, rebuilt, assist released WITH the repair line), slot 1 (51.6 s, released), final
+  KO at 79.6 s, tally written, both copies at the results flow: **86 equal `[TTSYNC]` lines** (frames 0-2550); the hashes differ only from frame 2580 on = the finish presentation (79.6 s + 5.8 s), where the
+  retail finish step runs the local fighter's win / lose script on each machine (known, see the KOLIST remark below; nothing is played after it). `keep2` (t2, free play, 2 KOs + final): 141 equal lines, same end.
+- SP (`~/dissidia/tt/exg/fa/sp1`, `party_battle_walk.txt`, `seq10.env`, 3 releases at 11.6 / 22.6 s, call-in assists made again at 17.0 / 29.0 s): every release clean, no hang, no repair needed (the assists were on the list).
+  `[MODELS] ... FAILED` allocations (60840 B) are in that log too: not from this change (list words only), not investigated here (another session works on memory).
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttfa_mp/reg1`).
+**KOLIST (finding 2):** the divergence of `a5` is the test aid, not a per-machine KO detection. `PSPRECOMP_TAGTEAM_KOLIST` puts HP 0 on the fighter; without `PSPRECOMP_TAGTEAM_KOLIST_NAT` a slot fighter
+then goes through the retail KO chain and the finish step runs the LOCAL fighter's win / lose script per machine, so the two machines KO'd "their own" fighter. Use `KOLIST_NAT=1` with the side-based names
+(`slot0 slot1 extra0 extra1`) in lock-step runs (comment added at the code; `human` / `cpu` / `partner` / `enemy2` are per-machine names too).
+**`mp_test.py` (finding 3):** waits for `[NETLINK] linked with` (plain battle) or `[NETPLAY] tag lock-step battle: network delay` (tag battle) instead of the removed `lock-step battle: input delay`; the
+statistics are read from the `[NETLINK] frame N: X checks agreed, Y frames waited` lines (the `[NETLS]` / `[NETSYNC]` lines no longer exist); a desync = `the battles differ` / `DESYNC` in a log. Only the syntax
+was checked (`ast.parse`); the script was not run against two copies (the plain-battle rig is not part of this task).
+**Not verified:** why the assist is off the list after the slot-swap rebuild (the repair makes it irrelevant; only the walk was added, the rebuild's list "put back" was not changed); a 2-player run
+with different saves; real LAN / two machines; anything on a device.
