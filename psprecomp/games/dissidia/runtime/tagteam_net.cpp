@@ -86,7 +86,7 @@ Ring g_local;
 std::map<Mac, Ring> g_remote;
 Stream g_streams[MAX_STREAMS];
 uint32_t g_wait_since = 0; bool g_wait_logged = false;
-uint32_t g_lowhp_slot = 0, g_lowhp_frame = 0; bool g_lowhp_done = false;
+struct LowHp { uint32_t slot, frame; bool done; }; std::vector<LowHp> g_lowhp;   // PSPRECOMP_TTNET_LOWHP=<slot>:<frame>[,<slot>:<frame>...]
 
 bool driver_at(int s, uint32_t f, Mac* m) {   // the stream's driver at frame f (false = nobody: the AI or no input)
     const Sched* cur = nullptr;
@@ -109,7 +109,7 @@ uint32_t guest_call(recomp_context* ctx, FuncPtr f, uint32_t a0, uint32_t a1 = 0
 
 void reset(uint32_t obj) {
     g_running = true; g_obj = obj; g_F = rd(obj + OFF_FRAME); g_seq = g_F; g_waits = 0; g_delivered = 0; g_wait_since = 0; g_wait_logged = false;
-    g_local = Ring{}; g_remote.clear(); g_lowhp_done = false;
+    g_local = Ring{}; g_remote.clear(); for (LowHp& l : g_lowhp) l.done = false;
     for (int k = 0; k < 2; k++) { g_streams[k].s.clear(); g_streams[k].last = 0; }   // the extras' pads (2+) are registered by tagteam.cpp when they are made
     for (int k = 2; k < MAX_STREAMS; k++) if (g_streams[k].gen != dissidia_tagteam_battle_gen()) { g_streams[k].s.clear(); g_streams[k].pad = g_streams[k].ctrl = 0; g_streams[k].last = 0; }
     psp_adhoc_local_mac(g_me.data());
@@ -222,10 +222,10 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         }
         std::fprintf(stderr, "[TTSYNC] frame %u n %d hash %08X%s\n", g_F, n, h, line.c_str());
     }
-    if (g_lowhp_frame && !g_lowhp_done && g_F >= g_lowhp_frame) {
-        g_lowhp_done = true;
-        const uint32_t bs = rd(BATTLE_PTR), a = ok(bs, 0x100) ? rd(bs + 56 + 4 * g_lowhp_slot) : 0, st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0;
-        if (ok(st, 0x40)) { wr(st + 0xCu, 1u); std::fprintf(stderr, "[TTNET] LOWHP: slot %u fighter %08X live HP -> 1 at lock-step frame %u\n", g_lowhp_slot, a, g_F); }
+    for (LowHp& l : g_lowhp) if (!l.done && g_F >= l.frame) {
+        l.done = true;
+        const uint32_t bs = rd(BATTLE_PTR), a = ok(bs, 0x100) ? rd(bs + 56 + 4 * l.slot) : 0, st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0;
+        if (ok(st, 0x40)) { wr(st + 0xCu, 1u); std::fprintf(stderr, "[TTNET] LOWHP: slot %u fighter %08X live HP -> 1 at lock-step frame %u\n", l.slot, a, g_F); }
     }
     g_F++; g_delivered++;
     wr(obj + OFF_FRAME, g_F);
@@ -294,7 +294,7 @@ void dissidia_ttnet_install(uint8_t* rdram) {
     g_log = std::getenv("PSPRECOMP_TTLOCK_LOG") != nullptr;
     g_padtest = std::getenv("PSPRECOMP_TTLOCK_PADTEST") != nullptr;
     g_lat = std::getenv("PSPRECOMP_TTLOCK_LAT") != nullptr;
-    if (const char* e = std::getenv("PSPRECOMP_TTNET_LOWHP")) std::sscanf(e, "%u:%u", &g_lowhp_slot, &g_lowhp_frame);
+    if (const char* e = std::getenv("PSPRECOMP_TTNET_LOWHP")) { for (const char* q = e; q && *q;) { unsigned sl = 0, fr = 0; if (std::sscanf(q, "%u:%u", &sl, &fr) == 2) g_lowhp.push_back({sl, fr, false}); q = std::strchr(q, ','); if (q) q++; } }
     g_orig_dispatch = psp_dispatch_probe_lookup(NET_DISPATCH);
     g_orig_pad_update = psp_dispatch_probe_lookup(PAD_UPDATE);
     g_orig_ctrl_all = psp_dispatch_probe_lookup(CTRL_UPDATE_ALL); g_ctrl_update = psp_dispatch_probe_lookup(CTRL_UPDATE);

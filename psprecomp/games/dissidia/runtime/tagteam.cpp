@@ -17,6 +17,7 @@
 #include "hle/psp_hle_io.h"
 #include "hle/psp_hle_adhoc.h"
 #include <cstdint>
+#include <chrono>
 #if !defined(__ANDROID__)
 #include <execinfo.h>
 #endif
@@ -225,7 +226,9 @@ std::vector<NetPlayer> group_players() {
     for (int i = 0; i < n && i < 16; i++) { NetPlayer p; if (parse_player(d[i], lens[i], p)) { std::memcpy(p.mac, macs[i], 6); v.push_back(p); } }
     return v;
 }
+void orec_test_level();
 void mp_sync_mode() {
+    orec_test_level();
     const bool local = g_enabled || g_menu_mode;
     gb_read_local();
     uint8_t d[24];
@@ -679,6 +682,7 @@ void group_rows_dump(const char* tag, int charId) {   // debug (PSPRECOMP_TAGTEA
     if (ok(base, 0x3000)) for (int r = 0; r < 2; r++) { std::fprintf(stderr, "[GROWS]  rec %d cnt %d:", r, g_ram[(base + 10208u + 8u + 104u * r + 100u) & 0x07FFFFFFu]); for (int i = 0; i < 5; i++) { const uint32_t row = base + 10216u + 104u * r + 20u * i; std::fprintf(stderr, " [c%u L%u f%02X]", g_ram[row & 0x07FFFFFFu], g_ram[(row + 1) & 0x07FFFFFFu], g_ram[(row + 3) & 0x07FFFFFFu]); } std::fprintf(stderr, "\n"); }
 }
 bool comms_battle();
+void orec_begin_battle(); void orec_test_level();
 // ---- enemy members: the CPU record of THEIR matchup (19 Nov, ttfb) ----
 // Retail's group battle makes the CPU record of a round in FUN_0891CFC4 (round set-up interpreter over the group struct *(0x089D8508): per fighter a node
 // base + 104 + 744 * i, commands of 0x20 bytes: halfword type at +0, arguments at +0x10; type 0 = a player's character, type 5 = a CPU character).
@@ -781,6 +785,7 @@ bool make_comms_cpu_record(uint32_t G, int charId) {
     return true;
 }
 bool make_sp_cpu_record(uint32_t G, int charId);   // below (single player CPU rows)
+bool owner_record(uint32_t G, int ch, const uint8_t** out, int* who);   // below (lock-step tag battle: the party owner's save record of a member)
 uint32_t record_for(uint32_t G, int newChar) {
     const int oldChar = g_ram[G & 0x07FFFFFFu];
     group_rows_dump("record_for", newChar);
@@ -794,6 +799,15 @@ uint32_t record_for(uint32_t G, int newChar) {
     // Best: the character's own save record (the save keeps one 0x778-byte record per character from 0x08BAFC90, laid out like the first 0x778 bytes of the
     // side record: id, level, loadout sets, ability list): the member fights with his own level, equipment and abilities. Found by its id byte.
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOSAVEREC")) {
+        if (const uint8_t* ob = nullptr; comms_battle()) { int who = -1;
+            if (owner_record(G, newChar, &ob, &who)) {   // lock-step: the party OWNER's record (his save, sent before the battle), the same bytes on every machine
+                std::memcpy(r, ob, 0x778u);
+                uint32_t h = 2166136261u; for (uint32_t o = 0; o < 0x778u; o++) h = (h ^ ob[o]) * 16777619u;
+                std::fprintf(stderr, "[TAGTEAM] character record for char %d: the owner's save record (side %d, level %u, hash %08X)\n", newChar, who, ob[1], h);
+                return g_rec_scratch;
+            }
+            std::fprintf(stderr, "[TAGTEAM] character record for char %d: NO owner record, falling back to this machine's save (a lock-step peer may differ)\n", newChar);
+        }
         constexpr uint32_t kSaveChars = 0x08BAFC90u, kSaveStride = 0x778u;
         const bool sane = g_ram[kSaveChars & 0x07FFFFFFu] == 1;   // the first record is character 1
         for (uint32_t i = 0; sane && i < 48; i++) {
@@ -1023,6 +1037,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, "[TTCPU] battle setup: %d player(s):", static_cast<int>(g_snap.size()));
         for (const NetPlayer& p : g_snap) { std::fprintf(stderr, " [%s%s party %d #%u:", p.local ? "me" : "peer", p.host ? " host" : "", p.party, p.serial); for (int i = 0; i < p.n; i++) std::fprintf(stderr, " %d%s%s", p.regs[i], (p.own_mask >> i) & 1 ? "o" : "", (p.cpu_mask >> i) & 1 ? "c" : ""); std::fprintf(stderr, "]"); }
         std::fprintf(stderr, " mode %02X\n", host_mode_byte());
+        orec_begin_battle();
     }
     if (!ok(bs, 0x2800)) return;
     const uint32_t a0 = rd(bs + 56), a1 = rd(bs + 60), mode = rd(bs + 76), human = rd(bs + 84);
@@ -1647,6 +1662,51 @@ int stage_index(int party, const TagEntry* l, int n) {
     const int sc = ok(stage, 0x12D0) ? actor_char(stage) : -1;
     for (int i = 0; i < n; i++) if (l[i].charId == sc) return i;
     return -1;
+}
+
+// ---- Owner records: every character record of a lock-step tag battle comes from the party OWNER's save (docs "Owner records") ----
+// A call-in / rebuild of a party member used to read his record from the LOCAL save of each machine (level, loadout, ability list, 0x778 bytes at
+// 0x08BAFC90 + 0x778 * i), so two players with different saves desynced at the first call-in. RETAIL already sends every registered member's record
+// before a Communications battle: the lobby's PTP exchange (port 0x64) gives the host each player's blocks of 5448 bytes (one per registered row, the
+// record = the first 0x778 bytes, taken from the owner's save) and the host sends everybody ONE 56284-byte table, which the game keeps at
+// [0x089D7F38]: header 0x70C bytes (the party commands), then 10 blocks of 5448 bytes, party A's rows 0-4 then party B's rows 5-9, in the order
+// column's order. The table is identical on every machine, so the member's record is taken from there (copied at the battle setup: the buffer is
+// the game's and may go away). PSPRECOMP_TTREC_OFF=1: old behaviour (this machine's save). Log: [TTREC].
+// Test aid: PSPRECOMP_TTREC_TESTLEVEL=<nick>:<char>:<level>[,..] sets that level in THIS machine's save record while in the group lobby (before the
+// exchange), nick = PSPRECOMP_ADHOC_NICK: two players with different saves.
+constexpr uint32_t kGrpDataPtr = 0x089D7F38u, kGrpBlk0 = 0x70Cu, kGrpBlk = 5448u, kRecSave = 0x08BAFC90u, kRecStride = 0x778u;
+std::map<int, std::vector<uint8_t>> g_orec[2];   // side -> character -> the owner's record (0x778 bytes) as the table had it at the battle setup
+void orec_test_level() {   // test aid, called from mp_sync_mode while in a group
+    static const char* t = std::getenv("PSPRECOMP_TTREC_TESTLEVEL"); const char* nick = std::getenv("PSPRECOMP_ADHOC_NICK");
+    if (!t || !nick || !g_ram || g_ram[kRecSave & 0x07FFFFFFu] != 1) return;
+    std::string spec = t; size_t p = 0;
+    while (p < spec.size()) { size_t q = spec.find(',', p); if (q == std::string::npos) q = spec.size(); char nk[32] = {}; int c = 0, lv = 0;
+        if (std::sscanf(spec.substr(p, q - p).c_str(), "%31[^:]:%d:%d", nk, &c, &lv) == 3 && std::strcmp(nk, nick) == 0)
+            for (uint32_t i = 0; i < 48; i++) { const uint32_t r = kRecSave + i * kRecStride; if (g_ram[r & 0x07FFFFFFu] == c && g_ram[(r + 1) & 0x07FFFFFFu] != lv) { static int w = 0; if (w++ < 4) std::fprintf(stderr, "[TTREC] TEST: save record of char %d: level %u -> %d\n", c, g_ram[(r + 1) & 0x07FFFFFFu], lv); g_ram[(r + 1) & 0x07FFFFFFu] = static_cast<uint8_t>(lv); } }
+        p = q + 1; }
+}
+void orec_begin_battle() {
+    g_orec[0].clear(); g_orec[1].clear();
+    if (std::getenv("PSPRECOMP_TTREC_OFF")) return;
+    const uint32_t base = rd(kGrpDataPtr);
+    if (!ok(base, kGrpBlk0 + kGrpBlk * 10u) || rd(base) != 1u) { std::fprintf(stderr, "[TTREC] the lobby's party data table is not there (pointer %08X): records come from this machine's save\n", base); return; }
+    int n = 0; std::string line;
+    for (int side = 0; side < 2; side++) for (int i = 0; i < 5; i++) {
+        const uint32_t b = base + kGrpBlk0 + kGrpBlk * static_cast<uint32_t>(side * 5 + i);
+        const uint8_t c = g_ram[b & 0x07FFFFFFu], lv = g_ram[(b + 1) & 0x07FFFFFFu];
+        if (c == 0 || c > 0x3F || lv == 0 || lv > 100 || g_ram[(b + 0x3FBu) & 0x07FFFFFFu] != c) continue;
+        g_orec[side][c].assign(g_ram + (b & 0x07FFFFFFu), g_ram + (b & 0x07FFFFFFu) + kRecStride); n++;
+        uint32_t h = 2166136261u; for (uint32_t o = 0; o < kRecStride; o++) h = (h ^ g_ram[(b + o) & 0x07FFFFFFu]) * 16777619u;
+        char t[48]; std::snprintf(t, sizeof t, " %d/%d:L%u#%08X", side, c, lv, h); line += t;
+    }
+    std::fprintf(stderr, "[TTREC] the lobby's party data table at %08X: %d member record(s) (side/char:level#hash):%s\n", base, n, line.c_str());
+}
+// The record of member `ch` of the side whose record block is G, from the owner's data. false = none (old behaviour, the caller logs).
+bool owner_record(uint32_t G, int ch, const uint8_t** out, int* who) {
+    if (std::getenv("PSPRECOMP_TTREC_OFF") || !comms_battle() || G < REC_BASE) return false;
+    const uint32_t side = (G - REC_BASE) / 4192u; if (side > 1u) return false;
+    auto it = g_orec[side].find(ch); if (it == g_orec[side].end()) return false;
+    *out = it->second.data(); *who = static_cast<int>(side); return true;
 }
 int party_cpus(int party, uint8_t* ids, int max) {
     TagEntry l[10]; const int n = party_order(party, l, 10);

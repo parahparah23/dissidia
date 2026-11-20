@@ -3456,3 +3456,36 @@ HP damage 1186`, then 296 at 269.83 and `[XBRKST] extraP ... state 0 -> 1 (BRV 0
   second, a break bonus?); needs `HITREGLOG=1 HITREACTLOG=1` in the device log.
 - **Seen but not changed:** `ledger_hp_hit(a, att)` still credits the module's slot fighter (the human) for an extra's HP hit (KO ledger / `by_ch`, same team, label only); the mate is knocked by the move
   (scripts 700 / 560) although the registration is blocked (victim-side reaction path, no damage / BRV change).
+
+## Owner records: every member's character record in a lock-step battle comes from his owner's save (20 Nov, tree ttfa; host-only, two headless copies on one host)
+**Problem.** `record_for` (call-in / rebuild of a party member) took the member's record from the LOCAL save (0x778-byte records at `0x08BAFC90`), so two real players, whose saves differ,
+built different fighters at the first call-in (keep1: level 58 on A, 57 on B -> HP differs -> desync).
+**Retail path followed (checked with `PSPRECOMP_NET_TRACE=1`, a temporary full dump of the PTP messages, and a RAM dump of both copies).** Retail Communications Mode already sends every
+registered member's data before the battle: in the lobby each player sends the host one block of **5448 bytes per registered row** (PTP port 0x64, `recv sock=4 n=5448`; the first 0x778 bytes are
+the character record taken from the player's OWN save: id, level, loadout sets, ability list; the rest is the 0x1060 side record's tail / friend card), and the host answers everybody with ONE table
+of **56284 bytes** (20480 + 20480 + 15324). The game keeps it at `[0x089D7F38]` (same address on A and B in the runs, 0x09B18E50): header 0x70C bytes (the party commands, 5 x 348), then **10 blocks
+of 5448 bytes, party A rows 0-4, then party B rows 5-9, in the order column's order**. Verified: block bytes `[0, 0x778)` equal the owner's save record (and the REC_BASE side record's first 0x778 bytes);
+the tables on A and B are byte-identical. Nothing of our own is sent: no new message, no version, nothing for an older build to miss (an older build does not run the tag battle anyway).
+**Change** (tagteam.cpp, "Owner records"): at the battle setup (`orec_begin_battle`) the table is validated (header word 1, block id / level / the id byte at +0x3FB) and the 0x778-byte record of
+every filled block is copied per side (`[TTREC] the lobby's party data table at ...: N member record(s) (side/char:level#hash)`; the hash is the same on both machines). `record_for` takes the
+member's record from there for his side (`owner_record`), then keeps filling the tail from the side record as before; log `character record for char N: the owner's save record (side S, level L, hash H)`.
+No table / member not in it -> the old behaviour with `[TTREC] ... records come from this machine's save` / `NO owner record, falling back`. Single player (`comms_battle()` false) and
+`PSPRECOMP_TTREC_OFF=1` are unchanged. Test aids: `PSPRECOMP_TTREC_TESTLEVEL=<nick>:<char>:<level>,...` sets a level in THIS machine's save record while in the group lobby (before the exchange,
+`orec_test_level` in `mp_sync_mode`; nick = `PSPRECOMP_ADHOC_NICK`: a real different save, save.bin itself is encrypted); `PSPRECOMP_TTNET_LOWHP` now takes a list `slot:frame,slot:frame,...`.
+**Other record readers.** Battle-start partners and call-ins both go through `record_for` -> covered. CPU rows (`make_comms_cpu_record`, retail's CPU builder FUN_088FA2AC with a fixed seed): the record does
+NOT depend on any save (test: local level of Yuna 80 on A / 60 on B, the `[MATCHUP]` hashes are equal on both machines, level 100 = the group struct's lead level), so nothing to carry. The matchup path
+(`make_matchup_record`) and `make_sp_cpu_record` are single player only (`comms_battle()` returns early). `save_level_of` (tally rows of members who never fought) still reads the local save: display
+only, after the decision. **Assists** do not read the save: the own-assist code takes the character data table `FUN_088BBD8C(char)` byte +35 (assist character) and the level byte of the side record
+(the record of the fighter standing in that slot, which now comes from the owner); retail's assists are built from the assist file the same way.
+**Tests** (rig `~/dissidia/tt/ttfa_mp`, `runall.sh` / new `runall4.sh` = B's second row Yuna stays a player's row; saves made different with TESTLEVEL A:30:70 B:30:59 A:28:80 B:28:60):
+- r1 (no KOs, 313 s, 314 `[TTSYNC]` lines to frame 9390): tables identical on A / B (Vaan L70 = A's, Yuna(B) L60 = B's), all `[TTSYNC]` hashes equal.
+- r3 (`runall4`, LOWHP 0:800 1:900 ...): B's Laguna KO'd at 30.0 s, call-in of Yuna (B's row): **both machines** `character record for char 28: the owner's save record (side 1, level 60, hash C6ECF48F)`
+  (A's own save had Yuna at 80: the old code would have used it); `[TTSYNC]` equal from frame 0 through 1050 (the call-in is at frame ~900).
+- r5: A's Vaan call-in `owner's save record (side 0, level 70, hash D557730B)` (A's table value; B's local Vaan was 59).
+- r7 (LOWHP 0:2000 0:3200, no KO resulted): 187 `[TTSYNC]` lines equal to frame 5490 with different local saves, then the normal decision at 170 s.
+- Not clean: in r2 / r3 / r5 the first battle ENDS by the decision about 5 s after the first slot rebuild and the two machines end it with a mirrored KO (A: own Yuna "KO'd" with full HP, B: Laguna), hashes
+  differ from there. The same happens with `PSPRECOMP_TTREC_OFF=1` and equal saves (r6), so it is the known finish step (see the KOLIST finding above), not the records; but it prevented a second call-in per side
+  in these runs and B never logged A's Vaan call-in.
+**Not verified:** two player-row call-ins per side in one battle (the roster has one player-row call-in per side), Vaan's call-in on BOTH machines of one battle, the second round of a tournament (the
+round-2 table of A and B differed in r5: the retail per-round exchange is not decoded), real LAN / relay, anything on a device.
+SP regression: `tagteam_test.py --baseline` RESULT: PASS (`/tmp/ttfa_reg/o1`).
