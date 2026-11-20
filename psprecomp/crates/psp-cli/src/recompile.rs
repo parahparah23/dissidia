@@ -693,8 +693,14 @@ fn enhance_function_discovery(
                 // The delay slot of a branch or jump is not a function start: a split there leaves the branch at the
                 // end of the previous function without its delay slot (code an ISO patch added: `beqz t3, x;
                 // addiu sp, sp, -16` lost the stack adjustment on the taken path).
-                let in_delay_slot = off >= 4
-                    && has_delay_slot(u32::from_le_bytes(bytes[off - 4..off].try_into().unwrap()));
+                // Not for a preceding `j` / `jal` word: every pointer into the game's memory (0x08800000..) has the j
+                // opcode's top bits, so a function right after a pointer table looked like a delay slot and was lost
+                // (25 battle-overlay functions, the game soft-locked); compiled code does not open a stack frame in the
+                // delay slot of a plain jump.
+                let prev = if off >= 4 { u32::from_le_bytes(bytes[off - 4..off].try_into().unwrap()) } else { 0 };
+                // Nor a "jr / jalr $zero": small integers in a data table (0x00000009) decode as that, and no code jumps to address 0.
+                let looks_like_data = matches!(prev >> 26, 0x02 | 0x03) || (prev >> 26 == 0 && (prev >> 21) & 0x1F == 0);
+                let in_delay_slot = off >= 4 && has_delay_slot(prev) && !looks_like_data;
                 if !in_delay_slot
                     && !all_known.contains(&addr)
                     && !is_inside_function(addr, &func_intervals)
