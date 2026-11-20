@@ -3592,7 +3592,7 @@ Two causes, both found with `PSPRECOMP_TAGTEAM_EXBAT` + window screenshots every
 - **Not verified:** a naturally started burst (EX gauge + HP hit) on a device; a burst in multiplayer (two machines; the changes use battle state only); an extra bursting
   while another chase / entrance camera runs; the victim being a human-driven extra of a multiplayer battle (it already has its own slot 4 + index: the code reuses a slot
   that holds the block).
-## Partner BRV-0 state on the big panel (20 Nov, tree tthud; host-only, window shots; NOT fixed)
+## Partner BRV-0 state on the big panel (20 Nov, tree tthud; host-only, window shots; FIXED in the next section, tree ttcam)
 RP6 log `rp6logs/rp6_1120_partner_hp.log`: every partner / enemy-partner `[XBRKST] ... state 2 -> 0` logs only the two OFF drops (`panel flag 0 reset dropped`, `steady BREAK off ... dropped`), never an ON line;
 t=269.80 `extraP ... state 0 -> 1 (BRV 0)` (HP attack that spent all BRV) and the user saw "BREAK animation and text on my BRV".
 - **The missing ON lines are expected.** The OFF calls come from `08AE137C` -> `08AE16AC` (state 1 entry, `CALLLOG` ra `08AE13F4`, a0 = the extra's handler) and from the state 2 -> 0 path (`08AE1300`
@@ -3646,3 +3646,47 @@ the retail "Hold: Cancel wireless" wait screen, which needs the winners' end-of-
 **Not verified:** the Internet relay; human-driven extras (tree ttx) being the silent peer; the next *tag* battle after the results (the replayed setup
 started a battle but with the default Onion Knight rows, not the tag parties); a peer that is silent only on the lock-step channel with the adhoc layer
 healthy beyond the 2 s timeout run above (simulated by the short timeout only).
+### Partner HP-hit pulse and natural-break burst on the big panel: fixed (20 Nov, tree ttcam; host-only, window shots, nothing seen on a device)
+- **The pulse is not a popup-pool object.** The "ghost" over the side's BRV number is the HP-damage pulse: the HP damage step `FUN_08AEFF40` calls
+  `FUN_089DD8E4(hud mgr)` (= hud+24) and `FUN_089E358C(hud+24, side, damage, ...)` (its only caller, ra `08AEFFC8`), which starts the number pulse (`089E3B60` ->
+  `089E3DB0..` per-side element). Found with `PSPRECOMP_FIRSTCALL` phases around the spawn frame (the earlier window started after it), then `CALLLOG` of the new
+  HUD-range functions: `089DD8E4 a2 00000BB8 ra 08AEFFB0` / `089E358C a1 1 a2 0BB8 ra 08AEFFC8` at the hit. `a1` is the VICTIM's side (s3 = victim, s0 = the booked
+  attacker = the victim's slot foe), so the attacker is not in the call: it is `g_xstep_att` (set while an extra's / its assist's damage step runs), else s0.
+  The earlier lead (`FUN_08B15D70` -> `FUN_0888ACE4`, the slot fighter's record list +1520) is the ability-activation messages ("EXP to HP activated!", top left):
+  dropping all of them left the pulse unchanged.
+- **Fix `hpghost_hook` (089E358C)**: when the real attacker is an extra (or an extra's own assist, `g_xas`) that is not its side's panel fighter, the call is dropped
+  (`[HUDBREAK] ... HP damage N pulse of extraP kept off the big panel (slotH)`). The slot fighter's own HP hits (and a retail assist's) are untouched; the lock-on case
+  (the panel shows that extra) goes through. Not shown on the partner's own panel (nowhere).
+- **Natural break of a partner still played the burst + "BREAK" on the player's number** (host repro `_HPMATRIX=10000 _HPM_VBRV=5 _HPM_PAIRS=7` = extraE breaks extraP
+  with a BRV attack; shots: burst + shards at +0.7 s, then a steady red "BREAK" in place of 1291 for the whole break, although every existing drop fired; the forced
+  `XHSTATE` break did not show it). Source: the break sub-object's state table (overlay data, `08ADF60C / 08ADF614 / 08ADFE7C / 08ADF81C`, a0 = state record,
+  a1 = the sub at handler+680): `08ADFE7C` / `08ADF81C` play the sub's copied UI elements (+72..+84, the SLOT's "BREAK" elements) through `FUN_088D9F5C(element, anim, 1)`,
+  call `FUN_08889F28(side, 0)` and spawn the 2D shards at the panel (`FUN_08AEAF84` params + `FUN_08AEB044`). Skipping the states themselves is wrong (they time the
+  break: the copy stayed in state 3 for 5 s instead of 1.2 s), so `brkst_hook<0..3>` run them with a thread-local mute (`g_brkst_mute` = the extra, `brkword_foreign_extra`
+  rule) and `elanim_hook` (088D9F5C), `sidef28_hook` (08889F28), `shards_hook` (08AEB044) drop their calls while muted. Break timing unchanged (3 -> 4 at +1.2 s, 4 -> 0
+  at +5.5 s as before). Log `[HUDBREAK] ... break word animation (anim 1, ra 08ADFF18) of extraP's break kept off the big panel` (rate limited).
+  `PSPRECOMP_TAGTEAM_PANELBREAK_ANY=1`: old for all of these.
+- **Verified (host, window shots, crops in /tmp/ttg/*_m{L,R}.png)**: partner HP attack on slotC (`_HPMATRIX=10089 _HPM_NODOWN=1 _HPM_SWEEP=2`): no pulse on the player's
+  1291 (fA; before: "3000" pulsing three times, p1); the human's own HP attack (`_SWEEP=0`, fB): the retail pulse "3000" on his own number, unchanged. Enemy partner (Terra,
+  `_ENEMY2_CHAR=11 _SWEEP=7`): with `PANELBREAK_ANY=1` the "3004" pulse is on Lightning's 1065 (fC0), with the fix nothing (fC). Partner natural break (b7a): the player's
+  1291 stays, no burst, no shards, no word for the whole break; the human's natural break (`_PAIRS=5`, bB): retail burst + "BREAK" + refilling number unchanged; forced
+  breaks `XHSTATE=partner:9:3` / `enemy2:9:3` (xP / xE): both big panels clean. Regression `tagteam_test.py --baseline`: PASS (/tmp/ttg/reg1).
+- **Not verified / open**: the enemy partner's NATURAL break (pair 3: the attack missed in 4 tries; same code path by side); the enemy SLOT fighter's own HP pulse
+  (no Lightning HP-attack id found for the harness; logic is side-agnostic); anything on a device. The "Bravery Break!" banner (top centre) still plays for a partner's
+  break (not on a panel; left as is). In the `_HPMATRIX=10000` runs without `_HPM_NODOWN` the tag HUD small panels were not drawn at all (harness g_down state; not looked at).
+- **Debug (new)**: `PSPRECOMP_TAGTEAM_VALSCAN=<t0>:<t1>:<value>[:<k>]`: guest words (u32 / f32 / u16) equal to value at battle age t1 that were not at t0, annotated with the
+  fighter / status / hud / handler-copy offset, and arms MEM_WATCH on the k-th. `HUDCALLLOG` also logs `hpghost` and `side28`.
+
+## Break screenshots (20 Nov, tree ttcam; test builds; host-verified)
+`tagteam_breakshot.cpp`: default ON in tag battles (`PSPRECOMP_TAGTEAM_BREAKSHOT=0` off). `breakshot_poll` (tagteam.cpp, every game frame) watches the damage handler
+state of every fighter: the slot fighters (`g_hstate_pairs` / `g_slot_hdl`, vtable `08AE7B50`, owner +16) and the extras' handler copies (`g_extra_hdl`). Entering a break
+(state 3, or 4 when 3 was skipped) of anybody, and an extra entering state 1 (BRV 0 after its own HP attack), schedule three shots: at the event, +0.5 s, +1.5 s (battle
+age). The game thread only queues; a worker thread calls `ge_draw_capture_window` (the debug socket 'V' service: the whole window incl. the HUD layers, read on the
+render thread at its next present, written there as TGA), converts it to PNG (zlib, RGB) and deletes the TGA. Files `<game dir>/breakshots/<battle#>_<age s>_<role>_<char>_<kind>_<n>.png`
+(game dir = the parent of ms0, i.e. `/sdcard/Android/media/org.psprecomp.game/game/` on Android), kind `break` / `brv0`, n 0..2. Log `[BREAKSHOT] t=9.43 extraP char 11 break: 3 shots scheduled (3 of 60 this run)`,
+then `[BREAKSHOT] t=9.93 extraP 11 break #1 -> <path> (<bytes> bytes)`. At most 60 shots per run; a shot is skipped while the window is minimised / hidden
+(`SDL_WINDOW_MINIMIZED | HIDDEN`), and when the capture service is busy (another capture pending) or no frame comes within 3 s. Cost: the render thread writes the
+full-size TGA once per shot (on a phone a 2400x1080 window is ~10 MB written in the present: expect a frame hitch per shot).
+- **Verified (host, 480x272 window)**: a partner break (b7a: `1_0009.43_extraP_11_break_{0,1,2}.png`, 185-204 KB), the human's break (bB: `slotH_15_break`, 199-232 KB),
+  the partner's BRV 0 after its HP attack (fA: `extraP_11_brv0`, 192-208 KB), the forced enemy partner break (xE: `extraE_31_break`). Content: the full window with both big
+  panels and the "Bravery Break!" banner. Not run on a device (file size there scales with the window: roughly 1-3 MB per PNG at phone resolutions, untested).
