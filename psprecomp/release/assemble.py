@@ -33,6 +33,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
 
 
+
+def game_keep(rel):
+    """Which files of games/dissidia (path relative to it, '/' separated) a release carries in game/. The Android setup app's payload
+    (android/pack_setup_app.py) uses this same list, so a file the tools need reaches both."""
+    top = rel.split("/")[0]
+    if top in ("analysis", "fx_shaders", "icon") and not rel.endswith(".py"):
+        return True
+    if rel in ("game.toml", "features.ini", "package_paths.txt", "README.md", "net_packs.json") or (rel.startswith("overlay_") and rel.endswith(".toml")):
+        return True
+    if top == "d1_moves" and rel.endswith((".json", ".npd")):   # Bartz's Dissidia 1 moves: patches against the player's discs
+        return True
+    if top == "tools" and rel.count("/") == 1 and rel.endswith((".py", ".json", ".txt")) and not os.path.basename(rel).startswith("test_"):
+        return True
+    return False
+
 def die(msg):
     print("assemble: " + msg, file=sys.stderr)
     sys.exit(1)
@@ -116,17 +131,6 @@ def main():
 
     game_src = os.path.join(a.repo, "games", "dissidia")
 
-    def game_keep(rel):
-        top = rel.split("/")[0]
-        if top in ("analysis", "fx_shaders", "icon") and not rel.endswith(".py"):
-            return True
-        if rel in ("game.toml", "features.ini", "package_paths.txt", "README.md", "net_packs.json") or (rel.startswith("overlay_") and rel.endswith(".toml")):
-            return True
-        if top == "d1_moves" and rel.endswith((".json", ".npd")):   # Bartz's Dissidia 1 moves: patches against the player's discs
-            return True
-        if top == "tools" and rel.count("/") == 1 and rel.endswith((".py", ".json", ".txt")) and not os.path.basename(rel).startswith("test_"):
-            return True
-        return False
     copy_tree(game_src, os.path.join(out, "game"), lambda rel: False)
     # (copy_tree cannot filter by "keep"; prune afterwards)
     for dp, dns, fns in os.walk(os.path.join(out, "game"), topdown=False):
