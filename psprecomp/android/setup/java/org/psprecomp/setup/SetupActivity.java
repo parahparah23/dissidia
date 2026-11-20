@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -21,6 +23,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.view.Gravity;
@@ -104,6 +107,16 @@ public class SetupActivity extends Activity {
     private static volatile String installStatus = "";
     private BroadcastReceiver installReceiver;
     private boolean pendingInstall;
+    private static volatile long installStartedAt;
+    // Android's install confirmation, received while this app was not on screen: Android 10+ does not let an app start it from the
+    // background (it is silently dropped and the page waits forever), so it is kept and shown when the app is back (onResume).
+    private Intent pendingConfirm;
+    // The last confirmation Android asked for. Started while this app was on screen it can still end up hidden: it opens in its own task,
+    // so a player who leaves and comes back through the app icon sees "Waiting for Android" with the dialog behind it. Coming back from
+    // the background (onStop, not just the dialog covering this page) while it is still unanswered opens it again.
+    private Intent lastConfirm;
+    private boolean wasStopped;
+    private static final long INSTALL_HINT_MS = 30000;   // no answer from Android after this: the waiting page explains what to do
     private String pendingInstallApk;
     private PowerManager.WakeLock wakeLock;
     private JSONObject upd;
@@ -171,10 +184,24 @@ public class SetupActivity extends Activity {
             refreshPage();
             ui.postDelayed(() -> { if (page != null && page.id.equals("permission") && hasAllFilesAccess()) afterPermission(); }, 650);
         }
+        resumedAt = System.currentTimeMillis();
+        if (pendingConfirm != null && page.id.equals("installing")) {
+            Intent c = pendingConfirm;
+            pendingConfirm = null;
+            showConfirm(c);
+        } else if (wasStopped && lastConfirm != null && page.id.equals("installing") && installStatus.equals("confirm"))
+            showConfirm(lastConfirm);   // still unanswered after coming back: it is hidden in its own task, show it again
+        wasStopped = false;
         if (pendingInstall && canInstallPackages()) {
             pendingInstall = false;
             doInstall(pendingInstallApk, installUpdate);
         } else if (page.id.equals("install-allow") && canInstallPackages()) refreshPage();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        wasStopped = true;
     }
 
     @Override
@@ -638,6 +665,7 @@ public class SetupActivity extends Activity {
             Card ins = p.card(new Card(this, Card.ACTION, Icons.INSTALL, "Install the game", "Installs the built game as an app. Android asks you to confirm."));
             if (!upd) ins.style(Card.STYLE_PRIMARY);
             ins.onClick(v -> installGame(new File(stWorkdir(), "android/dissidia.apk").getPath(), false));
+            saveApkCard(p);
             p.card(new Card(this, Card.ACTION, Icons.SLIDERS, "Change extras", "HD textures, texture pack, Japanese voices or Bartz's Dissidia 1 moves, without building again.")).onClick(v -> beginExtras());
             p.card(new Card(this, Card.ACTION, Icons.DISC, "Build it again", "Pick your game file and build from scratch. Your saves are kept.")).onClick(v -> beginPick(PICK_ISO, this::backHome));
             p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Check for updates", "Looks for a newer version of this app on github.com. Nothing about you or your game is sent.")).onClick(v -> beginCheck(true));
@@ -1205,6 +1233,8 @@ public class SetupActivity extends Activity {
         p.head("Finished", "All done", "The game is built and its files are in place. Install it as an app: Android asks you to confirm.");
         p.card(new Card(this, Card.ACTION, Icons.INSTALL, "Install the game", "Then open \"Dissidia 012\" from your app list.").style(Card.STYLE_PRIMARY).pulse())
                 .onClick(v -> installGame(new File(stWorkdir(), "android/dissidia.apk").getPath(), false));
+        saveApkCard(p);
+        p.card(new Card(this, Card.ACTION, Icons.BACK, "Skip for now", "Install it later from the start page.").style(Card.STYLE_QUIET)).onClick(v -> skipInstall());
         p.card(new Card(this, Card.ACTION, Icons.LOG, "View the build log", null).style(Card.STYLE_QUIET)).onClick(v -> viewLog(new File(stWorkdir(), "setup.log"), "Build log"));
         show(p, dirOf(p));
     }
@@ -1305,6 +1335,9 @@ public class SetupActivity extends Activity {
         installUpdate = update;
         pendingInstallApk = apk;
         installStatus = "working";
+        installStartedAt = System.currentTimeMillis();
+        pendingConfirm = null;
+        lastConfirm = null;
         if (installReceiver == null) {
             installReceiver = new BroadcastReceiver() {
                 public void onReceive(Context c, Intent i) {
@@ -1313,10 +1346,11 @@ public class SetupActivity extends Activity {
                         Intent confirm = (Intent) i.getParcelableExtra(Intent.EXTRA_INTENT);
                         if (confirm != null) {
                             confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                            c.startActivity(confirm);
+                            lastConfirm = confirm;
+                            showConfirm(confirm);
                         }
                         installStatus = "confirm";
-                    } else if (s == PackageInstaller.STATUS_SUCCESS) installStatus = "ok";
+                    } else if (s == PackageInstaller.STATUS_SUCCESS) { installStatus = "ok"; lastConfirm = null; }
                     else if (s == PackageInstaller.STATUS_FAILURE_ABORTED) installStatus = "failed: cancelled";
                     else installStatus = "failed: " + i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
                     ui.post(() -> { if (page != null && page.id.equals("installing")) refreshPage(); });
@@ -1349,6 +1383,94 @@ public class SetupActivity extends Activity {
         }, "setup-install").start();
     }
 
+    /** Leave the install for later: the built game and its files stay; the start page offers Install the game. */
+    private long resumedAt;
+
+    /**
+     * Shows Android's install confirmation. Not while this app is in the background (Android 10+ drops or hides it): then onResume shows
+     * it. Started in the same moment the app comes back to the front, Android aborted it (START_ABORTED, emulator, Android 15), so a
+     * start right after onResume waits until the return has settled; the page re-checks that the confirmation is still unanswered.
+     */
+    private void showConfirm(final Intent c) {
+        if (!resumed) { pendingConfirm = c; return; }
+        long wait = Math.max(0, 800 - (System.currentTimeMillis() - resumedAt));
+        ui.postDelayed(() -> {
+            if (!resumed) { pendingConfirm = c; return; }
+            if (page == null || !page.id.equals("installing") || installStatus.startsWith("failed") || installStatus.equals("ok")) return;
+            try { startActivity(c); } catch (Exception e) { /* the page offers Install again */ }
+        }, wait);
+    }
+
+    private void skipInstall() {
+        pendingConfirm = null;
+        lastConfirm = null;
+        backHome();
+        if (!installUpdate) ui.postDelayed(() -> snack("The game is built. Install it from the start page whenever you like."), 400);
+    }
+
+    private void saveApkCard(Page p) {
+        p.card(new Card(this, Card.ACTION, Icons.SAVE, "Save the APK to Downloads",
+                "To install the game yourself from a file manager, e.g. if Android's confirmation does not show up.")).onClick(v -> saveApk());
+    }
+
+    private void saveApk() {
+        final File apk = new File(stWorkdir(), "android/dissidia.apk");
+        if (!apk.isFile()) {
+            snack("The game's app was not found: build the game again.");
+            return;
+        }
+        snack("Saving the APK...");
+        new Thread(() -> {
+            String msg;
+            try {
+                msg = "Saved as " + copyToDownloads(apk, "Dissidia012.apk") + ". Open it in your file manager to install the game.";
+            } catch (Exception e) {
+                msg = "Could not save the APK: " + e.getMessage();
+            }
+            final String m = msg;
+            ui.post(() -> snack(m));
+        }, "setup-save-apk").start();
+    }
+
+    /** Copies `src` into the public Downloads folder (replacing an earlier copy of the same name) and says where it went. */
+    private String copyToDownloads(File src, String name) throws Exception {
+        byte[] buf = new byte[1 << 16];
+        int n;
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentResolver cr = getContentResolver();
+            Uri coll = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+            try {
+                cr.delete(coll, MediaStore.MediaColumns.DISPLAY_NAME + "=?", new String[]{name});
+            } catch (Exception e) {
+                // not ours to delete: Android names the new copy "Dissidia012 (1).apk"
+            }
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, "application/vnd.android.package-archive");
+            v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri u = cr.insert(coll, v);
+            if (u == null) throw new Exception("Android did not create the file");
+            try (InputStream in = new FileInputStream(src); OutputStream out = cr.openOutputStream(u)) {
+                if (out == null) throw new Exception("Android did not open the file");
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            } catch (Exception e) {
+                cr.delete(u, null, null);
+                throw e;
+            }
+            v.clear();
+            v.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            cr.update(u, v, null, null);
+            return "Download/" + name;
+        }
+        File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        dir.mkdirs();
+        File out = new File(dir, name);
+        try (InputStream in = new FileInputStream(src); OutputStream o = new FileOutputStream(out)) {
+            while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+        }
+        return out.getPath();
+    }
+
     private void showInstalling() {
         Page p = new Page(this, "installing");
         p.back = this::backHome;
@@ -1372,13 +1494,32 @@ public class SetupActivity extends Activity {
                 });
             p.card(new Card(this, Card.ACTION, Icons.BACK, "Back to the start", null).style(Card.STYLE_QUIET)).onClick(v -> backHome());
         } else if (failed) {
-            p.head("Not installed", "Installation stopped", "Android said: " + s.substring(Math.min(s.length(), 8)) + ". If it asked for permission to install apps from this app, allow it and try again.");
+            boolean cancelled = s.equals("failed: cancelled");
+            p.head("Not installed", "Installation stopped", cancelled
+                    ? "Android's confirmation was closed without installing. Tap Install again when you are ready" + (installUpdate ? "." : ", or save the APK and install it from your file manager.")
+                    : "Android said: " + s.substring(Math.min(s.length(), 8)) + ". If it asked for permission to install apps from this app, allow it and try again.");
             p.card(new Card(this, Card.ACTION, Icons.RETRY, "Install again", "Asks Android to install " + what + " again.").style(Card.STYLE_PRIMARY)).onClick(v -> installGame(pendingInstallApk, installUpdate));
+            if (!installUpdate) saveApkCard(p);
             p.card(new Card(this, Card.ACTION, Icons.BACK, "Back to the start", null).style(Card.STYLE_QUIET)).onClick(v -> backHome());
         } else {
-            p.head("Installing", "Waiting for Android", "Android shows a confirmation: tap Install. The game's files are already in place.");
-            p.card(new Card(this, Card.ACTION, Icons.RETRY, "Install again", "If the confirmation did not appear.")).onClick(v -> installGame(pendingInstallApk, installUpdate));
-            p.card(new Card(this, Card.ACTION, Icons.BACK, "Back to the start", null).style(Card.STYLE_QUIET)).onClick(v -> backHome());
+            long waited = System.currentTimeMillis() - installStartedAt;
+            boolean slow = waited >= INSTALL_HINT_MS;
+            if (!slow)
+                p.head("Installing", "Waiting for Android", "Android shows a confirmation: tap Install. The game's files are already in place.");
+            else
+                p.head("Installing", "Still waiting for Android", "Android has not answered. If no confirmation is on screen, tap Install again. "
+                        + "If Play Protect blocks it, choose More details, then Install anyway. On Samsung phones, Auto Blocker "
+                        + "(Settings > Security and privacy) stops installs from apps: switch it off for a moment. "
+                        + (installUpdate ? "" : "Or save the APK and install it from your file manager. ")
+                        + "The game stays built either way.");
+            Card again = p.card(new Card(this, Card.ACTION, Icons.RETRY, "Install again", "If the confirmation did not appear."));
+            if (slow) again.style(Card.STYLE_PRIMARY);
+            again.onClick(v -> installGame(pendingInstallApk, installUpdate));
+            if (!installUpdate) saveApkCard(p);
+            p.card(new Card(this, Card.ACTION, Icons.BACK, installUpdate ? "Back to the start" : "Skip for now",
+                    installUpdate ? null : "The game stays built: install it later from the start page.").style(Card.STYLE_QUIET)).onClick(v -> skipInstall());
+            if (!slow) ui.postDelayed(() -> { if (page != null && page.id.equals("installing") && installStatus.equals(s)) refreshPage(); },
+                    INSTALL_HINT_MS - waited + 100);
         }
         show(p, dirOf(p));
         if (!ok && !failed) ui.postDelayed(() -> { if (page != null && page.id.equals("installing") && !installStatus.equals(s)) refreshPage(); }, 600);
