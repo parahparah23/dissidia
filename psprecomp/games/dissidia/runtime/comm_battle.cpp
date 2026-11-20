@@ -32,6 +32,7 @@
 
 #include "psp_game_module.h"
 #include "psp_runtime.h"
+#include "psp_netplay.h"
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
 #include "recomp.h"
@@ -309,6 +310,7 @@ uint32_t tag_for_battle() {
 void begin(uint32_t net, bool watcher) {
     g_link = Link{};
     g_link.state = Link::GAME;
+    g_delay = static_cast<uint32_t>(psp_netplay_input_delay());   // the Settings row may have changed since the last battle
     uint8_t peers[16][6]; size_t n = 0; uint8_t own[6];
     psp_adhoc_group_peers(peers, 16, &n, own);
     if (n == 0) return;
@@ -530,8 +532,7 @@ void dissidia_comm_battle_install(uint8_t* rdram) {
     const char* e = std::getenv("PSPRECOMP_NET_LINK");
     if (e && e[0] == '0') { std::fprintf(stderr, "[NETLINK] off: online battles use the game's own exchange\n"); return; }
     g_log = (e = std::getenv("PSPRECOMP_NET_LINK_LOG")) && e[0] && e[0] != '0';
-    if ((e = std::getenv("PSPRECOMP_NET_DELAY"))) g_delay = static_cast<uint32_t>(std::atoi(e));
-    if (g_delay < 1) g_delay = 1; else if (g_delay > 8) g_delay = 8;
+    g_delay = static_cast<uint32_t>(psp_netplay_input_delay());   // the one network delay (env / Settings), read again at every battle start
     if ((e = std::getenv("PSPRECOMP_NET_LINK_DROP"))) g_drop = static_cast<uint32_t>(std::min(90, std::max(0, std::atoi(e))));
     g_orig = psp_dispatch_probe_lookup(HANDLER);
     g_orig_watch = psp_dispatch_probe_lookup(WATCH_HANDLER);

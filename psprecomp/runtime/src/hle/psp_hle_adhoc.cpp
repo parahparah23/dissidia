@@ -12,6 +12,7 @@
 //  * PTP is a small reliable byte stream (go-back-N) over the same UDP socket.
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
+#include "psp_netplay.h"
 #include "hle/psp_hle_kernel.h"
 #include "psp_scheduler.h"
 #include "psp_memory.h"
@@ -31,6 +32,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <random>
@@ -101,6 +103,7 @@ struct Peer {
     char group[8] = {0};
     bool in_group = false;
     uint8_t fps = 0;
+    uint8_t game_data[24] = {0}; uint8_t game_len = 0;   // the game module's own bytes (psp_adhoc_set_game_data)
     int64_t last_seen = 0;
 };
 
@@ -225,6 +228,7 @@ int g_next_handler = 1;
 std::map<int, std::pair<uint32_t, uint32_t>> g_handlers;  // id -> (func,arg)
 int64_t g_scan_due = 0;
 int g_local_fps = 0;
+uint8_t g_game_data[24] = {0}; uint8_t g_game_len = 0;   // this player's game module bytes, sent in the beacons
 
 std::deque<Ev> g_events;
 std::map<int, Match> g_match;
@@ -434,8 +438,17 @@ void handle_match(const Mac& src, const uint8_t* body, size_t len) {
             queue_match(m, M_DATA_ACK, src, {});
             break;
         }
-        case MO_PING: {
-            if (it != m.peers.end()) it->second.last_seen = t;
+        case MO_PING: {   // extra 1: the sender holds us as a pending request, 0: as established
+            const bool pending = extra & 1;
+            if (it == m.peers.end() || it->second.s == MPeer::HELLO) {
+                if (pending) match_send(m, src, MO_CANCEL, {});   // no such request here (its cancel was lost): let the sender drop it
+                break;
+            }
+            it->second.last_seen = t;
+            if (!pending && it->second.s == MPeer::ACCEPTED) {   // the requester has our accept but its MO_ESTAB was lost
+                it->second.s = MPeer::ESTAB;
+                queue_match(m, M_ESTABLISHED, src, {});
+            }
             break;
         }
         }
@@ -443,12 +456,21 @@ void handle_match(const Mac& src, const uint8_t* body, size_t len) {
 }
 
 // ---- PDP ----
+// Side channel for a game module (psp_adhoc_side_send / _recv): PDP datagrams on ports SIDE_PORT0+ (the PSP game never opens them), so
+// they take the same paths as game PDP traffic (LAN, relay). Queued here, read by the game thread.
+constexpr uint16_t SIDE_PORT0 = 0xFF00;
+struct SideMsg { Mac src; uint16_t chan; std::vector<uint8_t> data; };
+std::deque<SideMsg> g_side_q;
+// The runtime's own messages (the netplay desync check) travel as PDP between this port on both ends: the game never
+// uses it, older builds drop it (no socket on it), and the relay forwards it like any PDP packet.
+constexpr uint16_t AUX_PORT = 0xFFF0;
 void handle_pdp(const Mac& src, const uint8_t* body, size_t len) {
     if (len < 6 + 2 + 2) return;
     Mac dst; std::memcpy(dst.data(), body, 6);
     if (dst != g_mac && !is_bcast(dst)) return;
     if (!same_group(src)) return;
     uint16_t sport = get16(body + 6), dport = get16(body + 8);
+    if (dport == AUX_PORT && sport == AUX_PORT) { psp_netplay_on_message(src.data(), body + 10, len - 10); return; }
     if (dport == PING_PORT) {   // ping: 0 = ask (answered at once), 1 = answer
         if (len < 10 + 13) return;
         const uint8_t* q = body + 10;
@@ -476,6 +498,11 @@ void handle_pdp(const Mac& src, const uint8_t* body, size_t len) {
         if (g_side_handler && len - 10 <= PSP_ADHOC_SIDE_MAX) g_side_handler(src.data(), body + 10, len - 10);
         return;
     }
+    if (dport >= SIDE_PORT0) {   // a game module's side channel (psp_adhoc_side_send), never a game socket
+        if (g_side_q.size() < 4096) g_side_q.push_back({src, (uint16_t)(dport - SIDE_PORT0), std::vector<uint8_t>(body + 10, body + len)});
+        return;
+    }
+    (void)sport;
     for (auto& [id, s] : g_pdp) {
         if (s.port != dport) continue;
         size_t used = 0;
@@ -607,6 +634,11 @@ void handle_beacon(const Mac& src, const sockaddr_in& from, const uint8_t* body,
             g_gossip.emplace(addr_key(a), now_us() + 15000000);   // probe for 15 s
         }
     }
+    {   // the game module's bytes: after the peer list, 'G' 'D' <len> <bytes> (absent in older beacons)
+        const size_t at = len >= 43 ? 43 + (size_t)body[42] * 6 : len;
+        p.game_len = 0;
+        if (at + 3 <= len && body[at] == 'G' && body[at + 1] == 'D') { const size_t n = std::min<size_t>(body[at + 2], sizeof p.game_data); if (at + 3 + n <= len) { std::memcpy(p.game_data, body + at + 3, n); p.game_len = (uint8_t)n; } }
+    }
     if (fresh) ANOTE("peer %s (\"%s\") at %s:%u", mac_str(src).c_str(), p.nick, inet_ntoa(from.sin_addr), ntohs(from.sin_port));
 }
 
@@ -651,7 +683,47 @@ void dispatch_packet(uint8_t type, const Mac& src, const sockaddr_in& from, cons
     }
 }
 
+// Test option: artificial network delay on what this instance receives (PSPRECOMP_NET_LAG_MS=<one-way ms>,
+// PSPRECOMP_NET_JITTER_MS=<extra 0..n ms per packet>, PSPRECOMP_NET_LOSS=<percent dropped>). Game traffic only (PDP, matching,
+// PTP and their fragments); beacons and the relay handshake are left alone so peers do not time out. Set it on both
+// copies for a round trip of twice the delay. Packets with jitter may arrive out of order, as on a real path.
+struct Delayed { int64_t due; std::vector<uint8_t> data; sockaddr_in from; };
+int g_lag_us = 0, g_jitter_us = 0, g_loss_pct = 0;
+uint64_t g_lag_rng = 0x2545F4914F6CDD1Dull;
+std::deque<Delayed> g_delayed;   // net thread only
+uint32_t lag_rand() { g_lag_rng ^= g_lag_rng << 13; g_lag_rng ^= g_lag_rng >> 7; g_lag_rng ^= g_lag_rng << 17; return (uint32_t)g_lag_rng; }
+void load_lag_cfg() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    if (const char* e = std::getenv("PSPRECOMP_NET_LAG_MS")) g_lag_us = std::max(0, std::atoi(e)) * 1000;
+    if (const char* e = std::getenv("PSPRECOMP_NET_JITTER_MS")) g_jitter_us = std::max(0, std::atoi(e)) * 1000;
+    if (const char* e = std::getenv("PSPRECOMP_NET_LOSS")) g_loss_pct = std::clamp(std::atoi(e), 0, 100);
+    if (g_lag_us || g_jitter_us || g_loss_pct)
+        ANOTE("test network: +%d ms one-way, jitter %d ms, loss %d%% on received game packets", g_lag_us / 1000, g_jitter_us / 1000, g_loss_pct);
+}
+void on_packet_now(const uint8_t* d, size_t n, const sockaddr_in& from);
 void on_packet(const uint8_t* d, size_t n, const sockaddr_in& from) {
+    const bool game = n > HDR && std::memcmp(d, "DSAH", 4) == 0 && d[4] >= T_PDP && d[4] != T_RELAY && d[4] != T_BEACON;
+    if (game && (g_lag_us || g_jitter_us || g_loss_pct)) {
+        if (g_loss_pct && (int)(lag_rand() % 100) < g_loss_pct) return;
+        const int64_t due = now_us() + g_lag_us + (g_jitter_us ? (int64_t)(lag_rand() % (uint32_t)g_jitter_us) : 0);
+        auto at = g_delayed.end();
+        while (at != g_delayed.begin() && std::prev(at)->due > due) --at;
+        g_delayed.insert(at, Delayed{due, std::vector<uint8_t>(d, d + n), from});
+        return;
+    }
+    on_packet_now(d, n, from);
+}
+void flush_delayed() {
+    const int64_t t = now_us();
+    while (!g_delayed.empty() && g_delayed.front().due <= t) {
+        Delayed p = std::move(g_delayed.front());
+        g_delayed.pop_front();
+        on_packet_now(p.data.data(), p.data.size(), p.from);
+    }
+}
+void on_packet_now(const uint8_t* d, size_t n, const sockaddr_in& from) {
     if (n < HDR || std::memcmp(d, "DSAH", 4) != 0) return;
     uint16_t blen = get16(d + 11);
     if (HDR + blen > n) return;
@@ -730,8 +802,10 @@ void send_beacons() {
     std::memcpy(b.data() + 32, g_group, 8);
     b[40] = g_connected ? 1 : 0;
     b[41] = (uint8_t)g_local_fps;
+    auto game_trailer = [&]() { if (!g_game_len) return; b.push_back('G'); b.push_back('D'); b.push_back(g_game_len); b.insert(b.end(), g_game_data, g_game_data + g_game_len); };
     if (g_relay_mode) {   // one copy to the server; it fans it out to the room
         b.push_back(0);   // no gossip list
+        game_trailer();
         send_raw(g_relay_addr, T_BEACON, b);
         return;
     }
@@ -746,6 +820,7 @@ void send_beacons() {
         b.push_back((uint8_t)(list.size() / 6));
         b.insert(b.end(), list.begin(), list.end());
     }
+    game_trailer();
     std::vector<sockaddr_in> targets;
     for (int i = 0; i < g_span; i++) {
         uint16_t port = (uint16_t)(g_base_port + i);
@@ -877,9 +952,13 @@ void periodic() {
             if (g_connected) match_send(m, Mac{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, MO_HELLO, m.hello_opt);
         }
         if (t >= m.next_ping) {
+            // Keep-alive to every peer we have a request or a link with. A pending request (REQ_OF / REQ_BY / ACCEPTED) stays
+            // until it is accepted or cancelled, as on a PSP, so both sides ping it too; extra = 1 marks "I hold you as pending".
             m.next_ping = t + 1000000;
+            // Pending requests are pinged too: a room's host (Group Battle) leaves a join request open until it starts the
+            // battle, and without traffic both sides dropped the request after the 6 s timeout below.
             for (auto& [mac, p] : m.peers)
-                if (p.s == MPeer::ESTAB) match_send(m, mac, MO_PING, {});
+                if (p.s != MPeer::HELLO) match_send(m, mac, MO_PING, {}, p.s == MPeer::ESTAB ? 0 : 1);
         }
         int64_t timeout = 6000000;  // the game's ping_delay is far longer than a LAN needs
         for (auto it = m.peers.begin(); it != m.peers.end();) {
@@ -928,11 +1007,14 @@ void apply_pending_config();
 void relay_service();
 
 void net_thread() {
+    load_lag_cfg();
     int64_t next_beacon = 0, next_tick = 0;
     uint8_t buf[65536];
     while (!g_stop.load()) {
         pollfd pfd{}; pfd.fd = g_sock; pfd.events = POLLIN;
-        int r = psp_plat::poll_(&pfd, 1, 5);
+        int wait_ms = 5;
+        if (!g_delayed.empty()) wait_ms = (int)std::clamp<int64_t>((g_delayed.front().due - now_us()) / 1000, 0, 5);
+        int r = psp_plat::poll_(&pfd, 1, wait_ms);
         if (r > 0 && (pfd.revents & POLLIN)) {
             for (int i = 0; i < 64; i++) {
                 sockaddr_in from{}; socklen_t fl = sizeof from;
@@ -941,6 +1023,7 @@ void net_thread() {
                 on_packet(buf, (size_t)n, from);
             }
         }
+        flush_delayed();
         int64_t t = now_us();
         if (t >= next_beacon) {
             next_beacon = t + 500000;
@@ -1451,6 +1534,7 @@ void h_PdpSend(uint8_t* rdram, recomp_context* ctx) {  // (id, destmac*, port, d
     b.insert(b.end(), dst.begin(), dst.end());
     put16(b, it->second.port); put16(b, (uint16_t)ARG(2));
     b.insert(b.end(), gp(rdram, ARG(3)), gp(rdram, ARG(3)) + len);
+    psp_netplay_trace_ptp("pdp-send", (int)ARG(0), gp(rdram, ARG(3)), len);
     send_to_mac(dst, T_PDP, b);
     ret(ctx, 0);
 }
@@ -1477,6 +1561,7 @@ void h_PdpRecv(uint8_t* rdram, recomp_context* ctx) {  // (id, srcmac*, port*, d
     uint32_t cap = r32(rdram, lenp);
     uint32_t n = std::min<uint32_t>(cap, (uint32_t)m.data.size());
     std::memcpy(gp(rdram, data), m.data.data(), n);
+    psp_netplay_trace_ptp("pdp-recv", id, m.data.data(), n);
     w32(rdram, lenp, n);
     if (macp) std::memcpy(gp(rdram, macp), m.src.data(), 6);
     if (portp) w16(rdram, portp, m.sport);
@@ -1551,7 +1636,10 @@ void h_PtpConnect(uint8_t*, recomp_context* ctx) {  // (id, timeout, nonblock)
         std::lock_guard<std::mutex> lk(g_mu);
         if (!g_ptp.count(id)) { ret(ctx, E_INVALID_SOCKET); return; }
     }
-    if (!nb) wait_for(timeout, [&] { return st() != Ptp::SYN_SENT; });
+    // A non-blocking connect still waits for the handshake for a while: the game treats a would-block here as a failed
+    // connect and opens a new socket, so over any real round trip (the SYNACK takes longer than the game's next poll)
+    // it never got connected and "Preparing for online battle" hung with hundreds of sockets.
+    wait_for(nb ? std::min<uint32_t>(timeout ? timeout : 1500000u, 1500000u) : timeout, [&] { return st() != Ptp::SYN_SENT; });
     std::lock_guard<std::mutex> lk(g_mu);
     Ptp::S s = st();
     if (s == Ptp::ESTAB) ret(ctx, 0);
@@ -1606,6 +1694,7 @@ void h_PtpSend(uint8_t* rdram, recomp_context* ctx) {  // (id, data, size*, time
     if (it == g_ptp.end() || it->second.s != Ptp::ESTAB) { ret(ctx, E_NOT_CONNECTED); return; }
     uint32_t n = (uint32_t)std::min<size_t>(len, space());
     it->second.sendq.insert(it->second.sendq.end(), gp(rdram, data), gp(rdram, data) + n);
+    psp_netplay_trace_ptp("send", id, gp(rdram, data), n);
     w32(rdram, sizep, n);
     ret(ctx, 0);
 }
@@ -1630,6 +1719,7 @@ void h_PtpRecv(uint8_t* rdram, recomp_context* ctx) {  // (id, buf, size*, timeo
         w32(rdram, sizep, 0); ret(ctx, (p.fin_rx || p.s != Ptp::ESTAB) ? E_DISCONNECTED : E_WOULD_BLOCK); return; }
     uint32_t n = std::min<uint32_t>(r32(rdram, sizep), (uint32_t)p.rxq.size());
     for (uint32_t i = 0; i < n; i++) { gp(rdram, buf)[i] = p.rxq.front(); p.rxq.pop_front(); }
+    psp_netplay_trace_ptp("recv", id, gp(rdram, buf), n);
     w32(rdram, sizep, n);
     ret(ctx, 0);
 }
@@ -1731,6 +1821,17 @@ TRACED("AdhocctlDisconnect", h_CtlDisconnect)
 }  // namespace
 
 // ================= public =================
+void psp_adhoc_send_aux(const uint8_t* data, size_t n) {
+    if (!g_net_ready || n > 0x2000) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return;
+    const Mac all{0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    std::vector<uint8_t> b;
+    b.insert(b.end(), all.begin(), all.end());
+    put16(b, AUX_PORT); put16(b, AUX_PORT);
+    b.insert(b.end(), data, data + n);
+    send_to_mac(all, T_PDP, b);
+}
 void psp_adhoc_configure(bool internet, const char* server, const char* room, const char* peers) {
     load_cfg_from_env();   // consume the environment first so it cannot overwrite what the menu sets
     std::lock_guard<std::mutex> lk(g_mu);
@@ -1786,6 +1887,26 @@ void psp_adhoc_group_peers(uint8_t (*out)[6], size_t max, size_t* count, uint8_t
     *count = n;
 }
 void psp_adhoc_set_local_fps(int fps) { std::lock_guard<std::mutex> lk(g_mu); g_local_fps = fps; }
+
+// Up to 24 bytes of the game module's own (a mode it wants everyone in the group to run, a state checksum), sent in every beacon.
+void psp_adhoc_set_game_data(const uint8_t* d, int n) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_game_len = (uint8_t)std::max(0, std::min<int>(n, (int)sizeof g_game_data));
+    if (g_game_len) std::memcpy(g_game_data, d, g_game_len);
+}
+// The game bytes of the other players in this player's group (up to `max`): out[i] gets peer i's bytes, lens[i] their count; returns
+// the number of peers in the group (0 when not in a group). Peers without game bytes are counted with length 0.
+int psp_adhoc_group_game_data(uint8_t (*out)[24], int* lens, int max, uint8_t (*macs)[6]) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return 0;
+    int k = 0;
+    for (auto& [m, p] : g_peers)
+        if (p.in_group && !std::strncmp(p.group, g_group, 8)) {
+            if (k < max) { std::memcpy(out[k], p.game_data, sizeof p.game_data); lens[k] = p.game_len; if (macs) std::memcpy(macs[k], m.data(), 6); }
+            k++;
+        }
+    return k;
+}
 
 int psp_adhoc_group_fps_cap() {
     std::lock_guard<std::mutex> lk(g_mu);
@@ -1984,4 +2105,38 @@ int psp_adhoc_ping_ms() {
     for (auto& [mac, st] : g_ping)
         if (st.ever && st.srtt_ms >= 0 && same_group(mac)) worst = std::max(worst, st.srtt_ms);
     return worst < 0 ? -1 : (int)(worst + 0.5);
+}
+// ---- side channel for game modules (see handle_pdp) ----
+void psp_adhoc_local_mac(uint8_t out[6]) { std::lock_guard<std::mutex> lk(g_mu); std::memcpy(out, g_mac.data(), 6); }
+int psp_adhoc_group_macs(uint8_t (*out)[6], char (*nicks)[32], int max) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected) return 0;
+    int k = 0;
+    for (auto& [m, p] : g_peers)
+        if (p.in_group && !std::strncmp(p.group, g_group, 8)) {
+            if (k < max) { std::memcpy(out[k], m.data(), 6); if (nicks) { std::strncpy(nicks[k], p.nick, 31); nicks[k][31] = 0; } }
+            k++;
+        }
+    return k;
+}
+void psp_adhoc_side_send(const uint8_t mac[6], uint16_t chan, const uint8_t* d, int n) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_connected || n < 0 || n > 0x1000) return;
+    Mac dst; std::memcpy(dst.data(), mac, 6);
+    std::vector<uint8_t> b;
+    b.insert(b.end(), dst.begin(), dst.end());
+    put16(b, (uint16_t)(SIDE_PORT0 + chan)); put16(b, (uint16_t)(SIDE_PORT0 + chan));
+    b.insert(b.end(), d, d + n);
+    send_to_mac(dst, T_PDP, b);
+}
+int psp_adhoc_side_recv(uint16_t chan, uint8_t src[6], uint8_t* buf, int max) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (auto it = g_side_q.begin(); it != g_side_q.end(); ++it) {
+        if (it->chan != chan) continue;
+        const int n = std::min<int>(max, (int)it->data.size());
+        std::memcpy(buf, it->data.data(), n); std::memcpy(src, it->src.data(), 6);
+        g_side_q.erase(it);
+        return n;
+    }
+    return -1;
 }

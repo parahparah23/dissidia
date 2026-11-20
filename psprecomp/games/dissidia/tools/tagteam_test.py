@@ -30,6 +30,7 @@ def run_battle(work, out, seconds, tag, fps=30, partner=0, enemy2=0):
     env = {'PSPRECOMP_CAMX_LOG': '800', 'PSPRECOMP_FIGHTER_LOG': '1', 'PSPRECOMP_TAGTEAM_LOG': '1'}
     if tag:
         env['PSPRECOMP_TAGTEAM'] = '1'
+        env['PSPRECOMP_TAGTEAM_CLONES'] = '1'   # the quick battle has no party: the extras are copies (off in play: a team without a second member has no partner)
         if partner: env['PSPRECOMP_TAGTEAM_PARTNER_CHAR'] = str(partner)   # extras of other characters (load_character)
         if enemy2: env['PSPRECOMP_TAGTEAM_ENEMY2_CHAR'] = str(enemy2)
     a = argparse.Namespace(work=work, script=script, fps=fps, out=out, char='Squall', timeout=400, ff=True, ff_menus=4,

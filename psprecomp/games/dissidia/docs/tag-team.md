@@ -530,3 +530,2559 @@ Play-test: a natural lethal hit on the original fighter produced no switch. Find
   (`[TAGTEAM] extra ... is down`); the forced recipe on the enemy's clone did not end the battle (50 s). A natural kill of the clone (user report: battle ended) was not reproduced:
   the damage to a clone goes through the slot fighter's assist place (`fix_assist`), so it may be applied to the slot; check with a real fight.
 - Debug aids: `PSPRECOMP_TAGTEAM_NATKO=<who>:<s>:<hp>`, `_KOFALL=<who>:<s>`, `_STATDUMP=1`, `_RULELOG=1`, `_HPM_VHP`, `_HPM_WATCHHP`, `_HPM_WATCH_ACT=<hex>`.
+
+## Slot rebuild: a KO'd slot fighter is replaced by a DIFFERENT character (tag-slot, 15 Nov)
+Needed because `content_swap` only works for clones (real party members own different block lists). `swap_slot_with(S, T, ko)` (tagteam.cpp) is now the
+one entry point of the KO flow and the pad swap: same character -> `content_swap`; different characters -> `rebuild_begin(S, charId of T, HP/BRV of T)`
+rebuilds the slot fighter **in its own memory** (the HUD, camera, pad, lock block and player flag are bound to the address) and parks T out of the way
+(down, AI gated, position 5000/5000; its HUD panel keeps the name of the character that fell, `g_label_char`).
+- Rebuild steps: the old brain and lock block are hidden from the destructor `FUN_08B2EDC4(A, 0)` (it would free them), resource releases skipped,
+  A unlinked from the world actor list (`world+12`, link `+0x4A0`), the 0x12D0 bytes zeroed, the constructor `FUN_08B39E5C` + the setup's per-fighter
+  init run as `spawn_fighter` does, then the slot-owned words go back: brain, controller object `+0x5A0`, assist `+0x1108`, player flag bit `+0x5B0 & 4`,
+  stock / revive, foe.
+- **Four things were needed to make it work** (found one at a time, headless party battle, `PSPRECOMP_TAGTEAM_KOFALL=human:10`):
+  1. *the constructor's registrations must stay until the fighter is ready* (camera slot = the new lock block, camera manager words, old lock block words):
+     taken back immediately, `FIGHTER_READY` never became true and the fighter never stood (`cur=-1`). Now they are recorded and taken back in
+     `rebuild_frame` once it is ready (next frame); `PSPRECOMP_TAGTEAM_REBUILD_UNDO_NOW=1` = old behaviour;
+  2. *a fresh status object reads HP 0*: the retail rules saw a KO and restarted the round every 2 s (`t=0.0s` loop). The carried HP / bravery are
+     written right after construction;
+  3. *the world's player pointer `world+20` (0x08BAEA04)* is moved to the other slot by the destructor/constructor: the retail HUD then treated side 0 as
+     CPU (portrait / bars gone at the next spawn, the call-in). It is saved before and put back (`[TAGTEAM] rebuild ...: world player ... put back`);
+  4. *`REG_PAIR0` (0x08BAE9FC) is `world+12`, the world actor list head* (world = 0x08BAE9F0): the constructor links A in at the head; restoring the old
+     value at ready time cut A out of the list, so it was never updated again (frozen at 0,0,0). The rebuild no longer touches REG_PAIR0/1.
+- Result (headless, Party A: Jecht + Squall vs Lightning + Vaan, forced KO fall of Jecht at 10 s, `CALLIN_DELAY=8`): the slot becomes Squall with his model
+  and moves (gunblade in the screenshots), the match goes on, the HUD stays intact, Terra is called in at 18 s with banner; Squall takes hits, is broken and
+  HP-attacked. Not done: the **HUD portrait** stays the first character's (bound at setup; the `chara_image/p_<code>_1p.gim` texture would have to be
+  replaced).
+  5. *`LAST_FIGHTER_OBJ` (0x089D4774) is the TAIL of a global object list* (head 0x089D4770, link +120, unlinked by `FUN_0880ABF4`). The constructor appends
+     its objects; restoring the tail to the pre-constructor value orphaned the newest node, and the NEXT destructor of that fighter spun forever in the
+     unlink (the second rebuild hung: `FUN_08B2EDC4 -> FUN_088310BC -> FUN_0883E0AC -> FUN_0880ABF4`). Neither the rebuild nor `spawn_fighter`'s undo
+     restores it any more (`PSPRECOMP_TAGTEAM_UNDO_LAST=1` = old behaviour), and both undo paths skip the list's link words. **The extras' undo had the
+     same bug**: any later destruction of an extra (battle teardown) could hang the same way; a candidate for the Retry / Leave freeze on the device.
+- Verified after 5 (headless, Party A): human slot Jecht -> Squall (10 s) -> Cloud of Darkness (22 s), three KOs in a row; CPU slot Lightning -> Vaan, then
+  Laguna called in; no hang, HUD intact.
+- **Slot call-in**: a slot fighter that falls with no living team mate on the stage but reserve left is no longer the end: after `kSlotCallinDelay` (2 s,
+  the fall plays, the round guard holds the round) the next reserve member is rebuilt straight into the slot with full HP and the entrance (pose,
+  pause, banner). Verified: KOs at 10 / 20 / 32 s with a 30 s call-in delay -> Squall, Cloud of Darkness, Terra take the slot one after another, Yuna
+  joins as the partner at 40 s. `PSPRECOMP_TAGTEAM_NOSLOTCALLIN=1` turns it off.
+- **Reserve strip after a rebuild**: `update_party_reserve` re-derived "the member on the stage" from the slot's current character, so after a rebuild
+  it skipped members (Cloud of Darkness vanished from the strip, the CPU's Laguna was never called). The stage member is now pinned per battle.
+
+## Round guard (15 Nov)
+In 4 of ~15 party runs the retail rules step `FUN_08A23DA8` (battle overlay) picked a LIVING, idle slot fighter as the loser (the CPU slot, all fighters at full
+HP; most often a few seconds after a KO swap) and ran the finish (`FUN_08B33914`, then the round restarted every 2 s). Its predicates (`FUN_08A23488`,
+`08A23AEC`, `08A23BB8`) read per-slot rule records (`obj+240`, stride 40, rule types 4 and 2); not decoded. Guard: while `FUN_08A23DA8` runs, its slot
+actor getter `FUN_08A22C78` answers 0 (the step skips the slot) when the slot's fighter is alive, or KO'd with a living team mate, or its side has reserve
+left. Real KOs of the last fighter still end the round. `PSPRECOMP_TAGTEAM_NOROUNDGUARD=1` turns it off; `[KOFIN]` lines (fighters + host stack) are
+logged whenever the finish step runs.
+
+## Natural lethal hit: still ends the round (open, 15 Nov)
+Reproduced headless with `PSPRECOMP_TAGTEAM_NATKO=human:12:50` (HP 50, bravery held at 0, a real CPU HP attack kills): the match ends at once (DEFEATED,
+"Proceed to next battle"). `[NATTRACE]` (per-frame victim state) shows why the tag flow never saw it: on the hit frame the **live HP word stays 50** and
+the script is a hit reaction (700); bit 0x1000 of `+0x384` rises (also on a living fighter, so not usable); two frames later `bs+72` goes 3 -> 4 and
+`+0x380` bit 0x20000000 is set on BOTH slot fighters. The loser's status then holds `+0x8` = 0x0BB2 > HP (`+0x20` and the high half of `+0x0` too), the
+winner's `+0x8` = 0. The HP damage step is `FUN_08AEFF40` (battle overlay; writes `status+8`, has a "survive at HP-1" branch chosen by its arguments),
+reached through `FUN_08AFD424 -> 08AFD170 -> ... -> 08AE5BC8 -> 08AF03E8`; HP attacks do NOT go through `FUN_08AE6D2C`.
+Tried, all opt-in now: `_PENDINGKO=1` (KO = `status+8 >= HP`: the swap / rebuild happens at the hit, but retail has latched the KO already and runs the finish),
+`_PHASEBACK=1` (bs+72 4 -> 3 after the swap: **froze the match**, the finish presentation keeps running), `_LETHALCLAMP=1` (clamp in `FUN_08AE6D2C`: never fires).
+Next step: hook `FUN_08AEFF40` itself for slot fighters with somebody to come in (take its survive branch / clamp before its messages
+`FUN_08AFD170(.., 5|4, ..)` are sent), then swap.
+
+- Debug: `_REBUILD_DIFF=1` (static words the rebuild changed, `[RBDIFF]`), `_REBUILD_WATCH=1|2` (write watch on A+904 / the world list head),
+  `[RBWATCH]` lines (world membership, flags, script, position for 5 s after standing), `_HANGDUMP=1` (host backtrace when the frame hook stops),
+  `_FORCEREBUILD=1` (rebuild clones too). `_KOFALL=<who>:<s>[,<s>...]` now retries until the fall starts and takes up to 4 times.
+- HUD overlay: now taken off the screen 4 frames after the fight stops refreshing it (`dissidia_tagteam_frame_end`, called from the frame end hook in
+  every state); it was drawn over the pause menu, the VS / opponent pages and the next round's intro.
+
+## Retry / Leave freeze (15 Nov): REPRODUCED, cause narrowed, not fixed
+`~/dissidia/tt/bin/menu_drive.py TREE OUT WALK WAIT STEPS [ENV=VAL...]` drives the pause / result menus over the debug socket (battle via the direct walk,
+then e.g. `start:2,down:1,cross:3,...`, screenshots per step, `M<hex>:s` arms the memory-write watch); it reports whether the `[FIGHTER]` clock moves.
+- **Party battle, pause > Retry: the VS page sits at "Now Loading..." forever** (5 of 5 runs on tag-team HEAD and on tag-slot, no KO needed). The game
+  thread spins in the heap allocator `FUN_0885C6CC` called from the loading screen (`FUN_0888C4C8 -> 08B13B70 -> 08B13EB4 -> FUN_08890938`) on the retail
+  **FILE staging heap** (object 0x08E4D000, range 0x08E4D030..0x090C2800 = 0x275800 bytes): its free list holds a node (0x0903E680) inside memory the main
+  heap gave to the battle after the previous loading screen.
+- Controls: **clone partners (`PSPRECOMP_TAGTEAM_NOREAL=1`) -> Retry works; tag team off -> works.** So it comes with the real party members loaded mid
+  battle (`load_character`). `[LOADHEAP]` (`PSPRECOMP_TAGTEAM_LOADHEAPLOG=1`): `load_character` allocates from the model pool (0x09B90000), OBJDATA (0x0AFED000),
+  its private staging heap and three persistent manager heaps (0x09944510, 0x09971160, 0x099BA640), never from the FILE heap. Not the cause: `LAST_FIGHTER_OBJ`,
+  the round guard (bisected). The file manager never unloads the files loaded mid battle (`FUN_08844520(mgr, id)` = unload by id, `FUN_08844588(mgr)` = all);
+  next idea: unload them at the teardown, and find who frees into the FILE heap with a watch on 0x0903E680 armed before the Retry (the one try with
+  function tracing on changed the timing).
+- Quick Battle 2v2 (clones) pause > Retry, party pause > Forfeit (goes to Round 2), the result screen's Return to Battle Setup: continue normally.
+- Added on the way: `dtor_hook` (the retail fighter destructor): the first retail destruction of a slot fighter or an extra drops the tag battle state
+  (`[TAGTEAM] battle teardown`), so no per-frame step touches stale actors afterwards (`PSPRECOMP_TAGTEAM_NOTEARDOWN=1` off). Not the fix by itself.
+
+## Exit paths, first look (tag-exit, 15 Nov)
+`menu_drive.py` (~/dissidia/tt/bin, drives the pause / result menus over the debug socket with screenshots) tried: pause > Retry in a 2v2 Quick Battle,
+pause > Retry in a party battle after a KO + loaded call-in, pause > Forfeit in a party battle (goes to Round 2, plays), and the post-battle
+"Return to Battle Setup" > Enter Battle. All continued into a running battle. Seen on the way: a second party round starts with clones again (the real-member
+conversion runs once per battle), the reserve strips do not advance per round.
+
+## Play-test round (Pixel Fold, 15 Nov) and fixes
+Reported: damage to the enemy partner shows on the main enemy (HP and BRV); killing the partner ended the fight; Retry / Leave freeze; Summonstones fire endlessly.
+- **HP is `status+0xC - status+0x8`.** `+0xC` is the HP the fighter started with, `+0x8` the HP damage taken so far (the HP damage step adds to it, the HUD shows the
+  difference). `hp_eff()` is now used for alive / KO / panels / rebuild carry; writing HP also zeroes `+0x8`. (The old reading of `+0xC` alone never saw a
+  natural kill.)
+- **HP damage went to the slot opponent.** The HP damage step `FUN_08AEFF40(?, msg)` takes `msg+0` = the victim, which is always the attacker's slot
+  opponent, `*(msg+4)` = the attacker. `hpstep_hook` puts the fighter the attacker really hit (hit registration `FUN_08838734`, info `+28`, within 2 frames)
+  into `msg+0` for the call. Verified headless: the human's HP attacks on the enemy partner take its HP (it goes down, the fight continues; in a party
+  battle the reserve comes in); before, the main enemy's damage counter grew until it "died" = the round ended. BRV attribution: the tag-hp3 hooks
+  (merged): `afd424_hook` shows the hit victim as the attacker's foe during the combat module step, extras get their own damage module (mode 8). Matrix
+  (`_HPMATRIX`, bystanders now moved 30 m away, `_HPM_TOGETHER=1` old behaviour): human -> enemy partner takes the partner's BRV, main enemy untouched.
+  Still: our partner as attacker deals no damage.
+- **Natural lethal hits** (`hpstep_hook`): when the HP step would kill a slot fighter whose side has a team mate or reserve, its `+0xC` is raised for the
+  step (damage numbers stay right), then the damage is capped at HP-1 for retail and the fighter marked KO for the tag flow (`g_ko_mark`). Verified:
+  NATKO on the human -> Squall rebuilt into the slot, fight runs to 60 s, Cloud of Darkness called in. `_NOKOHOLD=1` off.
+- **Endless round restarts (probably the "infinite summons")**: `stock_hook` undid the retail finish for any "living" slot, also with no extras / after
+  a natural kill the old code thought alive: the round restarted every 2 s forever, replaying the round start (Ruby Light seen again and again). Now only
+  with extras, and alive uses hp_eff. In 100 s of normal AI 2v2 no Summonstone fired at all.
+- **Retry freeze: root cause found.** The battle heap (object `world+8`, 0x08E4D000 here; block chain from object+20, `+0` next, `+8` size, ends at
+  object+4) kept blocks of ours after the teardown: the extras' first 0x310 constructor block (not freed by the fighter destructor for an extra), the
+  private controller copies (0x80) and tag-hp3's damage module copies (0x200 + 0x80). The next loading screen's 544 KB file read then took the
+  allocator's wrap-around path and wrote its header over a live block (`next` = itself) -> the allocator looped at "Now Loading". Fix: `dtor_hook` notes
+  the teardown, and on the next frame end the extras' recorded blocks and our own allocations that are still allocated (same address AND size in the
+  chain) are freed with the game's free `FUN_0883133C`. Verified: party Retry, Quick 2v2 Retry, Forfeit (Round 2) continue normally; heap chain at the reload
+  = the retail one.
+  Final form (`dissidia_tagteam_after_free`, called from hooks_models' heap free hook): every fighter we build has a *leak list* (an extra: its
+  constructor blocks + the helper objects we allocate for it; a rebuilt slot: the new character's constructor blocks + the unused new lock block). When
+  the actor's own block is freed (its destructor has run), the listed blocks still allocated with the same address and size are freed: exactly the ones
+  the destructor leaves, never one retail frees later (the earlier "frame after the teardown" sweep ran mid-teardown in the rebuild case and double freed).
+  At each rebuild the previous *rebuilt* character's leftovers are freed right after our destructor call; the retail character's are not (still used:
+  the HUD stays bound to it). Content exchanges (clones): the fighter list link `+0x1114` and the global object list links (`+120` of the nodes at
+  0x089D4770) now stay with their address like `+0x4A0` (exchanged, a destructor walked off the list and hung), and the exchanges are undone at the
+  teardown (`_NOUNSWAP=1` off). Verified: Retry after 0, 1 and 3 KO rebuilds (party), after a clone exchange (Quick), Forfeit after rebuilds: all continue.
+- Debug aids: `_HPMON` (per-frame HP / BRV / damage taken), `_HPSTEPLOG`, `_HOLDFRONT=enemy2|cpu`, `_NATKO=enemy2|partner:...`, `_WORLDLOG`, `_SLOWLOG`
+  (does not fire yet), `_HEAPCHECK=<heap>` (chain validator, first break), `PSPRECOMP_FILEHEAP_LOG=<heap>` (big allocations with host stacks, chain dump
+  before the 544 KB read), `_OWNLOG`, `_NOSWEEP`, `_NOTEARDOWN`.
+
+## Real members fight with their own save record (15 Nov)
+- The per-side record (`REC_BASE + 0x1060 * side`) is a copy of the character's save data: byte 0 = charId, byte 1 = level, five loadout sets (every 0xC6),
+  ability list from ~+0x3EC in 6-byte entries, ids `charId << 8 | n` (own moves) and `0x40nn` (general). An extra of another character was initialised
+  with the side character's record: Squall had Jecht's 0x14nn moves and his AI never attacked (only 0/100/200/400 scripts), Vaan the same.
+- The save keeps one 0x778-byte record per character from **0x08BAFC90** (stride 0x778, same layout as the first 0x778 bytes of the side record; order
+  by roster index, found by the id byte). `record_for(G, charId)` copies the side record and puts the member's own save record over its first 0x778
+  bytes (fallback: the ids remapped to the new character). Used by `spawn_fighter` and the rebuild. Result: Squall level 100 / HP 9844 attacks (20 attack
+  scripts in 60 s, was 2), Vaan comes in at his save's level 57 / HP 5951; the "stats copied from the slot fighter" limitation is gone.
+  `_NOSAVEREC=1` (remap only), `_NORECMAP=1` (old behaviour), debug `_RECDUMP`, `_RECSCAN`, `_BRAINDUMP`.
+- Our partner (clone) does deal damage when its hits land (28/28 in an AI run); the matrix harness's partner windows just rarely connect.
+
+## Play-test round 3 (user, 15 Nov): partner KO, BRV display
+- **A fallen extra stood up again and stayed** (3 enemies after the call-in, all lockable): retail never runs a KO for a fighter outside the slots, the
+  extra only got the down mark. Now it starts the KO fall (script 1210), its AI is gated (+0x380 bit 2) and 3 s later it is placed off the stage
+  (5000, y, 5000), out of the lock-on, the camera and the fight (`g_park`; `_NODOWNFALL=1` off). Verified headless: Vaan falls at 19.3 s, leaves at 22.3 s,
+  Laguna comes in at 27 s and is the only enemy partner panel.
+- **BRV damage to the partner shows on the main enemy's retail panel: still open.** The real damage is right (`[HPMON]`: the partner's BRV drops, the
+  main enemy's stays), but the retail opponent panel books per-hit numbers in its own tables: with the main enemy 40 m away (`_FARCPU=1`) and untouched
+  (BRV 1040), its panel fell to ~450 and showed BREAK when the partner broke. Tried, all without effect or worse: skipping the HUD channel steps
+  FUN_08AE3710 / 08AE3B54 and unlinking every handler but the damage handler while a hit is booked on an extra (`_HUDQUIET=1`, opt-in), skipping the HUD
+  refresh FUN_089DEDB0 (froze the game at the partner's break: the break presentation waits on it; removed). Next: find where the per-hit amounts are
+  stored (FUN_08AE3B54 writes dirty bits at *(0x08AE7CA4) and amounts in a table at 0x09B7....) and book them for the slot only when the slot was hit.
+- Debug: `_FARCPU=1`, `_HUDPAIR`, `_WORLDPTR`, `_BRAINDUMP`.
+
+## Call-in entrance: the assist appear action (15 Nov)
+User wish: a called-in member should come in like an assist (the assist's warp-in animation and call line). An assist that is called plays script **240**
+first (`[ASSIST]` log of a CPU assist call: 240 -> 1 -> 10010...). `entrance_effect` now starts action 240 (falls back to the battle-start pose 1100 when the
+character has no such action; `PSPRECOMP_TAGTEAM_ENTRANCE_ACTION=<id>` overrides) and gates the member's AI (+0x380 bit 2) until the entrance ends (before,
+the AI cut 240 short after 0.5 s); the match pause and the banner stay. Headless: 240 runs for the whole 2.5 s entrance (Squall, Cloud of Darkness), then the
+member stands and fights. **Not verified:** how it looks (the camera never framed the entrant in the test shots) and the voice line (no sound logging;
+real members' voice banks are not loaded mid-battle, so they are probably silent; clones have theirs).
+
+## Bravery numbers on the slot panels (15 Nov)
+The two big panels only know the two slot fighters. A BRV change reaches them as `FUN_08AE3710(report obj, kind, amount, ...)`: the kind and the report
+object's side (`*(obj+16)` = its actor, side at +0x10CC) pick a channel from the 2x8 table at 0x08AE7B90, `FUN_08AE3B54` adds it to the channel row at
+0x09B6C160 + 16*ch and sets a dirty bit, and `FUN_089DEDB0` applies it to the panel groups (hud+36 / +120 / +204) through `FUN_089DE6EC(hud, ch, a2, a3, sign)`.
+Kind 2 is a **steal**: channel 0 moves group 36 -> 120, channel 1 moves 120 -> 36 (the gaining panel is a3). Channels 6 / 7 change group 36 / 120 alone by a
+signed amount (positive = gain; the BRV regen of kind 4 uses them), 8 the stage pool; 9-11 the same with the sign flipped.
+With extras only one half of a steal is true, which is what showed partner hits on the main enemy's panel:
+- an extra's report (its own actor, an owned block, or its copied damage module in `g_leak_watch`): a kind 2 whose victim is the opposite slot fighter
+  (its real BRV dropped by the amount since the last frame end, `g_brv_prev` / `g_brv_booked`) becomes the one-sided loss on that fighter's panel
+  (channel 7 - table[side][2]); everything else from an extra is dropped. The report object's side is not trusted (the module copy can carry the other side).
+- the slot fighter stealing from an extra (`g_hud_quiet`, set in the module step when the attribution booked the hit on a non-slot fighter): the kind 2
+  becomes the one-sided gain on the attacker's own panel; other kinds in that window are dropped.
+Headless check (`PANELLOG=08F1135C`, enemy panel; the player panel is 0x54 below it; `HOLDFRONT=enemy2 FARCPU=1`, brvspam): the main enemy's panel settles
+on its real BRV at every sample while the partner gains, loses and is broken; the player's panel follows its real BRV one roll behind (before: it missed every
+gain from hitting the partner and every loss to the partner). `PSPRECOMP_TAGTEAM_QUIETPASS=1` / `HUDNUMBERS=1` turn the rewrite off for A/B runs.
+One run of ~12 froze at 13 s right after the partner's break (rerun with the same build did not); not reproduced since.
+
+## Call-in entrance: warp-in, then the battle-start pose with the banner (15 Nov)
+`entrance_effect` runs two steps while the match pauses: action 240 (the assist entry: the member flies in) for 1.2 s (`PSPRECOMP_TAGTEAM_ENTRANCE_APPEAR`),
+then `entrance_step` starts the battle-start pose 1100 and shows the "<NAME> JOINS THE BATTLE" banner for 2.5 s (`..._ENTRANCE_PAUSE`); then the AI takes
+over. A character without action 240 goes straight to the pose. The clone call-in (`call_in`) uses the same entrance. A called-in member now spawns 40% of the
+way (max 5 m) toward the foe and 1.5 m to the side instead of 3 m beside the fallen fighter (which put him inside the camera). Headless (party battle,
+`KO=human:12 KO_HP0=1 CALLIN_DELAY=6`, `PSPRECOMP_TAGTEAM_AGESHOTS=<dir>:<from>:<to>:<step>` screenshots by battle age): Cloud of Darkness flies in, holds the
+pose under the banner for 2.5 s, then fights. **Not done:** the voice line (real members' voice banks are not loaded mid-battle); the camera stays on the slot
+fighter, so an entrant on the far side is small in frame.
+
+## Play-test round 3 fixes (15 Nov, later)
+**Panel shake / break on the main enemy.** The steal channels 0 / 1 also call `FUN_089DFCA4(group)` (the panel's hit animation, picked by the panel
+fighter's state) on the losing panel, so a hit on the partner shook the main enemy's panel, and once broken the break variant played on every hit. The
+earlier rewrite relied on `g_hud_quiet` (set only when the attribution redirected the foe); with the partner as the lock-on foe nothing was redirected and
+the plain steal went through (bv30: the main enemy's panel fell 1030 -> 411 while its real BRV stayed 1030). Now every kind-2 report of a slot fighter
+checks the opposite slot fighter's real BRV drop (`g_brv_prev` / `g_brv_booked`): only a real drop passes the retail steal; otherwise it becomes the
+one-sided gain (channel 6/7, no animation). A loss of the slot fighter to an extra uses channels 15/16 (one-sided loss with the panel's hit shake).
+Checked: bv31 (hits on the partner) the main enemy's panel matches at every settled sample; bv32 (hits on the main enemy) retail steals and the retail
+break (kind 6, -BRV, f12 100, 1.7 s roll) unchanged. `PSPRECOMP_TAGTEAM_CALLLOG=<hex>,...` logs calls of any guest functions (up to 8).
+
+**Chase camera.** Chase start `FUN_08AB6348(ctl 0x09AEEFB0, attacker, opponent, 0)`: ctl +0 = state (0 = none), +28 / +32 the pair; it puts the
+attacker's lock block (actor+0x5AC; block +0xF8 owner, +0xFC target) in camera mode 3 playing camera 2100 (0x834) and the opponent's playing 2110
+(0x83E) through `FUN_08B3AEB4` -> `FUN_08B3F034(lb+384)` -> `FUN_0880FD34(lb+480, id)`. The camera manager only initialises / follows the slot pair's
+blocks (mgr+0x6D0+4*side), and the chase framing reads the slot table: with an extra in a chase the shot showed empty ground or a far wide shot (chase
+shots: `PSPRECOMP_TAGTEAM_CHASESHOTS=<dir>`, 4 s of screenshots from each start; Squall quick battle + `chase_sq2.txt` gives several chases per run).
+Fix (`chase_camera`, before the original runs): the extra borrows its side's slot lock block (+0x5AC, owner +0xF8) and its side's slot table entry
+(bs+56/60) until ctl +0 returns to 0; teardown (`dtor_hook`) puts everything back first. Lending only the camera slot, or only the block, did not help.
+Headless: extra-chases-player and player-counter-chase frame both fighters close like retail. Not checked: the frames right after a chase's HP hit
+(the blown-away fighter left the frame once), a KO inside a chase. `NOCHASE_BS` / `NOCHASECAM` turn the parts off.
+
+**Entrance close-up.** camera.cpp `entr_frame`: during the warp-in the game's eye turns to the entrant; during the pose a front three-quarter close-up
+(eye toward his foe, 1.1 m to the side, pushing in 4.4 -> 3.5 m), 0.2 s cut-in, 0.3 s ease-out. `PSPRECOMP_TAGTEAM_NOENTRCAM=1` turns it off.
+Headless: Cloud of Darkness framed through the warp-in, close-up under the banner, back to the battle camera.
+
+**Call line.** The assist summon (`FUN_08B031AC`) plays voice `*(*(actor+0x5A4)+136)` via `FUN_08B33F8C(actor, id, 0, 0)` (Yuna 21410037). The entrance
+now does the same, but for a member loaded mid-battle the id (CoD 1510041) has no record in the voice table (`FUN_088A4364` returns 0), so nothing plays;
+the warp-in's own timeline line (1510038) is requested (`FUN_088A24D4`), audibility not verified. Loading the member's voice records is still open.
+
+## Play-test round 4 fixes (15 Nov, afternoon)
+**Extras' BRV state machine (break cooldown, recovery).** The damage handler (vtable 0x08AE7B50, +16 = owner) is also the fighter's BRV state machine and
+the HUD report object: the battle controller `FUN_08886C88` runs `FUN_08AE090C(handler, module)` and `FUN_08AE09C4(handler, module)` per slot (break
+state +8: 0 normal, 1 broken, 2 recovering; the refill to base after a break comes from `FUN_08AE10B0`). Extras never ran them: a broken extra stayed at
+0 for good and every later hit broke it again. The extra's handler copy was also only 0x80 bytes of a 0x310 block (size from the heap header at
+handler-8); it is now copied whole (self pointers moved) and both steps run for each extra after its module step. Headless (`SETBRV=enemy2:9:5`,
+`HSTATE=1`): break -> state 1 -> 2 -> 0 with BRV back at base 594 after ~2.4 s, the next break ~10 s later. (`NOEXTRABRV=1` turns it off.)
+Retail main-enemy break for comparison (`SETBRV=slotC:9:5`): 0 for ~3.2 s, then +3 per frame to base.
+
+**Battle decided.** When a slot fighter goes down with no team mate and no reserve, `g_decided` stops all KO handling and call-ins until the next battle:
+the winner's outro was taken for a KO (its slot rebuilt during the victory scene, a member called in over the results). `KOLIST=<who>:<s>,...` sets HP
+0 on fighters at given ages (who = human, cpu, enemy2, partner).
+
+**No duplicates.** A team without a second member gets no partner and a KO'd partner with no loadable reserve member is not revived as a copy
+(quick battles have one-member lists too, so they are now 1v1 unless `PSPRECOMP_TAGTEAM_CLONES=1`; `tagteam_test.py` sets it).
+
+**Lock cycle.** foe -> other enemy -> EX core (when out) -> straight back to the foe (the release in between made it three presses back to the main enemy).
+`LOCKRELEASE=1` restores the release.
+
+**Chase camera: lending off.** Measured with the camera's own SetEye values (`[CHASECAM]`), the borrowed lock block + slot table entry was not shown
+to fix the shot (the earlier "fixed" screenshots were confounded: the partner was a clone of the main enemy and `HOLDFRONT` / `FARCPU` moved
+fighters during the chase), and the slot table swap made the KO handling treat the partner as the main enemy. It is opt-in now
+(`PSPRECOMP_TAGTEAM_CHASECAM=1`); all of tagteam.cpp reads the slot table through `srd()` (the retail value while lent). Chase camera: still open.
+
+**Entrance close-up:** front three-quarter, waist-up (2.8 -> 2.3 m), direction toward the entrant's foe taken once when the pose starts (his facing at
+that moment is still the fly-in's; a per-frame facing swung behind characters whose pose turns them).
+
+**Voices: open.** The voice records are one global table (`*(0x089D6D4C)`, `FUN_088A4364` binary search) replaced whole when a sound resource loads
+(`FUN_0893354C` -> `FUN_088A4258`): it holds the battle's own characters only. A member loaded mid-battle (CoD 1510041 assist line, Laguna 21310041) has no
+record, so nothing plays; giving him his lines means loading his voice parameters + clip bank and merging them into that table. The assist summon's
+graphics come from the assist controller (`FUN_08B031AC`), not from action 240.
+
+## Chase camera, close look (15 Nov, evening)
+Dense captures (`CHASESTEP=2` ticks, `CHASELEN=2.5` s, `CHASESHOTS=<dir>`), Squall quick battle, `chase_sq2.txt`, no HOLDFRONT / FARCPU:
+- **Retail** (`EXTRAS=0`, the CPU chases the player, cb4): a tracking shot from the side that keeps both fighters in frame through the launch and the
+  dash, no cut.
+- **Partner chases the player** (cb2): within ~3 frames the view cuts to a fixed wide shot of the stage (probably framed on the player and the far main
+  enemy) and stays there.
+- Tried, clean: the extra borrows its side's slot lock block (`CHASECAM=1 NOCHASE_BS=1`, cb6/cb7) - no change; plus the slot table entry (`CHASECAM=1`,
+  cb9) - one chase still the fixed shot, one followed a fighter. Not fixed; the lending stays opt-in.
+- Camera manager diff at chase start (`CAMDIFF=1`): retail and partner chases change the same non-float words (`+0x8B4` foe -> 0, `+0x8C0` mode,
+  the shot list at `+0x10F0..0x1140`); the difference is in the float fields. Next: trace the lock-block mode-3 handler `FUN_08B3B280` and the camera
+  animation player `FUN_0880FD34(lb+480, 2100/2110)` for the anchor the chase camera is placed against.
+Rebased on origin/main (8e84486) 15 Nov: the branch's copy of the --direct commit was dropped for main's; `psp_ge_draw.cpp` present_blend_hud merged
+(canvas + tall-screen band: the canvas covers the top 272/h272 of the picture).
+
+## Chase camera: the cause for player chases (15 Nov, late)
+**Deterministic test** (no AI, no luck): `BT_NO_AI_ONLY=1` (new in battle_test.py: CPU brains off but the CPU fighters not frozen, so a launched
+fighter flies), Squall quick battle, script `chase_det_*.txt`: `place 2`, `action 72 player` (NEAR_COMBO4, script 10006, chase window ticks 60-110 from
+p_eht100.objx timeline 047), Cross taps 0.9-2.1 s after: a player chase every 6 s. `~/dissidia/tt/bin/dtvar.sh NAME "ENV"` runs it with 3 chases.
+**Bisection:** no extras = retail tracking shot; enemy partner only (`EXTRAS=1`) = fine; human's partner only (`EXTRAS=2`) = fixed wide shot of the
+stage centre. Not the assist pointer, the controller copy, the foe/camera-foe writers, the controller hook, the module step, or clone-ness.
+**Cause:** the fighter constructor resets the side's slot object (the one whose releases `rel1_hook`/`rel2_hook` skip, e.g. 0x08C0072C side 0,
+0x08C009A4 side 1): camera resource handles +0x00 / +0x0C to 0, ids +0xE8 / +0xEC to -1, the name at +0x110. The chase camera animations of that side
+then evaluate against nothing. **Fix:** spawn_fighter puts those words back right after the constructor (`[SLOTOBJ]` lines; `NOSLOTOBJFIX=1` off).
+Result: the player's chases in a tag battle track like retail (z1/z2 vs dt3). **Still open:** chases where the human is the one chased (by the main
+enemy or the enemy partner) keep the fixed shot; the lending experiments `CHASECAM=1..5` (slot table swap, lock block borrow, own block in the camera
+slot, camera players initialised from the slot's block, combinations) did not fix it in AI runs. Camera-side facts found: the camera's slots
+mgr+0x6D0..0x6DC = [human lb, CPU lb, assist lb, assist lb]; `FUN_08B40CDC(cam, lb)` is reached from the lock-mode handler `FUN_08B40014` only in a
+lock-cycle state, the human's view through `FUN_08B3B31C`; a lock block is 0x600 bytes, its camera players at +0x180 / +0x1E0.
+
+## Voices (15 Nov, late)
+The voice record table is loaded once per battle (a 70 KB resource, `FUN_0893354C` -> `FUN_088A4258`) and does hold the entrant's ordinary lines
+(CoD 1510004 / 031 / 045 at voice params +0x7C/+0x80/+0x84, Laguna 21310039 / 027 / 028) but not the assist call line (+0x88: CoD 1510041, Laguna
+21310041; a real assist, Yuna 21410037, has it). The call lines most likely come with the assist set (`p_<code>_a.objx`, `voice_p_<code>_a_00.scd`),
+loaded only for the battle's assists: playing them for a member called in needs that set loaded mid-battle. What +0x7C..+0x84 are was not pinned down,
+so none of them is played as a stand-in. `[VOICEPARAMS]` logs the ids and which exist.
+
+## Being chased: forced tests (15 Nov, night)
+`PSPRECOMP_TAGTEAM_FORCECHASE=cpu|enemy2` (+ `FORCECHASE_NOGATE=1`): once the attacker's foe is in a blow-away reaction (700/701/750/751) for 6 frames,
+the Chase starts the way `FUN_08B3526C` does it on the press: ctl = `*(0x08AB6738)`, `FUN_08AB6348(ctl, att, foe, 0)`, `FUN_08B35018(att)`,
+`FUN_08B35018(foe)`, `FUN_08B333F0(att)`, `FUN_08ABB458(*(0x08ABBDF8), att != FUN_08841FA4(0))`. (The real gate `FUN_08B33580` needs +0x190 bit 0x10,
+which a forced launcher does not set.) With `BT_NO_AI_ONLY=1` and `action 2310 cpu` (Lightning gst130, script 10072, chase window from tick 42) or
+`action 2310 2` (the enemy partner, kept beside the player with HOLDFRONT=enemy2) the enemy chases the player every 6 s. `HOLDPARTNER=near|far` keeps the
+player's partner beside the player or 60 m away (no effect on the result).
+Results (`chase_cpu.txt`, `chase_e2.txt`): no extras = close chase shot all the way; enemy partner only = the same; **the player's partner present** (main
+enemy or enemy partner chasing) = the first ~1 s is a fixed shot (SetEye of the human lock block camera: eye stuck at one point, looking 1 m ahead), then
+the shot follows the fighters. Same call paths as retail (`[CALLVEC]`, `PSPRECOMP_TAGTEAM_CALLLOG_VEC=1`). Ruled out: the pair table (UNDO_PAIR), the
+global 0x08B63310 struct, partner position, the four camera resource objects 0x08C0072C / 0x08C00868 / 0x08C009A4 / 0x08C00AE0 (all loaded).
+Lead not finished: lock block +0x278 (the camera resource object the block plays from) is 0x08C0072C in the tag run at chase time and 0x08C00868 in
+a 1v1 run, but the 1v1 run has a different allocation layout, so this may be noise; the partner's constructor zeroes it (0x0880FBA0) and the game sets
+it back (0x088359A8). Checked: a 1v1 run with the same layout keeps 0x08C0072C through its chases (mw5), so +0x278 is not the cause.
+
+## Panel follows the lock-on, call line, own stats on a slot call-in (15 Nov, night)
+**Big panel = the enemy you are locked on to** (default; `PSPRECOMP_TAGTEAM_NOHUDLOCK=1` keeps the slot fighters). `FUN_089E95B0(slot index)` is the
+HUD's fighter getter (HP / max HP via status +0xC/+0x8, BRV via status +0x14, info via actor+0x5A4): `hudget_hook` returns `hud_panel_fighter(k)` = the
+human's target (+0x2FC) when that is a living extra of that side, else the slot fighter. The BRV number is report-driven, so `hudref_hook` (on the HUD
+refresh `FUN_089DEDB0(hud)`; panels are hud+36 / hud+120, chosen per side by the steal channel table, shown value at group+4) keeps my own target per
+panel and sends the difference to the panel fighter's real BRV through the side's one-sided channel (it rolls like any change); switching back sends the
+difference to the slot fighter's value. Reports of a slot fighter that is not on its panel are dropped; steals where the attacker or the victim is off
+the panels only change the panel that shows the fighter concerned (also for the partners' steals). Checked (`HUDLOCKLOG=1`, `[HUDPANEL]`): the locked
+partner's panel follows its real BRV through hits, the break to 0 and the refill (roll lag only). The small overlay panels now show BRV too, and the one
+for an extra that is on the big panel shows the slot fighter it displaced there. Not done: the big panel's portrait stays the slot fighter's.
+**Call line:** the voice table is global (892 records); an assist's lines are the +50000 variant (`FUN_08842828`, character-data flag 8), e.g. CoD
+1560041, Laguna 21360041, Yuna 21460037, which exist; the entrance asks for id+50000 when the plain id has no record. A SAS voice (7904 bytes) is keyed
+on right after the request (`PSPRECOMP_SAS_TRACE=1`, absent without the call): the line plays (not listened to). The intro quote is a streamed `.at3`
+line chosen by the battle-intro code, not a timeline event (pose 1100 only has sound 1500035): not done.
+**Appear look:** the assist controller's display state 0x12 (`FUN_08834C10(actor, 0x12, 0)`, actor+900 bit 0x1000) hides the actor (it is the assist's
+"not here yet" state): opt-in `APPEARFX=1`, off by default.
+**Slot call-in stats:** the rebuilt member took the KO'd fighter's max HP / BRV (Laguna 9609 = Lightning's); now his own (+0x10B0 / +0x10AC after the
+constructor): Laguna 10299.
+
+## Entrant's intro line (15 Nov)
+A called-in member now says their battle-start intro line during the pose, after the assist call line at the warp-in. The battle start loads both
+sides' lines with `FUN_08B0E40C(ctx, 2, 0x09AFDFB0, -1)`: per fighter `FUN_08B0D7F4(obj16, actor, 2, 0x09AFDFB0, 0, -1)` picks the line
+(`FUN_08B009A0`, record name e.g. `la_battle_132`), reads `voice/<EN|JP>/battle/<name>.at3` into a heap buffer (obj+0) and binds it to a sound
+object (obj+4, handle obj+8, record obj+12). A script event plays it with `FUN_08B0D938(obj)`, and `FUN_08B0D8D8(obj)` frees it.
+The sound pool (`FUN_088A3E9C`) has only two slots (0x09B4D418), and the banter's two objects at ctx+108 / ctx+124 hold them until the battle
+ends. So `intro_load()` (at the warp-in) first stops and frees those two (the game's own free at the end then sees zeroes and does nothing), then
+loads the entrant's line into a 16-byte bump-allocated object. `intro_play()` plays it when the pose starts, and it is freed 8 s later or at the
+next entrance; the object is zeroed when a new battle starts. `ctx` is recorded by a hook on `FUN_08B0E40C`. `PSPRECOMP_TAGTEAM_NOINTROVOICE=1` turns it off.
+Headless: KOLIST cpu:12,human:45 played Laguna's `la_battle_132` and Cloud of Darkness's `cd_battle_55` (ATRAC decodes of the right files), and the battle shut down cleanly. Not heard on a device yet.
+The line is the one the game picks for that character at this battle's start (the matchup data at 0x09AFDFB0), not one aimed at the current foe.
+
+## Round 5 fixes (16 Nov)
+- **Break cooldown on the partner.** A slot fighter's hit on an extra played its reaction in the slot fighter's damage handler: `FUN_08AE3320(handler, ...)`
+  (queues the reaction with `FUN_08ADFBFC(handler + 0x2A8, attacker handler)`, sets the state with `FUN_08AE1270`) ran on the attacker's slot opponent.
+  The extra's own handler never left state 0, so after the first break its BRV stayed at 0 for good and every hit counted as hitting a broken fighter.
+  `hitreact2_hook` runs it on the extra's handler copy when an attacker of the other side has a registered hit on that extra. Retail states found with a
+  memory watch on the handler +8: 3 = broken (~5 s), 4 = refilling (+3 per frame to base), then 0. Headless (`E2NEAR` + `SETBRV=enemy2:9:5`, Circle taps):
+  the partner is broken 13.6 -> 20.7 s, refills, back at base 594. The extra's handler copy also gets its own base BRV at +28 (FUN_08AE090C reported
+  the slot's base as a change every frame). Debug: `E2NEAR=<s>` keeps enemy2 next to the human and makes it his target, `SETBRV_HOLD=1`,
+  `WATCHHSTATE=<k>` (memory watch on handler k +8), `HITMSG=1` / `HITQUEUE=1` (earlier, lower-level redirects, superseded).
+- **Lock cycle with an EX core out.** Retail takes every other L press itself (selector straight to the core, 2, without the lock-mode call), which made
+  it foe -> core -> foe -> core -> other enemy. The human's tick now steers retail's own selector moves into foe -> other enemy -> core -> foe, and when the
+  core is taken while selected the target goes back to the foe. (`NOCORESTEER=1` off.)
+- **EX Burst.** The burst (controller `*0x08A405E0`, +0x278 != 0 while it runs, +0xD8 / +0xDC the two fighters) parks every other fighter 100 m under the
+  stage; the tag fighters stayed there. Their last position before the burst is put back when it ends (`NOEXBRESTORE=1` off).
+- **Team mate takes over in place.** When a slot fighter falls and the team mate is rebuilt into the slot, the slot now stands where the mate stood, not
+  where the fallen one lay (`KOSWAP_ATFALL=1` for the old behaviour).
+- **Entrance close-up from the front.** The yaw word (+0x9C) and the matrix at +0x330 do not follow a called-in member's model; the model's facing is the
+  row at `*(actor + 0x398) + 0x240 / +0x248`. The close-up now sits straight in front along it (`PSPRECOMP_ENTRCAM_SIDE=0.7` for the old three-quarter
+  view, `_YAW=1` / `_FOE=1` other sources). The entrant is also turned toward the foe at spawn (`face_foe`, yaw only).
+- **Open: assist call line of a member loaded mid-battle.** Silent because its voice bank is not loaded. The banks are
+  `voice/<lang>/battle/voice_p_<code>_00.scd` and `voice_p_<code>_a_00.scd` (assist lines, ids + 50000), loaded per character by `FUN_08845230` and
+  registered with `FUN_08842420(obj, name, buf, size, flag)` (copies into sound-manager memory: `FUN_088A0CB0` alloc, `_0CF8` pointer, `_0D1C` commit;
+  `FUN_08842450` releases). `PSPRECOMP_TAGTEAM_VOICEBANK=1` loads and registers the member's assist bank (60 KB, ok; the 286 KB main bank does not fit),
+  but the call line still plays nothing: the voice records (`FUN_088A4364`: id range + type 0x0A for assist lines) find their bank another way.
+- **Open: the group battle goes on after the tag battle.** The progress per team is in the matchup block 0x09AFDFB0 (team records at +0x25 - 7: member
+  index, count, one result byte per member: 0 not fought, 1 won, 2 lost), but the end-of-battle script (`FUN_0891E8A4`, a command interpreter on a
+  3752-byte-per-team record) rewrites it from its own state, so writing it does not end the group battle (`GROUPEND=1`, `GROUPWATCH=1`).
+
+## Round 6 (16 Nov)
+- **Bravery break of an extra, per the wiki rules** (dissidia.wiki "Bravery (Dissidia 012)" > Bravery Break: a broken fighter cannot be broken again
+  until its BRV is back at base; bravery attacks that land meanwhile do not lower it, they speed the refill up). The handler redirect of round 5 was not
+  enough: retail's protection lives in a state the slot fighter's handler holds, so an extra in its refill (state 4) was taken to 0 by the next hit
+  and broken again. Now kept per extra: `g_xbroken` from the hit that takes it to 0 until its BRV (status +0x14 low half) is back at base (the high
+  half); meanwhile a BRV loss is given back and added to the refill (`xbreak_guard`), and its hit reaction (`FUN_08AE3320`) is not run again (no new
+  break). Headless (`E2NEAR`, `SETBRV=enemy2:9:5`, Circle taps for 30 s): broken at 21.6 s, refill from 32 s with hits adding to it, break over at 41.8 s
+  at 594, no second break. `NOXBREAK=1` off. (The broken phase lasted ~10 s against ~5 s for a retail slot break.)
+- **EX Burst**: while it runs the fighters outside it are held where the burst put them (under the stage) with their AI gated; let go and put back
+  when it ends (`NOEXBHOLD=1` off).
+- **Entrance**: the entrant's AI gate (+0x380 bit 2) is now held for the whole entrance (the pose action cleared it, the AI could cut the pose short:
+  a probable cause of a member standing still at his entrance).
+- **Chase after a KO**: the KO rebuild's constructor skips the same side slot object releases as the spawn; the slot object words are now put back
+  after it as well (`[SLOTOBJ] rebuild` in the log). In the headless rebuild + chase test no releases were skipped, so this did not change anything
+  there; the wrong-player chase after defeats was not reproduced.
+- **Group battle ends with the tag battle** (`group_decided`): the group battle is a Tournament (the winner stays, the loser's next member comes in).
+  Its booking record is a struct at 0x08B82204 (written at the booking by FUN_0891A1A0): per team 13 bytes from +0x295 (+0 members lost, +1 member
+  on the stage, +2.. one result per member: 1 won, 2 lost; the byte before = the team's wins). Setting the loser's lost count to count - 1 (and its
+  other members lost) when the tag battle is decided makes the booking finish the team: the game shows the Tournament tally and goes back to the
+  party menu. Open: the tally reads "1 - 0", "Round 1" with a DRAW banner (being looked into). The matchup block 0x09AFDFB0 holds a copy of the
+  progress per team (+0x25 ids, stride 0x38: ids - 7 index, - 6 count, - 5.. results) that the booking writes from its own state.
+- Debug: `FINDHEX=<hex>`, `FINDSTRIDE=n:a,b,c`, `ROUNDDIFF=1`, `GROUPLOG=1`, `GROUPWATCH=1`, `PORTLOG=1` (portrait loader args), `ENTRSCR` log lines.
+  `KOLIST` now fires again in every battle (also without extras).
+- **Tournament tally after the tag battle** (worked out by a delegated session): the tally screen (menu overlay `FUN_08B543D0` -> `FUN_08B5764C`,
+  `menu_pk_party_battle_result`) reads the group battle's result block G = `*(0x089D8508) + 10208` (0x08B82274): +4 format (0 = Tournament),
+  +8 team record 0, +8+104 team record 1; each record five 20-byte member rows (+0 charId, +1 level, +2 round wins, +3 flags: 4 not fought, 2 lost) and
+  the count at +100. Verdict `FUN_0891A44C(G)`: a team has won when the sum of its rows' wins reaches the opposing member count, else DRAW; the score
+  is the two sums. `group_decided()` now also sets the winner's on-stage member's wins to count - 1 (the booking `FUN_0891C7E8` adds the last) and books
+  the loser's other members as lost with their levels. Headless: "3 - 0", "Round 3", VICTORY, real levels, then back to the party menu
+  (`GROUPTALLY_OFF=1` off).
+- **Big-panel portrait follows the panel**: the HUD's portraits are sprites made by `FUN_08B21588(hud, char record, kind, variant)` (menu/JP/battle/
+  chara_image/<name>.gim) kept at hud + 420 + 4 * side; their picture word is +0x10. For a character the battle did not load (the game's file lookup
+  only sees the battle's files) the gim is read from the package and the sprite made with `FUN_088D08C0(*0x089D7830, 1, 0x216, buf, size)` like the
+  loader does; the sprite stays hidden and only its picture is lent to the side's portrait while that character is on the big panel
+  (`portrait_show`, from the HUD reconcile; also after a slot rebuild into another character). `NOPORTRAIT=1` off. Headless: lock on the partner ->
+  the right portrait becomes Vaan.
+- **EX / assist gauges** are read through the hooked HUD getter (`FUN_089E95B0`; the assist gauge float is status +0x18, `FUN_089E97FC`), so they follow
+  the big panel too: headless with the partner's gauge full and the slot's empty, the enemy side's bar changes when the lock moves to the partner.
+  The assist icon stays the slot fighter's (members called in have no assist).
+
+## Round 7 (16 Nov): break length, burst pads, Tag Team Battle menu entries
+- **Break length**: the broken phase (handler state 3) of an extra ended only when it stopped being hit (~10 s); retail's lasts 4.96 s (broken slot
+  fighter, headless). After 298 battle-age units in state 3 the refill starts the way retail starts it: `FUN_08AE1270(handler, 4, 1, 1)`.
+  Headless: broken 16.27 s -> refill 21.23 s -> back at base 33.3 s (`NOBREAKCAP=1` off).
+- **EX Burst, every player**: the fighters held out of a burst also have their pad input dropped (framerate.cpp's pad bit setter hooks, now always
+  installed, ask `dissidia_tagteam_pad_blocked`): an AI, the local human or (later) a remote player do nothing until it ends. In single player
+  the human outside a burst already did nothing in the test (`NOEXBPAD=1` off).
+- **Tag Team Battle entries** (menu_settings.cpp): a row under Labyrinth in Battle Mode and under Communications in Communications Mode, drawn on
+  the game layer in the sub-rows' style (bold 7.6, the thin line, the selected band to the screen edge, the game's hand, help text in the help
+  bar). The start menu's sub-list: group at state + 0xA88 (1 Battle Mode, 2 Communications Mode), cursor helper at state + 0xA58 (+4 index,
+  +36 max, raised by one), rows = scene instances from 0x17 (Battle Mode) / 0x20 (Communications), 16 apart. A confirm on the new row (seen in the
+  top-level update FUN_089E45E8 with its confirm args) sets the tag team mode (`dissidia_tagteam_menu_mode`) and moves the cursor to the row the
+  game then starts: Quick Battle (Party) / Group Battle. Any other row of those lists switches the mode off, so a plain group battle is retail again
+  (the tag team is on with `g_enabled` (env / debug setting) or the menu mode). Headless end to end (`tests/replays/tagteam_menu_walk.txt`, tag team
+  globally off): Battle Mode > Tag Team Battle -> party select -> a tag battle with both partners. `PSPRECOMP_MENU_NOTAGTEAM=1` removes the rows.
+  Communications > Tag Team Battle opens Group Battle with the mode on (the multiplayer tag battle is still to come).
+- Menu test driver for this tree: `~/dissidia/tt/bin/gtt.py` (Xvfb :82, debug port 9882; `V <tga>` captures with the game layer).
+- **EX Burst: the two fighters in it are never held** (the burst has inputs for both). They are the controller's +0xD8 / +0xDC when it has them;
+  a burst started by the CPU leaves those 0, so then the fighters still on the stage count as in it (the game parks the others 100 m under it) and
+  only the parked ones are held (AI gate, pad dropped, position). Headless: CPU burst on the human -> both partners held, human and CPU free;
+  partner's burst on the CPU -> human and enemy partner held.
+
+## Findings for later (16 Nov)
+- **Assist voice of a member loaded mid-battle**: voice ids resolve through a global table of 28-byte range entries (`FUN_088A0BC0(id)`:
+  `*(0x089D6C70)`, count `*(0x089D6C6C) + 8`, binary search; entry = id range + type 0x18, no bank pointer), filled for all 35 characters at load
+  (`FUN_088A3A94`: `voice_load_mpk` / `voice_load_p_<name>.bin` into 12-byte slots). The bank itself comes with the character's file group:
+  `FUN_0884417C(mgr, id, heap, size, flag)` (returns the record if already loaded, else a new 0xEC record) -> `FUN_08843014` -> `FUN_08845230`
+  (voice_p_<code>_00 / _a_00 into record + 96, a second bank into record + 212). Registering the bank in our own object (`VOICEBANK=1`) is not
+  found by the player, and sound memory is short (the 286 KB main bank never fits, the 60 KB assist bank only sometimes). Likely way: load the
+  newcomer's banks into the fallen character's record after releasing its banks (`FUN_08842450`).
+- **Assist appear effect**: the assist controller (`FUN_08B031AC`) ends an appear with `FUN_08837A5C`, `FUN_08836580(actor, vec)`,
+  `FUN_08837A80`, `FUN_08B308B8`, a vtable call and `FUN_08B34ED0(actor, 2)`. `FUN_08834DF4(actor)` puts the actor in a hidden "materialize"
+  state (the entrant vanished with it), `FUN_08834934(actor, -1, -1)` alone shows nothing; the visible fade-in with the blue glow is driven per
+  frame by the assist controller. Experiments: `APPEARFX2=<bits>` (at the warp-in), `APPEARFX3=<bits>` (at the pose).
+
+## Round 9 (16 Nov): voices, own entrance effect, the HUD on the game layer
+- **Sound heap**: `FUN_088A0C10` (game start) gives the sound manager's allocator (0x09B4CF80) 0x237000 bytes from the main heap, sized for two
+  fighters and two assists. The extras' main voice banks (~200-300 KB each) did not fit (their record's +96 bank had a size but no block): the
+  partners had no voices at all. The hook makes the heap from runtime memory with 2.5 MB more (`PSPRECOMP_SOUNDHEAP_RETAIL=1` for retail's).
+  Headless (70 s AI fight): voices from both partners' banks (51 / 45 voice sets).
+- **The call-in's voices**: a member loaded mid-battle has its banks loaded with its files but never linked: `FUN_08843FBC(record)` (the loading's
+  link step: bank +96 via `FUN_088424C4(obj, *record)`, +212 via `FUN_088A39D4`) is now run at its entrance. Its assist bank (voice_p_<code>_a_00,
+  the call line) is loaded and linked the same way. The voice call was also silenced by the AI gate (+0x380 bit 2) held for the entrance: it is
+  lifted around the call. Headless: the call line plays from the newcomer's own assist bank. When a newcomer comes in, the main bank of every
+  character that left the battle (down, not a fighter or an assist on the stage) is released (`FUN_08842450(record + 96)`; `KEEPBANKS=1` off).
+- **Entrance effect** (tagteam_fx.cpp, our own): a column of light, a soft glow and a growing ring on the floor and rising sparks during the warp-in,
+  a flash and a wide ring when the pose starts, drawn on the game layer at the entrant's projected position (`NOFX=1` off). The projection uses the
+  main scene's camera (`ge_draw_last_view_proj` in psp_ge_draw: the view / projection most opaque 3D draws of the main target use, voted per frame).
+- **HUD on the game layer** (tagteam_hud.cpp, rewritten): compact panels (the character's face strip `chara_face_in_name/p_<code>_face_in_name.gim`,
+  name in the game's bold face, a thin HP bar in the retail blues, BRV in serif numerals, HP), the reserve as face strips (the next one underlined),
+  the banner on a menu-style band; drawn with the effects once per frame (`tagteam_layer_frame`). Character codes come from the info record's
+  picture name (+36, "P_GST120_1P").
+
+## Round 10 (16 Nov): multiplayer (Communications Mode, lock-step)
+Built on the existing ad-hoc lock-step battle (`psp_hle_adhoc`, docs/multiplayer.md): every machine runs the whole battle from the same pad
+inputs, so every tag decision that changes the battle must come out the same on every machine. Host-tested with two headless copies on one PC
+(LAN mode); not played on real devices yet.
+- **Mode agreement.** Each player sends `{'T','T', version 1, on}` as game bytes in the ad-hoc beacons (`psp_adhoc_set_game_data`, a `GD`
+  trailer older builds ignore). In a group the tag team is on when any member has it on and every member's build sends the bytes; a member
+  without them (an older build) keeps the battle the plain 1v1 for everyone. Log: `[TAGTEAM] group of N other player(s): tag team on/off`.
+  Tested: A with the tag team on, B off -> both "on", both made the extras.
+- **No local-player logic in the battle.** Things keyed to "the local human slot" (bs+84) differ per machine:
+  - the L lock cycle (cycle state, cursor fix, core steer, the controller foe write) now runs per pad-driven slot fighter (`pad_driven`:
+    brain +0x54 != 0), with its state per fighter (`g_cycs`);
+  - the extras' controller object (+0x5A0) is copied from a CPU slot's controller (+0x48 == 1) when there is one, else from slot 1's with the
+    CPU flag set (+0x48 = 1, +0x30 = 0);
+  - with no CPU record (both slots are players), the extras get the brain settings of the other record or the default CPU ones (0 / 6);
+  - the late extras are made in side order (they were "the CPU's side first", which side that is depends on the machine);
+  - every block allocated for an extra (and its actor block and the private controller object) starts zeroed: the heap's leftovers differ per
+    machine and the AI read some of them before writing them (`NOZERO=1` off);
+  - the tag code's timers run on its own battle clock (`g_tt_age`, one step per slot-0 brain tick). framerate.cpp's battle age moves at each
+    frame end, which also runs while the lock-step battle waits for the other players; the camera's call-in close-up uses the same clock.
+- **Checking.** `PSPRECOMP_TAGTEAM_SYNCLOG=<frames>` logs every fighter's position, HP, BRV and script with a hash; `SYNCDUMP=<file>` writes every
+  fighter's actor, brain, status and lock blocks each frame (compare with ~/dissidia/mptt/cmp2.py). Some words differ by design (the local
+  player's marks: actor +0x2F8 info pointer, +0x5B0, +0x1078, +0x388, lock block +0x124, sound handles +0xCF4..).
+- **Results (two copies, both pads driven by a fixed button sequence incl. L, clone partners via `PSPRECOMP_TAGTEAM_CLONES=1`):** before the
+  fixes the state split at the extras' spawn and the game dropped the connection 0.6 s later; after them, 150 s and 120 s battles with 7 chases
+  stayed identical on both machines (every sample, positions / HP / BRV / scripts) and the session held.
+- **Open:** a Communications Mode party has one member per player, so with two players the teams have no second member and no partner
+  (clones are a test option only). Not tested yet: call-ins / KOs in multiplayer, EX bursts in multiplayer, 3+ players, the Internet relay.
+- **Fixed (not tag code):** a room entry request was dropped by the ad-hoc layer after 6 s while still pending (`MPeer::REQ_BY` timed out in
+  the matching loop: only established peers were pinged), so the host had to start within ~6 s of a member entering, else "Room has been
+  deleted due to a connection error". Pending requests are now pinged both ways and kept until accepted or cancelled; a side that really
+  vanishes still times out after 6 s (cancel / timeout event). Tested with two copies (LAN, and a local relay): 20 s and 60 s waits, quick
+  start, B cancelling while pending, B killed while pending (A drops B after ~6-12 s).
+  Test setup: ~/dissidia/mptt (launch.sh, walk.py, full.sh TAG SECONDS; own ad-hoc port 47700 and debug ports 9331/9332).
+
+## Round 11 (16 Nov): EX Burst in multiplayer
+Host-tested with the two-copy LAN rig (A hosts with the tag team on, B learns it, clone partners, both pads driven by a fixed sequence the
+whole time, also during the bursts); not played on devices.
+- **Who is in the burst.** The controller (`*0x08A405E0`) keeps attacker and victim at **+0x26C / +0x270**, written by the start
+  (`FUN_08A3EB70(controller, fighter, foe)`) for a player's and a CPU's burst alike and cleared at the end. The +0xD8 / +0xDC used before are
+  one of the controller's 0x18-byte records (+0x48 + 0x18 * n; +0x48 and +0xF0 seen holding the pair, n differs per burst, probably per
+  character), so they were 0 for most bursts, and the fallback ("still on the stage") changed over the first frames while the game parks the others one by one: in the first
+  multiplayer run a fighter that was outside the burst counted as in it (not held) for ~3 s. The victim is the start's own pick: asked for
+  an extra as foe it sometimes takes the attacker's slot opponent instead; +0x270 is what the burst really uses.
+- **Same on every machine.** The hold reads only battle state (the controller words, positions), the pad block sits in the virtual pad's bit
+  setters (FUN_08AB387C / 08AB38C4), which every machine runs for every fighter from the shared inputs, so a held remote player's pad is dropped
+  on both machines alike. The hold runs from the camera step (dissidia_tagteam_frame); `PSPRECOMP_TAGTEAM_STEPCHK=1` counts its runs against
+  the tag clock: exactly one run per battle frame on both machines for the whole battle (also in single player).
+- **Put back after the burst**: a held fighter is put back to its spot before the burst also when the burst's end lifted it to just above
+  the -20 line (seen: -18.98; that fighter stayed under the stage, idle).
+- **A fighter held out of a burst keeps its AI gate** against the brain tick's per-tick +0x380 bit 2 rewrite (which runs only with
+  `PSPRECOMP_TAGTEAM_LOG`; note: that KO gate itself depends on the log switch, to be looked at).
+- **Test aid** `PSPRECOMP_TAGTEAM_EXBAT=<who>:<s>[:<foe>],...`: starts a burst at tag-clock second s from the slot-0 brain tick, who / foe by
+  side (s0 / s1 slot fighters, x0 / x1 extras), so both machines start it on the same battle frame. `PSPRECOMP_TAGTEAM_WATCHAT=<s>:<who>:<hex>`
+  arms the memory watch on a fighter word at s.
+- **Results** (`EXBAT=s0:20,x1:50:s0,s1:80:x0,x0:105`, 135 s of pad input + the rest of the battle): s0 (A's human) on s1 (B's human); CPU
+  extra x1 on s0 with B's human held; s1 on (its pick) s0; x0 on s1 with A's human held. Each time the two in it played the burst, the
+  other two were parked, held (script 101, position fixed, pad presses ignored) and put back at the end on both machines; all 2152 `[SYNC]`
+  samples (every 10 frames, 358 s) equal, no disconnect; per-frame dumps equal apart from the local words below.
+- **More local-player words** (retail, not burst related, also outside bursts): the local fighter's near-camera fade, actor +0x490 alpha with
+  +0x380 bit 0x200000, and the other slot fighter's +0x4A4; sound handle +0xD00; effect words +0x738..+0x764, lock +0x31C/+0x444/+0x584.
+- **Not tested**: a burst started the natural way (EX Mode + the HP hit) in multiplayer, a burst by a remote player's human input timing
+  over real latency, bursts with 3+ players.
+
+## Communications Mode: CPU picks (16 Nov, branch ttcpu; reworked: own rows + CPU rows)
+**The game already has the widget.** On the Group Battle Tournament setup screen each player's left column has five rows: the first is the player's
+own character, and every further row opens Player Select again (characters already taken are greyed). Retail sends those rows to the other
+players (they show up in the order column) and puts them in the battle's party records (`bs + 0x13C21 - 6`, one record per side, in the order
+column's order; record index = battle side = party: side 0 = Party A, checked with the parties swapped). In retail every row is a character the
+player plays himself, one after the other. That stays the default; in the tag team mode **Square on a row from the second on makes it a CPU**
+(the AI fights it) and back. Row 1 is always the player's own.
+- **UI** (`runtime/tagteam_menu.cpp`, only while the tag team mode is on in the group: Communications Mode > Tag Team Battle, `PSPRECOMP_TAGTEAM=1`,
+  or a member who has it on): hooked on the setup screen's update (ovl_menu `FUN_08AA8F9C(screen)`, it does not run under Player Select; the
+  cursor is screen + 0x7CC4 = column, 0 = the left one, and screen + 0x5A4 = its row; retail Square does nothing there), drawn on the game layer:
+  a small "CPU" plate after the job name of each CPU row, "Add a character" in the next free row, and in the button bar, left of the screen's
+  own R / triangle hints, a Square key (a dark disc with a white square, like its triangle) with "CPU" or "Player" (what Square makes the row
+  under the cursor) while the cursor is on a row that can be switched. Square plays the cursor sound. The plain Group Battle draws nothing.
+  Screenshots (with the layer): `~/dissidia/mp_ttcpu/n4.png` (A: Lightning, Vaan, CPU Yuna; B: Laguna, CPU Yuna), `n5.png` (A's row 3 back to
+  the player), `t2.png` (the host's fighters-per-side choice, older plate placement).
+- **Fighters per side.** Two players: no choice; a party with a CPU row has 2 fighters on the stage, else 1. Three or more players: the room's
+  host chooses (2 vs 2, 2 vs 1, 1 vs 2, 1 vs 1, Party A first; default 2 vs 2), shown in the button bar as "Tag Team 2 vs 2" with an L key
+  (drawn like the bar's R) on the host's screen; L cycles (retail L does nothing on that screen). `PSPRECOMP_TAGTEAM_SELECTOR=1` shows / uses it
+  with two players (testing).
+- **Sync.** The party records are the game's own data, the same on every machine; whose a member is and whether it is a CPU come from each
+  player's tag bytes in the beacons (version 3, 16 bytes; `mp_sync_mode` in tagteam.cpp):
+
+  | byte | meaning |
+  |---|---|
+  | 0-2 | `'T' 'T' 3` (a member with another version or fewer bytes keeps the group's battle plain 1v1) |
+  | 3 | tag team on (this player) |
+  | 4 | party: 0 = A, 1 = B, 0xFF = none yet |
+  | 5 | bit 0: the room's host |
+  | 6 | fighters per side, the host's choice: bits 0-1 Party A, bits 2-3 Party B (1 or 2; 0 = not set); only the host's byte counts |
+  | 7 | serial, +1 whenever this player's party, rows, CPU flags or choice change |
+  | 8 | number of rows (0..5) |
+  | 9-13 | the party's rows (the setup screen's column, the same for every member of the party) in row order |
+  | 14 | CPU rows: bit i = row i is a CPU (only the player's own rows after his first) |
+  | 15 | own rows: bit i = this player registered row i (version 4, see "N-player lock-step") |
+
+  Local sources (found by diffing the two machines and a run with the parties swapped): `[0x089D7F3C] + 0x18` = the party joined (the block
+  goes away when the battle loads, so the last value is kept until the group ends), `0x089D7F44` = 0 on the host, 1 on a member,
+  `0x09B6F2B4` = the rows (5 words, zeroed when the setup screen opens, a row is written on its YES), read while the setup screen runs; the CPU
+  flags are ours (a row that goes away loses its flag).
+- **The party order list.** At the battle setup the group's bytes are copied once (`g_snap`, logged as `[TTCPU] battle setup: ...`, CPU rows
+  marked `c`); every decision of the battle uses that copy. A party's list = its battle record in order, each member matched to the row of
+  the party's player who registered it: `{charId, owner, is_cpu, local}` (`tagteam_party.h`). `owner` = the player's index in the group's
+  players sorted by (party, own character): the same number on every machine (-1 = no player's bytes name it); `local` is per machine and is
+  never used for a decision. Logged as `[TTCPU] side N order: *31/p0 30/p0 28/cpu0` (`*` = on the stage, `p<n>` = player n's own row,
+  `cpu<n>` = a CPU row picked by player n). Outside a battle the list is built from the bytes alone (players in the same order).
+  The owner and CPU flag come from bytes that are at least seconds old when the battle is set up (Enter Battle, the VS screen and Opponent
+  Info come in between); a change in the last half second before the setup could still reach the machines differently.
+- **Interface** (`tagteam_party.h`): `tagteam_party_order(party, TagEntry*, max)`, `tagteam_party_cpus(party, ids, max)` (the CPU rows without
+  the one on the stage), `tagteam_party_humans(party)` (players, not rows), `tagteam_fighters_per_side(party)`.
+- **The rule for the continuous match** (to be built by the KO / rotation work): after a KO the next fighter is the next entry of the list,
+  whoever's it is (a player's row is driven by its owner, a CPU row by the AI).
+- **Battle start, first use** (`comms_partner_char` in the frame hook's partner planning, instead of `party_partner_char` in a Communications
+  battle): a side with 1 place gets no partner; otherwise the entry after the one on the stage: a CPU row is spawned through the late queue as
+  a real member (`info_slot = 100 + charId`, `g_late_load`, `load_character`); a player's row (also the same player's second character) is the
+  marked TODO (a human-driven extra, not built): no partner for now. Clones stay a test option (`PSPRECOMP_TAGTEAM_CLONES`).
+- **Bug fixed on the way:** with both players on the same character the old `party_partner_char` guessed which record was the local
+  player's from the character alone: B's copy gave Vaan to the other side, the battles split and the session dropped after 10 s.
+- **Tests (two headless copies, LAN, host only; 30 fps on both; screens seen in the shots):**
+  - Own rows + CPU rows: A (Party A) Lightning, Vaan, CPU Yuna; B (Party B) Laguna, CPU Yuna. Both machines logged the same lists:
+    `side 0 order: *31/p0 30/p0 28/cpu0` (the next entry is A's own Vaan: TODO, no partner) and `side 1 order: *27/p1 28/cpu1` (partner: CPU Yuna,
+    spawned on side 1 on both). `[SYNC]` hashes (every 30 ticks, 3 fighters) equal in all 130 samples over 65 s.
+  - Earlier version (all extra rows CPUs): A's CPU Vaan vs B's CPU Yuna (2v2), the parties swapped with the host's 2 vs 1 (122 equal samples),
+    a group without the tag mode (no plates, `r1.png`), and A entering through the real menu row (no env; B learned the mode, `m1.png`).
+  - Square toggles a row to CPU and back (`[TTCPU] row 3 (char 28) is now a CPU` / `the player's own`).
+  - `tagteam_test.py --baseline` PASS (`~/dissidia/tt/cpu_reg2`).
+  - Rig helpers: `~/dissidia/mp_ttcpu/` `tosetup.sh` (SWAP=1 swaps the parties), `reg2.sh`, `reg3.sh` (the test above), `go.sh`, `vshot.py`
+    (screens with the game layer), `ramdump.py`; `walk.py` takes `TAGROW=1` (A uses the menu row); `PSPRECOMP_TTCPU_CURDUMP=1` logs the setup
+    screen's changing small words (how the cursor fields were found).
+- **Open:** not tested with 3+ players (the rig has two copies), so the host choice only ran forced; the menu addresses (`0x089D7F3C`,
+  `0x09B6F2B4`, `FUN_08AA8F9C`, the cursor words) are from the EU version only; the Tournament order column ("Random") was not changed in the tests
+  (the record followed the row order), a player put on the stage with a later row works with the list as it is (the partner is the entry after
+  the stage one); retail's later tournament rounds still follow the record (the one-continuous-match rules are other work).
+
+## Round 11 (16 Nov): multiplayer KOs and battle end
+Two headless copies on one PC (LAN mode, ~/dissidia/mp_ttko rig, clone partners), KOs forced at the same tag-clock time on both machines.
+- **Side-based debug names.** `PSPRECOMP_TAGTEAM_KOLIST` takes `slot0`, `slot1` (the fighter in that slot) and `extra0`, `extra1` (the living extra on
+  that slot's side) besides human / cpu / partner / enemy2 (those resolve through the LOCAL human and name different fighters on each machine).
+  `PSPRECOMP_TAGTEAM_RESERVE_SIDES="ids;ids"` is the reserve per side (side 0 ; side 1), the same on every machine (`RESERVE` is per team, team 0 =
+  the local player's). With two players a Communications Mode party has one member each, so this is how call-ins were tested.
+- **Match pause on the tag clock** (framerate.cpp `pause_match_impl`): the entrance pause counted frame ends at the requested rate. Frame ends also
+  run while the lock-step battle waits for the other player, and the requested rate is a local setting, so the other fighters could start moving
+  again on a different battle frame on each machine (found by reading the code; the entrances in the runs below stayed in sync with the fix). It now runs on the tag clock (`dissidia_tagteam_age`, one step per battle frame; cleared when the clock
+  goes back, i.e. a new battle).
+- **Per-battle state keyed on a battle generation** (`g_battle_gen`, one per setup) instead of the setup object's address: bs is at the same
+  address in the next battle of a session, so the second battle kept the first one's `g_decided` (no KO handling at all: an extra at HP 0 stayed
+  up, a slot KO went straight to the retail finish), its KOLIST position, the pinned stage members, the HUD panel / portrait statics.
+- **Lock-on second candidate** (`lock_other_hook`): with the opponent's team mate down there was no "other enemy" and the hook fell back to retail
+  `FUN_08B40994` (the foe's assist; with a tag team that is one of the tag fighters, filtered by `FUN_08837990`). After a slot rebuild the answer
+  differed between the machines: on one the player's fighter locked on to his own fallen team mate (actor +0x308, lock block +0xFC), the battle
+  split within a frame and the game left the room. In a tag battle the hook now answers 0 when no second enemy stands (`LOCKOTHER_RETAIL=1`: old).
+- **Reserve kept with the HUD off**: `update_party_reserve` (reserve_left / next_member_char decide KOs and call-ins) ran only from the HUD update,
+  which returns early with `PSPRECOMP_TAGTEAM_HUD=0`: one player with the overlay off would have had no reserve.
+- **Party record of the local player** (`human_party_rec`): chosen from both teams' characters on the stage; a mirror match (same character on both
+  teams) used to pick list 0 on every machine; in a lock-step battle it now falls back to the local player's slot side (assumes list index = side:
+  not verified, the rig only has one member per party, so `group_decided` returns before using it).
+- **Call-in brain settings side** (`queue_member`): "the side that is not the local player" -> the side whose record has a CPU control type, else 1.
+- **Results (host, two headless copies, both pads driven by exercise.py, `[SYNC]` hashes + per-frame dumps compared):**
+  - ko1 (clones, no reserve): extra0 KO 20 s (falls, parked), slot1 KO 35 s (team mate takes the slot), slot0 KO 50 s (side 0 has nobody: decided).
+    Hashes identical to the end of the battle; both reached the Tournament tally (A DEFEATED 0-1, B VICTORY 1-0) and went back to the Group Battle
+    room, no connection error.
+  - ko2 / ko3 (`RESERVE_SIDES=15;13`, `CALLIN_DELAY=8`): extra1 KO 15 s -> Cloud loaded and called in at 23 s (warp-in, pose, match pause);
+    slot0 KO 30 s -> mate takes over; Squall called in at 38 s; slot0 KO 45 s -> Squall rebuilt into the slot (different character); slot0 KO 62 s ->
+    decided. Dumps: no difference outside the known local words; tally and room as above.
+  - ko5 (two battles in one room session, the second with other characters): battle 1 as above; battle 2 also had a natural KO of the slot 1
+    fighter (Cecil Lv 1) with no mate standing -> slot call-in (Cloud rebuilt into the slot, entrance), Squall call-in, rebuild, decided at 35 s.
+    Both battles identical on both machines; both copies back at Player Select afterwards. Before the fixes the second battle had no KO handling
+    at all (the battle generation), and with that fixed it split at the slot rebuild and both copies left the room (the lock-on candidate).
+  - Words that differ between the machines also without KOs (local by design, ignored): actor +0x380 bit 0x200000, +0x490, +0x4A4, +0x738..0x764,
+    +0xD08, +0x550/+0x558 (single frames), an extra's status +0x48/+0x4C/+0x5C (colour-like bytes, 65 frames at its spawn in one battle).
+- **After the decision** the battle is no longer lock-stepped (finish, victory pose, rewards): the tag clock and the teardown time differ per machine
+  (e.g. 55.8 s vs 85.3 s), as for a retail battle; nothing of the tag code acts then (`g_decided`).
+- **Not verified:** 3+ players (parties of 2: `group_decided`'s record choice), the Internet relay, EX bursts during a KO. One run (ko3, second
+  battle) froze both copies inside the Squall call-in load while the GPU was overloaded (another copy logged a DrawSync timeout); the same load in
+  ko4 / ko5 worked, not reproduced. The rig's debug-socket pad does not reach the host replay-save dialog (circle there did nothing once).
+
+## Multiplayer: players and slots (research, 16 Nov, branch ttnet)
+How a Communications Mode Group Battle maps machines to fighters, and a prototype for a waiting human taking over a fighter mid-battle.
+All host-tested with three headless copies on one PC (LAN mode, ~/dissidia/mp_ttnet: `full3.sh TAG` walks A + B into Party A
+(Lightning, Vaan) and C into Party B (Laguna), Tournament, Enter Battle; `exB.py` drives the pads; `rd.py` dumps memory). Code:
+`runtime/tagteam_net.cpp` (new), hooks in tagteam.cpp, a side channel in `runtime/src/hle/psp_hle_adhoc.cpp`.
+
+### What the game does (proven by logs unless marked)
+- **Only the two machines whose players are on the stage are in the lock-step.** Per round each of them has an active lock-step object
+  (EBOOT `FUN_0890D664`, layout in docs/multiplayer.md "Battle protocol" / the mpdelay work) with ONE peer: A logged `local player 0, 1
+  peer`, C `local player 1, 1 peer`. Its local player index is its slot: player 0 = slot 0 (side 0), player 1 = slot 1, and `bs+84` on those
+  machines is the same number.
+- **Spectators (members not in the round) run the battle too, but receive only.** B (Party A's 2nd member, not fighting) never activates
+  `FUN_0890D664`; it runs `FUN_0890DF58` with `local player 2, 2 peers` (A and C), receives one 440-byte datagram per batch (`0x1B8` =
+  220 x 2 players: the fighters' input history) and plays it back; it sends nothing in the battle (0 `PdpSend` on B). The fighters' update
+  relays the inputs to the spectators from a per-player relay record (`obj + 244 + 76 x local index`, counter `+64`: a batch every 30 frames,
+  `FUN_0890C930` sends it); details of that record are partly decoded only. So a spectator runs behind the fighters: ~10 frames (330 ms)
+  with the relay forced every frame (`PSPRECOMP_TTNET_FASTRELAY=1`, measured with frame/clock stamps), up to ~30+ frames with the retail
+  batching (from the code; not measured). A spectator's own `bs+84` is 0 (its setup treats slot 0 as "local").
+- **The input path has exactly two pads.** The pad manager `[0x089D6008]` = `0x08C15B90` holds two 96-byte pad slots (player p at
+  `0x08C15B90 + 96 p`, SceCtrlData copy at +64; slot 0 is also the local pad poll object), and right after them the two controller objects
+  (`0x08C15C50`, stride 0x50: `+0x40` points at pad slot k). Slot fighter k's `+0x5A0` is controller k, so **slot k is played by lock-step
+  player k** on every machine. A third pad slot would overlap controller 0: the retail input path cannot carry a third player.
+- Per lock-step player and frame the packet carries ONE 16-bit input word (36-byte datagram on PDP port 0x67: frame, 8 words of history, the
+  oldest frame, checksum and its frame). Brain `+0x54` (the tag code's `pad_driven`) is 1 on both slot fighters once the battle runs (0 for
+  both before the intro ends).
+- Actor `+0x1078` byte 1 (1 or 2): in the 2-copy run it was 1 on the local fighter on both machines, in the 3-copy runs 1 on slot 0
+  everywhere; not understood, do not key anything on it. `+0x5B0` bit 4 and the `+0x380` bit
+  0x200000 / `+0x490` 0.9 mark the local player (as the mpdelay notes say).
+- **Next round (retail):** not reached in these runs (no round 2 was played to the end). From the Tournament rules and the matchup block
+  (0x09AFDFB0, current member index at ids-7) the next round pairs each party's current member; the machines of those members become the new
+  lock-step pair and the others spectate. **Not decoded:** where the group battle stores which player (MAC / room slot) owns each party row;
+  the Tournament setup screen shows each row with its owner's cursor, so it exists somewhere in the menu overlay's group data.
+
+### Design: a waiting human takes over a fighter
+1. **Who is next** is the party order list (Tournament rows, battle record order: `bs + 0x13C21 - 6`), one entry per character, each owned
+   by a player (or a CPU row). On a KO the tag code already rebuilds the slot as the next entry (`rebuild_begin`, slot call-in). That decision
+   must be made from lock-step state only (it is: KO, the tag clock, the party list) so every machine makes it at the same frame.
+2. **Who drives it** is the entry's owner. The lock-step is NOT changed: the side's lock-step machine (the machine of the player who was on
+   that slot when the round started) keeps sending that slot's input word, but the word comes from the owner's pad: the owner's machine sends
+   its pad samples on a side channel every frame, the lock-step machine feeds the newest one to the game's own pad read inside
+   `FUN_0890D664` (`psp_ctrl_set_script` around the call). Every machine then plays the same input from the lock-step, so this part is
+   deterministic by construction, whoever the owner is (another player, the same player with his next character = proxy off, or a CPU row =
+   proxy off + the CPU brain set on every machine at the same frame). The lock-step machine must stay in the match while anyone of its side
+   plays (its player cannot leave after his last character falls).
+3. **The new player's view:** his machine is a spectator (receive-only, behind). Its camera / HUD follow `bs+84` and the `+0x5B0` bit 4 of
+   the local fighter; the prototype sets them on the rebuild (`PSPRECOMP_TTNET_FOLLOW=<slot>`); viewer-only words, never read by the lock-step
+   state. Latency for him: his pad -> lock-step machine (side channel, ~1 frame on LAN) -> lock-step -> relay back to his machine (~10 frames
+   with the per-frame relay): about 11-12 frames (~370 ms) at 30 fps on a LAN, more over the Internet. Playable only with the per-frame relay;
+   a lower-latency version would make the spectator a lock-step member (not possible without decoding the session setup).
+4. **Two humans on one side at once** (the extra driven by a person): the retail packet carries one word per lock-step machine and the pad
+   manager has two pad slots, so not with the retail path alone. Proposed: (a) the second human's machine forwards its pad to its side's
+   lock-step machine (same side channel); (b) the runtime appends a second input word per frame as a trailer to that machine's port-0x67
+   datagrams and to the 0x1B8 spectator relay (the runtime emulates `PdpSend`/`PdpRecv`, the game would never see the trailer), kept per
+   (sender, frame) and consumed when the game delivers that frame, so it arrives with the same frame on every machine; (c) the extra gets a
+   private pad slot (96-byte block with the pad-slot vtable `0x089C96B0` at +0x34, its SceCtrlData at +64 filled each delivered frame) and its
+   private controller object's `+0x40` pointed at it, plus a pad brain instead of the CPU brain. Not prototyped; (c) needs the pad slot's
+   per-frame processing (edges, stick vector) checked, which the pad manager does for its two slots only.
+
+### Prototype (`tagteam_net.cpp`, env-driven, uncommitted)
+- `PSPRECOMP_TAGTEAM_NETPROBE=1` logs the lock-step objects of both entry points, every player's input word and both slot fighters'
+  position / HP / script every 60 delivered frames (`[TTNET] ... pads:`), and the clock stamps used for the spectator lag.
+- `PSPRECOMP_TTNET_PADFROM=<nick>[@rebuild]` / `PSPRECOMP_TTNET_PADTO=<nick>`: the pad proxy (adhocctl nicknames for now; the real version
+  would use the row owner's MAC). `@rebuild`: switch when this machine's slot is rebuilt (tagteam.cpp calls `dissidia_ttnet_slot_rebuilt`).
+- `PSPRECOMP_TTNET_FASTRELAY=1`, `PSPRECOMP_TTNET_FOLLOW=<slot>`, `PSPRECOMP_TTNET_LOWHP=<slot>:<frame>` (test aid).
+- Runtime: `psp_adhoc_side_send/_recv/_group_macs/_local_mac` (PDP datagrams on ports 0xFF00+, carried like game PDP traffic, LAN and relay).
+- tagteam.cpp: `KOFALL=slot0:<s>` / `slot1:<s>` (by slot on the tag clock: the same fall on every machine; `human` / `cpu` are per machine),
+  and in a lock-step battle the extras plan (2v1 / 1v2) is made for side 0 as "the human's" on every machine (`PSPRECOMP_TAGTEAM_MP_LOCALPLAN=1`
+  = old rule). Before, 1v2 put the second fighter on side 1 on A and B but on side 0 on C (`bs+84` differs), an instant split.
+- Test workaround in the ad-hoc layer: a pending room entry waits 60 s instead of 6 s (the known bug; another agent fixes it properly).
+
+### Results
+- **Pad proxy works and stays in sync** (plain group battle, no tag, A: PADFROM=B, B: PADTO=A): slot 0 (A's Lightning) moved only by B's
+  inputs (p0 words showed B's stick values 0x80FF / 0x0080 and B's buttons; A's own stick 0x8000 never reached the lock-step), and the logged
+  inputs + positions of both fighters were identical on A, B (spectator) and C at all 47 samples (2820 frames).
+- **Hand-over in a tag battle:** KO of slot 0 at 25 s (tag clock) -> slot call-in "VAAN into slot 0" at 27 s on all three, the proxy switched
+  on A at the rebuild. **But the battle splits after any slot rebuild in multiplayer**, proxy or not: control runs without the proxy (ctl2,
+  ctl3) split the same way, 3-6 s after the call-in, always the machine where the rebuilt slot is the REMOTE fighter (C) against the two where
+  it is the local one (A, B), and the game's own checksum ends the match (`[TTNET] the game's lock-step checksum disagreed at frame ~890`).
+  Without a KO / rebuild (ctl1) the same 3-copy tag battle stayed identical for 100 s. First differing words (SYNCDUMP, cmp2.py, A vs C):
+  at the rebuild frame the extra's `+0x4A4` (A: 0, C: the rebuilt slot actor), 26 ticks later slot 0 `+0xD00` (2.0 vs 24.0), then everything
+  from ~110 ticks. Not root-caused: the rebuild's world-list / registration handling (`world_unlink`, the ctor's re-link, the taken-back
+  words) is the first suspect, since it is the only step whose inputs differ by machine (local player marks, view objects).
+- Not done: a whole match end to end, the FOLLOW view on a slot-1 takeover, the second human per side, the member -> owner mapping, rounds
+  of the retail flow, the Internet relay (side-channel packets go out as PDP, so the relay should route them; untested), 4 copies.
+
+## Multiplayer: N-player lock-step (16 Nov, branch ttlock; stage 1)
+Every member of a Communications Mode tag battle is now a real lock-step member, and a player's row can be a human-driven partner on the
+stage beside another player's fighter, with the same input delay as a slot fighter. Host-tested with three headless copies on one PC (LAN
+mode, rig `~/dissidia/mp_ttlock`); not played on devices. Code: `runtime/tagteam_net.cpp` (rewritten: the pad-proxy prototype, its probes and
+the FUN_0890D664 / FUN_0890DF58 hooks are gone), hooks in tagteam.cpp, two small exports in netplay.cpp.
+
+### Design as built
+- **One protocol for every machine.** Retail runs the fighters' lock-step (`FUN_0890D664`) on the two machines on the stage and the spectator
+  path (`FUN_0890DF58`, 30-frame batches) on the others; both are called through one dispatcher, `FUN_0890C5BC(net object)` (object +64: 0 / 1).
+  In a tag battle of the group (`comms_battle()`, the same on every machine) tagteam_net.cpp replaces that dispatcher on every machine:
+  - each member samples its own pad once per call with the game's own read and packing (`sceCtrlReadBufferPositive`, `FUN_0890CE58`) and sends
+    its newest 8 input words (frame-numbered, side channel 2) straight to every other member. Nobody forwards anyone's input;
+  - **streams** are the fighters' input paths: 0 / 1 = the slot fighters (the game's pad slots), 2 + n = tag extra n (a pad slot of ours).
+    Each stream has a driver schedule (from frame F: a player's MAC, or nobody = the AI), decided from battle state only;
+  - frame F is delivered when the words for F of the players who drive a stream at F are here: **players who drive nothing are not waited
+    for** (they still send, so a later takeover needs no catch-up). Then every stream's word is unpacked (`FUN_0890D090`) into its pad slot and
+    the object's frame (+72) advances, as retail. Input delay (`psp_netplay_input_delay`) and the run-ahead rule are retail's (sample while the
+    own input is less than delay + 4 frames ahead; hold delivery until it is `delay` ahead); the desync check (netplay.cpp) gets every delivered
+    frame (`dissidia_netplay_frame_delivered`).
+  - First drivers of the slots come from the game's own session object: on a fighter's machine player +68 is local and the peer the other one,
+    on a spectator's peer i is player i (player k plays slot k).
+  - Retail Group Battle (no tag mode) and older builds: the dispatcher passes through (`PSPRECOMP_TTLOCK=0` also keeps the game's own). The tag
+    bytes went to version 4, so a version-3 build in the group keeps the battle the plain 1v1 for everyone.
+- **Pad slots and controllers for extras.** The pad manager (`[0x089D6008]`) updates its two pad slots with `FUN_08871E24(slot)` (+80 == 1:
+  take the SceCtrlData at +64, the lock-step mode) and then its two controller objects (`mgr + 192`, stride 0x50) with `FUN_08872D88` ->
+  `FUN_088725A0(ctrl)` (held / pressed / released into the controller's own +0..+0x30 from its pad slot at +0x40; the fighter reads the
+  controller, actor +0x5A0). Found with a memory watch on controller 0. Every extra now gets one 0xE0 block: its private controller (+0) and
+  a pad slot (+0x80, a copy of pad slot 1 in lock-step mode); the same block for CPU and human extras, so the heap stays the same on every
+  machine. A human-driven extra's controller is a copy of a pad slot fighter's (+0x48 = 0) with +0x40 -> its pad slot, brain +0x54 = 1, and
+  the extra's pad slot / controller are updated right after the game's (hooks on `FUN_08871E24` and `FUN_08872D88`), so its input is seen at
+  the same point of the frame as a slot fighter's. Checked in single player with `PSPRECOMP_TTLOCK_PADTEST=1` (the partner mirrors the local
+  pad): partner and human changed script at the same game times (4233, 7867, 13833, 17433 ms); without the controller update it never moved.
+- **Who owns a row.** On the setup screen the left column is the PARTY's rows (every member of a party reads the same `0x09B6F2B4` words: two
+  players in Party A both reported `31 30`, so the old "row 1 is the player's own" put both rows on one player). A row is now this player's own
+  when it appears while his cursor is on it (`gb_read_regs(cursor_row)`, byte 15 of the tag bytes); CPU rows only among own rows after his
+  first; players are sorted by (party, first own character, MAC). Log: `[TTCPU] battle setup: ... [me party 0 #3: 31 30o]` (`o` = own).
+- **Human partner** (`comms_partner_char`): the side's next row that is a CPU or another player's; a player's row is spawned like a CPU row and
+  made human-driven when it starts (`[TTLOCK] extra 0 (..., char 30, side 0) is human-driven ... stream 2`), driver = the row owner's MAC from
+  that frame on.
+
+### Results (three copies, A + B in Party A: Lightning (A), Vaan (B); C in Party B: Laguna; pads driven by `ex3.py`; 30 fps on all)
+| Run | Setup | Sync | Latency of own presses (sample -> played frame) | Waits |
+|---|---|---|---|---|
+| r4 | Vaan = B's human partner beside A's Lightning (2v1) | `[TTSYNC]` every fighter, 60 samples to frame 1770: equal on A, B, C; NETSYNC 0 mismatched | A 1, B (partner) 2, C 1-2 | 0 |
+| r5 | same, Input Delay 2 | 45 samples equal; NETSYNC 0 | A 2, B (partner) 2, C 2 | 2 of 1498 (start) |
+| r6 | host 1 vs 2: B waits (drives nothing), B receives with 150 ms lag (`NET_LAG_MS`) | 55 samples equal | A 1, C 3 | A 1, C 4 of ~1500 |
+| r7 | B drives the partner, B with 150 ms lag | 55 samples equal | A 3, B 3, C 3 | A 3, C 7 |
+- Every stream's input changes landed on the same battle frames on all three copies (stream 2 = B's partner: 68-100 changes per run).
+- The partner's input takes exactly the slot fighters' path: latency = how far the driver's own input runs ahead (its lead), the same rule for
+  every driver; with Input Delay N every driver has N frames (r5). Without a delay the lead is retail's self-tuning one (0 on a quiet LAN, it
+  grows during waits and stays), so it differs per machine (r4: 1 / 2 / 1-2), as in retail two-player battles.
+- A waiting player adds no wait: in r6 B (lagging 150 ms) drove nothing and A kept lead 1 (1-frame latency), against lead 3 for everyone when
+  the same lagging B drove the partner (r7). B's own battle runs that much later (it plays every frame when they arrive).
+- Regression: `tagteam_test.py --baseline` PASS (`~/dissidia/tt/lock_reg1`); plain two-copy Group Battle (`mp_test.py`, no tag) 40 s, 0 stalls,
+  NETSYNC 0 mismatched, the dispatcher passed through.
+- Two runs were discarded: the battle ran at 0.6 fps on all three copies from its first frame with `[GE] DrawSync timeout` (the GPU was shared
+  with other sessions; the same stage, a castle hall, both times).
+
+### Found: the camera feeds the simulation
+`PSPRECOMP_TTLOCK_FOLLOW=1` makes the partner's driver's camera follow the partner (writes the camera manager's side slot `mgr + 0x6D0 + 4 x
+bs+84` = the extra's lock block, view-only by intent). With it B's copy split from A and C at frame ~450 (r3: the partner's position differs
+from the first stick input on, then the slots: NETSYNC first `fighter0.pos.x` at frame 517) while A and C stayed equal; without it (r4) all
+three are equal. So the movement code reads that camera state: the same camera-dependent movement as multiplayer.md "Open: a real desync"
+(the ttcam work). Hence FOLLOW is off by default and **the partner's driver sees the battle through the slot fighter's camera** for now.
+
+### Not done yet after stage 1 (done in stage 2 below unless listed there as open)
+- Handovers (stream drivers on the KO / next-row flow), AI <-> human switch of a slot, the view of a driver of an extra or another slot, the
+  pad-driven tag logic for human extras: see "Multiplayer: handovers (stage 2)". Still open: the HUD panel of the new driver, 4 copies / two
+  humans per side, the Internet relay.
+- Test helpers (`~/dissidia/mp_ttlock`): `r3.sh TAG SECS [env]` (full3.sh + ex3.py), `HOSTL=n` (host presses L n times on the setup screen),
+  `cmpsync.py` (compare `[TTSYNC]`), `lat.py` (latency / waits / stream frames), `PSPRECOMP_TTLOCK_LOG=1`, `PSPRECOMP_TTLOCK_LAT=1`.
+
+## Multiplayer: handovers (stage 2, 16 Nov, branch ttlock)
+Who comes in when a fighter falls, who drives it, and what the new driver sees. One continuous match, no rounds; fallen fighters are gone for
+good; a side that runs out fights on with fewer; the match ends when a side has nobody left. Host-tested with three headless copies
+(`~/dissidia/mp_ttlock`, rig below); not played on devices. Code: tagteam.cpp (the "Multiplayer: handovers" block before `comms_partner_char`,
+`slot_handover` / `apply_drive`, the KO flow, `pad_driven`, the view block in `dissidia_tagteam_frame`), tagteam_net.cpp unchanged, camera.cpp's
+`dissidia_camera_set_view_slot`.
+
+### Rules as built (decided from battle state only, identically on every machine)
+- **Who is next** (`comms_next_entry`): the side's order list (`party_order`: the game's party record, each row matched to its owner / CPU
+  flag) and a per-battle "fielded" mask (`g_order_used[side]`, bit per row: the row on the stage at the start, the partner picked by
+  `comms_partner_char`, every row taken since). The next entry is the first row not fielded that is a CPU row or belongs to a player who is
+  not driving a fighter standing on the stage (`alive`: not down, no KO fall, HP > 0). So a player's own next character waits while he is on
+  the stage and comes in when his fighter falls; nobody = the side goes on with fewer (`reserve_left` = rows not fielded; both override the
+  single-player reserve list in a lock-step tag battle, `comms_handover()` = Communications Mode + our lock-step).
+- **Slot fighter falls, a team mate stands** (`ko_oneround`, the existing swap: the slot is rebuilt as the mate's character, the mate's body is
+  parked): the slot's stream is driven by the mate's driver from the current lock-step frame (`slot_handover`: a player's MAC, or nobody = the
+  AI), the parked extra's stream by nobody, its camera slot is freed. After the call-in delay the next entry comes in as a new extra
+  (`queue_member` takes the entry and puts its owner in `Late.driver`; `start_extra` makes it human-driven as in stage 1, or a CPU extra).
+- **Slot fighter falls, nobody stands** (slot call-in, 2 s): the next entry is rebuilt straight into the slot and its owner drives the slot
+  (or the AI). While the fallen fighter lies there the retail KO chain's revive word (`+0x10D0`) is cleared and the stock kept
+  (`PSPRECOMP_TAGTEAM_KEEPREVIVE=1`: old), as the swap path has always done.
+- **An extra falls**: its stream goes to nobody and its camera slot is freed; the next entry comes in after the call-in delay as above.
+- **Control of a rebuilt slot** (`apply_drive`, when it stands): a pad = brain `+0x54` = 1, the game's controller k `+0x48` = 0 / `+0x30` = 0;
+  the AI = `CPU_MODE` (FUN_08B2F2E4) + the default brain parameters as `spawn_fighter`'s "no CPU record" case, controller `+0x48` = 1.
+- **Human-driven extras**: `pad_driven` now covers them (L lock cycle, cursor fix, core steer, the controller target fix loop), and each gets its
+  own camera: its lock block goes into camera-manager slot 4 + index on every machine (retail uses 0-3: slot fighters, assists; the manager
+  steps all 8), with the camera players (`+0x180..+0x2C0`) copied from its side's slot block as the chase camera does (the extra's own were
+  never set up: its camera looked at the origin). `PSPRECOMP_TTLOCK_NOCAMSLOT=1` / `_NOCAMPLAYERS=1` turn these off.
+- **The view** (view-only, `dissidia_tagteam_frame`): a machine that drives another slot than its retail one sees that slot's camera
+  (`dissidia_camera_set_view_slot(k)`), the driver of an extra sees camera slot 4 + index, a machine that drives nothing the game's own (its
+  old slot; a spectator slot 0). The HUD is NOT switched yet: the retail panels and the local marks (`bs+84`, actor `+0x5B0` bit 4) stay as the
+  battle started (`team_of` and the reserve bookkeeping key on `bs+84`; switching it mid-battle needs that moved to sides first).
+
+### Test rig (`~/dissidia/mp_ttlock`)
+`full3x.sh TAG` / `r3x.sh TAG SECS [env]`: like full3.sh, but on the setup screen A adds a 3rd row (the 5th character tile: Kain) and C a 2nd
+(Yuna); `ROWS=cpu` makes both CPU rows (Square), default `human`. Party A: Lightning (A), Vaan (B), Kain (A); Party B: Laguna (C), Yuna (C).
+Side 0 order `31/p1 30/p0 24/p1`, side 1 `27/p2 28/p2`; 2 v 2 by the host's default, so side 1 starts with one fighter (its 2nd row is
+C's own). Pads driven by `ex3.py` (B stick + buttons, A and C buttons); KOs by `PSPRECOMP_TAGTEAM_KOLIST=slot0:20,slot1:45,slot0:70,slot1:90`,
+`PSPRECOMP_TAGTEAM_CALLIN_DELAY=8`. Logs: `[TTLOCK] handover`, `... is now pad-driven / AI-driven`, `side N: order entry i ... comes in`,
+`[TTLOCK] view: camera slot`, `[TAGTEAM] KO of slot ... (down/script/hp/dmg/stock/rev)`, `PSPRECOMP_TAGTEAM_FALLLOG=1` (every KO fall script
+started on a slot fighter, with the guest call ring and host stack).
+
+### Results
+All runs at 30 fps on all three copies (`[FPS]`), input delay 0, `[TTSYNC]` every 30 frames compared with `cmpsync.py`, `[TTLAT]` with `lat.py`.
+- **h4, human rows** (`ROWS=human`, KOLIST slot0:20, slot1:45, slot0:70, slot1:90, `KOLIST_NAT=1`): side 0 starts Lightning (A) + Vaan (B, human
+  extra, stream 2, camera slot 4: B's view), side 1 Laguna (C) alone. 20 s: Lightning falls -> the swap puts Vaan into slot 0, **stream 0 -> B**
+  from frame 600, stream 2 -> nobody, B's view back to slot 0; 28 s: the next row, Kain (A's own: A is no longer on the stage) comes in as a human
+  extra, **stream 3 -> A** from frame 843, A's view -> camera slot 5. 45 s: Laguna falls with nobody standing -> 47 s Yuna (C's own) rebuilt into
+  slot 1, **stream 1 -> C** (C's own retail slot: the game's view). 70 s: Vaan falls -> Kain swapped into slot 0, **stream 0 -> A** from frame
+  2100, A's view back to its own slot. 90 s: Yuna falls, side 1 has nobody: decided, tally on all three (winner record 0, 1 of the loser's 2
+  members booked lost). 100 `[TTSYNC]` samples to frame 2970: identical on A, B, C up to the decision (frame 2700); every stream's input
+  changes (0: 140, 1: 31, 2: 14, 3: 32) on the same frames on every copy; waits: A/B 1514 of 2984 frames (they ran ahead of C's input), C 6.
+  After the decision the copies differ as before (the finish presentation runs the LOCAL fighter's win / lose script per machine, `[FALLLOG]`
+  script 1200 / 1210 at 95.8 s with `bs+72` 4), which is the known post-decision behaviour (Round 11).
+- **c1, CPU rows** (`ROWS=cpu`, KOLIST slot1:20, extra0:30, slot0:50, slot0:75): side 0 Lightning (A) + Vaan (B, human extra), side 1 Laguna (C) +
+  Yuna (CPU extra). 20 s: Laguna falls -> Yuna swapped into slot 1, **stream 1 -> the AI**, the slot `AI-driven: brain +54 0, controller +48 1`
+  (the slot fighter then fought on under the AI; stream 1 carried no input from then on). 30 s: Vaan (B's extra) falls: stream 2 -> nobody, camera
+  slot freed; 38 s: the next row, CPU Kain, comes in as a CPU extra. 50 s: Lightning falls -> Kain swapped into slot 0, **stream 0 -> the AI**.
+  75 s: Kain falls, side 0 has nobody: decided, tally on all three (winner record 1 wins 0 -> 2, 2 of the loser's 3 members booked lost).
+  85 samples to frame 2520 identical up to the decision (frame 2250); streams 0 / 1 / 2: 28 / 2 / 36 input changes on the same frames everywhere;
+  the human extra's 36 word changes all match B's own pad samples within 4 frames; waits 1-2 per copy.
+- **The right pad**: proven for the human extras (B's samples = stream 2's words); for a slot after a handover it follows from the driver
+  schedule (`[TTLOCK] stream 0 driven by <B's MAC> from frame 600 (this machine)` on B) and the same delivery code path; the per-sample match was
+  not re-run for h4 (logs overwritten by c1).
+- **Found and fixed on the way (h1-h3)**: KOLIST's plain `HP 0` on a slot fighter with nobody standing reaches the retail KO chain: `bs+72` goes
+  to 4 and 5.8 s later the finish presentation starts the LOCAL fighter's win / lose script (1200 / 1210, `[FALLLOG]`) and re-places it, per
+  machine -> `[TAGTEAM] KO of slot 0` on A / B against `KO of slot 1` on C in the same frame, `NETSYNC DESYNC at frame 1525`. A natural lethal
+  hit never gets there (`dmg_hook` keeps the damage at HP - 1 and marks the KO for the tag flow); `PSPRECOMP_TAGTEAM_KOLIST_NAT=1` makes KOLIST do
+  the same for a slot fighter with somebody to come in (the last fighter of a side still gets HP 0 so retail ends the match). The revive word
+  of a fallen slot fighter was 0 in every run (the clearing in the slot call-in is a guard only).
+- Not verified: an AI slot fighter falling with a HUMAN extra standing (AI -> pad on a slot: `apply_drive(1)` restores brain `+0x54` = 1 and the
+  controller's `+0x48`; whether `CPU_MODE` left other brain words that matter is untested), two humans on one side with 4 copies, the HUD panel of
+  the new driver, that the extra's camera look-at follows it after the camera-player copy (the eye moved before it; not re-logged), the Internet
+  relay, devices. `PSPRECOMP_TAGTEAM_FALLLOG=1` stays as a debugging aid.
+- Single-player regression: `tagteam_test.py --baseline` RESULT: PASS (`~/dissidia/tt/s2_reg1`, with the stage-2 build).
+
+### Open items round (17 Nov)
+- **AI -> pad on a slot, what CPU_MODE sets**: `apply_drive(2)` now snapshots actor / brain / controller / lock block around `CPU_MODE` +
+  `BRAIN_MODE` / `BRAIN_LEVEL` and logs the diff; measured on a rebuilt slot fighter (m5 / m6, Kain into slot 0): exactly **3 words**,
+  `brain+0x30` FFFFFFFF -> 0 and `brain+0x34` FFFFFFFF -> 6 (the two brain parameters) and `brain+0x54` 1 -> 0. They are kept per actor
+  (`g_cpu_undo`) and put back by `apply_drive(1)` before the pad words are set, the same on every machine (`[TTLOCK] ... words CPU_MODE had
+  changed put back`). Controller `+0x48` / `+0x30` are ours.
+- **HUD panel of a driver of an extra** (view-only): `hud_panel_fighter(side)` returns the extra this machine drives on that side (when
+  alive), so the big panel / gauges / portrait follow it as the HUDLOCK panel path does for the lock-on target (`PSPRECOMP_TTLOCK_NOHUDDRIVE=1`
+  off). A player who drives the other SLOT than his retail one (only a spectator-side machine can) still sees the retail panel layout; not changed.
+- **Rig**: a 4th row added on the Tournament setup screen did not register in 4 of 4 tries (the picker opened late / the pick did not take; the
+  tag bytes briefly listed it, the game's record never did). The mixed order (human, human, CPU, human) is made with FOUR copies instead:
+  A + B + D in Party A, D picks its character in Player Select only after A has added the CPU row on the setup screen (`full4m.sh` / `r4m.sh`,
+  order Lightning (A), Vaan (B), CPU Kain (A), Yuna (D)); `full4.sh` / `r4.sh` = A + B vs C + D. `ex4.py SECS T0` drives like ex3.py until
+  T0, then alternates 8 s all pads idle / 6 s only `PROOF_SIDE` acting (the pad / AI proof). `arow.py SIDE` moves a copy's setup-screen cursor
+  onto Enter Battle from a screenshot (closes an open picker, finds the cyan row box). `[TTSYNC]` now prints each fighter's script (+0x180).
+- **Four copies, two humans per side (q2, `r4.sh`, A + B vs C + D, host default 2 v 2, 30 fps on all four)**: side 0 Lightning (A) + Vaan (B,
+  human extra), side 1 Laguna (C) + Yuna (D, human extra). 20 s Lightning falls -> Vaan into slot 0, stream 0 -> B; 40 s Laguna falls -> Yuna into
+  slot 1, stream 1 -> D; 60 s Vaan falls, side 0 empty: decided, tally on all four. 70 `[TTSYNC]` samples identical on A, B, C, D up to the
+  decision; streams 0 / 1 (93 / 27 input changes) on the same frames everywhere; waits: A/B 1-2, C/D ~920 of 2083 (C and D ran ahead of A/B's
+  input: the host pair was the slow one this time).
+- **AI -> pad on a slot (a1, `PSPRECOMP_TTLOCK_AISLOT=0:30` + KOLIST slot0:45, human rows, 3 copies)**: slot 0 (A's Lightning) handed to the AI
+  at 30 s on every machine (the 3-word CPU_MODE diff), KO at 45 s -> Vaan (B's extra) swapped in: `3 words CPU_MODE had changed put back`, brain
+  `+0x54` 1, controller `+0x48` 0, stream 0 -> B; 120 samples in sync to the decision at 110 s. **But the fighter then stood still**: slot 0
+  stayed at one position with script 1 (idle) through B's proof windows (B's stick / button words changed on stream 0: `lat.py` 44 changes,
+  B's samples in every active window), while in h4 the same swap without the AI step moved. So CPU_MODE changes more than the 4 regions diffed
+  (actor, brain, controller, lock block): `apply_drive(2)` now diffs the whole of RAM (stack window excluded) and undoes all of it (a2): on B and C the diff is the same 3 words; on A (the machine whose game object is "fighter, local player 0", the slot's
+  retail machine) 523 words, the 3 plus a 16-word record at 0997DCE4 (a function pointer 088A3264 and a data pointer, zeroed: the local pad
+  path's hook for that slot, by the look of it) and a block of packed halfwords at 0997FCC0 (not identified). Per machine the undo is of its
+  own diff, the battle stayed in sync (120 samples to the decision). **The AI did act** on the slot between 30 and 45 s (positions and attack
+  scripts 440 / 460 / 410 in `[TTSYNC]`), so slot -> AI works. **AI -> pad still left the fighter standing** (a2 as a1: slot 0 at one position,
+  script 1, through B's proof windows while stream 0 carried B's words). Next try: the brain's whole 0x300 bytes restored to the pre-AI snapshot
+  (`brain_snap`, `PSPRECOMP_TTLOCK_NOBRAINRESTORE=1` off): a3, 55 brain words differed and were put back - **still standing**. B's words DID reach
+  the slot: after the handover every one of stream 0's 32 word changes equals one of B's own samples within 4 frames (0x2000 circle, 0x4000
+  cross, 0x0010-0x0080 the stick's D-pad bits), so the delivery is right and the fighter ignores its controller. Next: the game's controller
+  object (0x50) and its pad slot (0x60, the live SceCtrlData excepted) restored to their pre-AI state as well, `+0x30` kept as it was (it had been 0x40000000; a4): controller 2 words and 56 brain words put back -
+  **still standing** (stream 0 carried B's words, 44 changes on the same frames everywhere, 120 samples in sync to the decision). So after a
+  CPU_MODE interlude the fighter ignores its controller although brain, controller, pad slot and (rebuilt) actor are as before; what is left
+  is the lock block (kept across the rebuild; the AI drives lock modes) and whatever the AI period touched outside those objects. **AI -> pad on a
+  slot is therefore still OPEN**; the bookkeeping and the lock-step are right (same frames, same hashes), the control is not. Suggested next step:
+  not toggling the slot's brain at all but giving the slot a fresh brain through the constructor path on the rebuild (as `spawn_fighter` does
+  for CPU extras, which do act, and as a pad slot gets at setup), or finding the pad-path gate (`[ACTPTR]` / `[BRAIN]` debug in the controller
+  hook: actor +0x390 object, +0x30C, +0x1100) with a before/after dump at the moment of the stand.
+- **AI -> pad test aid**: `PSPRECOMP_TTLOCK_AISLOT=<slot>:<sec>` hands a slot to the AI at a tag-clock time on every machine (`slot_handover(S, -1)`
+  outside a rebuild applies `apply_drive(2)` at once), so the next KO of it is an AI -> pad handover without a CPU row in the order list.
+- Single-player regression with the brain-restore build: `tagteam_test.py --baseline` RESULT: PASS (`~/dissidia/tt/s2_reg2`); the later
+  controller / pad-slot restore is inside the multiplayer-only path (`g_cpu_undo` is filled by `apply_drive(2)`, reached from `slot_handover`,
+  Communications Mode only) and was not re-run through the single-player test.
+
+### Round 3 (17 Nov): fresh brain, cross-side HUD, Internet owners, "you're up next"
+- **Internet mode row owners**: not reproduced with the current build through the local relay (d1: 3 clients in room "ttlock", `[TTCPU] battle
+  setup ... [peer party 1 #4: 27o 28o]`, order `27/p2 28/p2`, C's Yuna came in as C's own at 47 s, 90 `[TTSYNC]` samples 0 differ, all
+  streams on the same frames). The `p-1` of r1 / r2 therefore looks like a snapshot race (C's rows not yet in the beacons when the battle was
+  set up), not the mode. Hardening in `party_order`: a row nobody lists goes to the party's only human when the party has exactly one (identical
+  on every machine: same snapshot); with several humans it stays a CPU row.
+- **"You're up next"** (`tagin_notice`, view-only, this machine): when this player's row is the next entry of a side and a handover is pending (a
+  fallen fighter's call-in delay or a slot call-in), the overlay banner shows `GET READY: YOU'RE UP NEXT - <character>` from 3 s before the
+  handover frame (the slot call-in's 2 s window as it is), unless an entrance banner is up; `[TTLOCK] notice (this machine only)`. d1: A saw
+  "KAIN" at 25 s (Kain in at 28 s), C saw "YUNA" at 45 s (Yuna into slot 1 at 47 s), B saw nothing. The reserve strip in a lock-step tag battle
+  now lists the order list's rows not fielded yet, the next one first, this player's rows as `YOU NEXT: <name>` / `YOU: <name>`, CPU rows as
+  `CPU <name>` (view-only). `PSPRECOMP_TTLOCK_NONOTICE=1` turns both off.
+- **HUD, any side** (`hud_panel_fighter`): this machine's panel (index `bs+84`) shows the fighter it drives, whichever side it is on; the other
+  panel the other side's slot fighter or this fighter's lock target there. d1: B's panel 0 showed its extra Vaan (`extraP`) and, after the swap,
+  slot 0. q3 (4 copies, A + B vs C + D): D's panel 1 showed its extra Yuna (`extraP 08DF8E40`) from the start and slot 1 after the
+  swap at 40 s, with D's chase camera on the extra until then; A's panels unchanged; 70 samples identical on all four, streams 0-3 on the
+  same frames. Found: D's `bs+84` was 1 (`panel of side 1: slotH`), i.e. a Party B spectator's retail slot index is its party's side, not 0
+  as the stage-1 research assumed from B (Party A); so "a player driving the other side's slot" cannot arise, the panel index `bs+84` is
+  always the player's own side.
+- **AI -> pad with a fresh brain** (`rebuild_begin`: when the slot's brain had been through CPU_MODE (`g_cpu_undo`), the constructor's new brain is
+  kept instead of the old one; `PSPRECOMP_TTLOCK_OLDBRAIN=1` = old): a5 - `fresh brain 08DFC5C0 from the constructor`, brain `+0x54` 1,
+  controller `+0x48` 0, B's words on stream 0, 120 samples in sync, **and the fighter still stands** (one position, script 1, through all of
+  B's proof windows). So neither the brain nor the controller / pad slot / actor is where the AI interlude leaves its mark. Next measurement
+  (a6): every RAM word that points at the slot's brain at the rebuild, for a pad brain (the 70 s rebuild) against one that was through
+  CPU_MODE (the 45 s rebuild): a6 - **0 references outside the actor in both cases** (the brain is held by the actor alone, no global
+  registration), the fighter stood again. Next (a7): the lock block, the one per-slot object kept across the rebuild that the AI period wrote,
+  restored to its pre-AI state too, plus a dump of the pad-path words (`[DRV]`: actor +0x380/+0x384/+0x390 object/+0x30C/+0x1100, brain
+  +0..+0x60, controller) at every pad handover, and all three pads driven normally so the 70 s swap (A's Kain, no AI before it) is a control:
+a7 (all three pads driven as in ex3.py): after the 45 s AI -> pad swap slot 0 moved
+  once (frame 1440 (20.60,12.32) -> 1560 (27.10,8.82), script 700 = a hit reaction) and stood still otherwise; the 70 s swap (A's Kain, no AI
+  before it, A's pad on buttons + a short stick) also stood (2160-2280 one position, script 101). `[DRV]` at the stand: both rebuilt slots had
+  actor `+0x380` = 02002002 (bit 2 = the AI gate the brain tick checks, 0x2000, 0x02000000) against 0 on the slot fighter before, `+0x1100/+0x1104`
+  0 against non-zero; the brain tick hook clears bit 2 only for extras (`tick_hook`, the "spike"), a rebuilt SLOT is nobody's. **Open**: whether a
+  swapped-in slot fighter is ever pad-controllable in the lock-step (h4 only proved the words arrive); next test: clear `+0x380` bit 2 (and compare
+  the 0x2000 / 0x02000000 bits) at `apply_drive(1)` on a run with the driver's pad active the whole time.
+  **a8 - the gate bit was the freeze.** `apply_drive(1)` now clears `+0x380` bit 2 on a slot handed to a pad (`PSPRECOMP_TTLOCK_KEEPGATE=1` off;
+  logged `AI gate bit ... cleared for the pad (was 02002002)`, at 70 s `02202002`): after the 45 s AI -> pad swap slot 0 moved and changed scripts
+  continuously (1380-2040: positions from (-25.6,-3.4) to (-10.9,19.1), scripts 10055, 200, 750, 700-702, 101, 2, 102) where a1-a7 stood at one
+  position with script 1; 120 `[TTSYNC]` samples identical to the decision at 110 s. Not separated yet: how much of that motion is B's pad (B's
+  windows: frames 1410-1560 and 1830-2040) and how much hit reactions / the fresh brain acting on its own (scripts 10055, 700-702 also appeared in
+  B's idle windows) - a run with the AI opponent held and only B's pad active is the next step. The same gate bit sits on every rebuilt slot
+  (a swapped-in human fighter in h4 / q2 / q3 too: only the tick hook's per-tick clear for extras ever lifts it), so this clear applies to every
+  pad handover, not only after an AI interlude.
+
+### Single-player report (17 Nov, APK of the merged tree) - headless reproduction on the host (GL)
+The user's Battle Mode > Tag Team Battle (party) report: no way to put a CPU on his team, "two players spawned for me and the camera switched between
+them" (party of several), the enemy's partner and the enemy's tag-in INVISIBLE but lockable and unhittable (also with a party of one), a white
+screen after the tally when forfeiting. Headless (`~/dissidia/tt/sp_run.py OUT SECS tests/replays/tagteam_menu_walk.txt [ENV]`, WORK= picks the
+build; `BT_DISPLAY=:91`; screenshots at 8 / 16 / 24 s): Jecht (party: Jecht, Squall, ...) vs Lightning (party: Lightning, Vaan).
+- **Partners come up on this build**: side 1's Vaan (party member 30) is loaded (`load_character(30)`: files 592 / 544), spawned, started and
+  acts (r4: scripts 2 / 10095 / 101; in r1 it idled at script 1 for 30 s with its brain ticking - not understood), side 0's Squall acts (r1).
+- **Visibility, host GL**: with the partner held 1.5 m beside the human (`HOLDPARTNER=near`, r6) Squall is drawn beside Jecht at 16 s
+  (`~/dissidia/tt/sp_hold.png`, top row; the old build `build_ttko`, bottom row, showed only walls / floor in its frames). The enemy's partner
+  (r4, `1V2=1`, `PLACE=2,0`): at 16 s a lock marker hangs in the air with no model under it, at 24 s the marker is on Lightning
+  (`sp_r4.png`) - one frame, not proof. Every run logs ONE `[GE] composed MVP collapses prim (model spread 3.4e38 ...) NDC-direct fallback`
+  near the extras' start (a draw with an uninitialised model matrix); on GL the fallback draws, on the APK's Vulkan path the same draw may
+  be dropped and stay dropped. **Not reproduced as invisible on the host; the Android side is the suspect** (no device test here, by the rules).
+- **Camera**: r1 (party of several, both partners) 1 bad `[CAMX]` frame of 800; r3 with `PSPRECOMP_TAGTEAM_NOSLOTOBJFIX=1` showed the wide fixed
+  shots the slot-object fix is for. The "switching between two players" was not reproduced headless.
+- **Rule change (user, 17 Nov)**: in single player the human's team gets a partner only from a CPU row, and Battle Mode has none, so his side is
+  1 v 2 now (`team == 0` in the extras plan: no `party_partner_char`; his next members still come in when he falls; `PSPRECOMP_TAGTEAM_SP_PARTNER=1`
+  = the old 2 v 2 with his 2nd member; the Quick Battle clone test setup is unchanged). r8: `[TAGTEAM] single player: no CPU row on the human's team, no partner (1 v 2)`, only
+  side 1's Vaan started, the reserve strip lists his next members (`team0: SQUA COD TERR YUNA`), camera 0 bad frames of 800 (`sp_r8.png`).
+- **Forfeit** (`menu_drive.py ttlock OUT tagteam_menu_walk.txt 20 "start,down,down,cross,left,cross,..."`, `~/dissidia/tt/sp_forfeit2.png`): pause >
+  Forfeit > YES -> the tally ("Party received powers of a Warrior", Save Replay) -> "Proceed to next battle" -> the Round 2 VS page (Squall vs
+  Lightning) -> Lightning's intro -> a running Round 2 battle (the game time advanced through the 40 s watch; `battle teardown ... tag team state
+  dropped` at 35.7 s). No white screen on the host. Seen: Round 2's HUD panels have blank white portrait boxes (the portrait textures gone after
+  the teardown) - possibly what becomes a white screen on the APK's Vulkan path; and the forfeit of a one-match tag battle leads into the retail
+  Round 2 at all (the Tournament flow continues with the next member), which the one-continuous-match rule should end instead.
+- Single-player regression with this round's build (1 v 2 rule, HUD / notice / fresh-brain code): `tagteam_test.py --baseline` RESULT: PASS
+  (`~/dissidia/tt/s2_reg4`).
+- `tagteam_test.py` (Quick Battle, clones, no menu walk) cannot see any of this; a cheap extension is a second battle through
+  `tagteam_menu_walk.txt` (party, loaded partners) with the held-partner screenshot and a draw check (`collapses prim` count must stay at 0 for the
+  extras' models) - the walk costs ~45 s more per run.
+
+### Still open after this round (17 Nov, evening)
+- Pad control of a rebuilt slot: the gate bit is cleared (a8), the attribution pad vs AI remnant is not measured; the fresh-brain path is only
+  used after an AI interlude (plain swaps keep the old pad brain, as always).
+- Single player (APK): the enemy partner / tag-in invisible and unhittable and the white screen after the forfeit tally are NOT reproduced on
+  the host GL (partner drawn, battle continues to Round 2); the one `collapses prim` draw per run and the blank Round 2 portraits are the
+  leads for the Vulkan path; the forfeit of a one-match tag battle should end the match instead of starting the Tournament's Round 2.
+- Internet-mode row owners (`p-1`): not reproduced; hardening only. The human extra's stick-conversion camera; a 4th row on the setup screen
+  (rig); the Internet relay over a real network; devices.
+- **The extra's camera (CAMVIEW on B, r1)**: camera slot 4 is stepped (the eye moves) but its look-at stays at (0, 1, 0) even with the slot
+  block's camera players copied: the extra's lock-block camera is not a follow camera. The driver's VIEW is now a view-only chase camera
+  (`dissidia_camera_set_view_follow(actor)` in camera.cpp: behind the fighter, looking past it toward its foe, eased; `[CAMFOLLOW]` log,
+  `PSPRECOMP_TTLOCK_VIEW_SLOTCAM=1` shows the stepped slot camera instead). Open: whether a human extra's stick directions are converted with
+  its own (degenerate) lock-block camera or with its side's slot camera (the stage-1 FOLLOW experiment suggests the side's slot entry) - not measured.
+- Mixed order through the setup screen (m1-m6, `ROWS=mix`): A's 4th row never made it into the game's record (see above); the 4-copy variant with
+  D's late pick (q1, `full4m.sh`) did not get A's CPU row registered either while D sat in Player Select - the AI step is tested with AISLOT instead.
+- **Local relay** (r2: `tools/adhoc_relay` built in /tmp (`/tmp/ttroom_relay/adhoc_relay --port 47500 --bind 127.0.0.1`), the copies with
+  `net_mode=internet` in their settings.ini (`netmode.sh`; the saved setting overrides `PSPRECOMP_ADHOC_MODE`), `PSPRECOMP_ADHOC_SERVER=127.0.0.1:47500
+  PSPRECOMP_ADHOC_ROOM=ttlock`, human rows, 3 copies): the relay log shows the 3 clients in room "ttlock" (~10 000 datagrams received and
+  ~13 500 forwarded per client), the battle ran three handovers (slot 0 -> B at 20 s, slot 1 -> AI at 45 s, slot 0 -> A at 70 s) and the
+  decision at 90 s with 100 `[TTSYNC]` samples identical and every stream's input changes on the same frames; latency 1 frame on all three
+  (loopback). Found on the way: with `PSPRECOMP_ADHOC_MODE=internet` in the environment (r1, still LAN by the saved setting, and r2) the
+  order list showed Party B's rows with **no owner** (`27/p-1 28/p-1`), so C's second row came in as a CPU extra and the slot went to the AI at
+  45 s instead of to C; the same setup in LAN mode matched them (`27/p2 28/p2`). The own-row matching (tag bytes byte 15 by MAC) in Internet
+  mode is open.
+
+## User play-test on the RP6 (17 Nov, APK 09:42, single player Battle Mode > Tag Team Battle, 1 v 2)
+Video: https://youtu.be/EjMyGcZr2E0. Party Jecht (only used) vs Cecil, Tifa, Bartz, Vaan, Ultimecia; KO order Tifa > Bartz > Cecil > Vaan > Ultimecia.
+The no-AI fix (slot rebuild clears the AI gate) works. Open:
+1. The player's assist always goes for the original enemy, never the enemy's partner.
+2. The music stops after the first enemy dies.
+3. Enemy-on-enemy BRV changes are not shown on the retail BRV display (counted, shown on our panel); Bartz broke Cecil, Cecil kept BRV on screen; the stage BRV for that break went to the player.
+4. Cecil KO'd alone -> Vaan spawned instantly, Ultimecia shortly after and attacked during her banter; her attacks invisible; Vaan's Torrent invisible but hurt.
+5. Between Vaan's and Ultimecia's spawn the player's BRV jumped to 7542 (base 1386).
+6. Vaan and Ultimecia: no attack / effect audio.
+7. Damage 300 vs ~30 to the first two: later members probably have no equipment.
+Second match (Jecht + Kain, CPU killed Jecht):
+8. The 2nd character could not switch lock-on targets at first.
+9. His moves / equipment were the character's defaults for a few seconds (after a pause they were right): only the starting characters get their set-up at once.
+10. Enemy chase camera broken for the 2nd character (fine for the 1st).
+11. Enemy BRV attacks no longer lowered the shown BRV (9999 shown, HP attacks did ~2k): display or BRV state.
+12. Ultimecia invisible and could not be attacked.
+
+## User reports (18 Nov) and who works on them
+- Memory: mid-battle members' move effects invisible / silent (only starting fighters have effects); community map "Gojo's Memory Expansion" (US EBOOT patch: MEMSIZE=1, general heap +3 MB, FIELD::MEMORY +1.5 MB battle file loading area, sound heap +3.5 MB, effects heap +3.5 MB), copy in ~/dissidia/gojo. (agent: ttlock)
+- Tag-ins in mid-air (banter breaks) or outside the map (everything breaks); defeated animation + death audio missing for our KOs. (agent: ttfa)
+- Forfeit then another tag match: duplicate CPU players; forfeit continues to Round 2. (agent: ttfb)
+- End-game tally gives all wins to the first player; advanced job effects never awarded (computed at battle end); the CPU can unpause the game. (agent: ttcam)
+
+## Memory for characters loaded mid-battle (18 Nov, branch ttlock): effects and effect sounds
+User (RP6, 17 Nov): enemy party Cecil, Tifa, Bartz, Vaan, Ultimecia vs Jecht + Kain; every character loaded mid-battle (partners, call-ins, Kain
+too) was visible with its textures but its move effects were invisible and had no effect sound; only Cecil (a starting fighter) had effects.
+Reproduced headless (`~/dissidia/tt/sp5g`, 8 MB pool extra): per newcomer one `[FXPOOL] effect pool alloc(1.09-1.17 MB) FAILED: pool 4050944 B,
+free 254336 B` and one `[MODELS] heap 0x04110000 alloc(84-137 KB) FAILED (heap end 0, used 0)`.
+
+### What each mid-battle character costs (measured, `[MEMSUM]` lines after every `load_character`, run `mem2`)
+| Memory | Retail size | Per newcomer | Where it comes from |
+|---|---|---|---|
+| Model pool (`FUN_0888204C(0x780000)`, heap 0x08C15F80; Gojo's "General Heap", GRAPHICS::GRAPHICS) | 7.5 MB | **~2.0 MB** (7.9 -> 9.8 -> 11.9 -> 13.9 -> 15.6 MB over five loads) | `MODEL_POOL_TAGTEAM`, region 1 |
+| Effect pool (`EFFECT_ALLOCATOR`, `FUN_088A5054`: `sceKernelAllocMemoryBlock` 0x3DD000 + handle heap `FUN_08867310` at 0x09B4D420; Gojo's "Effects heap", two sites) | 3.86 MB, 0.25 MB free after the two starting fighters | **1.06-1.17 MB** (the objx `effe` chunk: `p_<char>.fep` effect pack, put there by `FUN_0883EB10(holder, ...)` from the chunk puller `FUN_088459E0`, handle at holder+32) | retail block + contiguous extension, region 1 |
+| Character texture heap (VRAM, heap object 0x04110000, 960 KB) | 960 KB | 84-137 KB that do not fit (the effect texture sheet) | `TEXHEAP_TAGTEAM` overflow heap (RAM), region 2 |
+| Staging heap for the load (`FILE` heap 0x275800; Gojo's FIELD::MEMORY, "battle file loading area") | reused by retail | one, 2.6 MB, kept | `TAGTEAM_LOAD_HEAP`, region 2 |
+| OBJDATA (D_ data, `FUN_088820D8(0x41000)`) | 260 KB | ~72 KB | `OBJDATA_TAGTEAM`, region 2 |
+| Sound heap (`FUN_088A0C10`, 0x237000; Gojo's "Sound heap") | 2.2 MB | voice bank, released when the character has left (`voice_banks_release_departed`) | `SOUND_HEAP`, region 1 |
+| A 16 KB manager heap (object 0x09971160, `FUN_0885C40C(block, 0x4000)` at boot) | 16 KB | ~0.8 KB (498 + 37 + 12 + 54 + 36 B records) | full at the fifth load; see below |
+
+Gojo's US patch offsets map to our (EU, same code addresses as the US EBOOT: VCKing101/Dissidia012-pc) vaddrs as `vaddr = file offset + 0x086EB028`:
+sound heap site 0x1B5BE8 -> `FUN_088A0C10` (our `soundheap_hook`), effects site (2) 0x1BA080 -> 0x088A50A8 inside `FUN_088A5054` (our `fx_heap_init_hook`),
+FIELD::MEMORY 0x1A57A8 -> 0x088907D0 (the FILE heap request next to `FUN_088908E0`, our `MODEL_FILE_HEAP` / `TAGTEAM_LOAD_HEAP`), general heap
+0xA80000 = 0x780000 + 3 MB (our model pool). Nothing is patched; the four sizes are raised by the hooks that already existed, now sized to fit.
+
+### Cause
+1. **The effect pool was never extended in a tag battle.** `fx_heap_init_hook` bump-allocates the 3 MB extension right behind the retail block and
+   needs it contiguous; with the 8-9 MB pool extra region 1 was full by then (`[FXPOOL] effect pool NOT extended: extension at 0x0B810000, pool
+   ends 0x0B634000`), the pool stayed at 3.86 MB with 254 KB free, and EVERY newcomer's 1.1 MB pack failed - no effects, and no effect sounds
+   (the pack's `.feb` / `.fxseb` sound-effect tables are inside it). Earlier, with 6 MB extra, the extension fit but the model pool ran out at the
+   fourth load instead.
+2. **The 3 MB extension was wasted in region 2** (bump-allocated, then unused), so the 3 MB texture overflow heap, allocated lazily on the first
+   VRAM-heap failure, found 2.6 MB left and silently got nothing: the `heap 0x04110000 ... FAILED (heap end 0, used 0)` lines (the heap object is
+   in VRAM, outside the diagnostic's RAM window, hence the zeros). Each newcomer lost its 84-137 KB effect texture sheet.
+3. The "region 2 breaks the game heap code" note was wrong: run `sp5c` (17 Nov) had the OBJDATA heap at 0x0B810000 and the staging heap at
+   0x0B8D1000 and every load worked (file objects at 0x0B8392B0..). Both the `FUN_0885C40C` heaps and the GE (`PSP_ADDR_MASK` 0x07FFFFFF) are
+   fine with 0x0B81xxxx addresses; what failed back then were the lazily-made blocks that no longer fit.
+4. Even with a fitting extension the effect pool holds four newcomers' packs and nothing is ever freed (the file manager unloads only at the
+   battle's end), so a five-member party's last member still failed (`mem1`).
+
+### Fix (hooks_models.cpp, tagteam.cpp, runtime/src/hle/psp_hle_kernel_memory.cpp)
+- `psp_kmem_bump_alloc_named_r2()` (region 2 first) and `psp_kmem_free_region()` in the HLE core. The staging heap, OBJDATA, the texture overflow
+  heap (now 2.5 MB, reserved when the pool is made, not lazily) and the 16 KB manager heap's replacement go to region 2 (5.9 MB: 2624 + 772 +
+  2560 + 48 KiB); region 1 holds the pool, the sound heap and the effect pool.
+- The tag team pool extra is 8 MB by default (`PSPRECOMP_TAGTEAM_POOL_EXTRA`), lowered 1 MiB at a time until region 1 keeps the sound heap, the
+  retail effect block, 3 MB of extension and a margin (`[MODELS] tag team model pool extra lowered ...`).
+- The effect pool extension takes everything region 1 has left behind the retail block minus the pending sound heap and a 256 KB margin
+  (`PSPRECOMP_EFFECT_POOL_EXTRA` forces a size): `[FXPOOL] effect pool 0x0AFC7000: 8359936 B (retail 4050944 B + 4308992 B)`.
+- **Departed characters' effect packs are released** (`fx_packs_release_departed`, with the voice banks when a newcomer comes in): `FUN_0883EC44(holder)`
+  (unbind the pack instance from the effect manager, unlock the handle) + `FUN_0883EBB0(holder)` (free, clear the holder) - the same two calls
+  the file object's release `FUN_08846628` makes at the battle's end, so nothing is freed twice. The holder is caught per character by a hook on
+  `FUN_0883EB10` during `load_character`. A character that is still on the stage as a fighter or an assist is never released. `PSPRECOMP_TAGTEAM_NOFXRELEASE=1` keeps retail behaviour.
+- The 16 KB manager heap at 0x09971160 is made over a 48 KB host block (`SMALLMGR_TAGTEAM`, matched by the heap object's boot address).
+- `[MEMSUM]` after every mid-battle load (`PSPRECOMP_TAGTEAM_LOG=1`): model pool used, effect pool free / largest, texture overflow used.
+
+### Results (headless, GL, `party_battle_walk.txt`, five mid-battle loads: Vaan 30, 27, 5, 9, 24; `~/dissidia/tt/mem1`, `mem2`, `mem3`)
+| Run | Effect pool | Pack failures | Texture (0x04110000) failures | Model pool after 5 loads | Other |
+|---|---|---|---|---|---|
+| sp5g (before) | 3.86 MB, not extended | 5 of 5 | 5 | - | 2 x 0x09971160 |
+| mem1 (layout fix) | 8.36 MB | 1 of 5 (the fifth: 142 KB free) | 0 | - | 5 x 0x09971160 |
+| mem2 (+ pack release) | 8.36 MB | 0 of 5 (free 1.2 MB after the fifth, 2.3 MB after its release) | 0 | 15.6 of 15.9 MB | 5 x 0x09971160 |
+| mem3 (+ 48 KB manager heap; release after the load) | 8.36 MB | 1 of 5 (the fifth: 2.3 MB free in TWO holes, largest 1.13 MB < 1.17 MB) | 0 | 15.6 of 15.9 MB | 0 |
+| mem4 (release BEFORE the load, final) | 8.36 MB | 0 of 4 (run ended at game time 40 s, GPU busy at 14 fps: the fifth load did not come; after the fourth: 3.4 MB free, largest hole 2.27 MB) | 0 | 14.1 of 15.9 MB after four | 0 |
+Screens: `mem1/battle_gl_042.tga` - Vaan (loaded by `load_character(30)` after the loading screen) mid-air with his attack's orange flare and
+sparks drawn; `mem2/battle_gl_050.tga` - the pink burst of a newcomer's attack hitting Kain. Effects are drawn in most frames of both runs, no garbage
+seen; what is on screen in a frame depends on who attacks when, so these show "effects of mid-battle members exist", not every move.
+
+Regression: `tagteam_test.py --baseline` RESULT: PASS twice (`~/dissidia/tt/mem_reg1` on the mem3 build, `mem_reg2` on the final build).
+
+### Limits and open items
+- The model pool is the next ceiling: ~2 MB per newcomer, 15.6 of 15.9 MB used after five loads, so the SIXTH mid-battle load would fail
+  (invisible model). Unloading a departed character's files (`FUN_08844520(mgr, id)` frees its model, textures, OBJDATA, pack and voice through
+  `FUN_08846628`) would need its parked actor destroyed first (`FIGHTER_DTOR(actor, 0)` as the slot rebuild does) and every tag-code reference
+  to it (extras list, HUD panel, lock lists, leak watch) retired: not done, judged too wide for this round. A 10-member party therefore gets at
+  most five characters loaded after the loading screen (the two starting ones + five = seven on one side's roster).
+- Holes in the effect pool only merge with free neighbours: the departed packs are released BEFORE the newcomer's load so its pack can take a
+  merged hole; a live pack between two holes can still leave no hole big enough (mem3's fifth load) - then that character has no effects, as before.
+- The pack release frees memory an effect of the departed character could still be reading if it outlives the character's fall by the next
+  newcomer's load (> 4 s): not seen in three runs, possible in principle (garbage in a stale effect until it ends).
+- The host heap is 35 MB in total (region 1 29.2 MB + region 2 5.9 MB, `game.toml`); the split above leaves ~0.25 MB in region 1 and ~0.07 MB in
+  region 2 for the small blocks the roster / tag code allocate later. If a mod raises the model budget the pool-extra cap lowers the tag pool.
+- No sound can be checked headless: the effect sounds are inferred to return with the packs (they are tables inside the pack).
+
+## Tally, job powers and the pause (18 Nov, worktree ttcam)
+Single player Battle Mode > Tag Team Battle is a Tournament group battle that the tag code ends in ONE booking (`group_decided`). Retail books
+it round by round; three things only came out right for the round the booking sees.
+- **Tally credited every win to the first member.** The booking `FUN_0891C7E8(base, winner record, winner actor, loser actor, ...)`
+  (base = `*(0x089D8508)`) adds one win to the winner's row `R_w[1]` (13-byte record R = base + 10756 + 13 * record: +0 team wins,
+  +1 member on the stage, +2 last booked, +3.. a result per member) and copies that row's level / status from the winner ACTOR; the tag code
+  never moved `R_w[1]` off member 0 and put all `cnt - 1` other wins on that row too. Now a **KO ledger** (`ledger_step`, every battle frame
+  before the KO handling; `ledger_hp_hit` from the HP damage step) books each fall as (team, character) with its scorer: the last HP
+  attacker within 10 s, else the slot fighter facing the fallen side (KOLIST debug KOs). `tally_from_ledger` (from `group_decided`, before
+  the booking) gives every row its own wins, its level / status words (+1, +8, +12, +18 as last seen), flag 4 cleared for members who
+  fought and flag 2 for members who fell (winners too), sets `R_w[1]` to the winner's slot fighter (the actor the booking reads) with one win
+  less, and every member's result byte. Falls the ledger could not credit go to the member on the stage, so the verdict
+  (`FUN_0891A44C`: wins >= opposing members) still holds. `tally_post_step` (frame end) writes the rows again once the booking has added
+  its win. `PSPRECOMP_TAGTEAM_OLDTALLY=1` = the old tally, `NOLEDGER=1` no ledger.
+  Headless (party walk, `KOLIST_NAT=1 KOLIST=enemy2:20,human:28,human:40,cpu:52,cpu:64`, `~/dissidia/tt/ttcam_tal4/watch_07.png`):
+  "3 - 2", Round 5, VICTORY; Jecht 1 win (Vaan), Squall 0, Cloud of Darkness 2 (Lightning, Laguna), Lightning 2 (Jecht, Squall), levels
+  on every member who fought. `ttcam_tal3`: Jecht 1, Squall 2, Lightning 1, "3 - 1" (before: Lightning / Jecht with all wins, "0 - 5").
+- **Job powers** (Quick Battle Party > Job Settings, a job per party position; "Party received powers of a ..."): per record a 19-byte
+  block P = base + 10832 + 19 * record (+2i job of member i, +2i+1 power received, +10 member on the stage, +11.. gathered powers, +15..
+  advanced ones). The booking calls `FUN_0891ED04(P, out, won, base[1])` once for the winner (won = 1: member P[10] hands the party his
+  job's power; `FUN_0891EBA0` / `FUN_0891EC10` check the combination table `*(0x089D7718)` / `*(0x089D771C)` for advanced jobs) and once
+  for the loser (P[10] moves on). In a tag battle that ran for the final round only, with P[10] = 0 (the first member got the power
+  whoever won). Now every fall in the ledger before the last is replayed through `FUN_0891ED04` with P[10] set to the member who won /
+  lost it (in KO order), and the booking's own round gets P[10] = its real scorer / victim. `PSPRECOMP_TAGTEAM_NOPOWERS=1` off. Logged as
+  `job powers record N before the replay / before the booking / after the booking`. ttcam_tal4: record 0 `01 01 01 00 07 01 ...` =
+  Jecht (Warrior) and Cloud of Darkness (job 07) received, Squall (no win) not; record 1 Lightning (job 08) received. The gathered /
+  advanced bytes (+11..) stayed FF in every run here, retail's own forfeit round included (no qualifying combination in this job set-up);
+  an advanced job is NOT shown on screen (the group battle ends with the tally, there is no next VS page). Only falls with both members
+  known are replayed (a KO with no scorer gives no power).
+- **Pause owned by the CPU (not reproduced).** The START check (`FUN_08B1E298`) walks the global actor list (`FUN_08841FA4`) and asks
+  each actor's controller (+0x5A0) whether START was pressed; the first that says yes owns the pause (control +12) and `FUN_08B1DE34`
+  opens the list (`FUN_08B1EBE8`) on THAT actor's controller, so if a CPU fighter (slot or tag extra) ever owned it, its AI would drive
+  the menu. Headless (pause / resume cycles over 30-40 s, with a human slot rebuild, a CPU swap, a CPU slot rebuild, a member call-in
+  loaded during the cycles: `ttcam_pause1..6`) the pause stayed open every time (game time frozen, 12 of 12 shots paused) and the owner was
+  always the human's slot fighter (list order slotH, slotC, extras; CPU controllers +0x48 = 1 on pad slot 1). Guard: `pause_open_hook`
+  (0x08B1DE34) gives the pause to the local human's slot fighter (bs+84) whenever a tag fighter owns it in a single-player battle
+  (`[TAGTEAM] pause: owner ... ->` in the log; `NOPAUSEFIX=1` off); with `PSPRECOMP_TAGTEAM_LOG=1` every pause logs its owner, the actor
+  list and the controllers. Whether this is the device's cause is unknown: needs a device log with the owner line.
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttcam_reg1`). Debug: `PSPRECOMP_TAGTEAM_GROUPDIFF=1` logs the changed
+  bytes of the group battle block (base .. +0x3000) every 30 frames.
+
+## Forfeit ends the match; every battle starts clean (18 Nov, ttfb)
+Reports: after pause > Forfeit and another tag team match there were sometimes MORE CPU fighters than planned, and a forfeited one-match tag battle went on into
+the Tournament's Round 2.
+- **Cause 1 (forfeit = KO for the tag flow)**: retail's forfeit runs the fall script (1210) on the human's slot fighter with the HP untouched and moves the
+  battle to the finish phase (`bs+72` = 4). `ko_oneround` took that for a KO: it queued a slot call-in ("SQUALL comes into the slot in 2.0 s") and 2 s
+  later REBUILT the slot (spawn + load) while retail was already tearing the battle down and heading for Round 2: spawns / queued members in the middle of
+  the end flow, and the Tournament continued with the next member instead of ending.
+- **Cause 2 (per-battle state not reset by a new setup)**: the reset lived in `dtor_hook` (only when retail destroys one of OUR fighters) and a partial one in
+  `setup_hook`. The `g_extra[]` entries were only partly overwritten at the next spawn (`replaced`, `callin`, `charId`, `pad`, `driver`, `camslot`, `undo`
+  from the previous battle stayed), and `g_down`, `g_ko_mark`, `g_rebuild`, the extras' module / handle maps, `g_called`, `g_decided`, `g_entrant`, `g_cycs`
+  were only cleared by the teardown.
+- **Fix**: (1) `ko_oneround`: a KO'd slot fighter seen with `bs+72 == 4`, live HP above 0 and no lethal-hit mark (`g_ko_mark`) is a FORFEIT: `g_decided`, no
+  swap / call-in, `group_decided(team of the fighter)` books every member of the forfeiter's team as lost, so the tally shows 0-N, DEFEATED, and "Return to
+  Battle Setup" (no Round 2). Single player only (not in Communications Mode); `PSPRECOMP_TAGTEAM_NOFORFEITEND=1` = old behaviour. (2) `reset_battle_state()`
+  (new, called from `setup_hook` after the retail setup and from the teardown): resets all of the above, including whole `Extra` objects.
+- **Verified (host, `~/dissidia/tt/fb8`, `bin/fbstart.sh` + `fbloop.sh`)**: Battle 1 (Jecht vs Lightning, party): forfeit at 18 s -> log `forfeit, team 0 loses the
+  whole group battle`, tally 0-4 / 0-5, DEFEATED, back to the setup; Enter Battle -> battle 2 with 2 slot fighters + 1 extra (Vaan) = the same as battle 1
+  (`[FIGHTER]` lines: 3 actors). Before: forfeit -> call-in of Squall at +2 s, Round 2.
+- Not reproduced: the duplicate itself on the old build (it needs a call-in rebuild that overlaps the next setup; timing dependent); the cause above is the
+  state that crossed the battle boundary. A time-over finish would not be treated as a forfeit only if a KO/hp marks it; not tested.
+- Tools: `~/dissidia/tt/bin/fbp.py PORT start:1.5 down cross shot:FILE` (pad via the debug socket), `fbsnap.py`, `fbstart.sh NAME`, `fbloop.sh NAME PORT`.
+
+## Safe entrance spot and defeat (18 Nov, tree ttfa)
+- **Tag-ins in the air / outside the map.** The newcomer was placed at the anchor's current position + an offset (3 m beside it, or 5 m toward the foe), and a
+  fallen anchor can be in the air or far out. No stage-bounds query was found (walls are collision geometry), so the walkable area is learned
+  (`ground_track`, every tick): a fighter that runs a standing / walking / running script (1..9, 1100) with a steady height (`+0x84` unchanged between two
+  ticks) records its (x, y, z) in a 1 m grid and as its last grounded position. **`+0x2E4` is not the ground**: it is the fighter's height of the previous frame
+  (it follows a fighter up in a jump or dash), so it is only used as the "no vertical movement" test. `safe_spot(ref, dx, dz)` takes the anchor's current
+  position when it is grounded, else its last grounded one, adds the offset only when a recorded ground sample lies within 1.5 m of the target (the offset is
+  shortened 1 / .75 / .5 / .25 / 0 until one does) and uses that sample's height. Used by `start_extra` (extra entrance), `call_in`, and the slot rebuild
+  (`rebuild_begin`, and the team mate's stand-in spot in `swap_slot_with`). `[SAFESPOT]` logs each choice. `PSPRECOMP_TAGTEAM_NOSAFESPOT=1` = old placement.
+  Seen (headless, stage 12, which has levels at y = 0 / 6 / 23): Laguna's call-in wanted +(-5, 1.7) from a fighter at (-7.2, 0, 8.5) and got (-8.4, 0, 8.9);
+  with the anchor in the air the spot was its last grounded one.
+- **KO: no fall, no KO line.** (a) A slot fighter with a team mate was rebuilt into the mate on the spot, so the fall never showed. Now the KO flow first starts the
+  fall (script 1210), plays the KO line and gates the AI, and the mate takes over `PSPRECOMP_TAGTEAM_KOSWAP_DELAY` (1.6 s) later (log `[DEFEAT]`, then
+  `KO of slot`). (b) A KO'd extra: 1210 ran but for some characters chains into 551 (landing bounce) and then into a stand (they stood up before leaving
+  the stage); the 551 pose is now held (motion time `+0x1A8` clamped at 46, script 551 re-started if it went to 1..9) and the extra leaves after 4 s (was 3).
+  Some characters' 1210 just holds its last frame (seen: motion time frozen at 176.6 for 4 s).
+- **KO line.** A retail KO (`KOLIST=enemy2:9,cpu:11` without `_NAT`, `NOSLOTCALLIN=1`, `CALLLOG=08B33F8C`) calls `08B33F8C(loser, id, 0, 0)` 0.13 s after the
+  lethal blow with id = voice params `*(*(actor+0x5A4) + 0x7C)` (loser 21710043 = +0x7C of its block); +0x80 / +0x84 are most likely the winner's lines
+  (the two functions 08ACA66C / 08ACAFAC play +0x84 / +0x80 with script 3000, not a KO). `ko_voice()` plays it for our KOs; the voice record exists
+  (`FUN_088A4364` nonzero) for the clone extras and the slot fighters. `PSPRECOMP_TAGTEAM_NOKOVOICE=1` / `_NODEFEAT=1` switch off. `PSPRECOMP_TAGTEAM_VPDUMP=1`
+  dumps the voice param blocks.
+- Not verified: audibility (headless, no sound); the pose on screen (the camera never framed the fallen enemy in the shots); a real lethal hit in a play test;
+  the 1.6 s fall of a human-driven slot in netplay (the delay is on the battle age, so it should be lock-step, not run).
+
+## User play-test on the RP6 (18 Nov, APK 15:02, 1 v 2, enemy Cecil, Tifa, Bartz, Vaan, Ultimecia)
+Fixed per user: pause, tally, tag-in in the air. Open:
+- Call-in timing: killing the last standing enemy forced Vaan in, then the 20 s timer brought Ultimecia almost at once; Vaan stayed in his banter with no AI. Rule: if somebody comes in during the 20 s, the timer starts again (another 20 s). Show the 20 s call-in countdown. Show a notification when someone dies.
+- "ULTIMECIA JOINS THE BATTLE" banner stays on screen into a new battle.
+- The player's own fighter (1 v 2, no partner) did not play the KO fall: the next character came in at once (KO sound heard).
+- Levels: enemy levels look random (player's all 100); at the tally the player's 3rd-5th characters have blank levels.
+- A tagged-in player character lacks his moves / equipment for a few seconds, and had no voice.
+- Chase: with the 2nd character, a chase by the enemy partner zoomed on the locked enemy (the original) instead of the chaser, and the player was teleported to it; a chase started on the original zoomed on the partner.
+- Memory: after the original enemy died Bartz came in with badly broken audio; Ultimecia (6th load) could not do her moves and had no voice; face icons can still be white squares; requirement: all 10 player models and their assists must fit.
+- Victory pose: camera in the floor.
+- Job effects must show at the top like between group battles, clearing by themselves (no button).
+- Start another game then forfeit -> "return to battle setup" -> white screen freeze. No "continue to next battle" button on the forfeit screen.
+
+## Levels, chase pairing, late member set-up (18 Nov, tree ttfb; host-only, nothing seen on a device)
+- **Levels (item 2).** Findings (`PSPRECOMP_TAGTEAM_RECDUMP2=1` prints the matchup block, the tally rows and side record vs save record, `[GROWS]` / `[GREC]`):
+  the side-0 record equals the player's own save record of that character (its tail from +0x778 is the friend card: name, message, no equipment), the
+  side-1 (CPU) record is the retail CPU record of the first enemy (same level as his save, but a different ability / loadout set: 180 words differ in the first
+  0x778). The CPU party's other members have no record anywhere before they are made (RECSCAN finds only the 48 save records and the two side sources at
+  0x08B99034 / 0x08B9A094), so a called-in enemy member fights with the PLAYER'S save record of that character (`record_for`): his level is the level of
+  that character in the player's save (Vaan 57, the others 100 in this save). That is what looked random. NOT changed (the retail CPU record builder was not
+  found: the side-1 source is written by `FUN_088908F0` through `FUN_088FB1A4 / 088C990C / 0887B944`, inside the party menu flow); open.
+  Tally: rows of members booked lost without ever being on the stage (the loser's 3rd-5th) had no level (the ledger had never seen them); `tally_write` now
+  puts the save record's level in a booked row without one and in a never-fought row whose level is 0 (`save_level_of`, `PSPRECOMP_TAGTEAM_NOTALLYLEVEL=1` off).
+  Members who fought keep the level the ledger saw. Log: `r<rec>.<row>=wins/flags/L<level>` in the "booked; tally rows written" line.
+- **Chase pairing (item 3).** Retail pairs the two fighters of a chase through each one's foe: `FUN_08B35018` / `FUN_08B333F0` and the chase camera place and frame a
+  fighter against ITS foe (`+0x300`, target `+0x2FC`, lock block target). In a tag battle that is not the other fighter of the chase: the human's foe is the enemy
+  he is locked on to (or the slot enemy), so a chase by the enemy partner moved / framed the locked enemy, and a chase on one enemy ended up at the other (the
+  teleport itself is retail and is kept). Fix: `chase_pair_start` (from `chase_hook` and the forced chase) makes the two fighters of the chase each other's foe /
+  target / lock target (`LOCK_SET`), `chase_pair_step` holds it every frame and puts the old foes and lock targets back when the chase controller goes idle (or the
+  battle changes). `PSPRECOMP_TAGTEAM_NOCHASEPAIR=1` = old behaviour; `[CHASEPAIR]` lines. The lock-block lending (`CHASECAM`) is unchanged and still opt-in.
+  Host check: only the natural CPU chase (slot CPU chases the human at 21.5 s in a KOLIST run) fired, pair and restore logged; the enemy-partner chase on a rebuilt
+  player slot was NOT reproduced (no way found to make the enemy extra launch the player: `action 2310` has no record for Vaan) and the screen was not compared, so
+  this is a fix from the cause analysis, unverified on screen.
+- **Late set-up of a rebuilt player (item 1): not found.** `PSPRECOMP_TAGTEAM_LATEDIFF=1` snapshots the rebuilt fighter, the side record, the voice params block
+  (`+0x5A4`) and the controller (`+0x5A0`) when it stands and logs the changed words at +1 / 4 / 8 / 15 / 25 s (one run with a START pause at 11.5 s): the side
+  record, the voice params and the controller did not change at all, and no actor word points into the `record_for` scratch, so a late re-read of the record or a
+  scratch reuse is ruled out on the host; the actor changed only in combat state. The moves / equipment symptom therefore does not come from those blocks; the
+  controller object and brain (kept from the old fighter, `rebuild_begin`) and anything the pause menu rebuilds in the actor are the remaining suspects.
+- (18 Nov, after APK 16:35) The CPU can still unpause the game (the pause-owner guard from tree ttcam did not fix it on the device). The player's BRV display shows a large number, but an HP attack does less damage than the shown BRV (display vs real BRV; the HUD reconcile / panel channels or HUD-follow). Waiting for a desktop log (PSPRECOMP_TAGTEAM_LOG=1 ~/dissidia/play_tagslot.sh --log ~/dissidia/tag_bugs.log).
+- (18 Nov, RP6 log ~/dissidia/rp6logs/1118_1709.log, 1 v 2) After the player's first character died and the 2nd came in (player slot rebuild): the camera put the enemy in the centre (maybe a death camera still running) and later a chase camera zoomed into the floor (maybe still following the first character's lock block / camera data). The BRV display of a panel drifts from the real BRV (log: side 1 panel "brv 2, shown 1065", "brv 1194, shown 810" at panel switches); the player's panel showed a large number at 17:09 while HP attacks did less damage (no side-0 HUD line was logged then: only switches are logged). Plan: one Opus task for everything after the player's slot rebuild (late moves/equipment/voice, camera, chase camera, BRV display), with more logging of the player's panel.
+
+## Call-in timing, notices, KO fall, result menu, victory camera (18 Nov, tree ttfa; answers the 18 Nov 15:02 play-test list)
+Host-only (headless GL, `party_battle_walk.txt`, windows shots with `PSPRECOMP_TAGTEAM_AGESHOTS_WIN=1`, new switch: whole window incl. our layer); not tried on the RP6.
+- **Call-in timing / never two entrances.** `g_side_entry[side]` = battle age of the last (or scheduled) entry of a side; the 20 s wait of every fallen member of that
+  side counts from `max(fall, last entry)` (`side_entry_mark` from `queue_member`, `call_in`, `entrance_effect` and the slot call-in, which marks its due age when it is
+  scheduled). `entrance_busy()` (entrant running, late load / queue, rebuild running) holds every call-in (member and slot) until it is over. `entrance_effect` ends an
+  entrant that is still posing before it starts the next one (AI gate lifted, `START_ACTION 1`; log `entrance of X cut short`): the single `g_entrant` slot was overwritten,
+  so the first entrant (Vaan) kept its AI gate for good. Seen (`SP_PARTNER=1`, `KOLIST=partner:15,human:25`): partner down 15 s, slot call-in Cloud of Darkness 28.2 s,
+  the partner's call-in (Terra) 48.2 s = 28.2 + 20 (was 35.0).
+- **Countdown.** `TagHudReserve.countdown` (`callin_countdown`): "NEXT IN n" under each waiting side's reserve strip (gold below 5 s); slot call-ins count too. Seen "NEXT IN 20 / 5 / 3 / 1".
+- **"X IS DOWN"** (`tagteam_hud_notice`, kind 0): dark plate, red edge, under the join banner, 4 s wall clock, fades; raised by the KO ledger for every fall. `NODOWNNOTICE=1` off.
+- **Banners cleared.** `reset_battle_state` and the teardown (`dtor_hook`) clear `g_banner_*` (the old battle age was far ahead of the new battle's clock, so the stale
+  "JOINS THE BATTLE" showed again), the notices and the entrance / victory camera state. (Cause found by reading; the 2-battle repro was not run.)
+- **KO fall of a slot with no partner.** The slot call-in now starts the fall like `defeat_start` (script 1210 + KO line, AI gate, 551 pose held via `g_defeat_hold`, asked
+  again for the first 0.75 s if an attack refuses it) and rebuilds `slot_fall_delay()` = 3.2 s later (`PSPRECOMP_TAGTEAM_SLOTCALLIN_DELAY`, was 2.0 s with no fall started by us).
+  Seen: Jecht reels and falls for ~3 s, then Squall's warp-in (`fa2_r8sh`); the fall pose itself was never centred in the camera.
+- **Result menu.** The result list "Proceed to next battle" / "Return to Battle Setup" is built through the EBOOT add-row `FUN_088D72E8(list, text index, action id)` (calls
+  `a1=0x2B a2=0x0A` and `a1=9 a2=2`, seen with `CALLLOG=088D72E8`); `addrow_hook` drops the first row once `group_decided` ran (`g_win_team`), forfeit or win. Seen (menu_drive forfeit,
+  `fa2_f2/step_06`): only "Return to Battle Setup". `KEEPPROCEED=1` off. The battle pause menu text pak (decoded in RAM) lists the same strings.
+- **Victory camera.** The retail result scene puts the winner at (0, y, 10) and keeps the fight's camera height; on stage 12's raised level (y = 23) the eye stayed at ~25 m
+  over an empty floor (`[VICT]` log, `PSPRECOMP_TAGTEAM_VICTLOG=1`: winner y 0, eye y 25.9). `g_dissidia_vic_actor` (set while bs+72 = 4, decided, the winner at x 0 / z 10) lets
+  `camera.cpp vic_frame` replace the eye when it is > 5 m from the winner's height: front view like the retail one on the ground level (eye +(-1, 1.2, 5.6)). Winner on level 0: unchanged.
+  `NOVICTCAM=1` off. Also the entrance close-up camera is cleared at `group_decided`.
+- **Job powers on screen.** `job_notice` (from the ledger, per fall): FUN_0891ED04 is run on a PRIVATE copy of the scorer's party block (the real block is booked only at the end, unchanged),
+  and when it changes the block the game's own bar is drawn: "Party received strong powers of the <Job>." (navy bar across the top, cyan words, 5 s, clears by itself; as the retail
+  result screen's bar, seen in `fa2_r3sh`); advanced jobs (bytes +15..18 changing) as "Advanced job <Job> unlocked: <effect>." (the value -> job id mapping 10..15 is a guess;
+  no advanced job occurred in any run here). Job / effect names are the English table of the chara_select pak (entries 9 / 10). `NOJOBNOTICE=1` off.
+- Notices and the reserve / panels of our layer still show over the result screens until the teardown (minor, not changed); `tagteam_hud_clear()` is called at `group_decided`.
+
+
+## Enemy members get their matchup's CPU settings (19 Nov, tree ttfb; host-only, nothing seen on a device)
+User rule: every enemy member that comes into the tag match (partner at the start, every call-in, every slot rebuild) must get the CPU strength, level and
+type of ITS matchup, the way a retail group battle round does; the player's own members keep their save records.
+- **Where the settings live.** Quick Battle > Party > Tournament screen: a row per round (1st..5th); A on a row opens STAGE / STRENGTH (CPU, 1-9) / LEVEL
+  (CPU, Auto, 1-100) / TYPE (CPU, Random + 8 types, 1/9) / RULES / JUDGEMENT. They are stored in the group struct `base = *(0x089D8508)` as per-fighter nodes
+  `base + 104 + 744 * i` (i 0-4 = the player's party in order, 5.. = the CPU party in order) holding commands of 0x20 bytes (halfword type at +0,
+  arguments at +0x10). Type 0 = a player's character (`FUN_088F9BB0`), type 5 = a CPU character. A type 5 command's arguments: B0 = character, B1, B2, B3,
+  B4 = STRENGTH tier (screen value - 1), B5 = LEVEL (0 = Auto, else the level), B6 = TYPE (-1 = Random, else the type index: screen entry 3 gave 1), H+16/18/20 = item overrides
+  (-1 = none), word +24 bit 0 = level is relative. Verified by driving the screen (`~/dissidia/tt/bin/setup_drive.py`, `sd5`/`sd6`): matchup 2 set to
+  Strength 2 / Level 10 / Type 3 gave B4 = 1, B5 = 10, B6 = 1; matchup 3 Strength 9 / Level 100 gave B4 = 8, B5 = 100. (Stage, rules and judgement
+  are the other words of the same nodes; not read by the tag code.)
+- **What retail does per round.** `FUN_0891CFC4(base, ...)` (round set-up interpreter, jump table `0x089CE668`) runs the node's commands; for type 5 on the CPU side it calls
+  `FUN_088FA2AC(side, B0, B4, level, B6, L0, B2, B3, [sp] = args + 8, [sp+4] = B1)` with `L0 = FUN_088CBAD0(the human's record of that round)` (his level) and
+  `level = flag ? max(1, L0 + B5) : B5`. That wipes `REC_BASE + 0x1060 * side` (`FUN_088F8D34`) and builds the whole record: character, level (Auto = L0 plus the
+  tier's offset, clamped 1-100), a random loadout / abilities from the tier's table (`FUN_088B3B98`, time-seeded), and the brain parameters +3892 type,
+  +3894 / +3896 (what `BRAIN_MODE` / `BRAIN_LEVEL` take) from the tier and the TYPE. Retail runs it once per round, for the round's fighter; the tag code
+  only ever saw round 1's, so later enemy members fought with the PLAYER's save record (his level of that character) and round 1's brain parameters.
+- **Fix** (`make_matchup_record` in tagteam.cpp, from `record_for`): for a CPU-side member other than the one the record already holds, it finds his type-5 command
+  by character, takes L0 from the save record of the player's member of the same matchup (node - 5; else the human's current record), calls retail's
+  `FUN_088FA2AC` with the same arguments the interpreter builds, copies the made record into the scratch record the member is initialised with and restores the first
+  enemy's retail record in `REC_BASE + 0x1060 * side` (it is the one retail made for matchup 1 and stays). The made record is cached per character for the battle
+  (retail rolls it once per round: a member who is rebuilt into the slot keeps his equipment / brain). `spawn_fighter` (and the slot rebuild, on the kept brain)
+  take the brain parameters from the member's own record. Single player only (not Communications Mode); a member with no type 5 command keeps the old save record.
+  `PSPRECOMP_TAGTEAM_NOMATCHUP=1` = old behaviour, `NOMATCHCACHE=1` no cache, `CPUREC=1` logs every `FUN_088FA2AC` call (args and the record it made) and
+  `[MATCHUP]` lines show the node, L0, tier, level and brain parameters.
+- **Evidence (headless, `sd6`/`wc1`).** Default matchups (strength 5, Auto, Random): Lightning (retail) tier 4, record level 100; Vaan record level 100 brain
+  params 1 7; Laguna 7 7 - each its own, random type rolls like retail. With matchup 2 = Strength 2 / Level 10 / Type 3 and matchup 3 = Strength 9 / Level 100
+  (sd6): Vaan `tier 1 level arg 10 -> record level 10, brain params 1 9`, Laguna `tier 8 level arg 100 -> level 100, params 5 0`, Laguna again as a slot rebuild
+  reuses the cached record (`level 100, params 5 0`, brain set on the kept brain). Before: Vaan = the player's Vaan (level 57 in that save), brain params of Lightning.
+- **Open.** Not seen on a device / on screen (levels 10 vs 100 not compared visually); a retail round's extra commands (item overrides H+16..20, B7, assists) are
+  not replayed (the default screen leaves them -1); stage / rules / judgement of matchups 2.. are not used (the tag match is one battle; hiding those rows on
+  the screen for the tag mode was not done); the Random TYPE gives a new roll per run, as retail.
+- (18 Nov 17:48, RP6 log ~/dissidia/rp6logs/1118_1748.log) BRV: real BRV and HP damage always match ([HPBRV]); the PLAYER's panel number drifts upward (e.g. real 1333 shown 7180): an HP attack on the enemy partner (391 s, 3330 spent) never lowered the shown number. Vaan's call-in: SAFESPOT used "last grounded" spots ~30-50 m from the anchor ((-35.8,0,-26.2), (-1.3,0,37.8)); Vaan stuck mid-air, went outside the map, jumped endlessly and attacked from outside.
+
+
+## Communications Mode: CPU rows get a deterministic CPU record (19 Nov, tree ttfb; host-only, two headless copies, LAN)
+Follow-up of "Enemy members get their matchup's CPU settings": a CPU row (Square on the Tournament setup screen) used to fight with the save record of his
+character on EACH machine (`record_for` fallback, "his own save record"): the two machines' saves can differ (level, loadout), so the stats could diverge.
+- **Where Communications keeps the per-matchup settings: nowhere.** Driven on both copies (`~/dissidia/mp_ttcpu`, A on a round's order entry): the round dialog has
+  only STAGE / RULES / JUDGEMENT (no STRENGTH / LEVEL / TYPE: every row is a human in retail), and the group struct `*(0x089D8508)` holds no type-5 command
+  on either machine (only the party rows: `base + 10216 + 104 * side + 20 * i`: char byte, level byte +1 (only row 0 filled: the lead, 100 here), flags +3;
+  identical on A and B). So there is nothing to sync or carry in the beacon bytes: a CPU row gets the settings a default single-player matchup has
+  (Strength 5 = tier 4, Level Auto, Type Random).
+- **Fix** (`make_comms_cpu_record` in tagteam.cpp, called from `record_for` after `make_matchup_record`; the common call is `run_cpu_record`): for a character that is
+  a CPU row of the record's side (`party_order`, the synced snapshot) it calls retail's `FUN_088FA2AC` with tier 4, level 0 (Auto), type -1 (Random), items -1,
+  base level L0 = level of the party's lead row in the group struct (same on every machine; 100 if unset) and a FIXED time seed: the builder's loadout / type
+  roll (`FUN_088B3B98`) seeds from `sceKernelGetSystemTimeLow` (0x089C5FB8), which is hooked to return `0x5EED0000 + char * 0x101 + side` for the duration of the
+  call. Cached per (side, char). `spawn_fighter` and the slot rebuild take the brain parameters from that record as in single player.
+  `PSPRECOMP_TAGTEAM_NOCOMMSCPU=1` = old behaviour. `[MATCHUP] comms side N char C: ... hash H` logs it (hash of the 0x1060 record bytes).
+- **Evidence.** A (Lightning, Vaan, CPU Yuna) vs B (Laguna, CPU Yuna): both machines log the same lines: side 0 Yuna `record level 100, type 1, brain params 0 6,
+  hash 9A1D659D`, side 1 Yuna `5 7, hash A00B3128` (the time seed differs per run and per machine, the records do not); 448 of 448 `[SYNC]` samples equal between A and B.
+  Single-player `tagteam_test.py --baseline` PASS (`~/dissidia/tt/fb4_reg1`).
+- **Open.** Both saves in the rig are copies (the old path would have matched too): the old divergence was reasoned, not reproduced with different saves. Level
+  is the lead row's, not each human opponent's. (Strength / level / type per CPU row: built, see the next section.)
+  Random type / loadout come from the fixed seed, i.e. they are the same every battle for a given character and side.
+- (18 Nov, user) The player's ASSIST still only attacks the original enemy (the slot fighter), even when it appears next to the enemy partner (it should go for the enemy the player is locked on to / near). Earlier item, still open.
+- (18 Nov, user, low priority) Battle start: play every fighter's banter and close-up (all fighters on stage, each side 1 or 2), not only the two originals.
+
+
+## Panel drift fix and stage spawn points (18 Nov, tree ttfa; host-only, nothing seen on a device)
+- **Player's BRV panel drift (RP6 log 1118_1748).** Real BRV and HP damage matched (`[HPBRV]`), but the panel kept an offset for good: a spend that never reaches the
+  panel (HP attack on the enemy partner, steals by / from extras) left it at e.g. 3670 vs real 1155 for 20+ s, because regen reports kept rolling the shown number.
+  The earlier settle reconcile waited for the shown number to be still, which never happens during regen. Fix (`hudref_hook`, `[PANELFIX]`): track the error
+  shown - real per side; when it stays inside a 150 band for 150 age units (2.5 s, so retail's own late report goes first) and |error| > 40, the difference is sent as
+  one panel report (rolls like any change; break / BRV-0 visuals unchanged, the break report path is untouched). Applies to both panels. `NOPANELFIX=1` turns it off.
+  Headless (`E2NEAR=8`, Circle + Square taps, `~/dissidia/tt/fa_p1`): after player HP attacks on the enemy partner the shown 1216 vs real 0 settled within ~4 s
+  (retail's late report, residue fixed by `[PANELFIX]`), a -573 panel on a broken extra was corrected to real in 1.5 s, no offset above 150 outlasted ~3 s.
+- **Spawns.** The stage's own point table (records of 0x3C bytes, marker 0xCC000000; start pairs like (-11.5,6,-7)/(11.5,6,-7) are two of its records, found at battle
+  start by matching a fighter's start position; `[SPAWNTAB]`) feeds `safe_spot`: a point is usable when a ground sample (a place fighters stood still) lies within 6 m at
+  the same height (+-1 m) and no living fighter is within 5 m; picked by a hash of battle age, battle number and pick counter (identical on every lock-step machine).
+  Covers call-in, slot call-in, rebuild, partner start, stand-in. No usable point: the old ground-sample logic. `NOSPAWNPTS=1` off. Run `fa_p2` (KO list, 5 call-ins):
+  all five came in at table points on the fighting level, e.g. (24,23,2), (21,23,18), (21,23,-2). Limit: the floor check only knows places fighters have stood, so
+  early in a battle few points qualify (2-5 of 64); the "floor" is not a game query. No game floor/height function was used or found.
+- Regression `tagteam_test.py --baseline` (`fa4_reg1`) PASS.
+- (18 Nov ~19:00, user) Vaan and Bartz (enemy members that came in mid-battle) fire their ranged BRV moves in the wrong direction (added to the assist / targeting agent, tree ttfa).
+- (18 Nov ~19:00, user) EX Burst: if the enemy dies on the hit that starts the burst, he disappears and the burst's damage goes to the other enemy. Rule: a fighter caught in an EX Burst must not be despawned / parked / swapped until the burst is over, even at 0 HP; the burst keeps hitting him. (queued)
+- (18 Nov ~19:00, user) Camera still wrong after the player's first fighter dies, and worse when a chase starts then (queued: the Opus task for everything after the player's slot rebuild; RP6 log with [CHASEDBG] needed).
+
+
+
+## Communications Mode: CPU row settings (STRENGTH / LEVEL / TYPE) (18 Nov, tree ttfb; host-only, two headless copies, LAN)
+- **UI** (`tagteam_menu.cpp`). Retail's Communications setup has no per-row STRENGTH / LEVEL / TYPE (only STAGE / RULES / JUDGEMENT), so the dialog is our own overlay
+  (menu_layer style). With the cursor on one of the player's OWN CPU rows (Square made it one) the button bar shows "Select: CPU Settings"; **Select** opens a panel
+  with STRENGTH (1-9, default 5), LEVEL (Auto, 1-100), TYPE (Random, 1-8). Up/Down pick the field, Left/Right change it (L/R held: LEVEL +-10), Select / Cross / Circle close.
+  Triangle is the screen's own Customization, so it was not used. While open the dialog takes the pad (`dissidia_tagteam_menu_pad`, in the button filter chain
+  of framerate.cpp's `jecht_grid_filter`: the screen sees no buttons). Editing is by the row's OWNER only (he is the one who toggles it to CPU; the owner's machine is the
+  only one that has the row's `own_mask` bit); the host has no say. Defaults 5 / Auto / Random reproduce the previous behaviour. Settings reset when the row goes away.
+  TYPE 1-8 = the builder's type index 0-7 (Random = -1), assumed like single player (screen entry 3 gave index 1); the types have no names in the overlay.
+- **Sync: tag bytes version 5, 24 bytes.** Bytes 0-15 as version 4 (header `'T' 'T' 5`). Bytes 16-23: four 2-byte slots; slot k belongs to the player's k-th own row after
+  his first own row (the first is never a CPU; `cfg_slot`): byte 0 = strength << 4 | type (0 = Random, 1-8), byte 1 = level (0 = Auto). The settings are part of the
+  beacon serial key, so a change bumps the serial. A version-4 build sees a different version / length: `all_know` false, the group's battle stays the plain 1v1.
+  `[TTCPU] group:` logs `28c(S9 L31 T3)` (strength, level, type) per CPU row.
+- **Battle.** `party_order` carries strength / level / type in `TagEntry` (from the setup snapshot); `make_comms_cpu_record` calls `FUN_088FA2AC` with tier = strength - 1,
+  level arg = level (0 Auto), type = type - 1 or -1; fixed time seed as before. The record cache is now cleared per battle (it was never cleared) and logged
+  `[MATCHUP] comms ... strength S (tier) level L type T ... hash H`.
+- **Evidence** (rig `~/dissidia/mp_ttcpu`, screenshots `e1.png` (dialog on A, overlay drawn by us, verified on screen), `e3.png` (closed, bar with "Select: CPU Settings")).
+  A's CPU Yuna set to strength 9 / level 31 / type 3, B's CPU Yuna to strength 2 / level 77 / type 8: each machine's `[TTCPU] group` shows both rows' settings;
+  in the battle both machines log identical records: side 0 `record level 31, brain params 2 0, hash 978A78A9`, side 1 `level 77, params 7 9, hash 43D23D74`;
+  546 of 546 comparable `[SYNC]` samples equal. Record level = the chosen level, brain params follow the tier / type.
+- **Open.** Only the dialog's drawing and the beacon / record path were exercised; the Auto level with a non-default strength and the Random type's effect were not
+  compared across machines; TYPE names; the other player's CPU rows' settings are not shown on the screen; Select as the key is a choice (a controller without Select
+  would need another); not tried on a device.
+
+## Unloading characters that have left the battle; voice banks, portraits (18 Nov, worktree ttlock, later)
+Goal (user): all ten party members (5 per side) and their assists loaded in one tag match with models, moves, effects, voices and effect sounds.
+Device reports: Ultimecia as the 6th load had no moves / no voice; Bartz came in with badly broken audio; HUD portraits white squares; forfeit ->
+"return to battle setup" -> white screen.
+
+### What was built (tagteam.cpp)
+- **Full unload of a departed character** (`unload_departed` / `unload_character`). `load_character` records the file objects its load made (diff of
+  the file manager's list, head mgr+8, link +232, id = row+0; e.g. Bartz: ids 43 228 1155..1160 - model, D_ data, weapon objects) in `g_own_load`.
+  `unload_departed` runs every tick and at the start of every load: a character of `g_own_load` with no actor referring to it (slots, every extra -
+  standing, fallen or parked - their assists +0x1108, the fighter list, pending rebuilds, queued members) is released with the battle end's own call,
+  `FUN_08844520(file manager, id)` (refcount +226 below 1 -> `FUN_08846628`: model, textures, D_ companion via +228 bit 0x20, effect pack +52, voice
+  banks +96 / +212 unlinked and freed, object dropped from the list, so the battle end does not release it twice). Conditions: no fighter of it
+  standing for 3 s (`kUnloadDelaySec`, KO line / fall effects over) and no reference at all for 1 s (the destroyed fighter's world objects - weapon,
+  shadow - are flushed a frame or more after its destructor and are drawn until then; unloading in the same tick crashed the GE, run u10g).
+  Characters of the battle's own loading screen are never unloaded (the slot objects keep their camera data, see the rebuild's SLOTOBJ restore).
+  `[UNLOAD]` lines + `[MEMSUM] after the unload`. `PSPRECOMP_TAGTEAM_NOUNLOAD=1`: off.
+- **The next member takes a fallen extra's body** (`reuse_parked`, single player; `PSPRECOMP_TAGTEAM_NOREUSE=1`: off). Instead of a new extra beside the
+  parked one, the parked actor is rebuilt in place (`rebuild_begin`: destructor with brain / lock block kept, constructor, registrations taken back,
+  entrance once it stands), placed at the call-in spot toward the foe, with his own HP / BRV. The fallen character is destroyed that way, so nothing
+  refers to it and its files go. No new actor, every pointer to the actor stays valid. Log `CALLIN: X takes the body of the fallen char N`.
+- `rebuild_begin` now loads the new character AFTER the old one is destroyed (memset of the actor), so a departed character can be unloaded before the
+  newcomer's load (`PSPRECOMP_TAGTEAM_REBUILD_LOADFIRST=1`: old order).
+- **Bug fixed with it**: rebuilding an extra freed its private controller copy (start_extra's 0xE0 block, kept at +0x5A0 by the rebuild) as an "old
+  character leftover"; the heap handed it out again while the actor still wrote to it: world list corrupted, the next fighter constructor looped
+  (run u10f, `[HANGDUMP]` backtrace rebuild_begin -> FUN_08B39E5C -> FUN_0883072C). The controller block is skipped and freed with the actor.
+- **Voice bank release fixed** (the "Bartz with broken audio" candidate). `voice_banks_release_departed` called `FUN_08842450(record+96)`, which frees
+  only entry 2 of the bank's three 12-byte entries and does NOT unregister it from the sound system; the next member's bank took that memory while the
+  sound system still had the old bank's handle. Now as the file release does it: `FUN_08842650` (each entry: `FUN_088A0DFC(system, handle)`, handle -1)
+  then `FUN_0884246C` (free all three). `PSPRECOMP_TAGTEAM_OLDBANKFREE=1`: old call. Not verifiable by ear headless.
+- The departed bank / effect-pack release (`departed_long_enough`) now waits until the character has been gone 3 s and every fallen body of it is parked
+  off the stage (it ran at once before: a load 3 s after Kefka's fall freed his bank and pack under his lying body). `PSPRECOMP_TAGTEAM_FASTRELEASE=1`: old rule.
+- **White portraits fixed** (`portrait_reset`): the portrait cache (`g_port_obj`) and the side's own picture (`g_port_orig_pic`) survived into the next
+  battle when its HUD object had the same address; at the second battle after a forfeit `portrait_show` wrote battle 1's picture into battle 2's
+  sprite: both big portraits white (reproduced host, run `fz1`, menu walk -> forfeit -> next battle). Cleared at the teardown and at every setup.
+- Debug: `PSPRECOMP_TAGTEAM_HANGDUMP=1` arms the hang watch at every rebuild; portrait log lines dump the picture object.
+- `FUN_08844520` is hooked (`fileunload_hook`): a call for an id with no object (the function would go on with object 0 and run the release on
+  address 0) is skipped and logged. Never seen in the runs (no such call), kept as a guard. `PSPRECOMP_TAGTEAM_NOUNLOADGUARD=1`: off.
+- Tried and reverted: model pool extra 7 MB (to give the effect pool +1 MB): the stage drew as garbage late in the battle (u10s); back to 8 MB.
+
+### Results (host, GL, headless, `party_battle_walk.txt`, 1 v 2, `~/dissidia/work_ttlock/run10.sh` = run.sh with an 1100 s limit, env in
+`~/dissidia/work_ttlock/seq10.env`: RESERVE `9,27,5,24;33,12,3`, KOLIST `cpu:9,human:10,enemy2:14,human:16,cpu:20,human:22,enemy2:27,human:28`, CALLIN_DELAY 4)
+Ten characters in one match: Jecht (20) and Lightning (31) from the loading screen, then Vaan, Bartz, Yuffie, Laguna, Onion Knight, Kefka, Kain,
+Firion loaded mid-battle (8 loads). Unloads at 21.0 (Bartz), 24.6 (Vaan), 27.0 (Laguna), 32.0 (Kefka), 33.0 (Onion Knight).
+| Run | Build | Outcome |
+|---|---|---|
+| u10base | before | 6th load (Laguna) `[MODELS] heap 0x09B90000 alloc FAILED`, effect pool 131 KB free; game time stopped at 52 s |
+| u10r | final but 8 MB, MEM_WATCH (slower) | all 8 loads, battle to 188 s; Kefka's and Firion's packs FAILED (effect pool holes < 1.1 MB) |
+| u10s | 7 MB pool | all 8 loads, no FAILED line, battle to 188 s, model pool peak 13.8 of 14.8 MB - but the stage rendered as garbage (reverted) |
+| u10g, u10e | fixes before the controller fix | passed the 8th load; u10g then a GE crash at Firion's entrance (see open items) |
+| u10d/h/i/m/n/p/q/t | various | game thread hung at t=29-31 s (Kain's load or the next constructor): see open items |
+| m10_reg1 | final but 8 MB | `tagteam_test.py --baseline` RESULT: PASS |
+Model pool per load with unloading: 7.9 / 9.7 / 10.1 / 12.0 / 12.0 / 12.2 / 12.0 / 13.8 MB (u10s) instead of 7.9 -> 15.8 MB + failures.
+
+### Open (not solved)
+- **Hang / heap corruption around the 7th-8th load (t=29-31 s in the sequence above), about every second run, timing dependent**: the battle heap
+  (0x08C15F80) has a block header overwritten with data (u10t: block 08CCD640 prev 05E905F3 next 05EC04F4), or the model heap header 0x09B90000 reads
+  zero (u10q); the next allocation loops (`[HANGDUMP] last heap allocation`, chain check in the hang dump, `PSPRECOMP_TAGTEAM_HANGDUMP=1`). It ALSO hung
+  with `PSPRECOMP_TAGTEAM_NOREUSE=1 PSPRECOMP_TAGTEAM_NOUNLOAD=1` (u10o) and the build before this work stopped at its 6th load (u10base), so it is not
+  (only) the unload; the writer is not found (a MEM_WATCH run on 0x09B90004 did not hang). Next: watch the corrupted header word of the battle heap.
+- GE crash at a call-in's entrance in u10g/u10m (display list calls 0x05F42200, `[GE] Hit command limit`), same list path both times; not in u10r/u10s.
+- Effect pool holes: with 8 MB of pool extra a late newcomer's pack can fail (u10r: Kefka, Firion) while two departed characters wait out
+  their 3 s / 1 s delays.
+- Forfeit -> "return to battle setup" -> white screen: NOT reproduced on the host (menu walk, battle with two mid-battle loads, forfeit, battle 2,
+  forfeit, battle 3 started normally, run `fz1`). The white portraits it showed are fixed above.
+- Audio: nothing heard (headless); the bank release fix is reasoned from the code.
+
+### The hangs found (18 Nov, later): a freed lock block kept in use, a stale brain
+- **Cause of the heap corruption (also before this work, also with NOREUSE/NOUNLOAD)**: the fighter constructor makes its lock block with
+  `FUN_08B3BC34(camera manager, slot, ...)`, which first DESTROYS and frees the lock block already in the camera manager's slot table
+  (`mgr + 0x6D0 + 4 * slot`: `FUN_08B3BCF4` -> `FUN_08B3AD98(old, 3)`, camera model released, `FUN_08B3B934` frees). For an extra (spawn_fighter) and
+  for every rebuild that slot holds the slot fighter's own lock block, which the tag code then put back into the slot and the actor (the "lock block
+  words put back" of the undo were the destructor's writes). Freed but in use: once the heap handed the memory out again, the camera and the next
+  constructor wrote into a live block - block headers overwritten (u10t), the model release in the next constructor spinning (u10h, v1b), a heap
+  allocation looping. `camslot_hide` takes the lock block out of the slot table for the constructor and puts it back (`[TAGTEAM] lock block X
+  hidden from the constructor`); `PSPRECOMP_TAGTEAM_NOCAMHIDE=1` = old behaviour. After it: 3 of 3 runs clean (v2a-c) where about every second hung.
+- **AI loop in a reused body** (v3c, 25 s after Firion came in): the body's kept brain had served Vaan, Yuffie and Kefka and still pointed into their
+  (now unloaded) data. A reused extra now gets the constructor's fresh brain (the old one goes with the destructor) set up like spawn_fighter's
+  (CPU_MODE, the CPU record's parameters). `PSPRECOMP_TAGTEAM_REUSE_OLDBRAIN=1` = keep it. (Slot fighters keep their brain: the human's is the pad.)
+- **Effect pool**: when a newcomer is loaded, a character destroyed in that same rebuild (its files wait 1 s for the world flush) has its effect pack
+  released at once if it fell 3 s ago or more (`PSPRECOMP_TAGTEAM_NOEARLYPACK=1`: off). Firion's 1.06 MB pack no longer fails (v3, v4: 0 FAILED).
+
+### Verification round (18 Nov, evening): 5 clean runs; a random assist kept a party member "present"
+- **Stability**: with `camslot_hide` + the fresh brain the hang / heap corruption / GE crash did not come back in 22 runs of the 10-character
+  sequence (v5a-e, v6a-d, v7a-d, v8a-b, v9a-d, w5a-e; all 8 mid-battle loads, battle to 188-218 s, no `[HANGDUMP]`, no `Hit command limit`). The
+  only `LOOKUP_MISS` (0xDEADBEEF) is at the exit and in the earlier clean runs too.
+- **Effect packs still failed in 5 of 17 runs (v5b, v5d, v6c, v7a, v7d)**: Kefka's and / or Firion's pack (1.06-1.10 MB, largest hole 0.78-0.88 MB),
+  because one departed member (Vaan, Kefka or Bartz) was never unloaded. Cause (shown by `[UNLOAD] ... counted live by:` census lines): side 1's
+  retail assist is a random character, and when it was a party member's (v7a: Kefka, v7d: Bartz; v8/v9 had 18 / 28 / 19 / 7 / 6 / 8) the census
+  counted that member as present through the assist actor (fighter list + the slot's +0x1108) for the whole battle: his files, pack and bank stayed.
+  The retail assist runs on its own assist files (the mid-battle load made a NEW object for the same model id, so it does not use them).
+- **Fix**: `retail_assist_note` records the slot fighters' assists in the battle's first second; `char_census` skips them (`[UNLOAD] slotN's assist X
+  (char C) is a loading-screen actor: not counted by the census`; `PSPRECOMP_TAGTEAM_ASSISTCENSUS=1` = old census). Debug: `census_explain` logs, at
+  every load, what counts each mid-battle-loaded character live, and once what still refers to a character gone 6 s.
+- **Results** (final build, w5a-e): 5 of 5 clean - 8 loads, 5 unloads, 0 pack / model FAILED, no hang, no GE crash, 40-44 GE fps. w5a (assist Onion
+  Knight) and w5b (assist Kefka) are the formerly failing case: both characters unloaded at 31 / 32 s, Firion's pack fit. Effect pool after the
+  8th load: 1.99-2.11 MB free, largest hole 1.23 MB (a pack is 1.06-1.17 MB): one more pack fits, two do not without a release in between.
+  Regression `tagteam_test.py --baseline` on the final build: RESULT: PASS (`~/dissidia/tt/m11_reg1`).
+- Open: the effect pool margin is thin (largest hole ~1.2 MB after the 8th load); the 3 s / 1 s release delays still decide whether a fast
+  call-in finds room. Sound and the assist's behaviour after its character's mid-battle copy is unloaded are not checked by ear / by eye (no crash).
+
+## Round 12 (18 Nov): a fighter in an EX Burst is not removed until the burst is over
+- **Bug**: an enemy who died on the hit that started an EX Burst was parked / swapped by the tag KO flow at once; the burst then hit the other enemy.
+  Removing steps: the extras' "is down" step (fall script 1210 started over the burst's action, parked 4 s later), the slot KO flow (fall, swap with the
+  mate 1.6 s later), the slot call-in and the reserve call-in (`g_downrec`).
+- **Fix** (`tagteam.cpp`): `exb_in(a)` = burst running (`*0x08A405E0 +0x278 != 0`) and a is the controller's +0x26C / +0x270; `exb_running()`.
+  While it holds: an extra in the burst is not put down (no fall, no park); a slot fighter's KO flow (ko_oneround) waits when it or its team mate
+  is in the burst; `g_park` entries wait; slot call-ins and reserve call-ins wait for the burst's end. Afterwards the normal flow runs.
+  Battle state only, so the same on every machine. Debug off switch: `PSPRECOMP_TAGTEAM_NOEXBDEFER=1`.
+- **Test** (headless, host): `E2NEAR=10 EXBAT=s0:20 KOLIST=enemy2:20.3` (extra victim at HP 0): down flow deferred at 20.3, burst over 31.4,
+  down + park (35.4) after. `EXBAT=s0:20 KOLIST=slot1:20.3` (slot victim, HP 0 and `KOLIST_NAT=1`): KO flow deferred, runs at 33.0 / 33.0 (swap with the mate)
+  after the burst. `EXBAT=s1:20 KOLIST=slot0:20.3` (no mate): KO flow at 30.3 after the burst, SQUALL call-in at 33.5. Before the fix the extra was down at 20.3, parked 24.3.
+  Note: the burst picks its own victim (EXBAT's foe is only a hint); use E2NEAR to make an extra the victim.
+
+
+## Assists and ranged moves follow the real opponent (18 Nov, agent ttfa)
+**Assist target (user: the player's assist always attacks the original enemy).** Measured with `PSPRECOMP_TAGTEAM_ASSISTLOG=1` (new `[ASSISTAIM]` lines: the
+assist actor's foe `+0x300`, target `+0x2FC`, its own lock block's target, next to its master's): a real assist (kind `+0x542` = 1, master at `+0x1108`) keeps
+foe = target = lock target = the original slot enemy for the whole battle, while its master's foe / lock moved to the enemy partner
+(`owner foe 08DE.. lockT 08DE..` vs `assist foe 08D96EB0`). `FUN_08B2F17C` (the target refresh) is never called for an assist (checked with a probe
+inside `refresh_hook`), so the lock cycle hooks never touch it, and the assist's own lock block only ever sees the slot pair.
+Fix: `assist_aim_follow()` (every frame from the tick, battle age > 3 s): for each slot fighter's real assist, target = the master's own lock-block
+target (`LOCK_GET(master+0x5AC)`) when it is a living enemy fighter, else the master's foe; written to the assist's `+0x2FC` / `+0x300` and its lock
+block (`LOCK_SET`). Only the master's own state is read (not bs+84), so every machine decides alike, for the enemy slot fighter's assist too.
+`PSPRECOMP_TAGTEAM_ASSISTFOLLOW=0` = retail. Log: `[TAGTEAM] t=.. assist A (master M) now aims at T (was foe F tgt G)`. Seen: assist re-aimed at the
+partner when the human's foe became the partner (7.87 s) and back with the lock cycle (18.43 s / 35 s / 37 s); retail rewrites the foe once at the
+cycle (a 1-frame flip, corrected the next frame).
+**Not verified:** a human-called assist hitting the partner. In the headless harness the player's assist call never started (taps R+CIRCLE / R+TRIANGLE /
+R+SQUARE / combos, both HUD-side gauges forced to 10000 with `PSPRECOMP_TAGTEAM_ASSISTFILL=1`: slot 0's assist stayed script 1 although SQUARE taps
+worked); only the CPU's own call (script 240 -> 101 -> 10050..) was seen. The aim words are verified, the hit on the partner is inferred.
+**Ranged moves (Vaan / Bartz fire the wrong way).** Not reproduced: `PSPRECOMP_TAGTEAM_AIMLOG=1` (`[AIM]` lines: every CPU fighter's foe / target / lock
+target, `STALE` when one names a fallen, parked, off-stage or same-side fighter) showed correct words for the slot enemy and the extras throughout a run
+with a Vaan KO and a call-in (foe = the human slot fighter, lock = the human). Safety net `aim_fix()` (every frame, CPU-driven fighters only,
+`PSPRECOMP_TAGTEAM_NOAIMFIX=1` off): a stale foe / fighter target / fighter lock target is replaced by the nearest living enemy on the stage (log `aim fix`).
+Lock targets that are not fighters (an EX core, the summon's own object `08DD1240` during the CPU's assist call) are retail's and left alone (a first
+version fought them every frame). Open: the real cause of the wrong direction is unproven (candidates: yaw / turn-to-target before the shot, a chase pair's
+restore, the stale foe stored by `rebuild_begin` `j.foe`); needs a repro on a device with the `[AIM]` log.
+
+## Banter for the start-of-battle partners (18 Nov, tree ttfa; host-only, audio not audible headless)
+Retail plays the battle-start banter (voice line + close-up) of the two slot fighters only. The partners are made after the intro ("late" spawn), so
+once a non-call-in extra is started (`start_extra`) it is gated (AI bit +0x380 & 2) and put in `g_banter_q`; a step before `entrance_step` runs
+the next one when no entrance is busy (`entrance_effect(A, name, banter=true)`): pose action 1100 toward the foe, `intro_load` / `intro_play` (the
+partner's own `<xx>_battle_NN` line), the entrance close-up camera (`g_dissidia_entr_*`) and the match pause for 2.5 s (`PSPRECOMP_TAGTEAM_BANTER_PAUSE`).
+No warp-in, assist call line, banner or entrance effect. Order = spawn order (the late queue: side 1 partner, then side 0 partner), one after the
+other, then the fight goes on. Deterministic: the queue is filled from the spawn, the pause is the tag clock. `PSPRECOMP_TAGTEAM_NOBANTER=1` = off.
+Run bn1 (SP_PARTNER=1, 2 v 2): retail intro to 7.8 s, Vaan banter 7.8-10.4 s (`va_battle_103`), Squall banter 10.4-12.9 s (`sq_battle_67`), fight from ~13 s.
+Seen on screen (screenshots a009-a012): Vaan pose, then Squall's close-up pose. Open: the camera sits at a medium shot for Vaan, not as tight as for
+Squall; audio unheard.
+
+## Smarter CPU targeting (18 Nov, tree ttfa; host-only)
+`ai_target()` (tagteam.cpp, called after `aim_fix` every frame). A CPU-driven fighter (slot or extra, never `pad_driven`) re-picks its enemy only while calm (script 1..9),
+with no chase, no EX burst, no entrance, at most once per 4 s of battle clock per fighter, and only with two living enemies. Rules, first match wins, each on by default
+with its own off switch `PSPRECOMP_TAGTEAM_AI_<X>=0`; master `PSPRECOMP_TAGTEAM_AI_TARGET=0` = retail:
+- `HELP`: an enemy whose foe/target is my team mate and whose script is 10..599 (attack range, inferred) and which is within 1.5x + 3 m of the nearest enemy.
+- `BROKEN`: an enemy with BRV <= 0 or HP < 25 % within the same reach.
+- `SPREAD`: the CPU team mate is on my enemy while the other is within 1.4x + 2 m: the lower actor address takes the other one.
+- `CLOSER`: nearest enemy when < 70 % of the current distance and > 2 m closer (skipped when it would just undo SPREAD).
+A broken or helped current target is kept (no CLOSER / SPREAD away). Applied like `aim_fix`: lock block (`LOCK_SET`), foe +0x300, target +0x2FC. Only game state and
+the battle clock are read (no local player, no wall clock). Log: `[AITARGET]` with `PSPRECOMP_TAGTEAM_LOG=1`.
+
+## After the player's slot rebuild: camera, chase camera, moves, voice, BRV panel (18 Nov, tree ttlock; host-only, nothing seen on a device)
+Runs: `party_battle_walk.txt`, 1 v 2, `KOLIST=human:12` (Jecht -> Squall at 15.2 s) and `human:12,human:40` (-> Cloud of Darkness at 43.2 s); `~/dissidia/tt/pr*`.
+New debug (all opt-in, need `PSPRECOMP_TAGTEAM_LOG=1`): `PSPRECOMP_TAGTEAM_CAMDBG=1` (`[CAMDBG]` once a second: player, its lock block with +0x278 / +0x2A0,
+lock mode / target, the manager's final eye (+0x40) / look-at (+0x50), nearest fighter to the look-at, shown slot, slots 0-3; `[CHASEDBG]` now prints the
+manager's eye / look-at too, the old `g_dissidia_last_*` printed one vector twice), `LBDIFF=1` (kept vs new lock block at ready), `BRAINDIFF=1` (kept vs fresh
+brain), LATEDIFF now also diffs the brain.
+- **Cause (camera, normal and chase).** The lock block is made for the CHARACTER: the fighter constructor calls `FUN_08B3BC34(mgr, slot, actor, *(*(actor+924)+11), ...)`
+  -> `FUN_08B3C4C8` (0x310-byte block), which passes that character byte to the camera set-up `FUN_08B3FDE0`. `rebuild_begin` kept the old character's block for the
+  slot (and threw the constructor's new one away), so the new member played his camera from the first character's set-up: `[CAMDBG]` shows Squall and Cloud of
+  Darkness with Jecht's block values (+0x278 = 08C0110C / 08C00FD0, the camera resource object, and +0x2A0 = 0xD6) where their own blocks have 08C03B04 / 0xBD (Squall)
+  and 08C03EB8 / 0xD3 (CoD). The RP6 log 1118_1709 shows the same on the device (Kain kept Jecht's block 08D94AA0 through three chases). The chase camera's
+  animations play from +0x278. (The camera manager's +0x8C0 that looked "stuck at 2" is a 0-1-2 frame counter, not a mode.)
+- **Fix (`rebuild_begin`, `rebuild_frame`).** For a fighter whose camera slot (`mgr+0x6D0+4*(actor+4300)`) holds its own block (the slot fighters), the constructor
+  now destroys the old block the retail way (it is not hidden: `FUN_08B3BCF4` -> `FUN_08B3AD98(old, 3)`, freed) and the NEW block stays in the actor and the camera
+  slot; nothing of the constructor's camera-manager writes is taken back (logged: `new lock block X kept (old Y freed by the constructor)`). The shown-camera byte
+  +0x125 of the old block is copied over, the lock target / lock mode are set on the new block when it stands (as before). The new block's camera would start at
+  its defaults (eye (0, 4.3, 5.5) at the stage origin; seen: eye 16-28 m from the player for the first second, a swoop from below the raised level), so its
+  position words +0x00..+0xCF (eye / look-at, previous / goal copies, velocities) are carried over from the old block before the constructor frees it.
+  Extras rebuilt in place (`reuse_parked`) are unchanged (their camera slot holds the slot fighter's block). `PSPRECOMP_TAGTEAM_REBUILD_OLDLB=1` = old behaviour,
+  `PSPRECOMP_TAGTEAM_NOLBCARRY=1` = no carry-over.
+- **Seen (host screenshots).** pr8 (fix): after Squall's entrance the camera is behind him with the enemy beyond (a019/a020), chases at 32.7 s (Lightning on
+  Squall) and 93.8 s (on CoD) are tracking shots of the pair (`~/dissidia/tt/pr8_newlb_shots_chases.jpg`); pr7 (fix without the carry-over): the swoop from the
+  default eye right after the 2nd rebuild (c043.47-c044.47, `pr7c_newlb_nocarry_chases.jpg`). Old behaviour pr3 / pr6 (`pr3_oldlb_shots.jpg`, `pr6c_oldlb_chase.jpg`):
+  on the host the old-block camera did not look obviously broken on these stills (both versions frame the locked enemy like the first character's camera; the
+  eye-in-the-player shots, d < 1 m in `[CAMDBG]`, are wall pull-ins at z = 19 in both); the "zoom into the floor" was not reproduced with the old block. The fix
+  removes the cause found in the data; the device symptom itself is not confirmed fixed.
+- **Moves, equipment, voice (item 3): not reproduced on the host.** Deterministic pad test (`BT_NO_AI_ONLY=1`, `place 3` then CIRCLE / SQUARE every 3 s from 19 s,
+  scripts `~/dissidia/tt/pr_mv_n.txt` / `pr_mv_p.txt` with a START pause at 30 s): the rebuilt Squall does 10008 (Circle) / 10094 (Square) from the first press,
+  before and after the pause, the same ids as Squall in a 1v1 Quick Battle (pr14). Presses during the entrance (pr15) cut the pose and give 10008 at 17.2 s.
+  Brain: the kept brain and the constructor's fresh one differ only in self-pointers and +0x2C (target): not character data; LATEDIFF with the brain: no change
+  after standing (pause included). Voice (`CALLLOG=08B33F8C` + `PSPRECOMP_SAS_TRACE=1`, pr18 vs Quick Battle pr19): the rebuilt Squall calls 0x24C622 / 0x24C61D,
+  each followed by a SAS voice of 1952 / 8208 bytes, as in the Quick Battle (sound not listened to). The device log was from an APK with the old load order
+  (`load_character` before the destroy). Inferred, not shown: with the old character's lock block the stick-to-world turn (done with the lock-block camera)
+  may have picked other directional moves; an equipment difference (side record = the first character's, accessory icons unchanged; an experiment copying the
+  member's record into the side record changed nothing visible) is open.
+- **BRV panel (item 4).** `[PANELFIX]` still settles the player's panel after a rebuild (pr4: a -108 fix in flight at the rebuild left the new member's panel at
+  968 vs 1076 for 2.5 s, then +108). Seen in every run, before and after a rebuild: a `[PANELFIX]` report is often followed 2.5 s later by the equal opposite one
+  (pr8 10.63 s -93 / 13.13 s +93; pr6 19.10 / 21.60 s -58 / +58): the first fix lands together with retail's own late report (double correction). Open.
+- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/ps_reg_pr1`): RESULT: PASS. No hang / HANGDUMP / GE limit in the runs pr2-pr19 (two player rebuilds per run in several).
+
+## BRV panel double correction, accessory icons (18 Nov, tree ttfa; host-only)
+- **Panel double correction: cause found and fixed.** Not a late retail report: the `[PANELFIX]` timer counted how long the error stayed inside the 150 band,
+  not how long it had been above 40. After a calm spell (error ~0, timer running since the last reset) a steal / spend that opened a 50-100 error fired the
+  fix within 3 ticks; retail's own report for the same event reaches the panel ~8 age units later, so the shown number got the amount twice
+  (`PANELDBG2`: shown 1079 -> fix -56 -> 1023 -> retail -56 -> 967; side 1 mirrored +56 / +56) and the next settle (2.5 s later) corrected it back.
+  Fix (`hudref_hook`): an error of 40 or less resets the band and the timer, so the 2.5 s are counted from when the error became large; a
+  steal retail reports itself is settled by retail before 2.5 s are over and no fix is sent. Debug (opt-in, with `PSPRECOMP_TAGTEAM_LOG=1`):
+  `PANELDBG=1` (group words +0..+0x1C and channel row when the error is above 20), `PANELDBG2=1` (12 ticks after each fix).
+  Evidence (runs pf1 before / pf4-pf6 after, `~/dissidia/tt`, KOLIST human:12, pad scripts pr_mv_n / long90): before, 12 fixes in pf1 with equal opposite pairs
+  (+-54..77 on both sides); after, pf5 none at all, pf4 one real fix (-3018 on the HP-attacked panel, shown = real afterwards, no opposite pair), pf6 three
+  fixes (-291, -70, +200) with no opposite pair. Group layout seen: +4 shown, +8 the rolling copy that follows it.
+- **Accessory / equipment icons: not fixed, source not found.** The only per-fighter icons on the HUD of the test run are the red orbs with an "A" beside the
+  BRV numbers (assist icons, the slot's `actor + 0x1108`); they look the same for Jecht and the rebuilt Squall and for both sides in this save, so
+  the host run cannot tell a stale icon from a right one. HUD init `FUN_08B21AB8` loads its images once per battle (two side entries); no HUD function reads
+  the side record (`REC_BASE`: only fighter-side code in 0x08AF.. / 0x08B0.. does). Equipment on the stats: the rebuild calls `FIGHTER_CTOR(A, side record, ...)`
+  with the FIRST character's record, then the actor init (vtable `*(A+1348)+256`) with `record_for(side, member)` = the member's own save record (equipment
+  is in its first 0x778 bytes), so the member's loadout feeds that init; whether the accessories' stat effects end up applied was not measured (inferred only).
+
+## Result screens clean, Tournament dialog rows, Comms CPU rows shown, tighter banter (18 Nov, tree ttfb; host-only)
+- **1. Result screens.** `tagteam_layer_frame(g_bs != 0 && g_hud_on && g_win_team < 0)`: once `group_decided` has run (`g_win_team >= 0`) the whole overlay (panels, reserve strips,
+  "NEXT IN", banner, falls and job-power notices, including the deciding fall's bar that is created after the decision) is hidden every frame until the next battle resets
+  `g_win_team`. Seen (headless, `ib2`, `KOLIST_NAT=1 KOLIST=enemy2:20,human:28,human:40,cpu:52,cpu:64`, `PSPRECOMP_TAGTEAM_AGESHOTS_WIN=1`, shots in `~/dissidia/tt/ib2s`): the strips / bar
+  are on screen at 58-62 s, gone from the decision (64 s, "THE FINAL BLOW") through VICTORY and the result screen. The "Party received strong powers of ..." bar still visible on the
+  last result shot (74.5 s) is the game's own result-screen bar (our layer is off there), not ours.
+- **2. Single player Tournament dialog.** The round dialog (A on a round's row) belongs to the same screen family: `ovl_menu FUN_08AAB514(screen)` is the screen's per-frame function,
+  `FUN_08AA8C78(screen)` the dialog update (only runs while it is open); `screen + 0x7CFC = M`, `M + 1444` the round the dialog is on (0 = 1st), `M + 1488` its cursor row (0 STAGE, 1 STRENGTH,
+  2 LEVEL, 3 TYPE, 4 RULES, 5 JUDGEMENT). Found with `PSPRECOMP_PC_TRACE=1` + socket `F <file>` (function counts idle vs dialog open). In tag mode (`dissidia_tagteam_sp_tag_on()`: Tag
+  Team Battle chosen, no ad-hoc session) the dialog of round 2.. covers STAGE / RULES / JUDGEMENT with the panel's own colour (a `MenuLayer` band) and the pad filter
+  (`dissidia_tagteam_menu_pad`) keeps the cursor on STRENGTH / LEVEL / TYPE: Up on STRENGTH and Down on TYPE are swallowed, a dialog that opens on STAGE gets one Down.
+  (Writing the cursor row itself desyncs the dialog's highlight bar: the first attempt showed garbled rows.) Round 1 keeps all six rows. `PSPRECOMP_TAGTEAM_SPDLG_OFF=1` = off.
+  Seen: `~/dissidia/tt/sd14` (round 3: three rows, up / down stop at the ends), `sd15` (round 1: all six rows). Driver: `bin/setup_drive2.py` (screenshots with our layer via the
+  socket `V`; `F=<file>` step dumps function counts), walk `tests/replays/ttfb_setup_a.txt` (= the first 40 lines of `party_battle_walk.txt`: stops on the Tournament screen).
+- **3. Comms CPU rows.** TYPE names of the dialog (read off the single player dialog, entries 2-9): Tactician, Valiant, Survivor, Cautious, Calm, Extreme, Conservative, Vicious
+  (entry 1 = Random); our TYPE 1-8 = entries 2-9 = builder index 0-7 (entry 3 -> index 1 was verified before; the others follow the screen order, not each read back from the brain
+  parameters). The CPU dialog shows them. A CPU row's settings are now shown read-only on the setup screen as a small tag "S5 L-- Random" (strength, level, `--` = Auto, type) on the
+  row's portrait in the left column (this player's rows and, with `dissidia_tagteam_menu_cpu_row`, party mates' rows, which also get the CPU plate) and "CPU S5 L-- Random" on the right
+  edge for the other party's rows (from `party_order` = the beacon v5 slots). Seen on the two-copy rig (`~/dissidia/mp_ttcpu/s6.png`, `s4.png`): A's row set to S9 L3 Survivor shows on A's left and
+  on B's right edge, B's S5 Auto Vicious likewise. NOT seen: a party mate's row in the left column (rig with SWAP=1), more than 2 rows.
+- **4. Banter close-up.** `PSPRECOMP_INTROCAM_LOG=1` logs the game's eye / look-at / fov against the nearest fighter. The retail intro close-ups of the slot fighters: eye 2.1 - 2.4 m
+  away horizontally (1.5 - 1.8 m in the tightest), 1.75 - 2.0 m above his feet, look-at 1.6 - 1.8 m, and a NARROW fov (camera object `+0xC0`: 21 - 26 degrees; the game's normal one is 50). Our banter used
+  2.8 -> 2.3 m at fov 50, so he filled half the height. Now the banter shot is eye 2.2 -> 1.9 m, +1.75 m, look-at +1.55 m, fov 26 (`entr_frame` `tight`, `g_entr_fov` written to `mgr + 0xC0`
+  with the shot's weight); the call-in pose keeps its old framing. `PSPRECOMP_BANTER_LOOSE=1` / `BANTER_NOFOV=1` = old. Between two banters: the next banter now starts in the
+  tick the last one ends (`g_entrant_banter`), the shot does not ease out to the game's camera when another banter follows (`g_dissidia_entr_more`) and pans from the last shot (not the wide game
+  view). Seen: one banter (Vaan; `ib7s`, `ib8s`) tight with the narrow fov. NOT seen: two banters in a row (the party walk has only one partner banter), so the pan is untested.
+- **5. Spawn points: not done.** `actor + 0x2E4` is NOT a floor: a MEM_WATCH on it shows it is written by `FUN_0883AF80` (`FUN_089A34C0` = vec3 copy of the actor's position `+0x80` into `+0x2E0`),
+  i.e. the previous frame's position, which is why `grounded_now` could not use it. The real floor query is not identified (the ground follow is inside the collision code `0x089A3xxx`);
+  `safe_spot` still judges floor from ground samples.
+- (18 Nov ~20:40, user) Bartz's Holy hit Tifa (his own team mate) and that hit broke the PLAYER (friendly fire + damage booked on the wrong fighter). Sent to the agent on Ultimecia / Bartz (tree ttfa).
+
+## Invisible late member, mate takeover teleport, new log lines (18 Nov, tree ttfa; host-only, device log 1118_2030 analysed)
+Device log `rp6logs/1118_2030.log`: the enemy's 5th member Ultimecia (char 16) took the parked body of Bartz and was invisible.
+- **Cause (from the log, not seen on screen).** `[FXPOOL] effect pool alloc(1118672) FAILED: free 1036416 B, largest 1010240 B` just before her load: her
+  effect pack did not fit. Bartz's 1.47 MB pack (alloc id 15) was still in the pool: `fxpack_hook` kept ONE holder per character (the last 'effe'
+  chunk puller call; a character's load makes one per model / weapon object, 8 objects for Bartz), so the early release
+  (`fx_packs_release_departed`, `[TAGTEAM] effect pack of char 9 released ... handle 16`) freed a 75 KB W_ pack (pool free 2056 -> 2131 KB), and the
+  big pack went only with the file unload 1 s after her load (`[MEMSUM] after the unload ... free 2455 KB`). Her model (file id 67) loaded ("2 file
+  objects" is normal: chars 24, 26, 30 show the same, only Bartz had 8) and her D_ file was already loaded; nothing in the log shows a missing model
+  object, so "no pack" (invisible effects) is proven, "invisible body" is inferred (a character whose pack failed has no / garbage effect
+  instances; on the device the body disappeared too). Order was already right: `reuse_parked` -> `rebuild_begin` destroys the body, memsets it, then
+  `load_character` -> `unload_departed(true)`; the file unload waits one more second (world flush) on purpose, so it cannot give the room in time.
+- **Fix.** `g_fx_holder` keeps every holder of a character (`std::vector`); `fx_packs_release_departed` releases all of them (all of Bartz's packs
+  at the first release, 3 s after the fall). New `fx_packs_release_for_room()`: when the effect pool's largest free block is below 1.3 MB at a load,
+  every departed character's packs (not live, no body lying on the stage) are released at once, without the delays. A failed pack allocation during a
+  load is logged as `[LOADCHK] FAILED` (hooks_models.cpp counts them: `dissidia_fx_fail_count`).
+- **Mate takeover moved the mate (second device finding).** `swap_slot_with(ko)` placed the mate through `safe_spot(T)`, which now picks a random stage
+  spawn point (`[SAFESPOT] ref 08DCF690 ... -> stage spawn point (-24.0,0.5,24.0)` at t=306 s): Bartz was carried across the stage and his Holy
+  (homing) had no valid aim. Now the mate stays where he stands (`PSPRECOMP_TAGTEAM_MATE_SPAWN=1`: the old placement) and the new body's foe is
+  the mate's own living foe (`+0x300`) when he has one. Spawn-point choice stays for newcomers (call-ins, slot rebuilds).
+- **New log lines (with `PSPRECOMP_TAGTEAM_LOG=1`; rate limited).**
+  - `[TELEPORT] t= actor (char) path: (from) -> (to) dist` at every `call(PLACE)` of tagteam.cpp (paths: call-in start, rebuild finish, pull away,
+    call_in, held spot, E2NEAR / follow, lineNNNN for the others) and when a mate's old body is parked at 5000,5000; 12 lines per fighter per 10 s.
+  - `[MATE]` at a mate takeover: mate position / foe / target / lock target, the slot fighter's position / foe / target, the new body's position / foe.
+  - `[HOMING]` when a fighter's script changes to an attack (id >= 100, not 1000..1999), at most 1 per fighter per second: foe, target, lock target,
+    distance, foe alive / on stage, "(tgt != foe)"; and a line when a hit event (`FUN_08AEF284`) lands on a victim that is not the attacker's foe.
+  - `[DRAWCHK]` once per second per started call-in member: world flags `+0x904`, object-list node `+916`, model file object with its reference
+    count (`+226`) and data pointer, D_ file object, position, script.
+  - `[LOADCHK]` per mid-battle load: effect pool free / largest before, each pack holder placed (handle, pool free / largest), FAILED lines, every file
+    object made now or already loaded with its reference count, each unload's objects with refcounts, and "no room for a pack: releasing ...".
+- **Update: the invisible body was the spawn point (user's insight, confirmed on the host).** `safe_spot` took a stage spawn point when a ground sample
+  lay within 6 m of it; Ultimecia got `(0,0,10)`, inside the rubble of Order's Sanctuary (hidden, not missing; the pack failure above is real and
+  fixed too, but a pack failure alone does not hide a body). The floor test is now 1.5 m (`PSPRECOMP_TAGTEAM_SPAWNR=<m>`): a point counts only
+  where a fighter has really stood. Host run (`~/dissidia/tt/ac2` old rule, `ac4` new rule; enemy reserve 33,12,3,16, five CPU KOs): old rule,
+  Ultimecia at (7.0,0.0,9.5) from the 6 m rule, screenshot `ac2_shots/a048.00.tga` showed the lock cursor with nothing drawn and her 715 damage
+  number; new rule, `ac4_shots/a042.00..a048.00.tga` show her small figure inside the lock circle (seen on screen). Early in a battle only few
+  points qualify (1 of 64 at t=38 s on this stage), so call-ins repeat the same spot; the mate takeover (no relocation) and slot rebuilds are unaffected.
+- **Friendly fire is allowed; the damage goes to who was hit.** Retail books a hit's damage on the attacker's foe unless our hit table has the real
+  victim; `hitreg_hook` only recorded hits on the other side, so Bartz's Holy on his team mate Tifa broke the player (his foe). Hits on a same-side
+  fighter are now recorded like any other (`g_hits`), so the damage / extra-module paths (`afd424_hook` attribution, the extra module's foe swap) and the
+  HP redirect (`hpstep_hook`, now also accepting a victim of the attacker's own side) book them on the fighter hit. `[FRIENDLY]` (information only):
+  `t= <role> att (char, side) hits its own team mate <role> vic (char); the damage is booked on vic (attacker foe ...)` and a hit-event line.
+  Host-unverified: no run produced a same-side hit.
+- **Mate stays on both sides; host check.** `swap_slot_with(ko)` is side-agnostic (enemy mate into the enemy slot, 1v2 extras, CPU slots). Audit of
+  the movers: `safe_spot` callers are `start_extra` / `reuse_parked` / `call_in` (newcomers), `rebuild_begin` (default for a newcomer in a slot, overridden
+  for the mate) and the mate takeover (no longer). The KO wait, `rebuild_frame` (uses the job's x/y/z) and `chase_restore` do not move a living fighter.
+  `tools/mate_stays_check.py <run log>` checks the `[MATE]` lines of a run with CPU KOs (mate position before = new body position): PASS on `~/dissidia/tt/ac4`
+  (5 takeovers, 0 moved); the only `[TELEPORT]` of a mate is the parking of its old body at 5000,5000. `tagteam_test.py --baseline` PASS (`~/dissidia/tt/inv_reg1`).
+
+## Single player: CPU rows (19 Nov, tree ttlock; host-only, headless, nothing seen on a device)
+Battle Mode > Tag Team Battle (Quick Battle Party > Tournament): the player can now make members of his own party CPU partners, as Square does on the
+Communications setup screen. Without CPU rows nothing changes (1 v 2, his members come into his slot one after the other).
+- **Screen** (`tagteam_menu.cpp`, `sp_tick_hook` on ovl_menu `FUN_08AAB514(screen)`, the screen's per-frame update; only while the tag mode is on and no
+  ad-hoc session runs). Found with `PSPRECOMP_TTSP_CURDUMP=1` / `PSPRECOMP_TTSP_PARTYSCAN=c0,c1,c4` (debug): `screen + 0x7CFC` = M (here the screen itself),
+  `M + 4` = state (2 = the matchup list, 3 / 4 = the round dialog opening / open, 5 / 6 = Enter Battle), `M + 1444` = cursor row (0..4 = 1st..5th, 5 = Enter Battle),
+  `screen + 0x788 + 8 * row` = the player's member of that row (character id; the group struct `*(0x089D8508)` nodes are EMPTY while the screen runs, they are
+  only filled when the battle is entered). On a row from the 2nd on: **Square** toggles the member to a CPU partner and back (cursor sound), the bar at the top
+  (left of the screen's "R Job Settings") shows the Square key with "CPU" / "Player" and, on a CPU row, "Select: CPU Settings"; CPU rows get the small "CPU" plate
+  after the job name. **Select** opens the CPU settings dialog of the Communications screen (same code: STRENGTH 1-9 default 5, LEVEL Auto / 1-100, TYPE Random / 1-8;
+  Up/Down, Left/Right, L/R x10, Select / Cross / Circle close; it takes the pad while open). Row 1 is always the player's own.
+- **Persistence.** The flags and settings live in `g_sp` (tagteam.cpp) for the program's run, per row, as long as the row shows the same character (a changed or
+  removed member loses its flag and settings: `[TTSP] row N changed`). So they stay for further battles of the same setup; not in the save file.
+- **Battle** (tagteam.cpp, "Single player: the human's team with CPU rows"; `sp_cpu_battle()` = not Communications, the human's party record has a CPU-flagged member):
+  - The human's order list = his party record (`read_party(g_human_rec)`), each member CPU or own by character (`[TTSP] human team order: *20/own 15/own 6/own 11/cpu 28/cpu`).
+    Fielded members: `g_sp_used` (bit per list index, reset per battle).
+  - **Partner at the start** = the first CPU member (instead of no partner): through the usual late queue (`info_slot = 100 + char`).
+  - **Record**: `make_sp_cpu_record` (in `record_for`'s chain) calls retail's `FUN_088FA2AC` via `run_cpu_record` with tier = strength - 1, level arg = LEVEL
+    (0 = Auto), type = TYPE - 1 or -1, items -1, base level L0 = `FUN_088CBAD0(the player's own save record of that character)` (Auto = L0 + the tier's offset,
+    as retail does for an enemy with the human's member level). Retail time seed (single player: no need for a fixed one). Cached per character for the
+    battle (`g_sp_cache`, cleared in `reset_battle_state`). `spawn_fighter` / the rebuild take the brain parameters from it; `apply_drive(.., 2)` too.
+  - **A CPU partner falls**: the next CPU member comes in as the partner (the usual call-in: delay, `queue_member` / body reuse); `next_member_char(team, false)`
+    for a fallen extra never returns an own member.
+  - **The player's slot fighter falls**: while he has own members left, the next own member comes into his slot (the slot call-in / rebuild; the CPU partner
+    is NOT swapped in, `te` and the KO-swap delay are skipped). With no own member left (user rule, 18 Nov): the CPU partner on the stage takes the slot
+    (the KO swap, `drive = 2`: AI-driven via `apply_drive`), or, with no partner standing, the next CPU member comes into the slot AI-driven; the side fights
+    on until nobody is left, then `group_decided` as before. `reserve_left(0)` = members not fielded (own + CPU).
+  - **HUD reserve strip** (team 0): the members not fielded, own first, CPU ones named "CPU <name>" (the strip shows portraits).
+  - `PSPRECOMP_TAGTEAM_NOSPCPU=1` turns the whole feature off (no screen hook, old battle rules). `[TTSP]` lines log every decision.
+- **Evidence** (walk `tests/replays/sp_cpu_walk.txt` = `party_battle_walk.txt` with, on the setup screen, Square on 5th (Yuna) and 4th (Terra), Select on Terra:
+  STRENGTH 7, LEVEL 3; party Jecht 20, Squall 15, Cloud of Darkness 6, Terra 11 (CPU), Yuna 28 (CPU)):
+  - Screen (screenshots with our layer, seen): `~/dissidia/tt/spc_a7/step_12_right.png` (dialog: STRENGTH 8 / LEVEL 2 / TYPE 1 on Terra's row, plates on 4th and 5th),
+    `spc_a7/step_14_shot.png` (closed: plates, bar "Square Player  Select: CPU Settings").
+  - `spc_b1` (no forced KOs): partner Terra `strength 7 (tier 6) level 3 ... -> record level 3, control 1, brain params 1 4`; she fell at 42 s, Yuna (Auto -> record
+    level 100) came in as the partner at 62 s (20 s call-in delay).
+  - `spc_b3` (`KOLIST=human:15,partner:25,human:60,human:80,human:100`, `KOLIST_NAT=1`): 15 s Jecht falls -> Squall into the slot (Terra stays partner); 25 s Terra
+    down -> 45 s Yuna partner; 60 s Squall falls -> Cloud of Darkness into the slot; 80 s CoD falls, no own member left -> Yuna takes the slot, `is now AI-driven`;
+    100 s Yuna falls -> side decided, booking from the ledger (5 falls, every member named: Jecht, Terra, Squall, CoD, Yuna).
+  - `spc_b2` (`KOLIST=human:15,partner:28,human:42,human:62,human:90`): the partner's call-in clock was restarted by CoD's slot entrance (45 s, existing rule:
+    an entrance of the side restarts the wait), so at 62 s Yuna came into the empty slot as an AI-driven CPU member instead.
+  - In battle (seen): `spc_b5/battle_gl_045.png` Squall (the player's 2nd own member, in the slot) with Terra's CPU-partner panel.
+  - Persistence (`spc_c3`, driven pad: pause > Forfeit > YES, results, Return to Battle Setup): the screen came back with both plates (seen:
+    `spc_c3/step_06_cross.png`), the second battle again had Terra as partner with strength 7 / level 3 (`record level 3`).
+  - Regression `tagteam_test.py --baseline` (`~/dissidia/tt/spc_reg1`): RESULT: PASS.
+- **Open / limits.** Not on a device. The CPU plate sits where the screen's hand cursor points on the selected row (as in Communications). TYPE shows a number here
+  (tree ttfb adds the type names to the same dialog; its round-dialog hook is on the same `FUN_08AAB514`: the two hooks have to be merged into one at the merge).
+  The 1v2 "no CPU rows" case is unchanged code. With non-NAT `KOLIST` (HP 0) the retail finish ended the round under the tag logic (`spc_b4`, a test artefact).
+  Yuna's call-in spot in `spc_b3` was (0, 0, 10) (the safe-spot logic, not changed here).
+
+## Spawn points: the battle's start pair only (18 Nov, user)
+The stage point table found by `spawn_table_find` is a general table (Order's Sanctuary: 64 records; only the first pair (-10,0,8) / (10,0,8) are the battle's start
+spots, the 3rd (0,0,10) is the middle of the map, in the rubble). Newcomers now use only the matched start record and its pair partner (record index paired even/odd,
+same height, more than 4 m apart). When neither is clear of living fighters (5 m), the one farthest from them is used (never the ground samples / the middle).
+`PSPRECOMP_TAGTEAM_SPAWNALL=1`: the old whole-table behaviour. Host: `spc_m3` (2 points, all call-ins at the start spots), regression `reg_spawn2` PASS. Not played.
+
+## Single player CPU rows: L instead of Square; partners held during the opening banter (18 Nov, user)
+- Square on the Tournament screen is the game's own "Swap format" (the user keeps it for later): the CPU / Player toggle of rows 2-5 is now **L** (`sp_draw`), the bar
+  hint shows an "L" key and starts left of the screen's own hints (x 334; at 370 it covered "Swap format"). The test walks `sp_cpu_walk.txt` / `sp_setup_walk.txt` press L (0x100).
+  The Communications setup screen still uses Square (a different screen; not checked for a "Swap format" there).
+- The CPU team mate attacked during the opening banter (device, user): the per-tick gate write in the brain hook cleared +0x380 bit 2 for every extra. Now kept set while
+  the extra waits in `g_banter_q` or is the entrant inside its own banter / entrance pose (`g_entrant`, `g_entrant_until`). `PSPRECOMP_TAGTEAM_NOBANTERHOLD=1`: old.
+  Host `spc_m5`: Terra gated through Vaan's and her own banter (10.33-12.83 s), first attack at 12.87 s. Not played. ("In the air" not seen on the host.)
+
+## Chain breaks of extras, false HUD break, desktop build toolchain (18 Nov evening; host-only)
+- Device log `rp6logs/1118_2124.log` (Bartz as the enemy's extra): at 196.2 s his own HP attack left his BRV at 0 and the HUD played a **break** animation (the panel code
+  treated any drop to 0 as a break). At 205.7 s the partner's BRV attack took his 45 BRV to 0: a real break that no hit-reaction hook saw (an extra hitting an extra), so it
+  was never marked: no break cooldown, no refill, BRV 0..45 for 17 s and every hit broke him again until 213.6 s.
+- Fix: the per-frame extras loop marks an extra broken when its BRV goes from > 0 to 0 while another fighter's hit is on it (`hit_victim_of`), then the existing rules
+  apply (losses given back, refill). If the retail refill has not brought it back 7 s after such a mark, the BRV is set back to its base. `PSPRECOMP_TAGTEAM_NOANYXBREAK=1`: off.
+  The HUD break animation now needs a hit on the panel's fighter (`PSPRECOMP_TAGTEAM_HUDBREAK_ANY=1`: old). `[XBRKST]` logs the extras' damage-handler state
+  (0 normal, 1/2 after its own HP attack, 3 broken, 4 refill; host brk5). Host: regression `reg_brk` PASS; the extra-on-extra break itself was not reproduced on the host.
+- Desktop: `~/dissidia/build_tagslot.sh` (desktop) built with the system compiler had no Vulkan and no mbedTLS ("Vulkan unavailable", "no TLS support"); it now uses the
+  v0.1.6 release toolchain (as `tcb/main_build.sh`), build dir `work/build_tagslot_tc`: Vulkan backend enabled, mbedTLS 3.6.4. Old script kept as `build_tagslot.sh.bak`.
+- Open: the tally with the **Round-Robin** format (device 21:40: format 1) is left to retail ("left alone (format 1)"); the ledger booking only handles Tournament (format 0).
+
+## Chase interrupted by a third fighter (18 Nov, tree ttlock; host-only, nothing seen on a device)
+User report (desktop): "I was being chased and the other enemy hit me out of it and now I'm stuck with the chase camera". Retail has two fighters, so nothing outside the
+chase's pair can ever hit one of its fighters; here the enemy's second fighter can.
+- **Retail's chase end (read in the generated code, `overlays/battle/generated/batch_0079.cpp`).** `FUN_08AB58A4` is the chase controller's per-frame state machine
+  (ctl `*(0x08AB6738)` = 0x09AEEFB0: +0 state 0..8, +16 camera resource, +24 timer, +28 attacker, +32 opponent). Its own end is `FUN_08AB54E4(ctl)`: stop the resource
+  (+16), and if +0 != 0 `FUN_08AB564C(ctl)` then +0 = 0. `FUN_08AB564C` gives both fighters back their lock blocks (`actor+0x5AC`): `FUN_08B3AF54(lb)` = block +281 (chase
+  camera flag, set by `FUN_08B3AEB4`) off, the block's camera player stopped, lock mode (+264) back to the saved +272; actor +900 bits 0x2000 / 0x4000 off. The machine
+  cancels through `FUN_08AB54E4` on distance / timer checks and `FUN_08AB518C` (the CHASER's script not in 800..816); it has no check for the OPPONENT being hit by anybody
+  else (states 5/6 only wait on the +896 0x200 flags and the chaser's script).
+- **What stays stuck (inferred from that code, not seen).** The controller keeps running (ctl+0 != 0 and its +24 timer / state waiting on a fighter that is no longer in the
+  expected state), so the lock blocks stay in chase camera mode (+281 = 1, mode 3, camera animation 2100 / 2110) and `chase_pair_step` keeps the two fighters as each
+  other's foe / lock target. A second variant: a chained chase start by the third fighter rewrites ctl +28 / +32 under a running chase, so the final `FUN_08AB564C` cleans
+  the NEW pair only and the first pair's blocks keep +281 for good. I could not make a real third-party hit land on the host (see below), so which of the two the user hit is unproven.
+- **Fix (`tagteam.cpp`: `hitreg_hook`, `chase_interrupt_step`, called every frame before `chase_pair_step`).** All inputs are simulation state (hit registration, ctl words,
+  battle clock; no wall clock, no `bs+84`), so it is lock-step safe.
+  1. A registered hit by a fighter that is neither of the chase's pair on one of its fighters while ctl+0 != 0 -> the chase is ended the retail way: `FUN_08AB54E4(ctl)`.
+     `[CHASE] hit of X on Y ...` then `[CHASE] ... INTERRUPTED (hit by a fighter outside the chase) ... ended with FUN_08AB54E4`. `chase_pair_step` then puts the foes / lock targets back.
+  2. A chase running longer than 900 frames of battle clock (retail ones last 1-3 s) is ended the same way (`INTERRUPTED (running too long)`).
+  3. Recovery: every fighter that was in a chase (set `g_chase_touched`, per battle) and is no longer in the running one while its lock block still has +281 gets
+     `FUN_08B3AF54(lb)` (+ actor +900 &= ~0x6000): `[CHASE] RECOVERY: ... camera back`. (+281 is also the camera flag of other scenes, so only chase fighters are swept; a first
+     version that swept everybody fired at the start of the battle and was removed.)
+  `PSPRECOMP_TAGTEAM_NOCHASEINT=1` = old behaviour (all three off).
+- **Test helpers (debug only).** `PSPRECOMP_TAGTEAM_CHASE_FAKEHIT=<frames>`: that many frames into a chase the attacker's other fighter is booked as having hit the chased one
+  (feeds the same state as the hit registration); `CHASE_TP3=<frames>` (+ `_DX=<m>`, `_ACT=<action id>`): place the attacker's other fighter beside the opponent and start an action on it.
+- **Evidence.** Run `cx9` (`~/dissidia/tt/cx9`, forced chase: `BT_NO_AI_ONLY=1 CLONES=1 HOLDFRONT=enemy2 FORCECHASE=enemy2 FORCECHASE_NOGATE=1 CHASE_FAKEHIT=10`, script `int_a.txt`):
+  the extra's chase on the human at 20.37 s is cut at 20.53 s (state 1, lock mode 3 -> 1 logged, chase over), the same at 26.33 s; screenshots
+  `~/dissidia/tt/cx9_interrupt_shots.jpg` (from `shots_cx9`) show the chase shot and, right after the cut, the normal wide battle camera. That is a SYNTHETIC interruption (booked hit,
+  not a real attack); the camera frames after it are real.
+- **Not verified.** (a) A real hit by the second enemy during a chase: on the host the forced chase's own blow-away hit also knocked the placed third fighter away / the human flew
+  6-16 m up and away, so no scripted hit landed (`CHASE_TP3` runs cx4-cx7). The `hitreg_hook` detection path therefore only ran through the fake-hit input. (b) The device; the old
+  stuck state itself was never reproduced (no desktop log of the report was available), so the cause above is read from the code. (c) Whether ending the chase while the chased
+  fighter is still in his launch leaves him in a retail-consistent state (he just continues his hit reaction in the screenshots).
+
+## BRV panel runaway guard, team mate's break on his own panel (18 Nov late; host-only)
+- Runaway: a big panel's number racing away from the real BRV (host `brk2`, desktop 22:10 log: Tifa "9999", +9700/s from 80 s on), both times starting at a call-in
+  entrance (`dissidia_pause_match`: every other fighter's dt is 0). Cause not found. Guard in `hudref_hook`: the error growing (|shown - real| > 1500, same direction)
+  for 30 HUD updates -> `[PANELRUN]` (dump of the panel group and channel row) and the number put back (a report first, the word itself after the 2nd time).
+  `PSPRECOMP_TAGTEAM_NORUNAWAY=1`: off. The first version (> 100 per update) missed the desktop at 120 fps (~80 per update). Not seen firing yet.
+- A team mate's break played the break animation on the player's big panel (user). `partner_break_report(side)` drops a kind 6 report (3710 and 3B54 hooks) when the
+  panel's fighter keeps BRV > 0 and is not hit while a same-side extra was just broken (`[HUDBREAK]`); the small panel of the broken mate shows a "BREAK" flash for
+  1.5 s (`TagHudFighter::break_flash`, set from `g_xbreak_show`). `PSPRECOMP_TAGTEAM_PANELBREAK_ANY=1`: old. Not reproduced on the host (no mate break in the runs).
+
+## Retry leaves the old battle's members loaded; voice bank codes; shared banks (18 Nov, tree ttfa; host-only, nothing heard or seen on a device)
+User (desktop): after pause > Retry "tifa's voice sounds really weird and terra's moves are invisible"; second report (no Retry): Vaan and Ultimecia silent.
+- **Cause 1 (Retry): retail's battle end / Retry does not release the files of characters loaded MID battle.** New `files_state_dump` (`[FILESTATE]`, `[MEMSUM]`
+  at "battle setup done" / "at the teardown", `PSPRECOMP_TAGTEAM_LOG=1`): clean first battle 16 objects, model pool 6.2 MB used, effect pool 4.5 MB free; at the teardown
+  21 objects (5 members' model / D_ files), and at the NEXT setup the same 21, model pool 10.2 MB, effect pool 2.1 MB free (runs rt5, rt6). Our teardown cleared
+  `g_own_load` / `g_fx_holder`, so nothing ever released them. In battle 2 every load then met a full pool (`[FXPOOL] effect pool alloc(1093520) FAILED`,
+  `[LOADCHK] FAILED: load_character(9)`: no effects = invisible moves; rt4, rt6, rt7) and "already loaded" members whose bank / pack our departed-release had
+  already torn down (weird voice).
+- **Fix** (`tagteam.cpp`): the teardown keeps a copy of `g_own_load` in `g_leftover_load`; `leftover_unload()` releases those objects with `unload_character`
+  (the battle end's own `FUN_08844520`), forced at the start of `setup_hook` (before the retail setup) and also from the frame end a third of a second after the teardown
+  when frames run. Result (rt8): before the unload 21 objects, model pool 10.1 MB, effect pool 2.1 MB free; after: 16 objects, 6.2 MB, 4.5 MB free = the clean state.
+  Battle 2 then loads Vaan, Bartz, Yuffie, Laguna, Onion Knight, Kefka with no FAILED line, and a screenshot (`~/dissidia/tt/rt8/watch_02.png`) shows the battle running with
+  effects. `PSPRECOMP_TAGTEAM_NOLEFTOVER=1`: old behaviour. Pause > Retry is driven by `/tmp/rt.sh`-style steps of `menu_drive.py` (start, down, cross, then cross every 4 s
+  through the VS / opponent pages).
+- **Cause 2 (voices, found on the way): `char_code_of` (heuristic RAM scan, done once) returns wrong file codes that differ from run to run**: in the log of the user's session
+  Bartz (9) = six100 = Terra's code (and 5 = six100, 11 = six100, 54 = six200), in our run 2 = gst120, 5 = gst120, 12 = org200 (record says thr100 / six200). The assist bank loaded for a
+  call-in (`voice_banks_load`) therefore was often ANOTHER character's. Now the code comes from the character's info record (`code_for_char`, "P_FIV100_1P"), the scan only as
+  fallback; `[TAGTEAM] voice bank code of char N: record X, scan Y` logs both. `PSPRECOMP_TAGTEAM_SCANCODE=1`: old lookup.
+- **Shared banks**: `voice_banks_release_departed` skips a departed character's bank / pack release while a character with the SAME file code is on the stage or in a reserve list
+  (`[TAGTEAM] voice bank of char N kept: ...`; `PSPRECOMP_TAGTEAM_NOSHAREDBANK=1` off). Not done: the file release itself (`unload_character` -> `FUN_08846628`) frees the file record's own
+  bank, shared by name with nobody else as far as seen (each record owns its copy), no reference count.
+- **Vaan / Ultimecia silent: NOT explained.** Their banks were linked (sound blocks 0x22 / 0x26, stride 4 per bank) after Bartz's release; Bartz's bank was Terra's (wrong code, now fixed) and was freed
+  with `FUN_08842650`/`0884246C` while Terra still fought. A free of a bank another member uses, or a limit on sound bank slots (the silent ones are the 4th and 5th assist banks), are the
+  candidates; nothing audible can be checked headless. Whether SE banks are also silent is unknown (voice banks only were inspected).
+- Evidence: runs `~/dissidia/tt/rt1..rt8`; regression: see below.
+- Regression `tagteam_test.py --baseline` (display :91, out `~/dissidia/tt/retry_reg1`): RESULT: PASS.
+
+
+## White screen after a won single-player tag battle (18 Nov, tree ttlock; NOT reproduced, no fix)
+Report: desktop log `~/dissidia/rp6logs/desk_1118_2221_white.log` (Vulkan, HD UI textures, widescreen, render scale 4), human side won 5-0 (Jecht 5 wins, ledger of 5 falls), screen white after the teardown.
+- **The log does not show a stuck menu.** After `battle teardown` the menu overlay loads, the result BGM starts (`ATRAC id=0 AT3+ 220244`), `arcadebackground.png` (the tally's backdrop) and 10 s later
+  `victorydefeatdraw.png` (its "VICTORY!" banner) are loaded on demand, and FPS stays 30 with 151 draws/frame. The working device tally `~/dissidia/rp6logs/1118_tally.log` has the same
+  sequence (ATRAC 220244 -> arcadebackground -> victorydefeatdraw) with 132 / 120 draws/frame on the tally screen. So the menu side reached and ran the tally screen; the game state
+  (tally rows, booking, freed blocks) was not what the screen was waiting for. The `[HANGDUMP] game thread stuck` dump is the battle-frame watchdog (`hang_watch_start`, counts battle frame ticks) firing
+  after the battle is gone: it appears in the working tally log too and its backtrace is just the main loop's vblank wait. It is not a symptom (it could be disarmed at the teardown to stop misleading).
+  The log ends ~15 s after the menu loaded, so it cannot tell whether the screen ever left white.
+- **Host reproduction (GL, no HD textures, 480x272 render target).** `menu_drive.py ttlock OUT party_battle_walk.txt ... PSPRECOMP_TAGTEAM_KOLIST_NAT=1 PSPRECOMP_TAGTEAM_KOLIST=enemy2:15,cpu:25,cpu:40,...`
+  (`~/dissidia/tt/wh1`, montage `wh1_montage.jpg`): human wins, tally "3 - 0, Round 3, VICTORY!", then Quick Battle Party setup -> Enter Battle -> VS page -> opponent info, all drawn.
+  With `PSPRECOMP_TAGTEAM_TALLY_WINS=5` (new debug: first winner row shows that many wins, i.e. the 5-wins-on-one-row layout of the report) the tally draws five win crystals under Jecht
+  (`~/dissidia/tt/wh2`, `wh2_montage.jpg`): no white screen. The host party has 3 members per side, so the 5-fall ledger itself was not played; HD UI textures and the Vulkan renderer could not be tried
+  (the textures `mods/textures/ui/*.png` are not on this host; the harness's Vulkan needs a real window and `SDL_VIDEODRIVER` ended up `offscreen`).
+- **Conclusion / lead.** The difference to everything that works is the desktop's renderer path (Vulkan, HD textures, post passes: 5 passes/frame vs 3 in the working tally), not game state; a white
+  frame with a normal draw count points at the presentation (a full-screen pass or a replaced texture drawn white). Needs, next time it happens: the debug socket `S` (render target) AND `V`
+  (window with post passes) screenshots while white, plus a run with the HD UI textures removed and one with `PSPRECOMP_POST_AA=0 SSAO=0 VK_RT=0`; if `S` is normal and `V` is white it is the post chain.
+  Open: not verified on the device either; nothing in the tag code was changed for this report (only the `TALLY_WINS` debug env).
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ci_reg2`).
+
+## Panel regen without stacked gain animations; analogue trigger threshold (18 Nov late; host-only)
+- An extra on a big panel (HUD follows the lock-on) had its BRV refill after a break (17 s for Tifa, desktop) sent as one report per frame: each report plays the gain
+  animation and they stacked on the panel (user screenshot). Gradual gains (0 < d <= 120 per HUD update) now write the panel's number silently, and wait while the
+  panel still animates an earlier report. `PSPRECOMP_TAGTEAM_PANELREGEN_REPORT=1`: old.
+- Dodge (R + X) on the desktop's Xbox pad started a chase instead: the analogue trigger counted as R only past 50% travel, so X reached the game a 30 Hz frame before
+  R (the RP6's digital R did not show it). Triggers now count from ~18% (`runtime/src/psp_event_loop.cpp`, `PSPRECOMP_PAD_TRIGGER_THRESH`). Not tried with the pad.
+
+## Friendly-fire reactions, EX Burst after a KO, entrance effect lights (18 Nov late; host-only)
+- Jecht hitting his team mate Terra (desktop): the hit reaction ran in the attacker's FOE's handler (the enemy slot fighter), so the break played on the enemy's panel
+  and every later hit broke Terra again. `booked_extra_victim` / `hitreact_hook` now also send a hit on the attacker's own team mate (an extra) to the mate's own
+  handler (break rules / cooldown apply). `PSPRECOMP_TAGTEAM_NOFRIENDLYREACT=1`: old. `[HUDBREAK]` is rate-limited.
+- EX Burst on Ultimecia whose opening hit KO'd her played on Vaan (the KO flow had re-pointed the attacker's foe): `exbstart_hook` (FUN_08A3EB70) does not start a
+  burst when the attacker's KO in the last 1.5 s (ledger) is not the foe it is given. `PSPRECOMP_TAGTEAM_NOEXBKOCHECK=1`: old. Desktop log `tt_logs/1118_2246_vaan.log`
+  (KO 508.8 s, burst 509.04 s).
+- A member's entrance (the warp-in's glow) made up to 8 effect lights, each a ray-traced light per pixel: Medium / High RT shadows stalled. During an entrance the
+  renderer's effect lights are capped at 2 (`psp_fx_lights_limit`, runtime/src/psp_ge_draw.cpp; `PSPRECOMP_TAGTEAM_ENTR_FXLIGHTS=<0..8>`). Not measured.
+- Dodge (R+X) / EX mode (R+Square) triggering X / Square alone on the desktop Xbox pad: see the trigger threshold above (the RP6 has a digital R).
+
+## Forfeit during the intro, then a new battle: copies of the fighters (19 Nov; host-only)
+Desktop: a forfeit before the opening banter was over, then a new battle: both partners were copies of the fighters on the stage. The late-spawn's `intro_seen`
+(static) stayed set from the forfeited battle, so the new battle's partners spawned at once, before the frame hook had picked the party members (no "team N
+extra: party member" line in that battle). Now `intro_seen` is reset per battle, and the start-of-battle queue spawns only after the pick for this battle
+(`g_planned_gen`; `PSPRECOMP_TAGTEAM_NOPLANWAIT=1`: old). Regression and an SP run pass; the forfeit-in-the-intro sequence itself was not replayed on the host.
+
+## Effect pool fragmentation: one slot size for character packs (19 Nov; host-only)
+Desktop 19 Nov (`tt_logs/1119_vaan2.log`): Vaan's pack `alloc(1145968) FAILED` with 2.1 MB free but the largest hole 1095360 B (a departed character's pack hole
+is the size of THAT pack; a slightly bigger newcomer's did not fit) -> invisible moves, no effect sounds. No pool has slack to give (host `snd1`, new [MEMSUM]
+sound-heap field: model pool peaks 14.7-15.1 of 15.9 MB, sound heap down to 284 KB free, region 1 full). `fx_alloc_hook` (hooks_models.cpp) now puts every
+character effect pack (0.9 MB .. 1.18 MB requests) in a 0x120000-byte slot, so any freed slot takes any newcomer; a padded request that does not fit is retried
+at the exact size. `PSPRECOMP_FX_PACK_SLOT=<bytes>` (0 = off). Host `snd2` (6 loads with releases): every pack in a slot, no FAILED; costs ~60 KB per pack.
+
+## Effect pool and sound heap: placement, region 2 bridge, sound release, re-link after a reload (19 Nov, tree ttfa; host-only, nothing heard on a device)
+Desktop 19 Nov (`rp6logs/desk_1119_vaan3.log`): "Bartz and Vaan still have no audio, Vaan still has invisible attacks". Vaan's pack `alloc(1145968) FAILED` with
+1.76 MB free, largest hole 1102784 B, although packs had 0x120000-byte slots.
+- **Bartz loaded twice is right**: the second `load_character(9)` (t=247 s, "already loaded", no new file) is the mate takeover (Cecil's slot rebuilt as
+  the mate Bartz, his old extra body parked); the parked body then took Vaan.
+- **Instrumentation** (`PSPRECOMP_HHEAP_LOG=1`, hooks_models.cpp): `[HHEAP] fx|snd alloc / free / compaction` for both handle heaps (the same allocator:
+  `FUN_08867310` init, `FUN_088673CC` alloc = first fit from the lowest address, handle id = heap+16, `FUN_088674AC` free (merges with free list
+  neighbours), `FUN_088676B4` lock (+8 = 1), `FUN_08867718` unlock, `FUN_08867590` compaction = an UNLOCKED block slides down into a free previous one;
+  header 64 B {id (0 = free), size, locked, prev, next}), owner = the character being loaded (`loading cN`); block maps (`[HHEAP] fx|snd blocks <tag>`,
+  `L` = locked) with every `[MEMSUM]` and at a failure; `[SNDHEAP] sound heap alloc(...) FAILED` is always logged now. The game itself compacts
+  both heaps only at boot. Lock state = in use: a fighter's sound / pack blocks are locked while an actor of the character exists.
+- **Causes (numbers from the desktop log and host `~/dissidia/tt/ffa1` / `ffa3`: reserve `24,11,15,22;26,9,30,16`, KOLIST below)**
+  1. Fragmentation by small blocks: after Tifa's slot was freed, Bartz's 76864 B second pack (first fit) went INTO it (1179648 -> 1102784 B), and Bartz's
+     1477712 B main pack (bigger than a slot) took the big hole: Vaan's pack had nowhere to go. Host: Yuna's 0.1-0.3 MB weapon packs went into Vaan's freed slot.
+  2. Effect pool too small for four mid-battle characters at once: 4.37 MB free after the setup, a character costs a 1.15 MB slot + 0.1-0.75 MB of small packs.
+  3. Sound heap: every load puts ~650 KB there (record +96 bank ~360 KB + 1.6 KB, record +212 sound object 250-300 KB) + the 52-60 KB assist bank;
+     a departed character's blocks went only with the file unload, a second or more AFTER the newcomer's load. Host baseline ffa3:
+     `sound heap alloc(288832) FAILED` (Yuna, 245 KB free) and `alloc(302368) FAILED` (Bartz, 476 KB free, largest 285 KB).
+  4. **Stale sound link after an unload + reload** (found with `PSPRECOMP_SAS_TRACE=1` + `tools`-style attribution of every `SetVoice` address to the block
+     holding it): `voice_banks_load` links a character's own banks (`FUN_08843FBC(record)`) once per battle (`g_vbank_chars`); a character unloaded and
+     loaded again gets a new file record that was never linked, and the sound system kept the old record's freed bank: in ffa2 Vaan's second stint played
+     65 voices from 0x0ACD8000 (his FIRST load's bank, by then Bartz's and then Ultimecia's data) and none from his new bank at 0x0AD78280. In the
+     baseline it only worked by luck (the reload got the same address).
+- **Fixes**
+  - hooks_models.cpp `fx_alloc_hook` + `hh_alloc_top`: character packs (>= 0xE0000 B) first fit from the bottom (slots as before), everything smaller from
+    the TOP (the highest free block that fits, carved from its end; same header / ids, so free, lock and compaction are unchanged). The sound heap the same
+    way for blocks < 128 KB (the 1.6 KB block and the assist banks), so a departed character leaves one ~650 KB hole. `PSPRECOMP_FX_SMALL_TOP=0`,
+    `PSPRECOMP_SND_SMALL_TOP=0`: old.
+  - `hh_bridge` (hooks_models.cpp, in `fx_heap_init_hook`, which also sees the sound heap's init): both heaps continue in region 2. The block list may
+    jump: a locked used "gap" block (an id nobody has; locked, so compaction never moves it) spans from the heap's end to a region 2 block that follows as a
+    free block. The texture overflow heap is 768 KB instead of 2.5 MB (peak use seen 383 KB; `PSPRECOMP_TEXHEAP_OVERFLOW=<bytes>`); the sound heap gets
+    512 KB (`PSPRECOMP_SND_BRIDGE`), the effect pool what region 2 has left minus OBJDATA and 64 KB (`PSPRECOMP_FX_BRIDGE`; 0 = off). Effect pool 8164 ->
+    9455 KB, sound heap 4828 -> 5339 KB (`[HHEAP] fx heap bridged into region 2: ... free block 0x0BBEC000 1322944 B`).
+  - tagteam.cpp `snd_banks_release_for_room`: at a load with the sound heap's largest hole below 760 KB, every departed character (not live, no body lying
+    on the stage) gives its sound now: +96 as `voice_banks_release_departed`, +212 `FUN_088A3A10` + `FUN_088A3998` (handle 0, so the file release skips it),
+    the +212 object only when its block is unlocked. `[SNDROOM]` lines, `[LOADCHK] ... sound heap before`. `PSPRECOMP_TAGTEAM_NOSNDROOM=1`: off.
+  - `unload_character` forgets the bank link (`g_vbank_chars`), so a reloaded character's new record is linked again (`PSPRECOMP_TAGTEAM_NORELINK=1`: old).
+    This does NOT fix cause 4: in ffa4 the new record is linked (`voice banks of char 30 linked (record 0BDA7940)`) and Vaan's second stint STILL plays
+    from 0x0ACC0000-0x0ACDFFFF (his first load's bank address, now Bartz's / Ultimecia's) and never from his new bank at 0x0AD78280: the stale reference
+    is in the game's sound side (candidate: the name-keyed bank list that `FUN_088424C4` links into - the release `FUN_08842650` / `FUN_0884246C` may not
+    unlink the old entry, so a lookup by "p_gst120" finds the freed one first). Open; until it is fixed a character that is unloaded and loaded again in
+    one battle plays wrong / garbage sounds.
+    `reload_if_released`: a character whose pack / sound was released early and comes back while its files are still loaded (no actor of it left) is
+    unloaded first and loaded fresh (`PSPRECOMP_TAGTEAM_NORELOAD=1`: off).
+- **Results** (host, headless, `run.sh ttfa NAME sp_cpu_walk.txt`, env `PSPRECOMP_TAGTEAM_RESERVE=24,11,15,22;26,9,30,16
+  PSPRECOMP_TAGTEAM_KOLIST=enemy2:15,partner:22,cpu:30,enemy2:40,partner:50,cpu:60,enemy2:70,human:80,cpu:90,enemy2:100 PSPRECOMP_TAGTEAM_KOLIST_NAT=1`,
+  130 s; 10 mid-battle loads: Vaan, Terra, Tifa, Yuna, Bartz, Vaan again, Squall, Ultimecia, two mate takeovers; identical sequence in every run)
+  | Run | Build / env | FAILED lines | Effect pool / sound heap after the setup | Lowest sound heap largest hole after a load |
+  |---|---|---|---|---|
+  | ffa1, ffa3 | old behaviour (ffa3: the new build with every switch off) | 2 x `[SNDHEAP] ... FAILED` (Yuna, Bartz) | 4367 / 2627 KB free | 224 KB |
+  | ffa2 | placement + bridge + sound release | none | 5615 / 3141 KB free | 449 KB (Yuna, then the release gives 1235 KB before Bartz) |
+  | ffa4 | + re-link / reload (final) | none | 5615 / 3141 KB free | 449 KB (Yuna); 8 loads, 0 pack / sound failures, no hang |
+  Regression `tagteam_test.py --baseline`: RESULT: PASS on the ffa2 build (`~/dissidia/tt/ffa_reg1`) and on the final build (`~/dissidia/tt/ffa_reg2`).
+- **Not verified / open**: nothing heard (headless). The desktop log's Bartz and Vaan DID get their sound blocks (sound heap 1332 -> 603 KB at Bartz's load,
+  1198 -> 553 KB at Vaan's), so their silence there is not explained by a failed allocation; the stale link (cause 4) needs an unload + reload of the same
+  character, which the desktop log does not show for them. Per-character play counts (SetVoice addresses inside a character's own blocks, ffa2) were zero for
+  Tifa (slot rebuild, 30 s on stage), Yuna and Squall too, while Terra, Vaan (first stint) and Ultimecia played theirs: whether slot rebuilds / some reused
+  bodies play their own sounds at all is the next thing to check (`~/dissidia/tt/tools_ffa/sas_attr.py`, `sas_time.py` on a run with
+  `PSPRECOMP_HHEAP_LOG=1 PSPRECOMP_SAS_TRACE=1`). The bridge's region 2 parts are not checked on a device (Android / RP6 use the same layout code).
+
+### Playback: the sound bank registry, double links, 20 bank slots (19 Nov, later; host-only, nothing heard on a device)
+User's complaint still open after the memory round: "Bartz and Vaan have no audio, Vaan's attacks are invisible".
+- **New instrumentation** (with `PSPRECOMP_HHEAP_LOG=1` or `PSPRECOMP_SNDREG_LOG=1`, hooks_models.cpp): `[SNDREG] register 'name' data size -> #index (refs, ...)
+  N of 32 used` / `unregister #i (refs a -> b)` on the sound system's bank registry, `[FXBIND]` on every effect pack bind (`FUN_0883EBE4(holder)`:
+  pack handle +32, its owner, the instance +40). Played sounds are attributed with `~/dissidia/tt/tools_ffa/sas_time.py <run log>` (needs
+  `PSPRECOMP_SAS_TRACE=1`): every SAS `SetVoice` address is matched to the sound block holding it and so to the character whose load allocated it.
+- **How the registry works.** `FUN_088A0DBC(system = *0x089D6C80, name, data, size, flag)` -> `FUN_088A0EEC`: 32 entries of 48 B; an entry whose NAME
+  matches gets its reference count (+40) raised and its index returned - the new data is NOT used; else a free entry (+0 == -1) is filled with a bank id
+  of the sound library, which has only **20** (flags at `*0x089D6C88 + 104`, `FUN_088A1638` / `FUN_089907F8`); -1 = no slot. `FUN_088A0DFC` lowers the
+  count and frees the entry at 0. A file record's banks (+96, three 12-byte entries: handle, size, registry index) are registered by `FUN_088424C4`
+  (names `p_<code>[se_0]`, `p_<code>[voice]`) and unregistered by `FUN_08842650`. Retail links a record through a use count: `FUN_08843F4C(record)`
+  (+224: link at 0 -> 1 = `FUN_08843FBC`: pack bind +52, banks +96, sound object +212) and `FUN_08843F88` (unlink at 1 -> 0); fighters do this.
+- **Cause.** `voice_banks_load` called `FUN_08843FBC` directly on a record the fighter's set-up had already linked: every bank was registered twice
+  (`refs 2`); the release takes one, so no entry of a mid-battle member was ever freed. Results (host `ffa5`, same 10-load sequence as above):
+  1. the 20 slots were full after the second member: Tifa, Yuna, Bartz, Squall and Ultimecia got `register 'p_sev110[se_0]' ... -> #-1` (18 failures in
+     `ffa8`): their voices / SE were not registered = silent;
+  2. Vaan, loaded again after his unload, re-registered `p_gst120[se_0]` -> the OLD entry #15 (refs 2 -> 3) with his first load's freed data: his second
+     stint played from 0x0ACD8000 (by then Bartz's / Ultimecia's memory) - wrong or garbage sounds;
+  3. each pack was bound a second time (`[FXBIND] ... BOUND AGAIN` (logged as "BOUND TWICE" in `ffa8`, 8 times); the manager returned the same instance, so no visible effect loss was
+     proven from it).
+  The desktop log fits: by Bartz's (t=146) and Vaan's (t=267) loads the four earlier members' double registrations held the slots.
+- **Fix (tagteam.cpp `voice_banks_load`).** The record is linked only when nobody uses it, through the use count (`FUN_08843F4C`); a record already in use
+  is left alone (`voice banks of char N already linked (record X, use count 1)`). The extra assist bank (`voice_p_<code>_a_00`, the call line, one slot)
+  is skipped when fewer than 3 slots are free (`assist bank of char N skipped`; `PSPRECOMP_TAGTEAM_RAREALWAYS=1`: always). `sndreg_make_room`: at a
+  load with fewer than 2 free slots, the banks of a loading-screen character or departed member with no actor left are unregistered (`FUN_08842650`
+  only, the data stays for the battle end); `[SNDREG] char N (no actor left): banks ... unregistered for room`; `PSPRECOMP_TAGTEAM_NOSLOTROOM=1`: off.
+  Not triggered in the runs below (unverified). `PSPRECOMP_TAGTEAM_OLDBANKLINK=1`: the old direct link.
+- **Results** (plays from each member's own sound blocks, `sas_time.py`; t = battle seconds)
+  | Member (on stage) | old link (`ffa8`) | fixed (`ffa7`) |
+  |---|---|---|
+  | Vaan 1st (7-15 extra) | 27 | yes (part of 171) |
+  | Terra (7-22 extra) | 31 | 54 |
+  | Tifa (30-61 slot rebuild) | 53 (se only, voice -1) | 59 |
+  | Yuna (42-50 reused body) | 0 | 12 |
+  | Bartz (53-91 reused body, then slot by mate takeover) | 9, only at 83-92 | 72, from t=53 |
+  | Vaan 2nd (81.6-, reloaded; slot 1 from 91.6) | 0 from his new bank | 140+ from t=83 |
+  | Squall (81- slot rebuild) | 23 | 37 |
+  | Ultimecia (111.6-, reused body) | 55 | 142 |
+  `ffa7`: 0 `-> #-1` registrations, 0 double binds, every pack bound once to its own handle (Vaan's second stint: handle 30, allocated by his reload).
+- **Effects / invisible attacks**: the invisible attacks of the desktop log were the failed pack allocation (memory round above); with it fixed and the
+  bind now once per pack, Vaan's reload binds his new pack (`[FXBIND] holder 0BDA7974 pack handle 30 (alloc c30)`). Not seen on screen in this round.
+- Regression `tagteam_test.py --baseline` on this build: RESULT: PASS (`~/dissidia/tt/ffa_reg3`). Nothing heard: "plays" means the SAS mixer was given sample data from that character's own bank.
+## BRV panel runaway ("9999", Cecil flicker): the call-in extra's report object, and the real HUD layout (19 Nov, tree ttlock; host-only, screenshots on the host)
+User (desktop): Ultimecia / Tifa "9999", Cecil's BRV "0 but it is not, changing back and forth quickly", stacked gain animations. Host repro (`sp_cpu_walk.txt`,
+`PSPRECOMP_TAGTEAM_KOLIST=human:15,partner:25,enemy2:35,cpu:45 PSPRECOMP_TAGTEAM_KOLIST_NAT=1`, `~/dissidia/tt/pl1`): at the call-in at 45.0 s side 0's big panel climbs from ~1300
+to 23000..78000 (screenshot `~/dissidia/tt/panfix_before_montage.png`: Squall's number reads **9999**, `pl1_shots`).
+
+**The HUD object is what the notes said, the guesses about it were wrong.** `FUN_089DEDB0(hud)` applies the dirty channels (bit set by `FUN_08AE3B54`, word 0x08AE7CA4, cleared by
+`FUN_08AE3BC8` at its end) to three 84-byte number groups: hud+36, hud+120, hud+204 (stage pool). The side -> group map is fixed by the steal-channel word (0x08AE7B90 + 32*side + 8):
+1 = group 36 (side 0, one-sided channels 6 / 12 / 9 / 15), 0 = group 120 (side 1, channels 7 / 13 / 10 / 16); the table did not change in any run (`chan words 1 12 / 0 13`),
+and hud+36 in the runaway WAS the BRV group (not a floating number). Group fields: **+0 byte 1 = in use** (rest of the word is padding, desktop log `321FEE01`), **+4 the number shown**,
+**+8 the number LAST DRAWN, not a target** (`FUN_089E0110`: when +4 != +8 or the lethal state +0x18 changed it stores +4 into +8 and calls the digit redraw `FUN_089DFF50`),
+**+0xC the OPPONENT's HP less its damage** (`FUN_089E0110` computes it from the other slot's status, for the "BRV >= HP" marker: so `1` during the runaway only meant the foe was
+nearly dead, and +0x10/+0x14/+0x18 = 2,2,2 are its state words), +0x44 the slot index handed to the HUD getter `FUN_089E95B0` (our `hudget_hook`). A report becomes a node in the HUD's
+animation list (`FUN_089DE6EC` -> `FUN_089DE7FC` -> `FUN_089E839C`); an "add" node (`FUN_089E8CA8` -> `FUN_089DF854(group, amount)`) adds the amount to +4.
+So the old dump `{1, 0x6488, 0x6163, ...}` is "shown, shown one update ago" (+8 trails +4 by one step because +4 climbs every update), not a target.
+
+**Cause.** `FUN_08AE090C(handler, module)` (battle controller, per slot and per extra handler copy) reports `status BRV - handler+28` as a kind 6 report every frame. The extra's
+handler copy (`g_extra_hdl`) had +28 set once at creation; after a call-in rebuild the member's BRV is different and the report goes out EVERY frame for the rest of the battle
+(`+983`, `+1124`... per frame). `hudch1_hook` drops reports of extras, but `extra_report_actor` did not know the handler copy any more (the rebuild left it out of `g_leak_watch` /
+`g_owned`; `actor+0x1C8` is 0), so the report went through, channel 12 (kind 6, side 0) = `089DE6EC(hud, 12, 0, hud+36, +1)` each frame: +1000 per frame on the side's group.
+Found with a memory watch on the dirty word (`PSPRECOMP_MEM_WATCH` / debug socket `M`): writer ring `08AE3B54 <- 08AE3710 <- 08AE090C <- 08B3337C`, and a log of the kind 6 object:
+`obj == g_extra_hdl[extraP]`. The same on the desktop log (`desk_1119_cecil0.log`: Bartz called in at 146.6 s, panel 5429 vs 473 at 148 s, then 6110, 8820, 12709 ...). Every earlier
+guard write was undone by the next frame's report, which is why "the guard's writes did not stick" and the number flickered between the guard's value and the runaway.
+
+**Fix** (`tagteam.cpp`):
+- `extra_report_actor` also knows `g_extra_hdl[a]` (0x310 bytes) and `g_extra_mod[a]` (0x200): the extra's own reports are dropped again after a call-in.
+- The rebuild's end sets `handler+28` to the member's BRV (no per-frame "change" any more, also for what retail does with it).
+- `panel_group(side)` returns 0 unless the steal word is 0 / 1 AND the group's in-use byte is 1; `hudref_hook` skips a side without a valid group, readers get -1, writers do nothing
+  (nothing is written into memory that is not a panel group).
+- Removed my own guesses: `panel_set_silent` writes **+4 only** again (writing +8 too would hide the change from `FUN_089E0110`, so the digits would not be redrawn), the settle reconcile
+  sends `real - shown` again (not `real - (+8)`) and sets `T[sd]` as before. The runaway guard stays as a safety net (it should never fire now).
+- Panel moves to an extra (`lastP != P`): `T` is read only once the shown number has stood still for 8 HUD updates (max 120 updates). A retail roll still running (the slot fighter's own
+  gain a moment before the lock-on switch) otherwise lands on top of the difference we send: host `pl15`, shown 6178 on a real 4321 for 5 s until PANELFIX.
+- `PSPRECOMP_TAGTEAM_HUDCHLOG_CAP=<n>` (default 300): the cap of the `[HUDCH]` log lines.
+
+**Evidence.** On screen (host, `AGESHOTS`): before `~/dissidia/tt/panfix_before_montage.png` (44 / 46 / 48 / 50 s: 544 -> **9999** -> 9999 -> 9999 on Squall's panel), after
+`~/dissidia/tt/panfix_after_montage.png` (43.5 .. 51 s of `pl14`: Squall's panel stays at 976 through the call-in, Yuna's entrance and the next fights). Logs: `pl14` (fixed build):
+no `[PANELRUN]`, max |shown - real| 1183 (only while a spent-BRV HP attack leaves the panel until the 2.5 s reconcile); `pl1` (before): `[BRVDRIFT]` 23376 .. 78810 on side 0 from 46 s to the end of the run.
+Only logs, no screenshot: the dirty-bit / row analysis, the `pl15` switch overshoot (the wait for the roll was added after it; `pl17` did not switch panels again, so that wait is not
+exercised on screen), the desktop log's side 1 case (same mechanism, not re-run with the desktop build).
+**Not verified:** on the desktop / a device; Cecil's "0" flicker itself was not seen on the host (explained by the guard fighting the per-frame report, not reproduced after the fix either);
+the lock-on switch wait; an enemy-side call-in with the extra on the big panel (`pl15` had one at 40 s on side 1 and no error afterwards, but the panel showed the slot fighter).
+Known and left alone: after a HP attack that spends the attacker's BRV the panel keeps the old number for ~2.5 s (reconcile), and a break bonus of +1857 on a slot fighter reaches the
+panel ~1 s late (`pl17`).
+
+## "Bartz BRV broke multiple times quickly" (desktop 19 Nov): investigated, cause NOT found, no code change (tree ttfa; host-only)
+Log `desk_1119_bartzbrk.log` (call-in extra Bartz on the enemy side): broken at 128.48 s through `hitreact2_hook` (handler 0 -> 3), 12 hits during the break all took the
+"no new break" branch (BRV stayed 0, no `is broken: a hit took` line), refill (state 4) at 133.44 s. The log ends at ~134 s and has no HUDCH / CALLLOG output.
+Host reproduction (`E2NEAR=8 SETBRV=enemy2:9:5 SETBRV_HOLD=1`, Circle taps every 0.35 s, `AGESHOTS` every 0.25 s, `HUDCHLOG`, `CALLLOG=08AE1270`; `~/dissidia/tt/bb8`, `bb8_shots`):
+- one extra break (14.40 s): one "Bravery Break!" banner (shots 14.4-15.0 s), the break bonus (kind 3, +1885) once 1.1 s later; 6 hits during the break (15.7-16.8 s):
+  no new banner, no second kind 3 / kind 6 report for the extra, only the steal halves (kind 2 -> one-sided panel reports), BRV given back by `xbreak_guard`.
+  Retail slot break for comparison (`SETBRV=slotC`, `bb7`): state 3 at 19.03, bonus +1885 at ~20.2 s, refill (state 4) 2.1 s after the break.
+- A SECOND "Bravery Break!" banner 4 s after the first (18.4-19.0 s, `bb8_shots`) is the enemy SLOT fighter's own break (handler state 3 set by the 3320 reaction, a legitimate
+  break: the slot fighter had spent its BRV in an HP attack, state 1 at 17.23 s, and the next hit broke it). It plays on the screen while the big panel shows the extra, so it can read as
+  "the broken extra broke again". Not proven to be what the user saw (Bartz's panel could not be told apart from the slot fighter's in the log).
+- Handler states: 0/1/2 = the BRV cycle after an HP attack (spent, recovering), 3/4 = broken / refill; `FUN_08AE1270(handler, state, ...)`.
+Not reproduced: repeated break banners / bonuses from hits on a broken extra, on either side or friendly (only the enemy side with the human attacking was tried).
+Open leads for the next try: (1) log `[HUDCH]` (cap `PSPRECOMP_TAGTEAM_HUDCHLOG_CAP`) and `CALLLOG=08AE1270` on the desktop around a break; (2) the `[HOMING]` lines show the broken extra's script
+changing (560/561/701) at every hit while broken: if the user means "he plays his hit reaction each hit", that is retail's flinch (our skip of `FUN_08AE3320` does not stop it);
+(3) a break of the enemy slot fighter while the panel shows the extra (above). No regression run: no code was changed.
+
+## Online: pad link and tag lock-step (merge with main's comm_battle.cpp, 19 Nov)
+
+Main added its own online battle engine (`comm_battle.cpp`, multiplayer.md "Battles: our pad link"), which hooks the game's 1-on-1
+exchange FUN_0890D664 (and the watcher's FUN_0890DF58). Our older input-delay module (`netplay.cpp`) hooked the same function and
+overrode it. How the two coexist now:
+
+- **Plain (non-tag) battles** run on main's pad link exactly as on main. `netplay.cpp` no longer hooks FUN_0890D664 /
+  FUN_0890D214 / FUN_0890D524 (no input delay hack, no `[NETLS]`); it keeps only the state hash for the desync check and the state dumps.
+- **Tag Communications battles** run on `tagteam_net.cpp`, which replaces the dispatcher FUN_0890C5BC (the caller of the exchange)
+  on every machine of the group and never calls the game's exchange, so main's link (and the watcher hook) is not reached
+  in a tag battle (`[NETLINK] linked` never appears there). Which engine runs is decided per battle by `dissidia_tagteam_comms_battle()`, the same on all machines.
+- **One delay**: `psp_netplay_input_delay()` (1..8, default 2, `PSPRECOMP_NET_DELAY`, one Settings row "Network Delay"). The tag
+  lock-step takes the own input `delay` frames ahead as before (`seq > F + delay`).
+- **Sticks**: the tag slot pads are injected pads (`+0x50 == 1`), so `input.cpp` never turns them by the local camera (main's
+  rule), and the tag battle's input word is the game's 8-way word (no analogue, no view turn): identical on every copy. `fixed`
+  (default dead zone constants for injected sticks) now also applies while the tag lock-step runs.
+- Tested 19 Nov (rig `~/dissidia/mp_ttlock`, `full.sh`, LAN, headless): plain 1v1: `[NETLINK] linked`, 360 checks agreed in 3600
+  frames, 0 frames waited; tag 2 copies: `[TTLOCK] own lock-step`, call-ins, 2096 frames compared by NETSYNC, 0 mismatched, no NETLINK;
+  tag 4 copies (`r4.sh`): ~2500 frames compared on each copy, 0 mismatched.
+## Lock switch during a chase, chained chases, EX core pickup by extras (19 Nov, tree ttfa; host-only, PARTLY VERIFIED)
+- **Report 1 (desk_1119_chase.log, chases 221-229 s).** The four chained chases are retail: our code starts no chase except the forced test one (`chase_hook` only observes; `chase_pair_start` keeps the first pair on a chained start). At 229.0 s (chase state 8) the human's L press moved the cycle (cyc 0 -> 1, extraE); the controller loop kept writing the cycle target into the human's foe every frame while `chase_pair_step` held the chase pair (foe flip-flop during the chase), and at 229.22 s `chase_pair_step` put back the PRE-chase foe / lock target with `LOCK_SET` (which also leaves the chase partner in the lock block's +252 and can switch the lock on), so foe (extraE via the controller), lock block target (slotC) and cycle state disagreed afterwards. Whether that alone stops L working on the device is NOT proven (the log shows no L press after 229.2 s).
+- **Fix (`PSPRECOMP_TAGTEAM_NOCHASELOCKFIX=1` = old).** For pad-driven fighters of the pair: the controller loop skips them while the chase holds them; at the chase end the lock block gets its words back (+252, +276, +356 raw, mode via LOCK_MODE with `g_lock_bypass` so it is not taken as an L press), a lock switch made during the chase is kept (cycle state -> foe/target words, selector h1+28 = cycle), `[CHASEPAIR]` lines log the lock block before/after. Chained starts log the lock blocks (`chained chase start`).
+- **Tests added:** `FORCECHASE_AT=<s,s>` (chase at battle times), `FORCECHASE_HUMAN=1` (against the human's fighter), `CHASE_FAKELOCK=<frames>` (L press in the chase), `COREDBG=1` (EX cores: state words, distances, fighter word diffs around a state change). Host: forced chases against the human run, the lock block is restored (`+252 08D96EB0 -> 0`), chase ends cleanly. Forced chases put the human's lock block in mode 3, where retail ignores L, so a real L-in-chase was not reproduced; the fake press did not log a cycle step (unverified).
+- **Report 2 (extras pick up EX cores): NOT DONE.** Found: cores are a pool of 6 kind-6 objects (state +1364: 0 idle, 1 out, 2 taken; +1360 byte flag) that appear at fixed stage points about every 30-40 s; `FUN_08B40A50` = nearest core of the list at `*(0x08ABBDF8)+456` via `FUN_08AB7B7C`. `COREDBG` shows a core going 1 -> 2 at 39.7 s with all fighters 26-29 m away (so the host run needs a closer look: who takes it). The retail pickup test was not located.
+## Banter / call-in close-up from the front (19 Nov, tree ttcam; host-only, headless screenshots, nothing seen on the desktop / a device)
+User (desktop): "in the tag in banter, it will still often show the backs of the character rather than the front."
+- **Cause.** Two faults together. (1) The model is drawn with the actor's world matrix (+0x00, copied to +0x330: row 0 x, row 1 up, row 2 forward,
+  row 3 position), and the game rebuilds it every tick in `FUN_0883D074` from the actor's **forward vector +0x90** (x, y, z; the yaw word +0x9C is that
+  vector's 4th lane) and up vector +0xA0 (row 2 = +0x90, row 0 = up x row 2, row 1 = row 2 x row 0). `face_foe` wrote only the yaw word; nothing turns the
+  yaw into +0x90 while the match is paused, and a member spawned straight into the paused entrance still had the spawn's (0, 0, 1). Every banter and
+  call-in pose was played facing world +z, whatever the yaw (`[ENTRSHOT]` logs: yaw = toward the foe, matrix = identity, for all 8 entrants of a run).
+  Found with a MEM_WATCH on the matrix (`PSPRECOMP_ENTRCAM_WATCH=1`: writer `089A3868` called from `0883D074`). (2) The camera took the entrant's
+  facing from `*(actor+0x398) + 0x240 / +0x248`, which is not a facing at all: it read NaN (Vaan), (0.15, 3.14) (Tifa), (0, 0) (Ultimecia, then the
+  fallback toward the game's eye), (1, 0) (Squall). Front only when that junk happened to point near +z.
+- **Fix.** `tagteam.cpp model_face_yaw(A)` (called by `face_foe`: at the entrance start, again at the pose start) writes the forward vector +0x90 =
+  (sin yaw, 0, cos yaw) and the rotation rows of +0x00 / +0x330 at once; the game's own per-tick rebuild keeps it (checked: the matrix stays turned through
+  the pose, no per-tick write needed; `PSPRECOMP_ENTRCAM_HOLDTURN=1` would force it every tick, debug). `camera.cpp entr_frame` now puts the close-up
+  in front along row 2 of the matrix the model is drawn with (actor +0x350 / +0x358), read every frame. Old behaviour: `PSPRECOMP_TAGTEAM_NOMODELTURN=1`
+  (yaw word only) + `PSPRECOMP_ENTRCAM_OLDDIR=1` (camera from the +0x398 row); `_ENTRCAM_YAW=1` / `_ENTRCAM_FOE=1` still pick the yaw word / the foe.
+- **Debug aid.** `PSPRECOMP_ENTRCAM_SHOTS=<dir>`: screenshots of every banter / call-in pose at 0.6, 1.3, 2.1 s (`e<n>_<b|c>_<char>_<k>.tga`) and
+  `[ENTRSHOT]` lines (yaw, actor matrices, forward / up vectors, the foe's matrix, the first gmo bones; bones dumped to `e<n>_<k>.bin`).
+  Battery: `~/dissidia/tt/ttcam_tools/battery.sh TAG "reserve"` (`sp_cpu_walk.txt`, 140 s, `KOLIST` of 10 forced KOs with `_NAT`), montage
+  `~/dissidia/tt/ttcam_tools/montage.py <shots dir> <out.png> [k]`.
+- **Evidence** (host, GL, headless; middle shot of each pose judged by eye):
+  | Runs | Build / env | Entrances | Face visible (front / front three-quarter) |
+  |---|---|---|---|
+  | ecA, ecEo, ecFo, ecGo | old (`ecA` before the change; the others with `NOMODELTURN=1 ENTRCAM_OLDDIR=1`) | 32 | ~9 (Tifa, Bartz, CoD, Lightning, Tidus, Squall x4); the rest side or back views, Golbez's shot inside his cape |
+  | ecD, ecE, ecF, ecG | fixed | 32 | 32 |
+  | ecH, ecI, ecJ | fixed (ecJ = the final build, camera from the matrix row; ecD-ecI took the yaw word, the same direction once the model follows it) | 24 | 24 |
+  Characters in the fixed runs: Vaan, Terra (banters), Tifa, Yuna, Bartz, Vaan, Squall, Ultimecia, Onion Knight, Cloud of Darkness, Cecil, Golbez, Zidane,
+  Kuja, Tidus, Jecht, Prishe, Lightning, Kain, Laguna, Gabranth, Shantotto, Gilgamesh (call-ins; 23 characters, two stages). Montages (middle shot of every
+  pose): `~/dissidia/tt/ttcam_before_montage.png` (ecA, ecEo, ecFo, ecGo), `~/dissidia/tt/ttcam_after_montage.png` (ecD-ecG), `ttcam_after2_montage.png` (ecH-ecJ).
+- **Regression.** `tagteam_test.py --baseline`: RESULT: PASS (`~/dissidia/tt/ttcam_reg6`, build against the private generated folder `~/dissidia/work_tsgen`;
+  reg1-reg5 were run on a build against the shared output another session regenerated at 16:27 and died with ConnectionRefused / "the game exited", not this change).
+- **Not verified / open.** Desktop / device not seen. The two banters are always Vaan and Terra (the walk's parties), the other characters only as
+  call-ins (same pose 1100, same path). Poses that crouch or fly (Onion Knight, Zidane, Kain's start, Terra floating) leave part of the body under / over
+  the frame; that is the framing, not the facing. Assist-only / boss records (ids 23, 32, 33) not tried. Whether a retail pose that is meant to turn
+  the character is now held: the forward vector is set only at the entrance start and the pose start, the pose itself may still change it.
+
+## KO ledger: HP hits by extras (19 Nov; host-only)
+The tally booked every KO on Jecht although Terra (the CPU partner) dealt the last HP hit to Ultimecia (desktop `tt_logs/1119_white2.log`). `ledger_hp_hit` was only
+fed from `hpstep_hook`, which sees the slot fighters' HP attacks; an extra's damage module never goes through it. `ledger_step` now also books, every frame, a fighter
+whose HP dropped while an extra's registered hit is on it as hit by that extra (`PSPRECOMP_TAGTEAM_NOEXTRAHPLEDGER=1`: old). Not seen in a tally yet.
+
+## White screen after the tally (19 Nov, desktop, evidence)
+After a won match (teardown, menu overlay loaded) the screen went white again. While it was white: the debug socket's `S` capture of the game's render target was
+all white (255) and the GE frame counter did not move for 5 s (`I`): the game thread had stopped drawing, so it is not the desktop's presentation / post chain.
+gdb could not attach (ptrace_scope 1). Log `rp6logs/desk_1119_white2.log`. Open.
+Correction / more evidence (same day): the frozen game was still running (pid 1244694). Its game thread (tid 1244965) was in state R using a full core (utime +2083
+ticks in ~3 s): a busy loop in guest code, not a wait; the GE frame counter stood still. The last hang dump's host backtrace is the main loop
+(FUN_08933398 -> ... -> FUN_08883f9c), written before the spin. The desktop play script now sets PSPRECOMP_FUNC_TRACE=1 so the next hang dump lists the last guest
+functions (psp_dump_func_ring). Ledger fix and these notes are in the 17:23 build.
+- **EX cores for extras (19 Nov, later).** Retail: the core manager's update `FUN_08AC27DC(mgr)` walks a player list (container `*(mgr+36)`: +4 count, +8 array, 72-byte entries, entry +56 = fighter) and tests every core that is out (core state +16 == 2, entries of 224 bytes at `*(mgr+48)`; the core object's own +1364 state 0 idle / 1 appearing 0.4 s / 2 out) against the fighter's collision object (+1128, `FUN_0883EA64`, after `FUN_08AC30D0` allows the fighter); a touch runs `FUN_08AC1610` (core -> 5, `FUN_08AB6A80` stops the core object, so +1364 -> 0) and `FUN_08B33384(fighter, points)` (fighter +0x12A4 = 1, +0x10C8 = points). Only the two slot fighters are in the list, so extras walked through cores. Found with `COREDBG` and `MEM_WATCH` on a core's +1364 (writer ring ... `08AB6A80 08AC1610`). Fix (`corepick_hook` on `FUN_08AC27DC`; `PSPRECOMP_TAGTEAM_NOEXTRACORE=1` = old): after retail's pass every living started extra gets the same pass, with the list shown to the original as one entry (the entry of its side's slot fighter, +56 = the extra, count 1) and put back afterwards; order = extra index, no wall clock, no local-player id, so lock-step safe (all machines run the same hook on the same frame state). Test switch `COREWALK=slotH|slotC|extraE|extraP` (with `COREDBG=1`) puts the fighter on the first core that is out.
+  Host (`fa_c3` slotC: core 2 -> 0 in 0.03 s, fighter script 0x65 pickup, status+0x18 0 -> 1500 a frame later; `fa_c6`, `fa_c7_extraE`, `fa_c7_extraP`: extraE / extraP put on a core: core 2 -> 0, same animation, `[EXCORE] ... took a core` lines). One earlier run (`fa_c5`, fix present) left the core at (-24,8.5,-12) out for 58 s with extraE put on it: unexplained (the same fighter took the next cores), so the teleport test is position dependent. A/B with `NOEXTRACORE=1`: `fa_c9` (extraP put on a core at (-11,23.5,0) from 60.9 s) left it out until the run ended at 98 s; `fa_c8` (extraE on the (-24,8.5,-12) core) also failed, so that spot fails with and without the fix. Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttfa_reg3`). Not checked: extras walking onto a core on their own (AI), the HUD gauge on screen (only slot fighters have one), EX burst use by an extra with the gained points.
+## Friendly fire on a slot fighter, zero target word after a rebuild, far targets kept (19 Nov, tree ttcam; host-only)
+Desktop logs `rp6logs/desk_1119_terrahit_holy.log`, `desk_1119_vaanmiss.log`, `desk_1119_ulti.log`.
+- **Terra hit the player, the break played on the enemy.** At 326-328 s extraP Terra hit the human slotH ten times (`[FRIENDLY]`). The damage step (the extra's
+  own module, foe swapped to the fighter hit) booked the BRV on the human, but the hit REACTION (`FUN_08AE3320`) runs on the attacker module's opponent handler,
+  which is the ENEMY slot fighter's (slotC Bartz): his BRV state machine took the hit (break animation / banner on the enemy, nothing lost). The 18 Nov fix
+  (`booked_extra_victim`) only covered a mate that is an EXTRA. Now `booked_friendly_slot_handler()` sends a same-side hit on a SLOT fighter to that slot
+  fighter's own damage handler (`g_slot_hdl`, found in its module by `afd424_hook` and seen in the reactions). The extra's own module step spends its `g_hits`
+  entry before the retail call, so the step's attacker / victim are kept in `g_xstep_att / g_xstep_vic` for the reaction hooks (also used by `booked_extra_victim`:
+  extra hitting extra mate). The extra's steal report (kind 2) on its slot mate now comes off the mate's panel (it was dropped and only `PANELFIX` corrected it
+  2.5 s later). Cases: extra -> slot mate (new), slot -> extra mate and extra -> extra mate (18 Nov path, + step victim), both sides alike.
+  `PSPRECOMP_TAGTEAM_NOFRIENDLYSLOT=1`: old. `[FRIENDLY] ... reaction of X's hit on its team mate Y in the mate's own handler` logs it.
+- **The break bonus went to the wrong fighter.** `FUN_08AE4310(handler, kind)` books the stage BRV bonus of a break as pending BRV on the reacting handler's
+  `+20` (its retail opponent handler; `FUN_08AE3008` applies it a moment later, found with a BRV-word watch, ring `08AE9AE0 08AE3C70 08835798 08AE4310 ...
+  08AE3008`). For every redirected reaction that is the victim's SLOT opponent: Terra breaking the human gave the bonus to the enemy slot fighter (host
+  `ff4`: slotC +1952), retail's mis-routed reaction gave it to the victim himself (`ff4o`: slotH +1916), and an extra breaking an enemy extra gave it to
+  its own slot mate. `react_with_opponent()` shows the attacker's own handler (`g_extra_hdl` / `g_slot_hdl`) at `+20` during the redirected reaction
+  (`[BONUS]` log). `PSPRECOMP_TAGTEAM_NOBONUSFIX=1`: old.
+- **Test harness:** `PSPRECOMP_TAGTEAM_HPM_FRIENDLY=1` (with `_HPMATRIX=10000 _CLONES=1 _HPM_WRONGFOE=1 _HPM_VBRV0=1`) runs the matrix on same-side pairs
+  (extraP->slotH, slotH->extraP, extraE->slotC, slotC->extraE); `_HPM_WATCHOTHER=<0..3>` watches that fighter's BRV word; `_HITREACTLOG=1` logs every reaction
+  (handler, step attacker / victim, recorded hits). The harness parks the other fighters in the down list, so `all_fighters` leaves the attacker out: inside an
+  extra's step the step's own attacker is used directly.
+- **Evidence (host, headless, GL, quick battle Squall vs Lightning clones).** `~/dissidia/tt/ff4o_friendly_break_before.png` (`NOFRIENDLYSLOT=1 NOBONUSFIX`-era
+  build `ff4o`, 57.0-58.8 s, extraP breaks the human): "Bravery Break!" banner, the BREAK animation on the ENEMY's panel (Lightning, right), the 1916 bonus
+  flying to the human. `~/dissidia/tt/ff5_friendly_break_after.png` (`ff5`): BREAK on the human's own panel (left); log: `[FRIENDLY] reaction ... in the mate's
+  own handler`, `[BONUS] ... -> the attacker's 08DEB8B0 (extraP)`, `[HPM2] slotH brv 3000->243, extraP 0->5004`, slotC unchanged. Also seen in `ff5`:
+  extraE->slotC (slotC broken, extraE +bonus), slotC->extraE and slotH->extraP (bonus to the slot attacker, the other side untouched).
+- **Zero target word (Ultimecia "attacks the opposite direction", Bartz's Holy not tracking).** `[HOMING]` lines of the enemy slot fighter show
+  `tgt 00000000` (+0x2FC) with foe and lock target = Terra after EVERY slot rebuild of that slot (Bartz 295-358 s, Vaan 383-421 s, Ultimecia 557-601+ s in
+  `desk_1119_ulti.log`; Bartz 324-358 s in the terrahit log), until some retail lock change happened to run the target refresh `FUN_08B2F17C`. Some readers
+  of +0x2FC fall back to the foe (`FUN_08B2EB34`: +0x2FC, else +0x300), the moves that do not went in a default direction. `aim_fix()` now fills a zero
+  +0x2FC of a CPU fighter with its lock target (else its foe) when that is a living enemy: through the lock block (`LOCK_SET`, the retail refresh), then
+  directly if still 0 (`[TGTFILL]`). A player's fighter gets it only when his lock block names a living enemy (his free state is left alone).
+  `PSPRECOMP_TAGTEAM_NOTGTFILL=1`: off. Inputs: actor words and the lock block only (lock-step safe).
+- **Vaan stayed on far-away Terra while the human stood next to him** (`desk_1119_vaanmiss.log`, 433-545 s, 9-68 m). No `[AITARGET]` line after 424 s:
+  Terra had taken 8020 damage (HP < 25 %), so `vulnerable(cur)` made `ai_target` KEEP her at any distance, and CLOSER never ran. A kept (broken / helped)
+  target now only counts while it is not far: far = more than `PSPRECOMP_TAGTEAM_AI_FAR` m (default 15) and beyond 1.5x + 3 m of the nearest enemy; then
+  CLOSER switches to the nearest (log `closer (far target)`, also past the crowd rule). Hysteresis: CLOSER's 70 % / 2 m margins, the 4 s per-fighter wait, and
+  BROKEN / HELP only pick enemies within 1.5x + 3 m of the nearest, so a far broken enemy does not pull him back. `PSPRECOMP_TAGTEAM_AI_KEEPFAR=1`: old.
+- **Evidence for the target word (host, headless, llvmpipe).** Party walk with `KOLIST=cpu:20 KOLIST_NAT=1` (enemy slot rebuilt 31 -> 30 at ~21 s):
+  `hm_old` (`NOTGTFILL=1`) 15 attack starts of the rebuilt Vaan with `tgt 00000000` (21.7-45.8 s), `hm_new` 0, one `[TGTFILL]` at 21.67 s. Screens
+  (`hm2o_shots` / `hm2n_shots`, 21-32 s): old, Vaan stands behind the human without landing anything; new, his attacks connect (damage numbers on the human).
+  Toward an EXTRA: quick battle, `CLONES=1 AI_TARGET=0 DBG_AIMEXTRA=18 DBG_ZEROTGT=18.5` (debug: the CPU slot fighter's foe / lock = the human's partner, then
+  its +0x2FC zeroed once): `[TGTFILL]` restores it in the same frame and Lightning's thunder strikes land on the far partner, not the human in front
+  (`~/dissidia/tt/hb_new_tgtfill_after.png`, 22.0 / 22.5 s). Without a KO (`hc_old` with `NOTGTFILL=17` vs `hc_new`, same debug setup): old, retail left
+  +0x2FC at 0 for 25 s (18.5 -> 43.2 s) and Lightning, whose foe / lock was the partner, hit the HUMAN 6 times (`[ATTR] slotC: foe extraP -> the fighter it
+  hit slotH`, his BRV 1291 -> 1200; `~/dissidia/tt/hc_zero_tgt_before.png`); new, her Lightning Strike lands on the partner (HP damage 1311 on extraP at
+  19.6 s, the human untouched; `~/dissidia/tt/hc_zero_tgt_after.png`). `PSPRECOMP_TAGTEAM_NOTGTFILL=<s>` (s > 0) turns the fill off only from that battle
+  age (test aid).
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ffreg6`; run with `--work ~/dissidia/work_ttcamx`, the same build under another process name:
+  another session was killing every process named `psprecomp_runtime` about once a minute on this host on 19 Nov ~17:30-17:45).
+- **Not verified:** Bartz's Holy itself (no run had Bartz as a CPU slot fighter: the `RESERVE` override did not rebuild into Bartz, a mate took the slot);
+  the far-target CLOSER switch (logic only, no forced run); the desktop / a device. Readers of +0x2FC other than `FUN_08B2EB34` were not all read, so a move
+  that aims by something else than +0x2FC / +0x300 would still go astray.
+
+## White screen after a won tag battle: host repro attempt (19 Nov, tree ttfa; INCONCLUSIVE, no fix)
+- Host repro with `sp_cpu_walk.txt`, `RESERVE=24,11,15,22;26,9,30,16`, `KOLIST=slot1:15,...,slot1:120` (+`KOLIST_NAT=1`, `FUNC_TRACE=1`), `BT_GPU=1` (3 members per side; the ledger had 6 falls): right after `booked; tally rows written` (before the teardown) the game went white
+  (`S` all 255), GE frame counter stood still, game thread 100% CPU (R). The shared func ring only listed the SAS audio thread loop (`FUN_08991D60`: ...`FUN_089A5244` = sceSasGetEndFlag wrapper, `FUN_08991000`, `FUN_08991158`)
+  = stale (the spinning game thread entered no guest function; the audio thread waits for the baton, preemption is off by default). So the loop is inside one guest function or HLE-only calls; PC unknown (no ptrace/perf/core here).
+- **Caveat:** that build had the PR #103 recompiler gap: the logs have `[OVL] resolve 0x08A5B3D0 (id 1) -> MISSING` (about 10 battle-overlay functions, e.g. 0x08AEED80, 0x089F4FB8), so the hang may be that artifact, not the user's bug. Needs a re-run on a build with the `work_tsgen3` overlays.
+- Tooling: `hang_watch` (`PSPRECOMP_TAGTEAM_HANGDUMP=1`) now repeats its backtrace dump every 4 s (max 8) instead of once; resolve addresses with `nm psprecomp_runtime` (PIE offsets). Drivers in `~/dissidia/tt/ttfa_tools/` (`wd2.py` runs the battle with FF, presses cross, reports a hang and leaves the game alive; `dbg.py`, `heap.py` read heaps over the debug socket).
+
+## Assist On / Off instead of Round-Robin (19 Nov, tree ttlock; host-only)
+User wish: no Round-Robin; Square toggles assists; with assists off an assist call teleports the caller's tag partner to where the assist would stand.
+- **Setup screen** (`tagteam_menu.cpp sp_draw`): on the single-player Tournament list Square no longer reaches the screen (`dissidia_tagteam_menu_pad` masks it for
+  40 polls after the last screen tick, so it never leaks into a battle), so "Swap format" / Round-Robin cannot be set. Square toggles `g_sp_assist_on`
+  (default On, per program run, not saved); the bar shows a Square key + "Assist: On/Off" left of the game's hints (x 334). `PSPRECOMP_TAGTEAM_ASSISTTOGGLE=0` = old (Square = Swap format).
+  **Not seen on screen**: the setup-screen walks in tests/replays no longer stop on the screen on this tree (they run into a battle), so the hint placement is
+  unverified, and the game's own "Swap format" hint text is still drawn (not covered yet: needs the bar colour from a screenshot).
+- **Battle** (`actl_hook`, hooks the assist controller `FUN_08B031AC`, arg = controller `ctl`): per side k a block at `ctl + 8 + 24k`: word 0 is -1 when idle/running and
+  **0 for the one frame a new call is pending** (byte +4 = kind, seen 1; phases/timers in words 3..5 while the assist is out). With Off the hook writes -1 there before the
+  original runs, so the assist never starts (no script 240, no voice, no model). The master is `*(0x089D6A10)+56+4k`. Then (`assist_off_move`) the same side's started, living
+  extra is moved with PLACE to master + 3.06 m toward the master's foe + 3.5 m sideways (fit to three retail calls, `[ACTLPOS]`), gets the master's foe as +0x300 / +0x2FC / lock
+  target, turns to it (`face_foe`), and the master's gauge (status +0x18) is set to 0. Its own AI then fights. Only game state is read (no clock, no bs+84): lock-step safe.
+  No standing partner (or no foe): the call is cancelled and nothing happens (assists are Off, no retail fallback). Applies to both sides' slot fighters (also the CPU's calls).
+  Log `[ASSISTOFF]`, `[TELEPORT] assist off`. Only while `g_nextra > 0`, not in ad-hoc sessions, after 2 s of battle.
+- **Env**: `PSPRECOMP_TAGTEAM_ASSIST=0/1` forces Off/On; test helpers `PSPRECOMP_TTLOCK_FORCECALL=<side>:<s>[:<s>..]` (starts a call by writing the request word), `_CTLLOG`, `_CTLPOS`.
+- **Evidence** (`~/dissidia/tt/ao1`, `ao2`: ASSIST=0 + FORCECALL on side 1 / 0 at 14 s and 24 s, clone partners): each call logs `assist call cancelled, partner .. moved to (..)`, a
+  `[TELEPORT]` line, no `[ACTLPOS]` line and no assist script 240 in either run (with On, `cl9` shows the assist at 240 with the same forced call). Regression
+  `tagteam_test.py --baseline` PASS: `~/dissidia/tt/ttlock_assist_reg3`, `ttlock_assist_reg4` (final build).
+- **Unverified**: a real pad call (R+Circle etc.; headless pads never started a human call, as before), the partner's visible attack after landing (it only gets the foe), a
+  screenshot of the moved partner, the setup-screen hint, and who writes the request word (the requester function was not found; the controller's entry is the hook point).
+### Assist Off, round 2 (19 Nov, ttlock): gauge, appear, floor check, the partner attacks
+- **Gauge**: retail's controller takes **5000 per bar when it starts the call** (forced retail call, `PSPRECOMP_TTLOCK_AGAUGELOG=1`: side 0 `9517 -> 4517`, kind 1). Assist Off cancels that start, so
+  `assist_off_move` now subtracts `5000 * (kind >= 2 ? 2 : 1)` from status +0x1C (float, clamped at 0). The first build zeroed +0x18 = the EX gauge (wrong word), hence "no bar used". Kind 2 (R+Square, two bars) is an assumption: only kind 1 was seen.
+- **Spot check**: the retail offset (master + 3.06 m toward the foe + 3.5 m aside) is used only where a strict ground sample is within 1.5 m; else the offset is shortened (x0.75 / .5 / .25), else the nearest sample within 12 m,
+  else the master's own floor, else the partner stays (`[ASSISTOFF] spot check: ..`). `PSPRECOMP_TTLOCK_NOSPOTCHECK=1` = old. (Host-tested: only that valid spots are chosen; the off-map case itself was not reproduced.)
+- **Appear + attack (CPU partner only)**: START_ACTION 240 (the assist's appear script, AI gated for ~1 s = 62 battle frames; deterministic, battle age only) and the own entrance light (`tagteam_fx_entrance`, also for a human partner;
+  `_NOAPPEARFX=1` / `_NOAPPEAR=1` off). Then `launch_attack`: like the retail assist (ACTLPOS: 5 m away at the appear, 0.9 m from the foe when phase 1 starts) the partner is PLACEd 1.5 m (1.0 / 0.5) from the foe on the foe's floor
+  height, faces it and gets START_ACTION **10000** (the assist actors' own attack script, 10000 -> 10001 -> 10002 in retail calls); AI gate lifted. No placement (partner attacks where it stands) when the foe is airborne / no floor.
+  What did NOT work: the virtual pad (`pad_set_state FUN_08AB387C(pad, bit, 1)`; BRV attack = bit 10, Circle = bit 13, held 6 frames): the AI rewrites the pad, no script started (`ATKMODE=pad` keeps it for tests); START_ACTION 100 / 101 / 10008 / 700 from 5-29 m
+  never connected (they do not home). Env: `_ASSISTATK=0` only moves (round 1 behaviour), `_ATKID=<id>`, `_ATKGAP=<m>` and `_STILLFOE=<s>` are test aids.
+- **Evidence** (`~/dissidia/tt/ttl_b1`, side 0 forced call at 14 s, enemies still 6 s): partner appears at 240, at 15.03 s put 1.5 m from the foe, 10000 starts, `[ASSISTATK] hit-victim <foe>` at 15.27 s and the foe's BRV 1099 -> 1063; later its AI goes on
+  (400, 10008 .. hits again). Gauge `ttl_a1`: 9517 -> 4517. Regression `tagteam_test.py --baseline` PASS (`~/dissidia/tt/ttl_reg1`).
+- **Unverified**: the appear light is not clearly visible in the headless shots (`ttl_s1/montage.png`); the game's own assist appear effect / sound was not reached; a hit from an enemy-side call (b2: the foe was not stilled, the partner was hit during the appear and `launch_attack` found no floor under the foe);
+  air foes; Lightning's 10000 at distance (ran into script 102 at once from 3.7 m); real pad calls; kind 2 cost. NOT DONE: the setup-screen "Assists: ON/OFF" label over the format text and the player name / CPU level per row (the walks do not stop on that screen; no screenshots).
+## Extras' EX and assist gauges; gauge bars on the small panels (19 Nov, tree ttcam; host-only, headless screenshots, nothing seen on a device)
+**Which word is which (corrects older notes here and in testing.md, which called status +0x18 the assist gauge):** status (`actor+0x52C`) **+0x18 = EX gauge**
+(0..10000; the HUD's vertical tube at the screen edge, gold when full; EX Mode drains it) and **+0x1C = assist gauge** (0..10000; the two chevrons under the HP bar,
+5000 each: the retail HUD `FUN_089EE014` reads +0x1C with thresholds 5000 / 10000). EX Mode flag: actor +0x5B2 bit 2. Proven by the writers (memory watch,
+`PSPRECOMP_TAGTEAM_EXWATCH=<role>:<s>[:<hex off>]`) and screenshots.
+- **Retail path.** The battle controller `FUN_08886C88(C)` (EBOOT, once per frame) runs, per side k, the modules C+4k and these handlers of the slot fighter:
+  C+8 `FUN_08AECE14`, C+16 `FUN_08AEFBBC`, C+24 damage handler (`08AE090C/09C4/0AB0`), **C+32 the EX gauge handler** (vt 08AECBA8, 16 bytes: next, vt, owner,
+  in-EX-Mode word) via `FUN_08AEBF10(handler, module)`: `FUN_08AEC338` = gain (EX core points +0x10C8 while the flag byte +0x12A4 is set, EX force orbs counted
+  in +0x10CA, both through tables), `FUN_08AEC1EC` adds it (clamped), `FUN_08AEC000` in EX Mode drains (rate from the fighter's abilities); **C+40 the assist
+  gauge machine** (vt 08AEED18, 0x30 bytes, +8 state / +C previous state) `FUN_08AED330(machine, module)`, gains in `FUN_08AEE124` per move used, gated by
+  `FUN_08AEDA5C`, which returns 0 when the fighter has no assist actor (+0x1108). The orb / core manager's player list (72-byte entries, +56 = fighter, only the two
+  slot fighters) delivers orbs (`FUN_08ABF104` -> `FUN_08B333A4`) and clears the core flag / orb counter every frame (`FUN_08AC04F8`).
+- **Fix (`xgauge_step`, tagteam.cpp).** `bctl_hook` keeps C. Each extra gets copies of its slot fighter's EX handler (owner = the extra) and assist machine (state 0,
+  previous -1 so state 0's enter runs), linked behind its damage-handler copy in its own module copy (so its hit events reach them), and both run once per battle
+  frame from its slot's module step (battle state only; same on every machine). After the tick the core flag and orb counter are cleared as `FUN_08AC04F8` does.
+  `PSPRECOMP_TAGTEAM_NOXGAUGE=1` = old (no gauges for extras). framerate.cpp's `gauge_sm_hook` key table grew to 12 machines.
+- **EX force from the extras' hits: APPROXIMATION.** Extras have no entry in the orb manager's list, so retail's orbs never reach them. Each hit an extra books in its
+  module step adds `PSPRECOMP_TAGTEAM_XORBS` orbs (default 5) to its +0x10CA; the retail tick converts them (30 EX per orb at the start). Not calibrated against
+  retail per move. The real fix is an orb-list entry per extra (open).
+- **Assist gauges of extras** run the retail machine, but extras have no assist actor (+0x1108 = 0), so retail never fills them; they keep their record's start value
+  (e.g. 6000 / 3000 seen) and show dim.
+- **HUD** (tagteam_hud.cpp `panel`, `ex_tube`, `assist_chevrons`; data from `hud_gauges` = the same words for the fighter shown on the small panel): the panel is 31
+  high (rows 34 apart, from y 142 up), the EX tube (3.4 wide, retail purple) sits outside the panel's outer edge, gold with a glow when full plus a gold "EX"
+  under the HP number, pulsing magenta with "EX MODE" in EX Mode; the assist gauge is two slanted segments under the HP bar (dark red to orange, a full level
+  brightens; dim without an assist). `PSPRECOMP_TAGTEAM_HUDGAUGES=0` = old panel.
+- **Test aids:** `PSPRECOMP_TAGTEAM_GAUGESET=<role>:<s>:<ex>:<assist>,...` (set gauges once; -1 = leave), `XGAUGELOG=1` (`[XGAUGE]` changes, tick dumps every 10 s),
+  `EXLOG=1` (all fighters once a second), `EXTICKLOG=1` (callers of the EX tick), `BCTLDUMP=1` (controller words), `ORBWATCH=<s>:<entry>:<hex off>`.
+- **Results (host, headless, GL, `sp_cpu_walk.txt`, ~/dissidia/tt/exg):** before (x1): extras' EX 0 all battle. After: extras' EX rises from hits and cores (x4,
+  orbs 2/hit: extraP 0 -> 1560, extraE 0 -> 2112 incl. a core +1056 at 90 s; x2: `extraE EX core points applied: EX 0 -> 2607`); CPU extras enter EX Mode on
+  their own when full and the retail tick drains it (x7 with GAUGESET: Terra (partner) EX Mode 20 -> 42 s, 10000 -> 0; Vaan (enemy) full 24 -> 53 s, EX Mode
+  53 -> 76 s, 10000 -> 0; x6: Vaan EX Mode at 40.7 s). Screenshots `~/dissidia/tt/exg/xgauge_montage.png` (18 / 30 / 40 / 60 s), `x7_shots/`. Regression
+  `tagteam_test.py --baseline` PASS (`~/dissidia/tt/exg/reg1`).
+- **Not done / not verified:** a natural EX Burst by an extra (none happened in the runs); retail orbs for extras (approximation above); assist gauges that fill
+  (needs an assist actor for members); x5 once showed the enemy extra's EX set to 10000 back at 0 a second later (not reproduced in x6 / x7, cause unknown);
+  multiplayer lock-step not run; nothing on the desktop / a device.
+
+## Single player after a visit to Communications Mode (19 Nov)
+The CPU could unpause a single-player tag battle again (desktop). tagteam.cpp took `psp_adhoc_connected()` (the game has joined an ad-hoc group at some point and
+not left it) as "this is a multiplayer battle": after the user had been in the online lobby, single-player battles ran with the pause-owner fix off, the
+group plan (comms_battle via g_snap_valid), no CPU rows, etc. All 13 uses in tagteam.cpp now use `psp_adhoc_in_session()` (other members in our group).
+Host regression passes; a multiplayer tag battle was NOT re-run with the rigs after this change.
+## "Cecil and Terra stopped moving" (desktop 19 Nov, desk_1119_stopped.log): the first pair of a chained chase kept the chase's speed factor (tree ttcam; host-only)
+- **What the log shows.** Terra (extraP, CPU partner) started a move every 1-2 s until 47.85 s, then none for 13 s; Cecil (slotC) none from 44.98 to 51.5 s. Both were
+  the pair of the chase that started at 45.62 s (Cecil chases Terra, Terra in scripts 700 / 701 / 702); 0.26 s later Tifa (extraE) started a **chained chase** on the
+  human (slotH) on the same controller (ctl +28 / +32 rewritten). Our recovery (`chase_interrupt_step`) then gave Cecil's and Terra's lock blocks back (+281 off,
+  +900 0x6000 off), but nothing else. The extras' gauge code (xgauge_step) is NOT involved: Cecil is a slot fighter (no copies), and the stuck pair is exactly the chase pair.
+- **Cause (read in the generated code).** The chase start `FUN_08AB6348` sets on BOTH fighters actor +1457 (0x5B1) bit 0x80 and +900 0x2000 / 0x4000; retail's end
+  `FUN_08AB564C` (only for the pair in ctl +28 / +32, i.e. the NEW pair of a chained start) clears, per fighter: lock block (`FUN_08B3AF54`), +900 bit 0x8000 and
+  0x2000 / 0x4000, **+1336 = 0**, **+1457 bit 0x80**, and calls **`FUN_08B34CB0(actor, 0, f12 = 1.0)`**, which writes speed factor 0 (actor +0x1250 + 4k, k = 0..5;
+  the product of the six is applied through vtable +424). The first pair kept all of that: a fighter left with the in-chase bit stands still (its AI starts no move).
+- **Fix (`chase_interrupt_step` recovery, `PSPRECOMP_TAGTEAM_NOCHASEFULLREC=1` = old).** A fighter that was in a chase and is no longer in the running one is recovered
+  when its lock block still has +281 OR its +1457 bit 0x80 is still set, and gets the rest of retail's per-fighter end: +1457 &= 0x7F, +900 &= ~0x8000, +1336 = 0,
+  `FUN_08B34CB0(actor, 0, 1.0)`. Log `[CHASE]   chase state of X cleared: +1457 .. +900 .. +1336 .. speed factor 0 (+0x1250) v -> 1`. Battle state only (lock-step safe).
+- **Test aids.** `PSPRECOMP_TAGTEAM_FORCECHAIN=<s>`: at battle time s, while a chase runs, a second chase by two fighters outside it is started on the same controller
+  (with `FORCECHASE=cpu FORCECHASE_AT=<s0>` for the first one). `PSPRECOMP_TAGTEAM_CHASECHK=1`: every 2 s each fighter's script, +1457 bit and speed factor 0.
+- **Reproduced and fixed on the host** (headless GL, `sp_cpu_walk.txt`, Jecht + Terra (CPU partner) vs Lightning + Vaan, `FORCECHASE=cpu FORCECHASE_AT=20 FORCECHAIN=20.4
+  CHASECHK=1`: Lightning chases Terra, 0.4 s later Jecht chases Vaan on the same controller; move starts (`[HOMING]`) between 20 and 45 s):
+  | run | xgauge | recovery | Terra (extraP) | Lightning (slotC) |
+  |---|---|---|---|---|
+  | `~/dissidia/tt/exg/ch_old` | on | old | 20.1 21.8 23.0, then nothing until 39.8 (+1457 bit set, script 1) | none 20 -> 39.8 (script 800, bit set) |
+  | `ch_old_noxg` | **off** (`NOXGAUGE=1`) | old | 20.9 22.4, then nothing until 45 | none 20 -> 45 |
+  | `ch_fix` | on | new | 12 move starts (every 1-2 s) | 13 move starts |
+  So the freeze needs no gauge code (it happens with `NOXGAUGE=1`); with the fix both keep fighting (`[CHASE]   chase state of ... cleared: +1457 80 ...` at 20.40 s,
+  bits 0 afterwards in `[CHASECHK]`). The speed factor read 1.0 in these runs (the chase does not change factor 0 here; the bit is what stopped them).
+  Regression `tagteam_test.py --baseline`: RESULT: PASS (`~/dissidia/tt/exg/reg_chase`). Not seen on the desktop / a device; a NATURAL chained chase was not reproduced on the host.
+## Own assists for extras: research (19 Nov, tree ttcam; implemented in the next section, tree ttfa)
+Everything below is read from the generated code (`work_tsgen3/output/generated`, `overlays/battle/generated`) or seen in host logs (`~/dissidia/tt/exg/ab0`, `ab1`).
+- **Retail creates the assists in `FUN_08888354(bs)`** (EBOOT), for k = 0, 1: id = bs+2032+4k (the assist's objentry / file id, < 0 = none; loaded at the loading
+  screen by `FUN_0888C4C8` with `LOAD_FILE_GROUP(id, FUN_088908E0(), 0)`, which returns the id written back), row = `FUN_088470B8(id)` (char = row[6], costume row[7]),
+  charrec = `FUN_088B3958(row[6])`; mem = alloc(0x12D0); **`FUN_08A61C3C(mem, FUN_08872B48(0), row, k + 2)`** = `FIGHTER_CTOR(mem, a1, row, k + 2, 1)` then vtable
+  0x08A61CF8 (the assist is a fighter subclass; side argument k+2 = camera manager slot 2 / 3, so the ctor would destroy the lock block in that slot: needs
+  `camslot_hide` as for extras); a 1912-byte init record on the stack: `FUN_088CB9E8(buf)`, `FUN_088CBA10(buf)`, `FUN_088CBA54(buf, char)`, buf[1] = level byte of
+  REC_BASE + 0x1060k + 1, `FUN_088BCA50(rdh(charrec + 4))` -> if non-zero `FUN_088BC17C(it, buf + 16)`, buf + 16 + 1892 = row[7]; vtable +256 init(mem + off, buf, 0);
+  `SET_FOE(mem, the other slot)`; +896 &= ~2; `LOCK_MODE(lb, 1, 0)`; `TARGET_REFRESH(mem)`; `START_ACTION(mem + 304, 1, 0)` (f12 = f13 = 0); `CPU_MODE(mem, 3)`;
+  `FUN_08A64100(brain, 0)`; vtable +352; **mem+0x1108 = master, master+0x1108 = mem, bs+64+4k = mem**.
+- **Which assist a member has.** Side record +3902 (half) = assist objentry id, +4186 (byte, signed) = assist char (< 0 none), +4187 = costume; the id is
+  `FUN_088FB934(char, costume, 1)` (`FUN_088F98E0`). The CPU builder `FUN_088FA2AC` (our `run_cpu_record` / `make_matchup_record`) fills them, so a CPU member's scratch
+  record already carries his assist. A player's member: the per-character struct `FUN_088BBD8C(char)` byte +35 (low 6 bits = assist char, 0 = none; high 2 bits
+  = costume), as `FUN_088F9F88` / `FUN_088FA11C` copy it into the side record (inferred, not checked at run time).
+- **The assist manager** (`*(0x089D...)`, object 0x09AEDC50 on the host, 0x60 bytes, init `FUN_08B01558`): +0 byte, +4 LCG seed (deterministic), per side k a 24-byte
+  call block at +8+24k (word 0: -1 idle, 0 = new request, 1..7 phases; byte +4 = call kind 1 / 2; floats), a 12-byte record at +56+12k and 8 bytes at +80+8k. Update
+  `FUN_08B01B74` -> `FUN_08B0165C(m)`: `08B01EE4, 08B0433C, 08B02BF8, 08B031AC (the controller), 08B01C14, 08B01CEC (request: reads the master's +0x5B6 bits 1 / 2 and
+  writes the block), 08B0203C, 08B0452C, 08B02164, 08B04870, 08B02228`; every step loops k = 0..1 over the master `bs+56+4k` and skips k when that word is 0.
+  `FUN_08B01924(m)` (from a vtable, every frame) sets master +0x12AC = "may call now" (`FUN_08B02784`: no EX Burst, battle state, the block idle ...).
+- **Who calls.** The control function `FUN_08B3526C` (pad or the CPU brain's virtual pad, every fighter) checks `FUN_08B3418C` (+0x12AC set and status +0x1C >= 5000)
+  / `FUN_08B341E8` (>= 10000) and the R+Circle / R+Square input (`FUN_08B321F4` / `FUN_08B322B8`) and sets **actor +0x5B6 bit 1 / bit 2**; `FUN_08B01CEC` turns that
+  into the request. The CPU AI also reads +0x12AC (callers `FUN_08A6DD08`, `FUN_08A6DFD4`, `FUN_08A7EF14`, `FUN_08AA23F8`). MEM_WATCH on the side 1 block word
+  (run ab1) confirms: written to 0 inside the manager update, before `FUN_08B031AC`.
+- **Gauge gate** `FUN_08AEDA5C(machine, module, ..)`: 0 when the module owner's +0x1108 is 0 (or an EX Burst runs, or the owner / its foe has +0x5B6 bit 0x10);
+  so the extras' assist machine copies (xgauge_step) fill as soon as the extra has an assist actor.
+- **Plan (not built):** (1) note each member's assist when his record is made (`spawn_fighter` / `rebuild_begin` after `record_for`); (2) spawn the assist actor
+  for the extra lazily (first time it stands, battle > 4 s) as `FUN_08888354` does, side argument side+2 with that camera slot hidden and restored, the slot /
+  pair / global fighter array words put back; share an assist file group that is already loaded (FILE_FIND on the id), load one only when the model pool /
+  effect pool keep room for the next member (else fall back to the side's retail assist character); (3) per extra a copy of the manager (0x60 bytes, init
+  `FUN_08B01558`, seed shared) and, after retail's update, `FUN_08B01924(copy)` + `FUN_08B0165C(copy)` with bs+56+4k = the extra and the other slot word 0 for
+  the call; (4) the extra's module step books its assist's hits (assist +0x380 0x200, +0x300 = the victim) with +0x1108 kept; (5) `assist_aim_follow` for the
+  extras' assists; (6) Assist Off = no assists for extras; (7) release: destroy the assist with its body's rebuild and unload its file group with the leftovers.
+  Probe helper added: `dissidia_model_pool_free()` (hooks_models.cpp).
+
+## Game freeze = a corrupted guest heap: the allocator's top-down bug (portraits), a rebuild that freed the slot fighter's lock block, a stale lock-block undo (19 Nov, tree ttcam; host-only)
+User freeze (desktop, `rp6logs/desk_1119_freeze.log` + `.bin`): game thread 100 %, GE counter stopped, hang dumps every 4 s: `FUN_0885C6CC` (the game heap allocator)
+<- `heap_alloc_hook` <- `call` <- `hudref_hook` -> `portrait_for` (a new character on the big panel: the human locked onto Bartz) <- `ovl_battle_FUN_089de360`;
+`last heap allocation: heap 099BA640 size 4520` (= 17696, a portrait .gim) and the chain `[#10 099C6138+4580 prev 099C6138 next 099C6138]` (a block linked to itself).
+- **Heap 099BA640 = "MENU MANAGER"** (`FUN_0885C40C` name argument, 0x63C00 bytes, made by `088CE9F8`; the heap of the 2D sprite manager `*(0x089D7830)`, +8/+4).
+  The heap object: +0 base, +4 end (also the chain's terminator), +8 used, +12 alignment, +16 hint, +20 sentinel block, +36 vtable 089C8E28; blocks
+  +0 next, +4 prev, +8 size (header included); the chain holds the allocated blocks in address order.
+- **Cause 1 (the user's freeze): a retail bug in `FUN_0885C6CC`, hit by the tag code.** A top-down request (t1 argument & 0xFF != 0) whose top region is
+  not free and whose hint gap is too small falls into the first-fit scan (0885C844..), which leaves `t2` = the block it FOUND; the top-down store path
+  (0885C8C4 `sw v1,0(t2)`, 0885C8EC..) then writes the "new" header over that live block: prev = next = itself, size = the request, and returns that
+  block's data area. The caller copies its file over a live block, and the next walk past it (the next allocation's walk from the hint) spins forever.
+  `FUN_08B21588` (the HUD's portrait read) asks for a top-down block, retail only at the HUD setup where the top is free. `portrait_for` asks
+  mid-battle, the same way (its own package read and `FUN_08B21588`). In the user's log: battle 1's portrait buffer was at the top (09A19D00);
+  in battle 2 the top was taken, Tifa's portrait came back as 099C6178 = the data of the live block 099C6138 (the scan's block) and the 17696-byte
+  .gim was copied over it; the next portrait (Bartz, 254 s) hung in the walk.
+  **Fix** (hooks_models.cpp `heap_alloc_hook` + `topdown_would_break`): a top-down request for which the game's own two top-down placements (the top,
+  the hint gap: replayed exactly) would both fail is made bottom-up (the scan is correct there); logged `[HEAPFIX]`. `PSPRECOMP_HEAP_TOPDOWN_RETAIL=1` = retail.
+  **Evidence:** `PSPRECOMP_HEAPCHECK_SELFTEST=1` replays it on a private 8 KB heap with the game's own init / alloc / free (hole in the middle, a block at the
+  top, hint gap too small, then a top-down request), `~/dissidia/tt/exg/hc_st1`:
+  `[HEAPTEST] retail: ... top-down request -> 0BAA0040 (the hole is at 0BAA0150, a1's data at 0BAA0040): chain BROKEN: block #1 0BAA0030+110 prev 0BAA0030 ... next 0BAA0030`
+  (the user's signature exactly) / `[HEAPTEST] with the fix: ... -> 0BAA0150 ...: chain consistent`.
+- **Cause 2: a rebuild of an EXTRA freed its side's slot fighter's lock block.** The constructor makes its lock block in the camera slot `*(actor+4300)&7`;
+  a block already there is destroyed and freed (`FUN_08B3BCF4 -> FUN_08B3AD98`). For an extra that slot holds the SLOT fighter's block (its own went
+  back out of the slot when it started), and `rebuild_begin` only hid the extra's own block (`camslot_hide(j.L)`). The slot fighter kept using the freed
+  block; a later rebuild freed it again (double free: the free relinks the stale neighbours and drops whatever was allocated between them).
+  Heap check (run `hc_r1`): `free 08D887A0 size 320 ... step 'rebuild_begin'` (slotH's block, in the rebuild of extra 08DF6030), later
+  `free of 08D887A0 (block 08D88790) that is NOT in heap 08C15F80's chain (double free ...)`, and the same for 08E0ADF0 and 08E3F210 (3 in 140 s).
+  **Fix:** the entry in that camera slot is hidden from the constructor too (when it is another fighter's block); the undo puts the slot back
+  (`[TAGTEAM] rebuild ...: camera slot N holds another fighter's lock block ...: hidden`). `PSPRECOMP_TAGTEAM_REBUILD_NOSLOTHIDE=1` = old.
+- **Cause 3: the rebuild's lock-block undo put stale heap headers back.** For a kept lock block the undo restored every changed word of
+  `j.L - 0x40 .. j.L + 0x400` from the pre-destructor snapshot: that window holds the heap header in front of the block and the neighbouring blocks, which
+  the destructor's / constructor's frees and allocations had legitimately changed. `hc_r1`: `FIRST BREAK of heap 08C15F80 'FIELD::MEMORY' ... frame check:
+  block #612 08DF8700+320 prev 08DF86E0 (want 08DF6020) ...; 0 ops since the last good check` = the extra's lock block 08DF8710, the frame its rebuild's
+  undo ran ("19 registration words taken back"). **Fix:** only the block's own 0x310 bytes. `PSPRECOMP_TAGTEAM_LBUNDO_WIDE=1` = the old window.
+- **Heap checker** (`PSPRECOMP_HEAPCHECK=1`, hooks_models.cpp, off by default): every heap made by `FUN_0885C40C` is registered with its name
+  (`[HEAPCHECK] heap X 'NAME' made`); every frame (framerate.cpp frame end) and before / after every `FUN_0885C6CC` / `FUN_0885C538` each chain is walked
+  (limit 200000 blocks, a next that does not go up stops it): prev/next consistency, ascending, no overlap, inside the heap, the hint is a block of the chain,
+  `used - sum(sizes)` constant. The first breakage of a heap is logged once (`FIRST BREAK`, where: frame check / before / after an allocation / a free, ops
+  since the last good check: 0 = a stray write) with the heap's last 64 operations from a 1024-entry ring (frame, alloc / alloc(top) / fixed top-down /
+  free, pointer, size, result, guest ra, tag-team step). A free of a block that is not in the heap's chain (double free / another heap's block) is logged
+  with the ring. The tag-team step is a scope marker (`TtStep`, `g_tt_step`) in load_character, spawn_fighter, rebuild_begin / rebuild_frame, the
+  unload / release paths, call_in, reset_battle_state, hudref_hook, portrait_for / portrait_show, the after-free sweep, frame_end.
+  `PSPRECOMP_TT_WRWATCH=<hex>`: the tag code's own `wr()` to that word prints the step and a host backtrace. Our own chain walks (hang dump, sweeps)
+  were already guarded (count limit, stop on a next that does not go up).
+- **Results (host, headless GL, `sp_cpu_walk.txt`, RESERVE `24,11,15,22;26,9,30,16` = the user's match, 10 forced KOs with `KOLIST_NAT`, 140 s, 8 rebuilds):**
+  before (`hc_r1`, causes 2/3 present): the FIELD::MEMORY break at f6062 and 3 double frees of lock blocks; after (`hc_f1`): no break, no bad free, 4
+  `camera slot ... hidden` rebuilds. `hc_m2` (same match, 440 s of battle, 8 rebuilds, 5 portraits from the package, HEAPCHECK on): no break, no bad free.
+  Regression `tagteam_test.py --baseline` (`~/dissidia/tt/exg/hc_reg1`): PASS.
+- **Second desktop freeze (`rp6logs/desk_1119_freeze2.log`, binary without the fix: no `[HEAPFIX]` string in it): the same mechanism, not a double free.**
+  Battle 1 torn down at 130 s; battle 2: Tifa's portrait at the top (09A19D00, top free), then Bartz's portrait came back as `buffer 099C6178` = the data of the
+  live block 099C6138 (the scan path; line 17798), the .gim copied over it; the chain now held 099C6138 linked to itself. The hang came at the next
+  top-down portrait request: Jecht fell at 188.1 s, Kain's slot call-in at 191.3 s made the HUD ask for Kain's portrait (`last heap allocation ... size 4520`,
+  regs r7 = 1 = the top-down flag, r10 = 099C6138). The slot rebuild only issued the next request; same block address both times because the menu heap's
+  layout in battle 2 is the same. The `[HEAPFIX]` guard turns exactly that Bartz request (and the Tifa one of freeze 1) into a correct bottom-up placement.
+- **Not verified:** cause 1 in a real game flow on the host: every host portrait so far got the free top (09A19D00); the user's case needs a second battle
+  of the session (what holds the MENU MANAGER top there is not known) and the host drivers did not reach one (`hc_m1`: the menu walk desynced; `hc_m2`: the
+  forced KOs never emptied side 1). The mechanism is proven with the game's own allocator (`HEAPTEST`) and matches the user's dump word for word; the
+  guard fires `[HEAPFIX]` when it would have happened - look for that line in the next desktop log. The white screen after the tally may be the same
+  spin (game thread 100 %, no guest function entered): unconfirmed. Nothing on the desktop / a device yet.
+## Own assists for extras (19 Nov, tree ttfa; host-only, headless, nothing seen on a device)
+User wish: "Partners should have assists." Every started extra (start-of-battle partners, the enemy's second fighter, call-ins) now has its own assist actor, its own assist
+gauge that fills, and calls it (CPU extras on their own, human-driven extras through the same +0x5B6 bits). Switch: `PSPRECOMP_TAGTEAM_XASSIST=0` = the old behaviour (extras without
+an assist); default ON. Code: `tagteam.cpp`, block "Own assists for extras" (`xas_*`, before `fix_assist`).
+- **The actor** (`xas_spawn`, from `xas_frame` at the scene tick, extra standing, battle age > 4 s, retried every 2 s): mirrors `FUN_08888354` for one assist: alloc 0x12D0 (zeroed,
+  ownership tracked like an extra's), `FUN_08A61C3C(mem, FUN_08872B48(0), row, side + 2)` with the camera slot `side + 2` hidden from the constructor (`camslot_hide`; the retail assist's lock
+  block lives there), the 1912-byte init record (`FUN_088CB9E8 / 088CBA10 / 088CBA54`, level byte of the side record, `FUN_088BCA50 -> FUN_088BC17C`, costume), vtable +256 init, foe =
+  the extra's foe, `LOCK_MODE(lb, 1, 0)`, target refresh, action 1, `CPU_MODE(mem, 3)`, brain level 0, vtable +352; `assist + 0x1108 = extra`, `extra + 0x1108 = assist` (set when ready).
+  NOT written: `bs + 64 + 4k` (that is the slot fighter's retail assist). What the constructor registered is taken back one second later (camera slot word, camera manager
+  words, the old lock block's words, as for an extra) and the retail pair table words (`REG_PAIR0/1`) are put back at once (`XASSIST_KEEPPAIR=1` keeps them). The assist gets a private
+  controller object (copy of the side's shared entry) and a private copy of the assist manager.
+  **Ready bit:** an assist never gets the slot fighters' `+0x5B0 & 0x10` (the retail assists do not have it either: `[XASCMP]`), so "ready" = one second after the constructor.
+- **Which assist**: the member's own: the matchup record's +4186 / +4187 (single player, CPU members) else the character data `FUN_088BBD8C(char)` byte +35 (low 6 bits char, high 2 bits costume; no
+  record cache in an ad-hoc / lock-step battle, so every machine picks alike); file id = `FUN_088FB934(char, costume, 1)`. Files already loaded are reused (FILE_FIND); otherwise, when the
+  model pool has >= 3.2 MB and the effect pool a 1.5 MB hole, the assist files (`row +0` and `row +4`) are loaded (`LOAD_FILE_GROUP`, own staging heap, as `load_character`; an assist costs about
+  0.7 MB model pool, 0.3 MB effect pool, 0.1 MB sound heap); a failed effect pack allocation releases them again. No room / no files: the slot's retail assist file (bs+2032+4k) is used
+  (a second actor on those files, log `[retail assist file]`). `PSPRECOMP_TAGTEAM_XASSIST_LOAD=0` never loads (always reuse).
+- **Assist manager**: per extra a 0x60-byte copy (`FUN_08B01558` init, byte +0 and the seed copied from retail's, seen by `actl_hook` = `FUN_08B031AC`'s argument). Every battle frame, from the
+  extra's module step (right after `xgauge_step`, battle state only): `bs + 56 + 4k = extra`, the other slot word 0, `FUN_08B01924(copy)` (sets +0x12AC "may call"), `FUN_08B0165C(copy)` (request
+  from the +0x5B6 bits -> `FUN_08B031AC` plays the call), the words restored. k = the slot index of the extra's slot fighter. The manager reads its master from `*(0x089D6A10) + 56 + 4k`
+  and the assist from `master + 0x1108`, nothing else, so that is all the swap needs.
+- **Gauge**: the extras' assist machine copies (`xgauge_step`) already existed; the gate `FUN_08AEDA5C` passes now (`+0x1108 != 0`): the gauge (status +0x1C) fills from the extra's moves and from
+  its assist's hits, 5000 / 10000 for call kinds 1 / 2; the HUD chevrons on the small panels show it as before.
+- **Hits**: pass 2 of the extra's module step (`afd424_hook`, mode 8): the module copy walks [extra, assist]; when the assist's `+0x380 & 0x200` is set (or `hitreg_hook` recorded a hit by it) the
+  step runs for the assist alone (the extra's own flag hidden, `+0x1108` kept, assist foe = the fighter it hit, `g_xstep_att` = the assist), so damage / BRV / break / EX orbs / friendly fire go
+  through the extra's damage handler copy. `assist_aim_follow` also covers the extras' assists (the master's lock target, else its foe).
+- **Off**: `assist_off_now()` (Assist On/Off option, `PSPRECOMP_TAGTEAM_ASSIST=0/1`) releases and never makes the assists: extras have no assist then, their gauge gate stays shut.
+- **Release** (`xas_release`): when the extra's body holds another member, when the extra is down for one second, or Off: `extra + 0x1108 = 0`, the constructor undo words (if not ready), `FIGHTER_DTOR(assist, 0)`
+  (tag teardown logic skipped), the actor block (with the controller copy and manager copy, in `g_leak_watch`) is freed two seconds later, the assist files this code loaded are released five seconds
+  after the last assist on them is gone. A battle teardown: retail destroys the actors (they are in the actor list), `g_leak_watch` frees our blocks, the files go to the leftover list. `char_census`
+  skips assist actors (their master counts) and the fighter list walks allow 48 entries (was 16).
+- **Debug**: `XASSISTLOG=1` (`[XASLOG]`: call block words, assist script, may-call, gauges, +5B6), `XASSIST_DIFF=1` (`[XASDIFF]` globals changed by the constructor), `XASSIST_CMP=1` (`[XASCMP]` words of
+  the assist vs the retail assist), `XASSIST_WATCH=1`, `[XAS]` / `[XASDMG]` lines always with `TAGTEAM_LOG`. Test aid: `GAUGESET=extraP:14:-1:10000,extraE:14:-1:10000`.
+- **Results** (host, headless GL, `sp_cpu_walk.txt`, 2 extras, `~/dissidia/tt/exg/fa`, runner `fa_run.sh`):
+  - `a9` (final build, `GAUGESET=extraP:14:-1:10000,extraE:30..31:-1:10000`): both extras got an assist actor at 7.8 s (enemy extra Vaan: its own assist, loaded now, char 26; partner Terra: no own assist
+    record, retail assist file 1280), ready at 8.8 s; the **CPU partner called its assist at 14.4 s** (script 240 -> 101 -> attack) and **the assist hit the enemy extra** (13 `[XASDMG]` lines "booked a hit on extraE"),
+    the **enemy extra called at 32.6 s** and its assist hit the human's slot fighter; assist gauge 10000 -> 0 at the call, then filled again from the assist's hits (150, 300, ...). Screenshots
+    `evidence/partner_assist_call_15s.png`, `evidence/partner_assist_banner_tornado.png` (the retail ASSIST bar + spell banner of an extra's call). `a5` / `a6` the same on earlier builds.
+  - `a7` (no GAUGESET, 100 s): the gauge fills naturally (enemy extra 0 -> 4034 by 78 s; drops when hit, as retail); no natural call in 100 s (needs 5000).
+  - `a8` (`ASSIST=0`): no assist actor made for any extra (0 `[XAS] got` lines). 
+  - `c1` (`party_battle_walk.txt`, `seq10.env`, five call-ins in 226 s): assists made / released with each body (`its master is down` after 1 s, actor block + controller + manager copy freed, own assist files released
+    5 s after the last assist on them), 17 `[MEMSUM]` lines, **no FAILED allocation**; model pool 8.4-12.1 of 15.9 MB, effect pool free 3.0-5.3 MB, sound heap free 1.1-2.5 MB through the run.
+  - Regression `tagteam_test.py --baseline` PASS in a new out dir (`~/dissidia/tt/exg/fa/reg2`, final build).
+- **Not verified**: a human-driven extra's own call (R+Circle / R+Square on its pad stream: same bits, same manager copy, but no headless pad drove an extra), a lock-step run with a peer (everything reads game
+  state only; the choice of assist avoids the single-player record cache in a session; the memory-based load decision is the same on machines with the same heap state), voices of the assist call line
+  (no voice banks loaded for the assist characters), an extra's assist during an EX Burst / chase, an assist standing idle off screen at (0, 0, 0) (it does not appear on screenshots), the second
+  assist call on one gauge while the first is still out (the manager copy refuses it like retail's), and 3+ simultaneous call-in assists in memory-tight situations (the fallback is the retail assist file).
+
+## Tournament screen labels: "Assists: ON/OFF" bar, player / CPU per row (19 Nov, tree ttlock; host-verified on screenshots)
+User wish (single player setup screen): the format bar shows the Assist setting, and each matchup row names who plays it instead of the stage.
+- `tagteam_menu.cpp` `sp_draw`: while the matchup list (or our CPU dialog) is up, `sp_format_bar` covers the game's "Tournament" / "Round-Robin" text with the bar's gradient
+  (x 198..284, y 103..115, measured on screenshots) and writes "Assists: ON" / "Assists: OFF" (white bold, follows `g_sp_assist_on` live); `sp_row_label` covers each row's stage
+  text ("Random", x 258..342, y 123+20*row .. +11; bar interior is flat vertically, horizontal gradient only; grey normal / blue highlight chosen by the cursor row) and writes
+  the player's name (the save's player name at EBOOT 0x08BCEB40, UTF-16, as `discord_presence.cpp`; "Player" if unreadable) or, for our CPU rows, "CPU STR n" (the row's
+  STRENGTH setting). Not drawn while the game's round dialog is open (state != list), so it never lies over that dialog.
+- `PSPRECOMP_TAGTEAM_SPLABELS_OFF=1`: old look (game's "Tournament" and stage texts).
+- (Superseded 19 Nov, tree ttfa: see "Two labels per row" below; the enemy strength IS kept by the screen.) The game's own "Swap format" hint is not visible in any shot (our pad filter hides
+  Square from the screen), so nothing needed covering; unverified whether it appears in states the walks do not reach.
+- Evidence: `~/dissidia/tt/lockdrv/evidence/` (before_cursor5th, after_assists_on, after_assists_off, after_enter_battle_row); driver `~/dissidia/tt/lockdrv/shots.py` (debug-socket `V`
+  window shots every 0.3 s during the walk; the plain `S` shot does NOT include the menu layer), Assists OFF walk `lockdrv/walk_sq.txt` (sp_cpu_walk + Square at poll 3910).
+### Assist Off, round 3 (19 Nov, tree ttcam; host-only, headless): the game's own appear effect + sound, hit guard, placement by the foe's height
+- **Found** (first-call logging `PSPRECOMP_FIRSTCALL` gated by `PSPRECOMP_TTCAM_FCGATE=<a>:<b>:<c>[:<d>]` around a forced retail call, diff against an Assist Off call, then `FN_WATCH` with `ra`):
+  when the controller `FUN_08B031AC` starts a call it places the assist (`FUN_08B34ED0` -> PLACE), START_ACTION 240, then plays the appear sound
+  `FUN_08B33F8C(assist, *(*(assist + 1444) + 136), 0, 0)` (0x295A17 for side 0 on the host) and starts **common battle effect 0x10** on the assist's root node:
+  `FUN_088A9DE8(*(*0x089D6DD0), 0x10, assist + 1224, 0, 0)` -> handle, `FUN_088A6A38(handle, 2, node, -1, -1, f12 = -1)` (mode 2 = follow the node; the handle sits at manager +80 + 8k
+  with a timer). `FUN_08B01EE4` kills it after ~0.53 s (`FUN_088A6AA4`) and starts **effect 0x12** (after-glow, ends by itself ~3 s later) on the same node; 0x11 is played on the assist when it leaves.
+  The partner's own START_ACTION 240 plays nothing of this (Off run: only 3 new functions in the call frame vs ~200 in retail's): the flash and sound are not in script 240.
+  Also in the call, not reproduced: `FUN_08A62020(*0x08A62280, 6, 0.4)` (a global speed channel: retail's slow motion with the screen tint while the assist runs at 1 / 0.2) and
+  `FUN_0888A154(k, 0)` (the HUD's "ASSIST" banner).
+- **Built** (`tagteam.cpp`, `appear_fx_*`, before `launch_attack`): `assist_off_move` plays the retail assist's sound id (`*(*(retail assist + 1444) + 136)`, else the partner's) on the partner and
+  starts 0x10 on `P + 1224`; 32 battle ticks later (`appear_fx_step`, from `actl_hook`) 0x10 is killed and 0x12 started, as retail. Our own light (`tagteam_fx_entrance`) is now drawn only when the
+  game's effect did not start (`PSPRECOMP_TTCAM_OWNFX=1`: both). A partner destroyed while an effect follows its node (`dtor_hook`, not a rebuild): the effect's node word (+208) is moved to the master's node.
+  `PSPRECOMP_TTCAM_NOGAMEFX=1` = round 2 (own light only), `_NOAPPEARSE=1` no sound.
+- **Hit guard**: the per-victim hit test `FUN_08808EE4` is hooked (`hitguard_hook`; with `TAGTEAM_HITGATE` set, `hg_hook` does the same check): a partner in `g_appear_guard` is skipped
+  from the move until 0.5 s after its attack starts (`PSPRECOMP_TTCAM_GUARDLEN=<ticks>`, default 30; human partner 40 ticks from the move). `PSPRECOMP_TTCAM_NOAPPEARGUARD=1` = hittable (old).
+- **Short appear**: the partner's own 240 is a ~0.45 s pose; the attack now starts when 240 is over (>= 8 ticks) or at 62 ticks (`PSPRECOMP_TTCAM_FULLAPPEAR=1` = always 62).
+- **Placement by the foe's height** (`launch_attack`): the foe counts as standing when `grounded_now` or a ground sample under it is within 0.5 m of its height; then 1.5 / 1.0 / 0.5 m from it on that floor
+  (the last gap is taken even without a sample: the foe stands there). Otherwise (airborne, or a floor nobody has stood on: b2's "no floor under the foe") the partner is PLACEd 1.2 m from the foe **at the foe's
+  height**, START_ACTION 102 (air state; a ground move started in the air is turned into 101 on the next frame and never hits, as the round 2 run showed), and two ticks later its character's air attack:
+  learned per character from the CPU's own moves (the first script >= 10000 started straight from 102; char 15 = 10008), else its AI picks. `PSPRECOMP_TTCAM_OLDPLACE=1` = round 2 rule.
+- **Test aids**: `PSPRECOMP_TTLOCK_STILLFOE` now stills the side opposite to the `FORCECALL` side (was always side 1's fighters); `PSPRECOMP_TTCAM_AIRFOE=<m>` keeps the stilled foes <m> m over their floor
+  (PLACEd every frame), `=j<s>` makes them jump (START 101) <s> s after the call; `PSPRECOMP_TTCAM_SHOTAT=<dir>:<s>,<s>..` screenshots at battle ages; `PSPRECOMP_TTCAM_GUARDLOG=1` logs hit tests.
+- **Evidence** (`~/dissidia/tt/aofx`, runner `ao_run.py` = the ttlock one pointed at this tree): `R` (Assist On) vs `O` (Off), forced call side 0 at 14 s: `closeup.png` / `montage_R_vs_O.png` show the
+  same violet summon sphere and flash on our moved partner (14.20 / 14.35 s) as on the retail assist; retail additionally shows the ASSIST banner and the blue slow-motion tint (not reproduced).
+  Log: `appear: game effect 0x10 .. handle 09A93300, sound 295A17`, `flash 0x10 ended, after-glow 0x12` at 14.53 s (retail: 14.53 s). Ground attack `O`: 240 over at 14.43 s, 10000 from 1.5 m, hit at 14.67 s (foe BRV 1030 -> 989).
+  **Enemy side** (`FORCECALL=1:14`): `E2` (stilled foe) 10000 from 1.5 m, foe BRV 1076 -> 966; `E5`, `E6` (foe NOT stilled) hits at 14.83 / 15.10 s (BRV 1291 -> 1156; 1076 -> 896); `E3` (not stilled) the partner was hit
+  14 ticks into its attack (-> guard extended to 0.5 s after the attack starts). Guard: `G1` (`GUARDLEN=600`, `GUARDLOG`) logs `hit test on the appearing partner .. skipped` (the only proof the skip runs; no run had an
+  enemy hit during the appear itself). Regression `tagteam_test.py --baseline` PASS (`~/dissidia/tt/aofx/reg1`; final build `reg2`).
+- **Air: NOT reliable.** Hovering foe (`A5`, `AIRFOE=3`) and a real airborne foe (`G1`: 0.5 m over a 4.5 m floor): the partner is put next to it in the air, but no air attack was learned yet for its character at 15 s, so
+  its AI picked: `A5` hit with its own 10008 only at 17.9 s, `G1` landed and walked away (no hit). With a known id (`A1`: forced 10008 on a hovering foe) the move was turned into 101 (the
+  partner was still in 240 then; the 102 step was added afterwards and not re-run with a known id). A built-in per-character air attack table (from the moveset `actions.json` / `ablt` phase) is the open fix.
+- **Unverified**: anything audible (headless; the sound call returns, nothing heard), lock-step with a peer (all decisions use battle ticks and game state; the effect spawn runs on the same frame on every
+  machine, the learned air table depends only on what the fighters did), human partner, kind 2 calls, a partner destroyed while the after-glow follows it (the node redirect is untested).
+
+## Forfeit during the opening banter still offered "proceed to next battle" (19 Nov, ttlock; host)
+Cause: `ko_oneround` returned at `g_nextra == 0`, and the extras are spawned only after the start-of-battle banter / entrance pause. A forfeit before that (pause >
+Forfeit > YES; the finish phase `bs+72 == 4`, fall script 1210 on the slot fighter, HP untouched) never reached the forfeit-ends-the-match decision, so `group_decided`
+was not run and retail's Tournament flow offered "Proceed to next battle" (Round 2). Later forfeits (extras standing) were fine.
+Fix: before that early return, with no extra standing, the same test (a slot fighter in `ko_state` with live HP, finish phase, no lethal-hit mark, single player) ->
+`g_decided`, `group_decided(team of the fighter)`. Once per battle (`g_battle_gen`). Log: `finish phase before any extra stands ... forfeit`.
+`PSPRECOMP_TAGTEAM_NOEARLYFORFEIT=1` (or `NOFORFEITEND=1`) = old behaviour.
+Verified (host, `~/dissidia/tt/bin/md_lock.py`, steps `start:0.8,down:0.4,down:0.4,cross:0.8,left:0.4,cross:6,cross:4,cross:4`, wait 0): old (`lk0`, KO at 3.5 s, no forfeit
+line, screenshot `step_06`: "Proceed to next battle" + "Return to Battle Setup", then Round 2 setup); new (`lk2`, forfeit at 6.0 s, tally booked from the ledger, "result menu:
+Proceed row left out"; `lk1` screenshot: only "Return to Battle Setup", back to the setup screen). Not tested: the full regression suite, Communications Mode, a forfeit before the first frame of age.
+## Tournament screen: two labels per row (19 Nov, tree ttfa; host-verified on screenshots)
+Each matchup row's stage area now carries two labels: LEFT our side (player name, or "CPU STR n" for our CPU rows, as before), RIGHT the enemy side's CPU strength of that round ("CPU STR n"),
+a thin divider at x 336 between them. Both 7.5 em, left centred at x 293 (max 62 wide), right at x 363 (max 46); the cover band now starts at x 246 (it hid the right half of the game's
+"World of Darkness" stage text of round 1 but left a "\" of its start visible; 246 covers it).
+- **Where the enemy strength lives.** NOT the group struct (its nodes are all empty while the screen runs; only filled at Enter Battle). The round dialog stores STRENGTH in the screen object
+  itself, one block of 0x16DC bytes per round: tier (screen value - 1, 0-8) = byte `screen + 0xA5B + 0x16DC * round`. Found with `PSPRECOMP_TTSP_CURDUMP=2` (prints every changed word of the
+  screen when few change): rounds 2 / 3 changed `+0x2134` / `+0x3810` top byte 4>3>2 / 4>5 while their STRENGTH moved, stride 0x16DC confirmed by the closing writes (`+0x36B8` / `+0x4D94`);
+  round 1's block is extrapolated (0xA5B) and showed the right value (5) on the shots, rounds 4 / 5 likewise by the stride. `sp_enemy_strength` returns 0 (no right label) outside 1-9.
+  Debug: `PSPRECOMP_TTSP_GNODES=1` logs the group struct's type-0/5 commands on change (all empty on this screen).
+- Human enemy players: the single player screen has none; the Communications setup is another screen and `sp_draw` does not run there, so no player name is drawn on the right (not done).
+- `PSPRECOMP_TAGTEAM_SPLABELS_OFF=1` still gives the old look.
+- Evidence (`~/dissidia/tt/lockdrv/evidence/`): before `after_assists_on.png` (one label per row), after `foe_after_strengths.png` (rows 2 / 3 set to STR 3 / 6 in the dialogs, others default 5)
+  and `foe_after_cpurow.png` (3rd row also our CPU partner: left "CPU STR 5", right "CPU STR 6"). Driver `lockdrv/shots_fa.py` (absolute out dir!) with `walk_fa.txt` / `walk_fb.txt`.
+  Regression `tagteam_test.py --baseline` PASS in a new out dir (`~/dissidia/tt/lockdrv/fa/reg3`).
+- Unverified: round 1 / 4 / 5 block addresses set non-default (only default 5 seen there; the stride is from rounds 2-3); a tournament with fewer than 5 rows; text fit with 2-digit-wide
+  player names (the left label shrinks by dropping characters to 62); the Round-Robin format.
+### Assist Off, round 4 (19 Nov, tree ttcam; host-only, headless): own BRV / HP attacks, EX Burst guard, call slow motion + banner
+User bug (desktop build 20:05, round 2, `~/dissidia/rp6logs/desk_1119_exloop.log`): an assist call while the CPU partner Terra (extraP) had a full EX gauge / was in EX Mode left
+the "EX Mode / EX Burst quicktime" looping on the human's screen. Terra reached EX 10000 at 119.57 s, the call moved her at 146.61 s and `START_ACTION 10000` started at 147.64 s.
+- **What 10000 is for a fighter.** `START_ACTION` (FUN_0882FA10) takes a **motion id**, not an attack: 10000 is the retail ASSIST actor's attack, but for a full fighter it is just the
+  first motion of its own table (Terra: motion 10000 = `NEAR`, a BRV attack). It was started **without its plya record**: actor +0x101C kept the record of whatever ran before
+  (an HP attack, e.g. Tornado / Cataclysm), and the game books the hits and shows the banner of +0x101C (r6: the 10000 showed "Tornado"). An HP record that connects in EX Mode
+  is the EX Burst opener. Also: script **240 is the fighter's ground dash** (R+Triangle, event-ops K.md), not an appear: on a full fighter it often came right before the AI's own
+  EX Mode entry ("Trance!" + "EX MODE!", r1).
+- **Fix: per-character attack table from the moveset** (`own_*` in tagteam.cpp). actor +0x390 -> moveset +0x88 -> plya table (`{version, count}` + 0x74-byte records).
+  Opener = +0x03 kind 0, +0x0F button 1 BRV / 2 HP, motion +0x1C in 10000..19999, +0x05 where the attacker stands (2 ground / 1 air), name (+0x64) without `_A_` / `EX` /
+  `LIMIT` / `ASSIST`. Ranked: moves this character's own AI started this battle (+0x101C watch, its equipped set) first, then the shortest reach (+0x28) covering the gap.
+  The **call kind picks the button**: kind 1 (R+Circle, one bar) = a BRV attack, kind 2 (R+Square, two bars) = an HP attack (no HP opener on that side: a BRV one), ground or air by
+  where the partner is (an airborne foe: placed next to it in the air, then its air attack). Started like a press: FUN_08B382B8(actor, 1, 0) with the selector handing back the
+  record (roster.cpp `dissidia_test_action`), so +0x101C, homing, hit records and banner are the move's own. Terra's table (log `[OWNATK]`, `PSPRECOMP_TTCAM_ATKTABLE=1` prints all
+  44 records): BRV ground NEAR 1067 / MIDDLE 1068 / AIR_UPPER 1073 / LONG1-2 / LAND_DEFO, BRV air NEAR2 1495 / AIR_UPPER2 1492 / AIR_LOWER 1074 / AIR_LONG 1076 / AIR_LONG_TANPAT /
+  AIR_DEFO, HP ground MIDDLE_ABI1 1081 / LONG_ABI1 1082, HP air LONG_ABI2 1514 (AIR_LONG_ABI1 1084 has motion 9: skipped). `PSPRECOMP_TTCAM_OWNATK=0` = round 3.
+- **EX Burst guard**: no Assist Off call while an EX Burst runs (call cancelled, no bar used), and no forced attack if a burst started while the partner appeared
+  (k2: our call at 24.00 s on Terra in her own burst, started 20.80 s, ended that burst at once; a cut burst is one way to leave its UI behind). `PSPRECOMP_TTCAM_NOEXBGUARD=1` = off.
+- **Call effects**: a forced retail call (`PSPRECOMP_TAGTEAM_CALLLOG=08A62020,0888A154`, rt run) makes, on the call frame, `FUN_08A62020(*0x08A62280, 6, 0x44, f12 0.4)` (slow motion,
+  blue tint) and `FUN_0888A154(side, 0, f12 5.0)` (ASSIST banner), one call each (own timers). `assist_off_move` now makes the same two calls. `PSPRECOMP_TTCAM_NOCALLFX=1` = off.
+- **Test aids**: `PSPRECOMP_TTCAM_FORCEKIND=<k>` (kind byte of `PSPRECOMP_TTLOCK_FORCECALL`), `PSPRECOMP_TAGTEAM_EXWATCH=<role>:<s>:a<hex>` (actor-relative watch, e.g. `a5B0` =
+  the EX Mode halfword), `PSPRECOMP_TTCAM_EXUILOG=1` (framerate.cpp: the EX Burst quicktime UI object), CALLLOG lines now carry f12. Runner `~/dissidia/tt/exloop/run.sh`.
+- **Evidence** (`~/dissidia/tt/exloop`): reproduction with the old code (`r6`, `r7`: GAUGESET full, forced calls, stilled foe): a red square-with-arrows prompt in the screen centre
+  stays from ~21 s / ~34 s to the end (`r6s/m1.png`, `r7s/m1.png`), right after an HP hit by extraP in EX Mode. New code: `k1` (kind 1) NEAR2 / MIDDLE BRV attacks, foe BRV 1009 -> 1002
+  at 17.37 s; `k2` (kind 2) LONG_ABI1 / LONG_ABI2 HP attacks ("Cataclysm" / "Tornado" banners, DAMAGE 957 on screen, `k2s/m.png`), the HP hit in EX Mode opened Terra's own
+  EX Burst (8000 -> 8101), which played. `cf` (kind 2, calls at 16 / 22 / 28 s): `callfx_rt_vs_off.png` = retail Assist On (top) vs Off (bottom): the ASSIST banner shows the
+  same way; the tint is not clearly visible in the Off shots (the HP attack's own effect fills the screen), unverified. Regression `tagteam_test.py --baseline` PASS (`reg_r4`).
+- **NOT solved / unverified**: what the stuck prompt is. It is not the EX Burst controller (*0x08A405E0 phase stayed 0) and not the quicktime UI FUN_08A40E60 (never called in r7).
+  It came from the extra's OWN HP hits in EX Mode too, not only from the forced 10000, and only while the victim (slotC) was AI-gated by the STILLFOE test aid; in r2 / r9 the extra's
+  burst started 2 s after the gate was lifted. Hypothesis: a CPU extra's burst decision is read from the CPU pad it shares with slotC (extraP's controller -> pad 08C15BF0), so it
+  waits while slotC's brain is gated / in hit stun. Not reproduced without STILLFOE in 3 tries (fa, r8, r9). Needed: the state word of that prompt (FIRSTCALL diff of a stuck vs a
+  clean phase), then a timeout for extras. The call effects are not yet compared frame by frame with retail (see `cfs/` vs `rts/`); nothing on a device.
+### Assist Off / extras, round 5 (19 Nov, tree ttcam; host-only, headless): the stuck EX prompt, and the call slow motion that never ended
+- **What the stuck prompt is.** The red square-with-arrows in the screen centre (with everybody at 0.1 speed) is a state of the per-frame **EX manager**
+  FUN_08ACB208 (EX controller actor +0x784, +0 the actor): every frame it sets slow-motion channel 2 to 0.1 (`FUN_08A62020(*0x08A62280, 2, 1, f12 0.1)`,
+  ra 08ACB624) and waits for the actor's input (input tests FUN_08B320A4 / FUN_08B321F4 / FUN_08B3214C on the actor), or for its EX gauge to empty. It was entered
+  right after a CPU extra's own HP hit while in EX Mode (3 of 3 cases; whether retail calls it the EX Burst chance or EX Revenge is not proven). A slot CPU's brain
+  answers within frames. **An extra cannot**: its input tests read its controller copy's pad, which is slotC's shared CPU pad (08C15BF0), and its EX drain
+  (xgauge handler copy) runs at the slowed global step, so the state lasted ~10x the gauge (stuck 19 s+ in `xr4`, 50 s+ in `r6` / `d1`). With slotC AI-gated
+  (STILLFOE) it never ended; in play it depends on what slotC's brain happens to press.
+- **How it was found**: `PSPRECOMP_TTCAM_FCGATE=s<from>:<len>` (new: a FIRSTCALL phase every <len> s), stuck vs clean windows of a reproducing run (`a1`): new
+  per-frame functions in the stuck windows only: the EX manager's 08ACAAC8 branch, the input tests 08B320A4 / 08B3214C, the damage handler's state-1 tick 08AE0D70
+  (debug `PSPRECOMP_TTCAM_DHLOG=1`: FUN_08AE1270 state changes, timer +568 counted with the global step); then `CALLLOG=08A62020` (`dr2`: 1091 calls, channel 2, 0.1, every frame).
+  Reproduction: `PSPRECOMP_TTCAM_ATKACT=1081` (new test aid: force that plya action id, here Terra's MIDDLE_ABI1 "Flood") with GAUGESET full and STILLFOE: 3 of 3 runs.
+- **Fix** (`slowset_hook` on FUN_08A62020): when the EX manager's per-frame call (ra 08ACB624, channel 2) is made for a CPU-driven extra, the state may last
+  `PSPRECOMP_TTCAM_XREVLEN` battle ticks (default 150 = 2.5 s); then that extra's EX gauge is set to 0 and the game's own end runs. Log `[XREV]`. Battle ticks and
+  game state only (lock-step safe). `PSPRECOMP_TTCAM_NOXREVCAP=1` = off. Not done: answering with the extra's own decision (its own pad / an EX Burst start).
+- **Round 4 regression, fixed**: the Assist Off call effect set slow-motion channel 6 to 0.4 and never gave it back, so after the first call the whole battle ran
+  at 0.4 / 2.0 = 1/5 speed (FIGHTER step 0.400 in 6600 of 8000 samples, `qr1` / `cf`). Retail releases it with `FUN_08A620B0(mgr, 6)` from 08B023E4 66 ticks after
+  the call (`rt2`, `CALLLOG=08A620B0`); `callfx_step` now does the same (`[ASSISTOFF] .. slow motion channel 6 released`). The round 4 merge has this bug.
+- **Evidence** (`~/dissidia/tt/exloop`, red-pixel count in the screen centre `redchk.py`, montage `xrev_fix_montage.png`: top `xr4` cap off, bottom `xr3` fix):
+  `xr4` (cap off): prompt from 35 s to 54 s; `xr3` (fix): state 18.33 s, cut at 20.83 s, prompt gone from 22 s, then extraP's EX Burst 21.00 -> 33.97 s
+  played and ended, step 2.000 in 7698 of 8330 samples. `x2` (first fix build): cut at 25.23 s, prompt gone at 25 s. Regression `tagteam_test.py --baseline` PASS (`reg_r5`).
+- **Unverified**: the retail meaning of the state, whether 2.5 s matches retail, a human-driven extra (multiplayer: excluded, its own pad answers), the desktop / a device.
+
+### Assist Off / extras, round 6 (19 Nov, tree ttcam; host-only, headless): a CPU extra decides its EX Burst chance itself, like a slot CPU
+- **How a fighter answers the chance (retail).** An HP hit landed in EX Mode sets the attacker's chance flag, actor `+0x5B2` bit `0x10`. The per-frame EX manager
+  FUN_08ACB208 (EX controller actor `+0x784`; `+4` state: 1 entering EX Mode, 3 EX Mode, 5 chance, 7 EX Burst; log `PSPRECOMP_TTCAM_EXSMLOG=1` `[EXSM]`) goes
+  3 -> 5 while the flag is set. In state 5 it sets slow motion channel 2 = 0.1 and reads FUN_08B320A4 / 08B321F4 / 08B3214C = "brain pad bit 0x16 / 0x1B / 0x14
+  pressed" (the fighter's OWN brain pad, brain `+0x53C`, via FUN_08A64260) OR "set in its controller object `+8/+12`" (FUN_0887279C; always 0 for a CPU controller,
+  also for an extra's private copy - the pad pointer `+0x40` = 08C15BF0 is all zero and not read here). Its own timer `+12` (+2 per frame, unslowed clock) ends the
+  chance at 92 (~1.5 s). A CPU answers through its brain's AI node FUN_08A9EBBC: a roll against its EX gauge, then brain bit `0x13` = EX Burst (target's status
+  `+40` bit 4 set) or `0x14` = no burst (state 5 -> 3, slow motion released). (`CALLLOG=08A97060`: ra 08A9ECA4 = 0x13, 08A9ECC0 = 0x14; `EXTESTLOG=1` `[EXTEST]`.)
+- **Finding: the extra already decided by itself, with slot-CPU timing** (its own brain, own brain pad, own controller copy; round 5's "it reads slotC's pad" was
+  wrong). Same situation, same build: slotC 0x14 after 0.50 s (`e16`), 0x13 + burst after 0.67 s (`e17`), 0.54 s (`f4`); extras 0x13 + burst after 0.50-0.70 s
+  (`e10`, `f2`, `f3`, `f4`), 16-19 frames in natural play (`e4`).
+- **Root cause of the stuck prompt: the chance flag of an extra was never cleared.** Retail clears `+0x5B2` bit 0x10 every frame for the two SLOT fighters only
+  (FUN_08AE398C: both entries of `*(0x089D69F8)+24`, `->+16` = actor), found with a write watch on `+0x5B0` (`PSPRECOMP_TTCAM_CHWATCH=<role>`, `w_slotC`). For an
+  extra the stale flag re-opened the chance the frame after every "no burst": `5 -> 3 -> 5` every ~0.6 s with the AI saying 0x14 each time (`e11`-`e14`, 4 of 4 with
+  the STILLFOE recipe; slotC in the same stilled-foe situation said 0x14 once and was done, `e16`), and the damage handler's own chance timer runs at the slowed 0.1
+  step (~15 s). A stale flag also opened a chance with no attack in flight: an HP hit booked while the extra was held out of another pair's EX Burst (damage handler
+  0 -> 5 during it, 5 -> 1 at its end; `e6`, natural play, no test aids: stuck from 43.53 s until the old 2.5 s cut), or before it entered EX Mode (`e16` extraE:
+  chance right at EX Mode entry, then 9 re-opens in 6 s).
+- **Fix** (`chclear_hook` on FUN_08AE398C): after the retail clear, the same clear for every started extra. The chance now opens once per HP hit and the extra's own
+  AI answers it (burst or not) or the retail timer ends it. Game state only, every machine the same (lock-step safe); a human-driven extra answers with its own pad as
+  before. `PSPRECOMP_TTCAM_NOCHCLEAR=1` = off, `PSPRECOMP_TTCAM_CHCLEARLOG=1` logs `[CHCLEAR]`.
+- **Safety net kept, longer**: round 5's cut (`[XREV]`, EX gauge -> 0) now only after `PSPRECOMP_TTCAM_XREVLEN` = 600 battle ticks (10 s) of one unbroken chance (a
+  chance is "unbroken" while state 5 is seen at least every 30 ticks; it was measured from the first chance before). `PSPRECOMP_TTCAM_NOXREVCAP=1` = off. Never hit in
+  the runs below.
+- **Evidence** (`~/dissidia/tt/exloop`, all with the cut OFF, `NOXREVCAP=1`): STILLFOE + ATKACT recipe (before: stuck in `e3`, `e5`, `e7`, `e11`-`e14`): `f1` chance
+  18.30 s -> retail timer end 19.83 s (+12 = 94, no press), next HP hit 27.00 s -> 0x13 at 27.50 -> EX Burst 27.53 -> 41.80 s; `f2` 26.40 -> 0x13 -> burst 27.03 s;
+  `f3` 18.30 -> 0x14 at 18.87 -> state 3 at 18.90, no re-open; 26.13 -> 0x13 -> burst 26.73 s. Natural play (`f4`, gauges set full, no STILLFOE): extraP chance
+  22.47 -> burst 23.17 s, slotC 49.43 -> burst 49.97 s. Screen centre red count (`redchk.py f1s`): prompt only at 18.5-19.5 s and 27.5 s (+21.0 s), montage
+  `chclear_f1_montage.png` (18.0 Flood, 18.5 / 19.5 prompt, 20.0 gone, 27.5 prompt, 28.5 "Riot Blade" burst). Regression `tagteam_test.py --baseline`: `reg_r6`.
+- **Normal play**: the fix touches only the chance flag of extras; attacks / guards / dodges come from the same brain as before (bits 0x0A / 0x0D / 0x15 etc.,
+  `PADLOG`, unchanged code path). Not measured side by side beyond the regression.
+- **Unverified**: the retail meaning of the target status bit 4 that picks 0x13; EX Burst quicktime inputs and EX Revenge of an extra (no new evidence that they read
+  anything but the extra's own brain pad: they use the same brain-pad tests); a human-driven extra (multiplayer) in a chance; desktop / devices. Debug aids added:
+  `EXTESTLOG`, `EXCHLOG` (`[EXCH]` per chance frame), `EXSMLOG`, `STWATCH=<side>`, `CHWATCH=<role>`.

@@ -52,6 +52,7 @@
 #include "recomp.h"
 #include "hle/psp_hle.h"
 #include <algorithm>
+#include "hle/psp_hle_adhoc.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -60,6 +61,7 @@
 
 float dissidia_camera_turn();   // camera.cpp
 bool dissidia_comm_link_active();   // comm_battle.cpp
+bool dissidia_ttnet_running();      // tagteam_net.cpp: the tag battle's own lock-step
 
 namespace {
 
@@ -83,6 +85,24 @@ constexpr uint32_t PAD_DEADZONE = 0x258u;       // float in the pad object (stic
 bool g_8way = true, g_move_rel = true;   // g_move_rel: PSPRECOMP_CAM_MOVE_REL=0 leaves the stick in the game's own frame
 float g_dpad_zone = 0.35f;
 
+// Lock-step battles (Communications mode): the stick turn below is view state (how far THIS player's free camera / held
+// camera is turned from the game's camera), so it may only touch the local player's own stick before it is sent, never
+// the stick the battle simulates with. In a lock-step battle the net object (FUN_0890D664) reads the local pad and packs
+// it into the 16-bit input word with NET_PACK (FUN_0890CE58), which calls the stick processor once for the local stick
+// (the stick survives only as its 4 virtual D-pad bits); every machine then unpacks every player's word into the pad
+// slots (FUN_0890D090: the stick becomes 0x00 / 0x80 / 0xFF per axis) and runs the stick processor on each slot. Turning
+// those slot sticks by the local view (as this hook did) turned BOTH players' sticks by a different angle on each
+// machine: a desync whenever a view was turned (right stick) or held (no lock-on, e.g. after a knockdown).
+// So in a lock-step battle the turn is applied only inside NET_PACK (it becomes part of the input every machine gets).
+constexpr uint32_t NET_PACK = 0x0890CE58u;
+FuncPtr g_orig_pack = nullptr;
+bool g_in_pack = false, g_net_battle = false, g_legacy_turn = false;   // g_legacy_turn: PSPRECOMP_NET_VIEW_STICK=1, the old behaviour (A/B tests only)   // g_net_battle: NET_PACK ran in this battle (cleared outside the battle overlay)
+void dissidia_net_pack(uint8_t* rdram, recomp_context* ctx) {
+    g_net_battle = true; g_in_pack = true;
+    g_orig_pack(rdram, ctx);
+    g_in_pack = false;
+}
+
 void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t out = static_cast<uint32_t>(ctx->r[4]), in = static_cast<uint32_t>(ctx->r[5]);
     float lx = rdf(in), ly = rdf(in + 4);
@@ -94,9 +114,11 @@ void dissidia_stick_process(uint8_t* rdram, recomp_context* ctx) {
     uint32_t mode = 0;
     std::memcpy(&mode, g_ram + ((out - 0x20u + 0x50u) & 0x07FFFFFFu), 4);
     const bool injected = mode == 1u;
-    const bool fixed = injected && dissidia_comm_link_active();
+    const bool fixed = injected && (dissidia_comm_link_active() || dissidia_ttnet_running());   // our pad link or the tag lock-step
     const float dz = fixed ? 0.20f : g_dz, dpad_zone = fixed ? 0.35f : g_dpad_zone;
-    if (g_move_rel && id == 1 && !injected) {
+    if (id != 1) g_net_battle = false;
+    const bool lockstep = !g_legacy_turn && (g_net_battle || psp_adhoc_in_session());
+    if (g_move_rel && id == 1 && !injected && (!lockstep || g_in_pack)) {
         // The free camera (camera.cpp) turns the view away from the game's own camera, but the game still reads the stick
         // in its own frame (behind the fighter, towards the opponent): without this "up" would not go into the screen.
         // The stick is turned by the same angle the view was turned to the right (right and forward are the stick's x and -y).
@@ -303,6 +325,7 @@ void dissidia_input_install(uint8_t* rdram) {
     g_ram = rdram;
     if ((e = std::getenv("PSPRECOMP_ANALOG_8WAY")) && e[0] == '0') g_8way = false;
     if ((e = std::getenv("PSPRECOMP_CAM_MOVE_REL")) && e[0] == '0') g_move_rel = false;
+    g_legacy_turn = (e = std::getenv("PSPRECOMP_NET_VIEW_STICK")) && e[0] == '1';
     if ((e = std::getenv("PSPRECOMP_ANALOG_DPAD_ZONE"))) g_dpad_zone = static_cast<float>(std::atof(e));
     if (g_dpad_zone < 0.05f) g_dpad_zone = 0.05f; else if (g_dpad_zone > 0.78f) g_dpad_zone = 0.78f;
     if ((e = std::getenv("PSPRECOMP_ANALOG_DEADZONE"))) g_dz = static_cast<float>(std::atof(e));
@@ -311,6 +334,8 @@ void dissidia_input_install(uint8_t* rdram) {
     g_orig = psp_dispatch_probe_lookup(STICK_PROCESS);
     if (!g_orig) { std::fprintf(stderr, "[INPUT] stick hook NOT installed\n"); return; }
     psp_dispatch_register(STICK_PROCESS, dissidia_stick_process);
+    if ((g_orig_pack = psp_dispatch_probe_lookup(NET_PACK))) psp_dispatch_register(NET_PACK, dissidia_net_pack);
+    else std::fprintf(stderr, "[INPUT] lock-step pack hook NOT installed: the camera turn stays off in lock-step battles\n");
     std::fprintf(stderr, "[INPUT] continuous analogue stick direction (dead zone %.2f)\n", g_dz);
 
     if ((e = std::getenv("PSPRECOMP_ANALOG_WALK")) && e[0] == '0') { std::fprintf(stderr, "[INPUT] walking: original 8 ways\n"); return; }

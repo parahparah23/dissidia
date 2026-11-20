@@ -117,6 +117,7 @@ struct AtracCtx {
     struct Seg { uint32_t fileOff, len; };
     std::vector<Seg> segs;      // file ranges held in the ring, in ring order from ringPos
     int64_t lastDec = -1;       // file frame index last fed to the decoder (streamed)
+    bool testJumped = false;    // PSPRECOMP_ATRAC_TEST_TAIL
 
     // Decoder
     int decNext = 0;            // index of the next frame the decoder expects
@@ -449,6 +450,14 @@ uint32_t decode_data(AtracCtx& c, uint8_t* rdram, uint32_t outAddr, int* numSamp
         return ERR_ALL_DATA_DECODED;
     }
 
+    {   // test: PSPRECOMP_ATRAC_TEST_TAIL=<seconds>: a looping streamed track jumps (once) to that long before its loop end, to check the wrap
+        static const int tail = std::getenv("PSPRECOMP_ATRAC_TEST_TAIL") ? std::atoi(std::getenv("PSPRECOMP_ATRAC_TEST_TAIL")) : 0;
+        if (tail > 0 && c.state == ST_STREAMED && c.loops() && c.loopEnd > 0 && !c.testJumped && c.currentSample > 44100) {
+            c.testJumped = true;
+            const int to = c.loopEnd - c.offsetFull() - tail * 44100;
+            if (to > c.currentSample) { std::fprintf(stderr, "[ATRAC] test: jump %d -> %d (loop end %d, end %d)\n", c.currentSample, to, c.loopEnd - c.offsetFull(), c.endSample); seek_to(c, to); }
+        }
+    }
     const int offFull = c.offsetFull();
     const int64_t n = static_cast<int64_t>(c.currentSample) + offFull;
     const int64_t k = n / spf;
@@ -526,14 +535,17 @@ uint32_t decode_data(AtracCtx& c, uint8_t* rdram, uint32_t outAddr, int* numSamp
     }
 
     *numSamples = ns;
+    if (c.testJumped) { static int n = 0; static int lastgot = -1; if ((n++ % 200) == 0 || (int)got != lastgot) { lastgot = got; std::fprintf(stderr, "[ATRAC] test: cur %d ns %d got %d ring %u segs %zu fileRead %u loops %d loopNum %d\n", c.currentSample, ns, (int)got, c.ringValid, c.segs.size(), c.fileRead, (int)c.loops(), c.loopNum); } }
     c.currentSample += ns;
 
     const bool hitEnd = c.currentSample >= c.endSample;
     const int loopEndUser = c.loopEnd - offFull;
     if ((hitEnd || c.currentSample > loopEndUser) && c.loopNum != 0 && c.loopStart >= 0) {
+        if (c.testJumped) std::fprintf(stderr, "[ATRAC] test: WRAP at %d -> %d (hitEnd %d)\n", c.currentSample, std::max(0, c.loopStart - offFull), (int)hitEnd);
         seek_to(c, std::max(0, c.loopStart - offFull));
         if (c.loopNum > 0) c.loopNum--;
     } else if (hitEnd) {
+        if (c.state == ST_STREAMED) std::fprintf(stderr, "[ATRAC] streamed track finished at sample %d (loopNum %d, loopStart %d): it does not loop\n", c.currentSample, c.loopNum, c.loopStart);
         *finish = 1;
         c.currentSample += spf - ns;
     }
@@ -586,6 +598,7 @@ void hle_ReleaseAtracID(uint8_t*, recomp_context* ctx) {
     std::lock_guard<std::mutex> lk(g_mtx);
     int id = static_cast<int>(A(ctx, 0));
     if (!get_ctx(id)) { ret(ctx, ERR_BAD_ATRACID); return; }
+    { const AtracCtx& c = g_ctx[id]; if (c.state == ST_STREAMED) std::fprintf(stderr, "[ATRAC] release id=%d (streamed, at sample %d of %d, loops %d)\n", id, c.currentSample, c.endSample, (int)c.loops()); }   // the battle music: when does it stop
     free_ctx(id);
     ret(ctx, 0);
 }
@@ -750,6 +763,7 @@ void hle_SetLoopNum(uint8_t*, recomp_context* ctx) {
     AtracCtx* c = managed(ctx);
     if (!c) return;
     if (c->loopStart < 0) { ret(ctx, ERR_NO_LOOP_INFO); return; }
+    if (c->state == ST_STREAMED && c->loopNum != static_cast<int32_t>(A(ctx, 1))) std::fprintf(stderr, "[ATRAC] loop count of the streamed track %d -> %d at sample %d\n", c->loopNum, static_cast<int32_t>(A(ctx, 1)), c->currentSample);
     c->loopNum = static_cast<int32_t>(A(ctx, 1));
     ret(ctx, 0);
 }

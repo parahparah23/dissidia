@@ -42,6 +42,8 @@ void dissidia_presence_title();            // discord_presence.cpp: where the pl
 void dissidia_presence_main(uint32_t state);
 void dissidia_presence_sub(uint32_t state);
 
+void dissidia_tagteam_menu_mode(bool on);   // tagteam.cpp: Battle Mode > Tag Team Battle
+
 namespace {
 
 constexpr uint32_t OVL_BASE = 0x089DD4C0u;
@@ -183,14 +185,16 @@ bool edit_start_seq(std::vector<uint8_t>& pak) {
 }
 
 // The pad's "pressed" test exactly as FUN_089E45E8 calls it for confirm (it follows the Cross / Circle swap).
-bool confirm_pressed(uint8_t* rdram, recomp_context* ctx) {
+bool confirm_pressed_at(uint8_t* rdram, recomp_context* ctx, uint32_t args);
+bool confirm_pressed(uint8_t* rdram, recomp_context* ctx) { return confirm_pressed_at(rdram, ctx, CONFIRM_ARGS); }
+bool confirm_pressed_at(uint8_t* rdram, recomp_context* ctx, uint32_t args) {
     const int32_t pad = call(g_pad_obj, rdram, ctx, {0});
     const uint32_t vt = r32(static_cast<uint32_t>(pad) + 52) + 16;
     const int16_t adj = static_cast<int16_t>(r32(vt) & 0xFFFF);
     const uint32_t fn = r32(vt + 4);
     recomp_context save = *ctx;
     ctx->r[4] = pad + adj; ctx->r[5] = static_cast<int32_t>(fn);
-    ctx->r[6] = static_cast<int32_t>(r32(CONFIRM_ARGS)); ctx->r[7] = static_cast<int32_t>(r32(CONFIRM_ARGS + 4));
+    ctx->r[6] = static_cast<int32_t>(r32(args)); ctx->r[7] = static_cast<int32_t>(r32(args + 4));
     RECOMP_LOOKUP(fn)(rdram, ctx);
     const bool on = ctx->r[2] != 0;
     *ctx = save;
@@ -287,6 +291,7 @@ void draw_settings_row(float ox, float oy, bool selected, float alpha) {
     g_layer.publish();
 }
 
+void tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st);   // below (Battle Mode > Tag Team Battle)
 void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(MAIN_TICK)) f(rdram, ctx); return; }
     const uint32_t state = r32(static_cast<uint32_t>(ctx->r[4]) + 320);
@@ -305,7 +310,14 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         return;   // this frame's update is skipped: the retail code would read past its 7-entry mode table
     }
     const uint32_t menu = static_cast<uint32_t>(ctx->r[4]);
+    tag_row_confirm(rdram, ctx, state);
     g_orig_main_tick(rdram, ctx);
+    if (state && std::getenv("PSPRECOMP_MENU_CURDUMP")) {   // debug: cursor helpers (+4 index, +32 min, +36 max) in the start menu state
+        static std::string last; std::string now; char b[64];
+        for (uint32_t o = 0; o < 0x4000u; o += 4) { const uint32_t mn = r32(state + o + 32), mx = r32(state + o + 36), ix = r32(state + o + 4);
+            if (mn == 0 && mx >= 2 && mx <= 9 && ix <= mx) { std::snprintf(b, sizeof b, " +%X:%u/%u", o, ix, mx); now += b; } }
+        if (now != last) { last = now; std::fprintf(stderr, "[CURDUMP] state %08X:%s\n", state, now.c_str()); }
+    }
     // The eighth row follows the Options row (instance 0xE of the start menu scene, handle state + 0x408 + 4 * 0xE; float origin
     // at +0x10 / +0x14), one row further down the curve.
     const uint32_t st = r32(menu + 320);
@@ -319,17 +331,94 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 
-// The start menu's sub-lists (group at state + 0xA88: 1 Battle Mode, 2 Communications Mode; cursor helper at state + 0xA58, +4 index)
-// are updated by ovl_menu FUN_089E4A60; the row the cursor is on is reported for Discord (discord_presence.cpp).
-constexpr uint32_t SUB_TICK = 0x089E4A60u;
+// ---- Battle Mode > Tag Team Battle -------------------------------------------------------------------------------------
+// The start menu's Battle Mode sub-list (group 1, state + 0xA88) has four rows (scene instances 0x17..0x1A of the start menu scene, origins
+// (271, 101 + 16 * row)); its cursor is the cursor helper at state + 0xA58 (+4 index, +36 max). ovl_menu FUN_089E4A60 is the sub-list's
+// update: on confirm it starts the mode of row (group, index) from its table at 0x089E7518. A fifth row "Tag Team Battle" is drawn on the
+// game layer under Labyrinth; the cursor range is raised to 4, and a confirm on it switches the tag team mode on and lets the game start
+// Quick Battle (Party) (index 1); any other row switches it off (a plain group battle is retail).
+constexpr uint32_t SUB_TICK = 0x089E4A60u;      // ovl_menu: start menu sub-list update
+constexpr uint32_t SUB_CONFIRM_ARGS = 0x089E72A0u;   // the words FUN_089E4A60 passes to the pad test for confirm
 FuncPtr g_orig_sub_tick = nullptr;
+const char* const kTagLabel = "Tag Team Battle";
+const char* const kTagHelp = "Two on two with your party: your team mates join the fight, the fallen are replaced.";
+std::chrono::steady_clock::time_point g_sub_last_draw{};
+float g_sub_sel = 0.f;
+void draw_sub_row(float ox, float oy, bool selected) {
+    using dissidia::LayerColor;
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::min(0.1f, std::chrono::duration<float>(now - g_sub_last_draw).count());
+    g_sub_last_draw = now;
+    static float appear = 0.f;
+    appear = dt >= 0.1f ? 0.f : std::min(1.f, appear + dt / 0.2f);
+    g_sub_sel = selected ? std::min(1.f, g_sub_sel + dt / 0.12f) : 0.f;
+    load_ui_sheet();
+    g_layer.begin(std::max(2, psp_sddialog::output_scale()));
+    const float sa = g_sub_sel * appear, ia = (1.f - g_sub_sel) * appear;
+    if (ia > 0.f) {   // idle: the thin line under the row, like the retail sub-rows
+        g_layer.band(ox + 12.f, oy + 10.4f, 470.f, oy + 11.1f, [&](float x, float) {
+            const float fade = x < 430.f ? 1.f : std::max(0.f, 1.f - (x - 430.f) / 40.f);
+            return LayerColor{119, 114, 149, ia * fade};
+        });
+    }
+    if (sa > 0.f) {   // selected: the band
+        g_layer.band(ox - 15.f, oy - 2.f, 480.f, oy + 11.f, [&](float x, float y) {
+            const float ramp = std::min(1.f, std::max(0.f, (x - (ox - 15.f)) / 30.f));
+            const float t = x < 390.f ? 0.f : std::min(1.f, (x - 390.f) / 80.f);
+            float r = 63 + (134 - 63) * t, g = 53 + (136 - 53) * t, b = 174 + (207 - 174) * t;
+            if (y < oy - 1.f) { r += 30; g += 33; b += 11; } else if (y > oy + 10.f) { r += 7; g += 8; b -= 9; }
+            return LayerColor{r, g, b, sa * ramp};
+        });
+    }
+    const float tx = ox + 26.f, base = oy + 8.6f, em = 7.6f;
+    if (ia > 0.f) g_layer.text(kTagLabel, true, em, tx, base, LayerColor{40, 42, 65, ia});
+    if (sa > 0.f) {
+        for (const auto& o : {std::pair<float, float>{0.6f, 0.6f}, {0.6f, 0.f}, {0.f, 0.6f}, {-0.4f, 0.f}, {0.f, -0.4f}})
+            g_layer.text(kTagLabel, true, em, tx + o.first, base + o.second, LayerColor{30, 24, 80, 0.75f * sa});
+        g_layer.text(kTagLabel, true, em, tx, base, LayerColor{255, 255, 255, sa});
+        draw_hand(ox - 13.f, oy - 2.6f, sa);
+        const float hw = g_layer.text(kTagHelp, true, 7.9f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        g_layer.text(kTagHelp, true, 7.9f, 232.f - hw / 2.f, 239.3f, LayerColor{108, 102, 128, sa});
+    }
+    g_layer.publish();
+}
+// The groups that get a Tag Team Battle row: Battle Mode (group 1: 4 rows, the row starts Quick Battle (Party), index 1) and Communications Mode
+// (group 2: 5 rows, instances 0x20.., it starts Group Battle, index 1: the multiplayer tag battle, to come).
+struct TagGroup { uint32_t group, rows, target, first_inst; };   // first_inst: scene instance of the group's first row (rows 16 apart)
+constexpr TagGroup kTagGroups[2] = {{1, 4, 1, 0x17}, {2, 5, 1, 0x20}};
+const TagGroup* tag_group(uint32_t st) { if (!st) return nullptr; const uint32_t g = r32(st + 0xA88); for (const auto& t : kTagGroups) if (t.group == g) return &t; return nullptr; }
+// a confirm on the Tag Team Battle row (called from the start menu's top-level and sub-list updates, before the game's code sees it)
+void tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st) {
+    const TagGroup* tg = tag_group(st); if (!tg) return;
+    const uint32_t cur = st + 0xA58u;
+    if (r32(cur + 36) != tg->rows) return;
+    const bool c1 = confirm_pressed_at(rdram, ctx, SUB_CONFIRM_ARGS), c2 = confirm_pressed(rdram, ctx);
+    if (std::getenv("PSPRECOMP_MENU_SUBLOG") && (c1 || c2)) std::fprintf(stderr, "[SUBTICK] confirm seen (sub args %d, main args %d) idx %u\n", c1, c2, r32(cur + 4));
+    if (!(c1 || c2)) return;
+    const uint32_t idx = r32(cur + 4);
+    dissidia_tagteam_menu_mode(idx == tg->rows);
+    if (idx == tg->rows) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); std::fprintf(stderr, "[MENUSET] Tag Team Battle chosen (group %u)\n", tg->group); }
+}
 void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(SUB_TICK)) f(rdram, ctx); return; }
-    const uint32_t menu = static_cast<uint32_t>(ctx->r[4]);
-    dissidia_presence_sub(r32(menu + 320));
+    const uint32_t menu = static_cast<uint32_t>(ctx->r[4]), st = r32(menu + 320);
+    dissidia_presence_sub(r32(menu + 320));   // discord_presence.cpp: the row the cursor is on
+    const TagGroup* tg = tag_group(st);
+    const uint32_t cur = st + 0xA58u;
+    if (tg && r32(cur + 32) == 0 && r32(cur + 36) == tg->rows - 1) std::memcpy(rdram + ((cur + 36) & 0x07FFFFFFu), &tg->rows, 4);   // one more row
+    if (std::getenv("PSPRECOMP_MENU_SUBLOG") && st) { static std::string last; char b[128]; std::snprintf(b, sizeof b, "group %u idx %u min %u max %u state0 %u", r32(st + 0xA88), r32(cur + 4), r32(cur + 32), r32(cur + 36), r32(st)); if (last != b) { last = b; std::fprintf(stderr, "[SUBTICK] %s\n", b); } }
+    tag_row_confirm(rdram, ctx, st);
     g_orig_sub_tick(rdram, ctx);
+    const uint32_t st2 = r32(menu + 320);
+    const TagGroup* tg2 = tag_group(st2);
+    if (tg2 && r32(st2 + 0xA58 + 36) == tg2->rows) {   // the extra row, one row under the last (the sub-list's first row is instance 0x17, rows 16 apart)
+        const uint32_t inst = r32(st2 + 0x408 + 4 * tg2->first_inst);
+        float ox = 271.f, oy = 101.f;
+        if (inst >= 0x08800000u && inst < 0x0A000000u) { std::memcpy(&ox, rdram + ((inst + 0x10) & 0x07FFFFFFu), 4); std::memcpy(&oy, rdram + ((inst + 0x14) & 0x07FFFFFFu), 4); }
+        oy += 16.f * static_cast<float>(tg2->rows);
+        if (std::isfinite(ox) && std::isfinite(oy) && ox > 100.f && ox < 400.f && oy > 0.f && oy < 240.f) draw_sub_row(ox, oy, r32(st2 + 0xA58 + 4) == tg2->rows);
+    }
 }
-
 
 // ---- Title screen ----------------------------------------------------------------------------------------------------
 // NEW GAME / LOAD GAME / EXTRAS are artwork rows (ovl_menu FUN_089DF14C, state T = [title + 476]: cursor T + 76, row count

@@ -48,8 +48,8 @@ BTN = {'select': 0x1, 'start': 0x8, 'up': 0x10, 'right': 0x20, 'down': 0x40, 'le
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Player Select grid: (row, column) of each character with the cursor starting on (0, 0); read off the screen
-GRID = {'lightning': (0, 0), 'vaan': (0, 1), 'bartz': (1, 2), 'squall': (1, 5), 'kain': (0, 4), 'terra': (1, 3), 'jecht': (2, 7)}   # (down presses, right presses; negative = left)
-CHAR_ID = {'lightning': 31, 'bartz': 9, 'squall': 15, 'kain': 24, 'terra': 11, 'jecht': 20}      # the game's charId (the fighter the tests drive; the other one is the dummy)
+GRID = {'lightning': (0, 0), 'vaan': (0, 1), 'squall': (1, 5), 'kain': (0, 4), 'terra': (1, 3), 'jecht': (2, 7)}   # (down presses, right presses; negative = left)
+CHAR_ID = {'lightning': 31, 'squall': 15, 'kain': 24, 'terra': 11, 'jecht': 20}      # the game's charId (the fighter the tests drive; the other one is the dummy)
 
 
 class Game:
@@ -70,7 +70,7 @@ class Game:
         shutil.copytree(os.path.join(self.work, 'ms0'), ms0)
         ini = os.path.join(self.out, 'settings_%d.ini' % self.fps)
         with open(ini, 'w') as f:
-            f.write('display=%s\nfps=%d\nrender_scale=%d\nwidescreen=%d\nvoice=%s\ncheck_updates=0\nhd_textures=%d\n' % (
+            f.write('display=%s\nfps=%d\nrender_scale=%d\nwidescreen=%d\nvoice=en\ncheck_updates=0\nhd_textures=%d\n' % (
                 os.environ.get('BT_DISPLAY_MODE', 'window'),   # BT_DISPLAY_MODE=fullscreen: a real-display test the way players run (VRR, pacing)
                 self.fps, self.render_scale, self.widescreen,
                 os.environ.get('BT_VOICE', 'en'),              # BT_VOICE=jp: the Japanese voices (needs voice_jp/ next to the run's ms0, i.e. in --out)
@@ -85,6 +85,9 @@ class Game:
         env.setdefault('PSPRECOMP_TEST_NO_AI', '1')   # the CPU brain never ticks: the dummy does not attack (BT_NO_FREEZE=1 lets it act)
         if os.environ.get('BT_NO_FREEZE'):
             env['PSPRECOMP_TEST_NO_AI'] = '0'      # let the CPU fighter act (the dummy is the default)
+            env['PSPRECOMP_TEST_FREEZE_CPU'] = '0'
+        if os.environ.get('BT_NO_AI_ONLY'):        # the CPU brains do not think but the CPU fighters are not frozen (they react to hits, fly when launched)
+            env['PSPRECOMP_TEST_NO_AI'] = '1'
             env['PSPRECOMP_TEST_FREEZE_CPU'] = '0'
         if os.path.exists(self.go_file):
             os.remove(self.go_file)
@@ -315,8 +318,6 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
     g.step('cross')
     g.step('cross')                                    # YES
     lap('char chosen')
-    for _ in range(int(os.environ.get('BT_CPU_RIGHT', '0'))):   # another opponent: cursor steps right from Lightning (1 = Vaan)
-        g.step('right', settle=False)
     g.step('cross')                                    # CPU Select: Lightning
     g.step('cross')                                    # YES
     time.sleep(2.0)

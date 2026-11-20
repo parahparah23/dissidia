@@ -170,6 +170,14 @@ uint32_t psp_kmem_bump_alloc(uint32_t size);
 /// Same, with a name for the [MEM] layout log.
 uint32_t psp_kmem_bump_alloc_named(uint32_t size, const char* name);
 
+/// Same, but region 2 first (when configured and the request fits there),
+/// else region 1: for blocks a game wants kept out of region 1 so that one
+/// big contiguous block can still come from it later.
+uint32_t psp_kmem_bump_alloc_named_r2(uint32_t size, const char* name);
+
+/// Bytes still unallocated in one region (1 or 2; 0 for an unconfigured region).
+uint32_t psp_kmem_free_region(int region);
+
 /// True when allocating `sizes[0..n)` in order (each rounded up to 256 B, the
 /// same first-fit as psp_kmem_bump_alloc: region 1, then region 2) would all
 /// succeed from the heap's current position. Does not allocate.

@@ -32,6 +32,10 @@ void psp_adhoc_pump(uint8_t* rdram, recomp_context* ctx);
 
 /// The frame rate (30 or 60) this instance would like. 0 = unknown. Sent to other players.
 void psp_adhoc_set_local_fps(int fps);
+// A game module's own bytes in the beacons (at most 24): what it wants the other players in the group to know (a mode, a checksum).
+void psp_adhoc_set_game_data(const uint8_t* d, int n);
+// The game bytes of the other players in this player's group: returns how many are in the group (0 = not in a group).
+int psp_adhoc_group_game_data(uint8_t (*out)[24], int* lens, int max, uint8_t (*macs)[6] = nullptr);   // macs: each player's MAC, same order
 
 /// The frame rate the whole connected group should run at: the lowest of every player's
 /// preference, or 0 when not in a group with anyone else (no limit).
@@ -84,3 +88,12 @@ bool psp_net_notice_showing();
 /// The round trip to the slowest player in our group, in ms (smoothed, measured once a second), or -1 when unknown (no group, or the
 /// others run a build that does not answer pings).
 int psp_adhoc_ping_ms();
+// Side channel for a game module: datagrams to one player (or the broadcast MAC ff:..:ff) of the group on channel `chan`, carried like the
+// game's PDP traffic on ports the game never uses. _recv pops the oldest message of that channel (-1 = none). Not reliable, not ordered.
+void psp_adhoc_local_mac(uint8_t out[6]);
+int psp_adhoc_group_macs(uint8_t (*out)[6], char (*nicks)[32], int max);   // the other members of this player's group (MAC, adhocctl nickname)
+void psp_adhoc_side_send(const uint8_t mac[6], uint16_t chan, const uint8_t* d, int n);
+int psp_adhoc_side_recv(uint16_t chan, uint8_t src[6], uint8_t* buf, int max);
+/// Send a runtime message (not the game's) to every player in this instance's group: a PDP datagram on a reserved
+/// port; the receivers hand it to psp_netplay_on_message. Does nothing when not in a group.
+void psp_adhoc_send_aux(const uint8_t* data, size_t n);

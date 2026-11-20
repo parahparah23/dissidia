@@ -314,6 +314,18 @@ uint32_t psp_kmem_bump_alloc_named(uint32_t size, const char* name) {
     return kmem_alloc(size, name);
 }
 
+uint32_t psp_kmem_bump_alloc_named_r2(uint32_t size, const char* name) {
+    if (size != 0 && g_heap2_end != 0 && g_heap2_pos + size <= g_heap2_end) {
+        const uint32_t addr = g_heap2_pos;
+        g_heap2_pos += size;
+        g_kmem_log.push_back({name ? name : "", addr, size});
+        return addr;
+    }
+    return kmem_alloc(size, name);
+}
+
+uint32_t psp_kmem_free_region(int region) { return region == 1 ? kmem_free_r1() : region == 2 ? kmem_free_r2() : 0u; }
+
 // Claims what is left of region 1 only (Patapon's dlmalloc-override arena);
 // region 2, when configured, stays available to later allocations.
 void psp_kmem_reserve_remaining(uint32_t* start, uint32_t* end) {

@@ -81,8 +81,8 @@ std::atomic<uint32_t> g_host_buttons{0};
 //
 // SDL game controller (all connected pads, hot-plug aware):
 //   A -> CROSS        B -> CIRCLE      X -> SQUARE      Y -> TRIANGLE
-//   LEFTSHOULDER  -> LTRIGGER    TRIGGERLEFT  (>50%) -> LTRIGGER (or PSPRECOMP_PAD_L2)
-//   RIGHTSHOULDER -> RTRIGGER    TRIGGERRIGHT (>50%) -> RTRIGGER (or PSPRECOMP_PAD_R2)
+//   LEFTSHOULDER  -> LTRIGGER    TRIGGERLEFT  (>18%) -> LTRIGGER (or PSPRECOMP_PAD_L2)
+//   RIGHTSHOULDER -> RTRIGGER    TRIGGERRIGHT (>18%) -> RTRIGGER (or PSPRECOMP_PAD_R2)
 //   DPAD up/right/down/left -> UP/RIGHT/DOWN/LEFT
 //   START -> START    BACK -> SELECT    GUIDE -> ignored
 //   Left stick -> analogue lx/ly, 0..255 (centre 128), ~8% deadzone applied
@@ -402,16 +402,19 @@ void pad_close(SDL_JoystickID id) {
     }
 }
 
+// The analogue triggers count as pressed from ~18% travel (was 50%): R + X (dodge) pressed together on an Xbox pad reached the game as X first, R a frame or
+// two later (the trigger's travel), so X alone started a chase in a chase window (18 Nov, desktop). PSPRECOMP_PAD_TRIGGER_THRESH=<0..32767> overrides.
+int16_t trigger_threshold() { static const int t = [] { const char* e = std::getenv("PSPRECOMP_PAD_TRIGGER_THRESH"); return e ? std::atoi(e) : 6000; }(); return static_cast<int16_t>(t); }
 void pad_axis(uint8_t axis, int16_t v) {
     switch (axis) {
         case SDL_CONTROLLER_AXIS_LEFTX: g_lx_raw = v; break;
         case SDL_CONTROLLER_AXIS_LEFTY: g_ly_raw = v; break;
         case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-            g_trig_l_down = v > 16383;
+            g_trig_l_down = v > trigger_threshold();
             update_triggers();
             break;
         case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-            g_trig_r_down = v > 16383;
+            g_trig_r_down = v > trigger_threshold();
             update_triggers();
             break;
         case SDL_CONTROLLER_AXIS_RIGHTX: g_rx_raw = v; break;

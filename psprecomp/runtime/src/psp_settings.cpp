@@ -13,6 +13,7 @@
 #include "hle/psp_savedata_dialog.h"
 #include "hle/psp_hle_adhoc.h"
 #include "hle/psp_upnp.h"
+#include "psp_netplay.h"
 #include "hle/psp_cloud_service.h"
 #include "hle/psp_cloud_glue.h"
 #include "hle/psp_saves_page.h"
@@ -193,7 +194,7 @@ void texpack_download_start();
 void texpack_install_tick();
 
 enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
-           ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
+           ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_DELAY, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
@@ -1038,6 +1039,15 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = g_net_peers.empty() ? "None" : g_net_peers;
             m.help = "Direct peers\nExtra addresses to contact directly, in addition to the local network: host or host:port, comma separated. Press Cross to edit. Saved.";
             break;
+        case ROW_NET_DELAY: {
+            const int d = psp_netplay_input_delay();
+            m.label = "Network Delay";
+            m.value = std::to_string(d) + (d == 1 ? " frame" : " frames");
+            m.can_dec = d > PSP_NETPLAY_MIN_DELAY;
+            m.can_inc = d < PSP_NETPLAY_MAX_DELAY;
+            m.help = "Network delay for online battles\nYour button presses take effect this many battle frames later (one frame is 33 ms at 30 fps), and in return the other player's input has that much longer to arrive, so the battle does not stall at higher pings. A rough guide: one frame per 70 ms of round-trip ping at 30 fps (per 35 ms at 60 fps); 3 frames each handled a 200 ms round trip in tests. Both players should pick the same value (the delays of both players add up). Cannot be changed during an online session. Saved.";
+            break;
+        }
         case ROW_NET_STATUS:
             m.label = "Status";
             m.value = g_net_status.empty() ? "..." : g_net_status;
@@ -2167,6 +2177,12 @@ void change(int d) {   // left / right on the selected row
             build_rows();   // the rows differ: server and room, or direct peers
         }
         break;
+    case ROW_NET_DELAY: {
+        const int v = std::clamp(psp_netplay_input_delay() + d, PSP_NETPLAY_MIN_DELAY, PSP_NETPLAY_MAX_DELAY);
+        psp_netplay_set_input_delay(v);
+        save("net_input_delay", std::to_string(v));
+        break;
+    }
     case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_NET_STATUS: case ROW_NET_UPNP_STATUS: case ROW_DISCORD_STATUS: break;
     case ROW_CLOUD_PROVIDER: {
         const int cur = int(g_cloud.provider), nx = std::clamp(cur + d, 0, 3);
@@ -2437,6 +2453,7 @@ void build_rows() {
         add(ROW_SEC_SERVER); add(ROW_NET_MODE);
         if (g_net_internet) { add(ROW_NET_SERVER); add(ROW_NET_ROOM); }
         else { add(ROW_NET_PEERS); }
+        add(ROW_NET_DELAY);
         add(ROW_NET_STATUS);
         if (!g_net_internet) { add(ROW_NET_UPNP); add(ROW_NET_UPNP_STATUS); }   // direct play needs the port reachable
         add(ROW_NET_PING);
@@ -2921,6 +2938,7 @@ void confirm_row() {
     case ROW_NET_SERVER: edit_begin(0); return;
     case ROW_NET_ROOM: edit_begin(1); return;
     case ROW_NET_PEERS: edit_begin(2); return;
+    case ROW_NET_DELAY: change(psp_netplay_input_delay() >= PSP_NETPLAY_MAX_DELAY ? PSP_NETPLAY_MIN_DELAY - PSP_NETPLAY_MAX_DELAY : 1); return;   // cycles round
     case ROW_NET_STATUS: break;
     case ROW_CLOUD_PROVIDER: change(g_cloud.provider == psp_cloud_svc::Provider::Google ? -3 : 1); return;   // cycles round
     case ROW_CLOUD_FOLDER: edit_begin(3); return;
@@ -3312,6 +3330,7 @@ void psp_settings_load_early() {
     if ((it = g_saved.find("net_peers")) != g_saved.end()) put("PSPRECOMP_ADHOC_PEERS", it->second);
     if ((it = g_saved.find("net_upnp")) != g_saved.end()) put("PSPRECOMP_ADHOC_UPNP", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("net_ping")) != g_saved.end()) put("PSPRECOMP_PING_OVERLAY", it->second == "1" ? "1" : "0");
+    if ((it = g_saved.find("net_input_delay")) != g_saved.end() && !it->second.empty()) put("PSPRECOMP_NET_DELAY", it->second);
     if ((it = g_saved.find("fps_counter")) != g_saved.end()) put("PSPRECOMP_FPS_COUNTER", it->second == "1" ? "1" : "0");
     if ((it = g_saved.find("vsync")) != g_saved.end() && (it->second == "0" || it->second == "1")) put("PSPRECOMP_VSYNC", it->second);
     if ((it = g_saved.find("perf_overlay")) != g_saved.end()) put("PSPRECOMP_PERF_HUD", it->second == "1" ? "1" : "0");

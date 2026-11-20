@@ -41,6 +41,8 @@
 #include "recomp.h"
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
+float dissidia_tagteam_age();   // tagteam.cpp: its battle clock (one step per battle frame; the match pause runs on it)
+#include "psp_netplay.h"
 #include "psp_ge_draw.h"
 #include "psp_screenfx.h"
 #include "psp_present_sync.h"
@@ -74,6 +76,10 @@ extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);
 int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, int id);   // roster.cpp
 
 void psp_mem_watch_set(uint32_t addr);   // runtime/src/psp_dispatch.cpp
+void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx);
+void dissidia_heapcheck_frame(const uint8_t* rdram);   // hooks_models.cpp (PSPRECOMP_HEAPCHECK=1: every game heap's chain checked)
+bool dissidia_tagteam_pad_blocked(uint32_t actor);   // tagteam.cpp: fighters held out of an EX Burst (any player, also a human's pad)   // tagteam.cpp: takes the tag team overlay off the screen when the fight stops refreshing it
+
 namespace {
 
 constexpr uint32_t OVL_BASE = 0x089DD4C0u;
@@ -834,10 +840,12 @@ constexpr uint32_t GRID_MASK = 0x2000u | 0x8000u;
 }  // namespace
 uint32_t dissidia_walk_filter(uint32_t buttons);   // direct_battle.cpp
 uint32_t dissidia_tagteam_pad(uint32_t raw);        // tagteam.cpp: the tag swap button
+uint32_t dissidia_tagteam_menu_pad(uint32_t raw);   // tagteam_menu.cpp: the CPU settings dialog takes the pad while it is open
 namespace {
 uint32_t jecht_grid_filter(uint32_t raw) {
     raw = dissidia_walk_filter(raw);   // direct_battle.cpp: test-only pad record / replay of the menu walk (a no-op unless asked for)
     raw = dissidia_tagteam_pad(raw);   // tagteam.cpp: takes the swap button out of the input in a tag battle
+    raw = dissidia_tagteam_menu_pad(raw);
     if (l30_active()) {   // 30 Hz logic: the pad changes only on gameplay frames (the PSP reads it once per 30 Hz frame);
         static uint32_t shown = 0, latched = 0;            // a press that came and went between two of them is shown once (latched)
         latched |= raw & ~shown;
@@ -1159,6 +1167,8 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t timer = static_cast<uint32_t>(ctx->r[4]);
     g_tick++;
     dissidia_xmods_frame();   // xdelta_mods.cpp: code a mod rewrote while running
+    dissidia_heapcheck_frame(rdram);
+    dissidia_tagteam_frame_end(rdram, ctx);   // tagteam.cpp: the overlay leaves the screen when the fight stops refreshing it
     ge_draw_perf_set_gameplay(battle_running());   // the performance overlay's average / 1% low count battle frames only
     if (ok(timer)) {
         // In an ad-hoc session every player runs at the lowest rate any of them asked for, so the
@@ -1194,6 +1204,7 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         g_fx_period = rate / 30;
     }
     g_orig_frame_end(rdram, ctx);
+    psp_netplay_frame_end(battle_running());
     g_play_ms += 1000.0 / static_cast<double>(std::max(30, g_rate));
     input_debug_frame();
     testdrive_frame(rdram, ctx);
@@ -1451,15 +1462,18 @@ uint32_t actor_of_pad(uint32_t pad) {   // the fighter whose controller (actor+0
 constexpr uint32_t PAD_SET_STATE = 0x08AB387Cu, PAD_SET_PENDING = 0x08AB38C4u;
 FuncPtr g_orig_pad_set_state = nullptr, g_orig_pad_set_pending = nullptr;
 bool ai_off_blocks(uint32_t pad) {
-    if (!g_test_ai_off || !g_gt_started) return false;
     const uint32_t a = actor_of_pad(pad);
+    if (a && ::dissidia_tagteam_pad_blocked(a)) return true;
+    if (!g_test_ai_off || !g_gt_started) return false;
     return a && a != test_player();
 }
 void pad_set_state_hook(uint8_t* rdram, recomp_context* ctx) {
+    { static const bool lg = std::getenv("PSPRECOMP_TTLOCK_PADLOG") != nullptr; if (lg) std::fprintf(stderr, "[PADSET] state pad %08X (actor %08X) a1 %08X a2 %08X\n", static_cast<uint32_t>(ctx->r[4]), actor_of_pad(static_cast<uint32_t>(ctx->r[4])), static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6])); }
     if (ai_off_blocks(static_cast<uint32_t>(ctx->r[4]))) { ctx->r[2] = 0; return; }
     g_orig_pad_set_state(rdram, ctx);
 }
 void pad_set_pending_hook(uint8_t* rdram, recomp_context* ctx) {
+    { static const bool lg = std::getenv("PSPRECOMP_TTLOCK_PADLOG") != nullptr; if (lg) std::fprintf(stderr, "[PADSET] pending pad %08X (actor %08X) a1 %08X a2 %08X\n", static_cast<uint32_t>(ctx->r[4]), actor_of_pad(static_cast<uint32_t>(ctx->r[4])), static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6])); }
     if (ai_off_blocks(static_cast<uint32_t>(ctx->r[4]))) { ctx->r[2] = 0; return; }
     g_orig_pad_set_pending(rdram, ctx);
 }
@@ -1677,6 +1691,13 @@ CoreSeen g_cores[8];   // kind-6 objects (EX cores) and the g_tick they last upd
 struct ActorSeen { uint32_t actor; float res; int own; };
 ActorSeen g_actor_seen[24];
 
+// Tag team call-in: for `ticks` frame ends every fighter but `keep` gets time step 0 (the match is paused while the new member makes an entrance).
+// The pause runs on the tag team's battle clock (tagteam.cpp, one step per battle frame), not on frame ends: frame ends also run while a lock-step
+// (Communications Mode) battle waits for the other players, and the requested rate can differ per machine, so a frame-end pause ended on a
+// different battle frame on each machine (the other fighters would start moving a few frames apart: a split).
+uint32_t g_pause_keep = 0; float g_pause_from = 0.f, g_pause_until = -1.f;
+void pause_match_impl(uint32_t keep, float seconds) { g_pause_keep = keep; g_pause_from = dissidia_tagteam_age(); g_pause_until = seconds > 0.f ? g_pause_from + seconds * 60.f : -1.f; }
+bool match_paused_impl() { const float a = dissidia_tagteam_age(); if (a < g_pause_from) g_pause_until = -1.f; return a < g_pause_until; }   // (a new battle: the clock went back)
 // PSPRECOMP_MT_SNAP=1 (experiment): a move's motion time (actor +0x1A8) sums the step every update. At 90 / 150 / 180 / 210 fps the step
 // (2/3, 0.4, 1/3, 2/7 ticks) is not exact in floating point and the sum lands just under a whole tick (69.99999 instead of 70), so an event
 // keyed at tick 70 fires one update late (Exdeath's multi-hit 1960: a hit every 177.8 ms at 90 fps instead of 166.7; fps_parity.py). The
@@ -1809,10 +1830,6 @@ void task_run_hook(uint8_t* rdram, recomp_context* ctx) {
 
 void task_exec_hook(uint8_t* rdram, recomp_context* ctx) { task_note("OBJ_MANAGER::ExecTask 088413D0", ctx); g_orig_task_exec(rdram, ctx); }
 void task_draw_hook(uint8_t* rdram, recomp_context* ctx) { task_note("draw task 088881BC", ctx); g_orig_task_draw(rdram, ctx); }
-// Tag team call-in: for `ticks` frame ends every fighter but `keep` gets time step 0 (the match is paused while the new member makes an entrance).
-uint32_t g_pause_keep = 0; uint64_t g_pause_until = 0;
-void pause_match_impl(uint32_t keep, float seconds) { g_pause_keep = keep; g_pause_until = g_tick + static_cast<uint64_t>(seconds > 0.f ? seconds * static_cast<float>(g_target.load()) : 0.f); }
-bool match_paused_impl() { return g_tick < g_pause_until; }
 
 void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t actor = static_cast<uint32_t>(ctx->r[4]);
@@ -1845,7 +1862,7 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     const float before = ctx->f[0];
     struct NoteDt { recomp_context* c; ~NoteDt() { g_face_dt = c->f[0]; g_face_dt_set = true; } } note_dt{ctx};   // for face_step_hook
-    if (g_tick < g_pause_until && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != g_pause_keep) { ctx->f[0] = 0.f; return; }
+    if (match_paused_impl() && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != g_pause_keep) { ctx->f[0] = 0.f; return; }
     if (g_test_freeze_cpu && g_gt_started && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != test_player()) { ctx->f[0] = 0.f; return; }
     if (g_ticks != 2.0f && ok(actor) && own) ctx->f[0] *= g_ticks * 0.5f;   // own clock: a fixed 2.0 per frame
     if (g_action_start_step && g_ticks < 2.0f && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0) {
@@ -2093,6 +2110,11 @@ void exb_ui_hook(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
     static float acc = 1.f;
+    if (std::getenv("PSPRECOMP_TTCAM_EXUILOG")) {   // debug: the quicktime object (r4): +0 actor, +4, +8 state, +C, +10, +14, and the caller, once per 30 calls or on a change
+        static uint32_t n = 0, lo = 0, l8 = ~0u; const uint32_t o = static_cast<uint32_t>(ctx->r[4]);
+        if (ok(o) && (n++ % 30 == 0 || o != lo || r32(o + 8u) != l8)) { lo = o; l8 = r32(o + 8u);
+            std::fprintf(stderr, "[EXUI] gt=%.0f obj %08X +0 %08X +4 %08X +8 %08X +C %08X +10 %08X +14 %08X +18 %08X +1C %08X ra %08X calls %u\n", g_gt_ms, o, r32(o), r32(o + 4u), r32(o + 8u), r32(o + 12u), r32(o + 16u), r32(o + 20u), r32(o + 24u), r32(o + 28u), static_cast<uint32_t>(ctx->r[31]), n); }
+    }
     if (g_ticks == 2.0f || !g_exb_ui || !g_orig_exb_pressed || g_exb_in) { g_orig_exb_ui(rdram, ctx); return; }   // inside a gated call: already at 30 Hz, do not gate twice
     acc += g_ticks * 0.5f;
     if (acc < 1.f - 1e-4f) { exb_poll_held(rdram, ctx); return; }
@@ -2215,11 +2237,11 @@ FuncPtr g_orig_gauge_sm = nullptr;
 bool g_gauge30 = true;
 void gauge_sm_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!g_gauge30 || g_ticks >= 2.0f || overlay_id() != 1) { g_orig_gauge_sm(rdram, ctx); return; }
-    static uint32_t key[4] = {}; static float acc[4] = {};
+    static uint32_t key[12] = {}; static float acc[12] = {};   // 2 slots + the extras' machine copies (tagteam.cpp xgauge_step)
     const uint32_t self = static_cast<uint32_t>(ctx->r[4]);
     int slot = -1;
-    for (int i = 0; i < 4; i++) if (key[i] == self) slot = i;
-    if (slot < 0) { for (int i = 0; i < 4 && slot < 0; i++) if (!key[i]) slot = i; if (slot < 0) slot = 0; key[slot] = self; acc[slot] = 0; }
+    for (int i = 0; i < 12; i++) if (key[i] == self) slot = i;
+    if (slot < 0) { for (int i = 0; i < 12 && slot < 0; i++) if (!key[i]) slot = i; if (slot < 0) slot = 0; key[slot] = self; acc[slot] = 0; }
     const float step = rdf(FRAME_STEP);
     acc[slot] += step;
     if (acc[slot] < 2.0f - 1e-3f) return;                 // not this update: the PSP frame has not "elapsed" yet
@@ -2454,6 +2476,7 @@ bool dissidia_nearest_fighter(const float eye[3], float pos[3]) {
 }
 
 float dissidia_battle_age() { return g_battle_age; }   // ticks (1/60 s) since the battle started running (camera.cpp)
+float dissidia_logic_tick_len() { return g_ticks; }   // 1/60 s per game logic frame (tagteam.cpp: its own battle clock)
 
 // The fighter a person controls (its brain, actor +0x5C4, is in human mode: brain +0x54 != 0), 0 if none is known (camera.cpp).
 uint32_t dissidia_player_actor() {
@@ -2633,9 +2656,9 @@ void dissidia_framerate_install(uint8_t* rdram) {
     }
     psp_settings_add_debug_toggle({"Jecht Combo Timing", "Jecht combo helper (debug)\nThe screen edge flashes green when the window for his next chain press opens, and a press says GOOD, TOO EARLY or TOO LATE with the milliseconds off. Rush, Neutral / Up 2 and 3, HP. This session only.",
                                    +[]() { return g_dbg_combo; }, +[](bool on) { g_dbg_combo = on; }});
-    if (g_test_ai_off && (g_orig_pad_set_state = dissidia_ovl_battle_lookup(PAD_SET_STATE)) && (g_orig_pad_set_pending = dissidia_ovl_battle_lookup(PAD_SET_PENDING))) {
+    if ((g_orig_pad_set_state = dissidia_ovl_battle_lookup(PAD_SET_STATE)) && (g_orig_pad_set_pending = dissidia_ovl_battle_lookup(PAD_SET_PENDING))) {   // always: the tag team blocks pads too
         psp_dispatch_register(PAD_SET_STATE, pad_set_state_hook); psp_dispatch_register(PAD_SET_PENDING, pad_set_pending_hook);
-        std::fprintf(stderr, "[FPS] test: CPU AI input off\n");
+        if (g_test_ai_off) std::fprintf(stderr, "[FPS] test: CPU AI input off\n");
     }
     std::fprintf(stderr, "[FPS] press latch %s (pressed-test hook %s)\n", g_press_latch ? "on" : "off", g_orig_pressed ? "installed" : "NOT FOUND");
     if ((g_orig_rootmotion = psp_dispatch_probe_lookup(ROOT_MOTION))) psp_dispatch_register(ROOT_MOTION, root_motion_hook);

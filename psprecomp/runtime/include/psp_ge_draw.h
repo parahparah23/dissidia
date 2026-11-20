@@ -123,6 +123,8 @@ void ge_draw_flash(uint32_t rgb, int ms);
 /// View blocker fade: while `active`, static scene geometry (not skinned) that lies between the camera and `target` (world space, the
 /// player's chest) fades out to a see-through alpha, like the game's own wall fade does for its camera (the game computes that from its
 /// own eye, so a camera we move ourselves needs it done here). Call once per camera update (game thread).
+bool ge_draw_last_view_proj(float view[12], float proj[16]);   // view (4x3) and projection (4x4) of the last completed main scene (column-major, GE layout)
+void ge_draw_last_eye(float eye[3], float fwd[3]);   // debug: eye and view direction of the last depth-tested 3D draw
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]);   // eye: the game camera's eye this update; only draws made from that view fade
 // Camera collision against the stage geometry the main view has drawn (static, non-skinned, depth-writing draws, cached in world
 // space per stage): ask for the segment from -> to (game thread); the answer, the fraction of the segment before its first hit

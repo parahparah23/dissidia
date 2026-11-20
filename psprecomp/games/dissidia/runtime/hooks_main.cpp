@@ -60,6 +60,7 @@ extern void dissidia_net_packs_install();
 // camera.cpp: analogue right-stick battle camera.
 extern void dissidia_camera_install(uint8_t* rdram);
 extern void dissidia_menu_settings_install(uint8_t* rdram);
+extern void dissidia_tagteam_menu_install(uint8_t* rdram);   // tagteam_menu.cpp: Group Battle setup screen marks (CPU picks)
 extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
 extern void dissidia_tagteam_install(uint8_t* rdram);
 extern void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx);   // tagteam.cpp: the swap's safe point, once per scene tick
@@ -80,6 +81,7 @@ extern FuncPtr dissidia_xmod_changed_code(uint32_t vaddr);
 extern void dissidia_xmods_watch_begin(uint8_t* rdram);
 extern void dissidia_xmods_watch_boot();
 extern void dissidia_xmods_overlay_loaded(int ovl);
+extern void dissidia_netplay_install(uint8_t* rdram);
 
 bool dissidia_player_pos(float* P);   // camera.cpp
 int dissidia_ex_cores(float (*P)[3], int max);   // framerate.cpp
@@ -380,11 +382,13 @@ void dissidia_register_hooks(uint8_t* rdram) {
     dissidia_tagteam_install(rdram);  // tagteam.cpp (2 v 2 battles, experimental)
     dissidia_camera_install(rdram);   // camera.cpp (wraps a battle-overlay function too)
     dissidia_menu_settings_install(rdram);   // menu_settings.cpp: Settings entries in the title / start menu / pause menu
+    dissidia_tagteam_menu_install(rdram);    // tagteam_menu.cpp: Communications Mode tag team: CPU picks on the Group Battle setup screen
     dissidia_discord_install(rdram);         // discord_presence.cpp: Discord Rich Presence
     dissidia_input_install(rdram);    // input.cpp
     dissidia_button_prompts_install();   // button_prompts.cpp: the game's button symbols in the controller's style
     dissidia_comm_battle_install(rdram);   // comm_battle.cpp: online battles on our pad link
     dissidia_framerate_install(rdram);   // framerate.cpp (wraps a battle-overlay function too)
+    dissidia_netplay_install(rdram);     // netplay.cpp: the lock-step battle's input delay and desync check
 
     supacc_init_dispatch_table();
     supacc_init_data_sections(rdram);
