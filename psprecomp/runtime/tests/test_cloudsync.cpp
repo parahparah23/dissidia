@@ -311,10 +311,12 @@ int main() {
         r = sync_all(*p2, D.opts(), &err);
         CHECK(find(r, "ExtGameData00") && find(r, "ExtGameData00")->action == Action::Pulled);
         CHECK(slurp(D.dir("ExtGameData00") / "EMSX.BIN") == slurp(C.dir("ExtGameData00") / "EMSX.BIN"));
-        // without a Dissidia save in the folder, a lone non-Dissidia title is not taken for one
+        // any save under a Dissidia 012 disc ID counts, even a mod's save alone; another game's save never does
         Dev E{T + "/modE", "ULUS10566"};
         make_save(E.saves(), "ULUS10566ExtGameData00", "EXTRA DATA (Emendatus)", "", "EMSX.BIN", 8);
-        CHECK(psp_savemgr::scan(E.saves()).empty());
+        make_save(E.saves(), "ULUS98765DATA00", "SOME OTHER GAME", "", "DATA.BIN", 9);
+        auto found = psp_savemgr::scan(E.saves());
+        CHECK(found.size() == 1 && found[0].name == "ULUS10566ExtGameData00");
     }
 
     std::error_code ec;
