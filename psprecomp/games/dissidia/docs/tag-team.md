@@ -3254,3 +3254,50 @@ Terra's moves "do not work".
   character) -> Ultimecia -> Lightning -> Yuffie; the host runs at 1/50 speed under load, ~25 min to t = 40 s).
 - **Not verified**: that the dangling references are what broke the moves (needs the user's device or a host run with the effect pool nearly full: the host pool had 5.4 MB free where
   the RP6 had 1.1 MB); screenshots of Kain's wind move; whether the kept blocks leak enough to matter over a very long battle (~70-80 KB per slot rebuild).
+## Assist Off, round 8: the partner uses its assist move (20 Nov, tree tthud; host-only, headless)
+User: "When the CPU assist is called, can we have them use their normal assist move?" Code: `tagteam.cpp`, blocks "Assist Off, round 8" (`ao8_*`, `ao_lock_foe`, `ao_partner_busy`, before `assist_off_move`) and the `forced` mode of `xas_spawn`.
+- **What a retail assist is (research).** An assist is a separate fighter-class actor made from the character's ASSIST file (`FUN_088FB934(char, costume, 1)`; `xas_spawn` already builds these). Its moveset is
+  tiny: plya table of 4 - 14 records (the dump is `[AO8]` lines, `PSPRECOMP_TTCAM_ATKTABLE=1` or the tag log), e.g. Terra (c11) LONG1 (ground BRV, motion 10030, reach 30) / AIR_UPPER2 (air BRV, 10020) /
+  MIDDLE_ABI1 (ground HP, 10090) / AIR_LONG_ABI1; Kain (c24) BR_L_CHARGE1 (10005) / BR_A_SPIN1 (10020) / HP_L_JUMP1 / HP_A_AIMING1; Lightning (c31) BR_A_IMPACT1 (10004) / BR_L_AERORA1 (motion 58 -> script 10017) /
+  HP_L_RAIKOU1 (10071) / HP_A_TENMEI1 (10075); c18: NEAR_HOLY / MIDDLE_HOLY (10010 ground BRV) ... The retail controller plays: appear script 240 (~1 s, flash + sound + slow motion + ASSIST banner), 101, then the
+  attack script (BRV kind 1: ground 10010 / air 10002 for c18, 10005 / 10020 Kain; HP kind 2: 1009x, 10071 ...), homing from 4 - 9 m, follow-ups by the script itself.
+  **Where the moves live:** the records are in the FULL fighter's table too under the same action ids (Terra 1070 LONG1, 1492 AIR_UPPER2; Lightning 2289 BR_A_IMPACT1 ...), but round 7's own-attack picker takes
+  the shortest-reach NEAR / combo openers and never LONG1-style casts, and an assist's script plays with the assist model's motions / the controller's homing and hit module. Starting the full body's record would
+  copy only the name, not the retail behaviour (appear, ph / hit booking, homing, call fx); so:
+- **Choice: the partner's own assist actor X plays the call through retail's own controller.** `xas_spawn(idx, forced = true)` makes X from the assist file of the PARTNER'S OWN character (not the member's chosen
+  assist; loaded like Assist ON's, pool room needed; no file / no room -> no X, log `its own assist file .. is not available`), 4 s into the battle, for both sides' extras when Assist is Off (`g_xas[..].forced`;
+  `xas_ptr` hides it from the Assist ON paths, `xas_update` never runs it). When the human / slot CPU requests a call (request word 0, `actl_hook`), `ao8_try` swaps `M + 0x1108 = X` (`X + 0x1108 = M`) and leaves the
+  request for `FUN_08B031AC`: gauge take, place, appear fx, slow motion, banner, homing, attack script, retail hit module booking on the caller's side all run unchanged (identical logs to retail: appear 240
+  at +0, 101 at +1.03, attack script at +1.13 s, first hit +1.4 - 1.9 s). The partner's BODY steps out (PLACE (5000, y, 5000), AI gated, hit guard) so one character shows; `ao8_step` (scene tick) ends the call when
+  X's attack script has been over 0.5 s (or 6 s after it began; 5 s if it never attacked; 12 s cap): `M + 0x1108` back, X sent to its hidden idle script 1, the partner PLACEd back where it was.
+  Retail has no leave phase to observe (the manager frees the side at the attack start, `rec` word -1; `ph` word +24 = "hit landed"). Round 7 (`assist_off_move`) stays as the fallback (no X ready, pad-driven partner,
+  no foe) with a log line `[AO8] .. has no assist actor ready`. Switches: `PSPRECOMP_TTCAM_ASSISTMOVE=0` = round 7; `PSPRECOMP_TTCAM_NOPARK=1` = the partner's body stays; `PSPRECOMP_TTCAM_AO8LOG=1` (manager words +
+  assist script every change, works for retail Assist ON too).
+- **Pad-driven partner lock (user addition).** `assist_off_move` used `LOCK_SET` for every partner; for a pad-driven one that writes the lock block's +252 override and the L toggle returns early, so the player could never
+  switch targets (same bug as the slot call-in, see "Lock switching"). `ao_lock_foe`: pad-driven -> SET_FOE + target word, +252 = 0, mode 1 through LOCK_MODE (`g_lock_bypass`), selector h1+28 = 0, cycle state reset; CPU partners keep
+  LOCK_SET. `PSPRECOMP_TTCAM_AOLOCKSET=1` = old. **Not tested**: no pad-driven Assist Off partner exists on the host (code path only).
+- **Busy partner refused (user addition).** `ao_partner_busy`: the call is refused (request word back to -1 BEFORE the controller runs, so the 5000 / bar is never taken; log `call refused, the partner .. is <reason> (script n): no bar used`)
+  when the partner is knocked out, in an EX Burst (`exb_in`), in a chase (`chase_pair_holds` or script 800..816), Bravery-broken (`g_xbroken`), has the EX Burst chance flag (+0x5B2 bit 0x10), enters EX Mode / the burst (EX controller
+  `+0x784`, `+4` state 1 / 5 / 7), or its script is 500..999 (hit reactions 6xx, launched / down 7xx, 9xx). Everything else (idle, moving, attacking, guarding 300, dodging 410, airborne 102) is cut and the call goes on. A second call while the first
+  partner's assist is still out is refused too (before this the retail controller took it: the request word stayed 0). `PSPRECOMP_TTCAM_NOPARTNERBUSY=1` = off. Test aid `PSPRECOMP_TTCAM_AOSTATE="<script>@<s>,b@<s>,x@<s>"` puts side 0's partner in that script
+  (b = marked broken, x = chance flag) just before a forced call.
+- **Evidence** (`~/dissidia/tt/ao8`, runner `run.sh NAME "ENV"`, `tally.py`, natural fight, forced calls every 6 s 12 - 60 s, assist gauge refilled, same schedule as round 7):
+
+  | runs | BRV hits / attacks | HP hits / attacks | never attacked |
+  |---|---|---|---|
+  | Off round 8: Terra c11 `A11` 1/5, Kain c24 `A24` 3/9 + `AK` (enemy side) 7/9, Lightning c31 `A31` 7/9, c18 `A18` 2/6 | **20/38 = 53 %** (air 6/12, ground 14/26) | | 6 of 44 |
+  | Off round 8 HP (FORCEKIND=2): Terra `K11` 1/5, Kain `K24` 3/9, Lightning `K31` 8/8 | | **12/22 = 55 %** (air 5/7, ground 7/15) | 2 of 24 |
+  | retail Assist ON (round 7 table / today `R18`, `RK`) | 67 % (33/49) / 6/12 | 53 % (9/17) / `RK2` 2/5 | 24 of 73 / 13 of 21 |
+  | Off round 7 (own attack) | 81 % (54/66) | 39 % (15/38) | - |
+
+  BRV is lower than round 7's (the assist plays retail's long casts: Terra's ground LONG1 starts 18 - 50 m away and misses a moving foe, as retail's), comparable to retail's own rate; HP is above round 7 and equals retail's. The scripts
+  are the retail ones: c18 10010 / 10002 (`A18` and retail `R18` identical: distance at the attack 9.1 / 4.0 m, first hit +1.73 / +1.40 s); Kain 10005 ground (`AK` +1.60 s, 11 hits; earlier retail side 1 Kain call in `ao7/R1`: +1.60 s, 14 hits),
+  10020 air, HP 10050 / 10056; Terra 10030 / 10020, HP 10090 / 10092; Lightning 10017 / 10004, HP 10071 / 10075. Side by side: `mont_c18.png` (top retail `R18` call, bottom ours `A18s`, 12.4 - 14.4 s: ASSIST banner, summon flash,
+  slow motion, "Lightning Strike" banner, same hit numbers). Terra / Lightning have no retail twin in the quick battle (its assists are c18 / c8-c24), so for them the evidence is the same controller driving the character's own assist
+  file (scripts above = the `[AO8]` plya dumps' motions).
+  Refusals (`B1`, `B2`, partner Terra, forced kind 1 calls with the assist gauge refilled): script 600 refused (hitstun), 700 refused (launched), 805 refused (chase), broken (`SETBRV` 0 held + marked) refused; guard 300, dodge 410, air 102, attack
+  10000, idle 1 all went through. Gauge at a refused call (`AGAUGELOG`): `t=14.00 9731.8 -> 14.03 9711.7` (no 5000 step; the slow drift is the host test's gauge decay, also without calls), `38.00 10000.0 -> 10000.0`.
+  Regression `tagteam_test.py --baseline`: see `~/dissidia/tt/ao8/reg1.txt`.
+- **Not verified / limits:** nothing on a device or seen by a human; pad-driven partner lock; EX Mode / EX Burst / chance refusals (state read from `+0x784`, flag cleared by `chclear_hook` before the check in the host test, so only the code path); a real
+  chase refusal (only the script range 800..816 was driven); lock-step with a peer (decisions use battle ticks and game state; X loading depends on pool room, like Assist ON's); the partner's body parked at (5000, y, 5000) for up to ~5 s can still be
+  an enemy's foe word (its AI may walk toward it); a call during a retail cinematic can be held by the controller (call "never attacked", as retail); memory use of one more assist file group per side with Assist Off.
