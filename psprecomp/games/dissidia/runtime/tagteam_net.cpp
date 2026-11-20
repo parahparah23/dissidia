@@ -49,6 +49,7 @@ uint32_t dissidia_tagteam_battle_gen();
 int dissidia_tagteam_fighters(uint32_t* out, int max);   // tagteam.cpp: every fighter of the battle (slots, extras)        // tagteam.cpp: +1 per battle setup
 void dissidia_netplay_frame_delivered(uint32_t frame);   // netplay.cpp: desync check / dumps for a delivered frame
 void dissidia_netplay_note_delay(int delay);
+uint32_t dissidia_camera_manager();                      // camera.cpp
 
 namespace {
 constexpr uint32_t NET_DISPATCH = 0x0890C5BCu;   // EBOOT: per-frame lock-step update (a0 = net object; +64: 0 = FUN_0890D664, 1 = FUN_0890DF58)
@@ -67,7 +68,8 @@ using Mac = std::array<uint8_t, 6>;
 
 uint8_t* g_ram = nullptr;
 FuncPtr g_orig_dispatch = nullptr, g_orig_pad_update = nullptr, g_orig_ctrl_all = nullptr, g_ctrl_update = nullptr, g_pack = nullptr, g_unpack = nullptr, g_ctrl_read = nullptr;
-bool g_enabled = true, g_log = false, g_padtest = false, g_lat = false;
+uint32_t g_pu_calls = 0, g_ca_calls = 0;   // pad updates / controller updates per delivered frame (log)
+bool g_enabled = true, g_log = false, g_padtest = false, g_lat = false, g_log2 = false;
 
 bool ok(uint32_t a, uint32_t n = 4) { return a >= 0x08800000u && a + n < 0x0A000000u; }
 uint32_t rd(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
@@ -92,6 +94,21 @@ bool g_decided_logged = false;
 double g_timeout_s = 10.0;   // a peer that sends nothing for this long (wall clock) while the lock-step needs its input has left: PSPRECOMP_TTLOCK_TIMEOUT
 std::chrono::steady_clock::time_point g_wait_t0;
 struct LowHp { uint32_t slot, frame; bool done; }; std::vector<LowHp> g_lowhp;   // PSPRECOMP_TTNET_LOWHP=<slot>:<frame>[,<slot>:<frame>...]
+
+// The pad objects keep game-loop-rate state: FUN_08871BD0 counts a held button's auto-repeat timer (+0x30, a float) down once per UPDATE and clears the
+// pressed / released edges, FUN_088725A0 does the same for the controllers. The game loop runs those updates on every iteration, also on the ones in which
+// the lock-step waited for a peer (no frame delivered), so the timers (and an edge seen by a read between two updates) depended on how many iterations THIS
+// machine needed per frame: machine-local simulation input. Inside a lock-step battle every pad / controller is now updated once per DELIVERED frame
+// (PSPRECOMP_TTLOCK_PADEVERY=1: the old every-iteration update).
+struct Seen { uint32_t gen = 0xFFFFFFFFu, n = 0xFFFFFFFFu; };
+std::map<uint32_t, Seen> g_seen; bool g_padevery = false;
+bool stale_update(uint32_t obj) {   // true: no frame was delivered since this object's last update (skip it)
+    // Once the battle is decided (or outside a Comm battle) the lock-step is over: pads and controllers update every loop again, so the
+    // retail finish / results / menus always see the buttons (determinism only matters up to the decision).
+    if (!g_running || g_padevery || dissidia_tagteam_decided() || !dissidia_tagteam_comms_battle()) return false;
+    Seen& s = g_seen[obj]; const uint32_t gen = dissidia_tagteam_battle_gen();
+    const bool stale = s.gen == gen && s.n == g_delivered; s.gen = gen; s.n = g_delivered; return stale;
+}
 
 bool driver_at(int s, uint32_t f, Mac* m) {   // the stream's driver at frame f (false = nobody: the AI or no input)
     const Sched* cur = nullptr;
@@ -236,6 +253,22 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         write_pad(ctx, st.pad, w);
     }
     dissidia_netplay_frame_delivered(g_F);
+    if (g_log2) {   // [TTSYNC2] every frame: what feeds each fighter's input path (pad words, controller, lock-block camera, camera manager slots), compare across machines
+        uint32_t f[8]; const int n = dissidia_tagteam_fighters(f, 8); auto fl = [&](uint32_t a) { float v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; };
+        auto hsh = [&](uint32_t a, uint32_t len) { uint32_t h = 2166136261u; for (uint32_t o = 0; o < len; o += 4) h = (h ^ rd(a + o)) * 16777619u; return h; };
+        std::string line; char b[256];
+        for (int i = 0; i < n; i++) {
+            const uint32_t A = f[i], lb = rd(A + 0x5ACu), ct = rd(A + 0x5A0u), pad = ok(ct, 0x50) ? rd(ct + 0x40u) : 0u;
+            std::snprintf(b, sizeof b, " | %08X p%.2f,%.2f,%.2f tgt%08X scr%d", A, fl(A + 0x80u), fl(A + 0x84u), fl(A + 0x88u), rd(A + 0x2FCu), static_cast<int16_t>(rd(A + 0x180u) & 0xFFFFu)); line += b;
+            if (ok(pad, 0x60)) { std::snprintf(b, sizeof b, " pad%08X,%08X,%08X,%08X st%.3f,%.3f", rd(pad + 64u), rd(pad + 68u), rd(pad + 72u), rd(pad + 76u), fl(pad + 0x54u), fl(pad + 0x58u)); line += b; }
+            if (ok(ct, 0x50)) { std::snprintf(b, sizeof b, " ct%08X", hsh(ct, 0x50)); line += b; if (std::getenv("PSPRECOMP_TTLOCK_LOG2_RAW")) { line += " CT"; for (uint32_t o = 0; o < 0x50u; o += 4) { std::snprintf(b, sizeof b, ":%X", rd(ct + o)); line += b; } line += " PAD"; for (uint32_t o = 0; o < 0x60u; o += 4) { std::snprintf(b, sizeof b, ":%X", rd(pad + o)); line += b; } } }
+            if (ok(lb, 0x400)) { std::snprintf(b, sizeof b, " lb%08X cam%08X +F8:%08X +FC:%08X", lb, hsh(lb + 0x180u, 0x140u), rd(lb + 0xF8u), rd(lb + 0xFCu)); line += b; }
+        }
+        const uint32_t mgr = dissidia_camera_manager();
+        if (mgr) for (uint32_t k = 0; k < 8; k++) { const uint32_t s = mgr + 0x110u + 0x30u * k, lbk = rd(mgr + 0x6D0u + 4u * k); if (!lbk) continue;
+            std::snprintf(b, sizeof b, " | cs%u e%.3f,%.3f,%.3f t%.3f,%.3f,%.3f", k, fl(s), fl(s + 4u), fl(s + 8u), fl(s + 0x10u), fl(s + 0x14u), fl(s + 0x18u)); line += b; }
+        std::fprintf(stderr, "[TTSYNC2] frame %u pu%u ca%u%s\n", g_F, g_pu_calls, g_ca_calls, line.c_str()); g_pu_calls = g_ca_calls = 0;
+    }
     if (g_log && g_F % 30 == 0) {   // every fighter (extras too) at the start of this frame: compare the machines' [TTSYNC] lines
         uint32_t f[8]; const int n = dissidia_tagteam_fighters(f, 8); uint32_t h = 2166136261u; std::string line; char b[96];
         for (int i = 0; i < n; i++) {
@@ -266,11 +299,14 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
 void pad_update_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     const uint32_t slot = static_cast<uint32_t>(ctx->r[4]);
+    if (slot == rd(PAD_SLOTS_PTR)) g_pu_calls++;
+    if (stale_update(slot)) { if (slot == rd(PAD_SLOTS_PTR)) for (int s = 2; s < MAX_STREAMS; s++) if (ok(g_streams[s].pad, 0x60)) stale_update(g_streams[s].pad); return; }
     g_orig_pad_update(rdram, ctx);
     const uint32_t slots = rd(PAD_SLOTS_PTR);
     if (slot != slots) return;
     for (int s = 2; s < MAX_STREAMS; s++) {
         const uint32_t p = g_streams[s].pad; if (!ok(p, 0x60)) continue;
+        if (stale_update(p)) continue;
         if (g_padtest && !g_running) {   // single-player test: the extra mirrors the local pad
             Mac m; if (driver_at(s, 0, &m)) { const uint32_t buf = static_cast<uint32_t>(ctx->r[29]) - 64u; guest_call(ctx, g_ctrl_read, buf, 1); for (uint32_t o = 0; o < 16; o += 4) wr(p + 64u + o, rd(buf + o)); }
         }
@@ -281,8 +317,16 @@ void pad_update_hook(uint8_t* rdram, recomp_context* ctx) {
 // extras' private controllers get the same update right after them.
 void ctrl_all_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
-    g_orig_ctrl_all(rdram, ctx);
-    for (int s = 2; s < MAX_STREAMS; s++) if (ok(g_streams[s].ctrl, 0x50) && ok(g_streams[s].pad, 0x60)) guest_call(ctx, g_ctrl_update, g_streams[s].ctrl);
+    g_ca_calls++;
+    const bool stale = stale_update(0x00000001u);   // key 1: the game's own controllers (the extras' are keyed by their address below)
+    if (!stale) g_orig_ctrl_all(rdram, ctx);
+    {   // test aid (multiplayer determinism): PSPRECOMP_TTX_SHOWN=<slot> marks only that camera slot's lock block as the one this machine SHOWS (+0x125), whatever the game chose:
+        // machines that show different slots must still simulate the same (the shown byte is view state)
+        static const char* sh = std::getenv("PSPRECOMP_TTX_SHOWN");
+        const uint32_t mgr = sh ? dissidia_camera_manager() : 0u;
+        if (mgr && g_running) for (uint32_t k = 0; k < 8; k++) { const uint32_t lb = rd(mgr + 0x6D0u + 4u * k); if (ok(lb, 0x200)) g_ram[(lb + 0x125u) & 0x07FFFFFFu] = (k == static_cast<uint32_t>(std::atoi(sh))) ? 1 : 0; }
+    }
+    for (int s = 2; s < MAX_STREAMS; s++) if (ok(g_streams[s].ctrl, 0x50) && ok(g_streams[s].pad, 0x60) && !stale_update(g_streams[s].ctrl)) guest_call(ctx, g_ctrl_update, g_streams[s].ctrl);
 }
 }  // namespace
 
@@ -319,6 +363,8 @@ void dissidia_ttnet_install(uint8_t* rdram) {
     g_padtest = std::getenv("PSPRECOMP_TTLOCK_PADTEST") != nullptr;
     g_lat = std::getenv("PSPRECOMP_TTLOCK_LAT") != nullptr;
     if (const char* e = std::getenv("PSPRECOMP_TTLOCK_TIMEOUT")) g_timeout_s = std::atof(e);
+    g_log2 = std::getenv("PSPRECOMP_TTLOCK_LOG2") != nullptr;
+    g_padevery = std::getenv("PSPRECOMP_TTLOCK_PADEVERY") != nullptr;
     if (const char* e = std::getenv("PSPRECOMP_TTNET_LOWHP")) { for (const char* q = e; q && *q;) { unsigned sl = 0, fr = 0; if (std::sscanf(q, "%u:%u", &sl, &fr) == 2) g_lowhp.push_back({sl, fr, false}); q = std::strchr(q, ','); if (q) q++; } }
     g_orig_dispatch = psp_dispatch_probe_lookup(NET_DISPATCH);
     g_orig_pad_update = psp_dispatch_probe_lookup(PAD_UPDATE);

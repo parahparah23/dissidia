@@ -458,6 +458,9 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
             if (std::fabs(g_pitch) < 0.002f && g_vpitch == 0.f) g_pitch = 0.f;
         }
     }
+    // Test aid (multiplayer determinism): PSPRECOMP_CAM_FORCE_YAW=<radians> holds this machine's free camera at that yaw / PSPRECOMP_CAM_FORCE_PITCH likewise,
+    // so machines with different local cameras can be run against each other (the simulation must not notice).
+    { static const char* fy = std::getenv("PSPRECOMP_CAM_FORCE_YAW"); static const char* fp = std::getenv("PSPRECOMP_CAM_FORCE_PITCH"); if (fy) g_yaw = static_cast<float>(std::atof(fy)); if (fp) g_pitch = static_cast<float>(std::atof(fp)); }
     // Yaw is unbounded but kept in (-pi, pi].
     const float PI = 3.14159265f;
     if (g_yaw > PI) g_yaw -= 2 * PI; else if (g_yaw < -PI) g_yaw += 2 * PI;

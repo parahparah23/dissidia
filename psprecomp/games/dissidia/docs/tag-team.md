@@ -3690,3 +3690,35 @@ full-size TGA once per shot (on a phone a 2400x1080 window is ~10 MB written in 
 - **Verified (host, 480x272 window)**: a partner break (b7a: `1_0009.43_extraP_11_break_{0,1,2}.png`, 185-204 KB), the human's break (bB: `slotH_15_break`, 199-232 KB),
   the partner's BRV 0 after its HP attack (fA: `extraP_11_brv0`, 192-208 KB), the forced enemy partner break (xE: `extraE_31_break`). Content: the full window with both big
   panels and the "Bravery Break!" banner. Not run on a device (file size there scales with the window: roughly 1-3 MB per PNG at phone resolutions, untested).
+## 4-human 2v2 desync at frame ~1400 (c2 case): machine-local pad state (20 Nov, agent ttx)
+Finding (rig `~/dissidia/tt/net4b`, c2 = 150 ms lag + 30 ms jitter, 1 of 2 runs): A+B vs C+D split at frame 1402, first field `fighter1.pos.y`
+(Yuna, side 1, driven by C) as she started an attack (script 100). `[TTLAT]` words and `[HOMING]` foe/target were identical on all four machines,
+and the split was by TEAM (A,B vs C,D), not by driver.
+
+**Audit.** The extra's / rebuilt slot's stick is converted from its pad slot bytes `+72 / +73` (FUN_08871E24, floats via FUN_089A383C); the lock-block
+camera is simulation state (stepped from the slot table, identical on every machine: `[TTSYNC2]` `cs0..7` eye / look-at equal at every frame), the
+camera manager's FINAL eye (what camera.cpp's free / hold / chase views change) and the shown byte (`+0x125`) are view state. New logging
+(`PSPRECOMP_TTLOCK_LOG2=1`, every delivered frame, `PSPRECOMP_TTLOCK_LOG2_RAW=1` adds the raw controller (0x50 bytes) and pad slot (0x60 bytes) words):
+`[TTSYNC2] frame F pu<n> ca<m> | actor pos tgt script pad words stick ct-hash lock-block hash +F8/+FC | .. | cs<k> eye look-at`. Compare with
+`~/dissidia/tt/net4x/cmp2x.py / cmp3x.py <tag> <maxframe>` (per-field first difference across A-D).
+**Machine-local state found** (equal-sim runs x1/x2/x3, no divergence needed): the pad objects (FUN_08871BD0: held / pressed / released edges, and an
+auto-repeat timer, float at `+0x30`, counted down once per UPDATE) and the controllers (FUN_088725A0) are updated by the game loop on EVERY loop
+iteration, including those where our lock-step waited (dispatch returned 1, no frame delivered). So the timers / the edges seen between two updates depend
+on how many iterations THIS machine needed per frame (150 ms lag + jitter = 230-270 waits per 1800 frames): pad `+0x30` was 22 / 24 / 26 on different
+machines for hundreds of frames, controller words `+8..+0x1C` differed on single frames. Anything in the simulation that reads a held-time / repeat /
+edge word between lock-step frames then differs per machine. (Also machine-local, harmless: the reserved bytes `+72` upper half / `+76` of the pad
+slot copy and the controller's initial `+0x30` (24 vs 26 at frame 0, a pad-manager constant `+0x25C`); the simulation reads only `+72 / +73`.)
+**Fix** (tagteam_net.cpp `pad_update_hook`, `ctrl_all_hook`): inside a lock-step battle every pad slot (the game's two, the extras') and every
+controller object is updated ONCE per DELIVERED frame (`stale_update`: skipped when no frame was delivered since that object's last update).
+`PSPRECOMP_TTLOCK_PADEVERY=1` = the old every-iteration update.
+**Evidence.** p1 (c2 settings, fix on, LOG2_RAW): 63 pre-decision `[TTSYNC]` samples equal on A-D, `pu1 ca1` (one update per delivered frame), and
+the pad edge / hold-timer words are equal across the machines at every frame (cmp3x: only the harmless reserved bytes and the controllers' initial `+0x30`
+differ). Without the fix the same fields differed on 600+ frames per run.
+**Not proven:** the failing c2 run did not reproduce again (x1, x2, x3 old build, x1-x3 + f1 + p1 all equal before the decision), so that this timer IS
+the input of the frame-1402 split is inference (a machine-local, wait-count dependent pad state exists and is now gone), not a reproduced
+before / after. The split by team makes the shown byte / local-team (`bs+84`) readers (many `hs = rd(g_bs + 84)` sites in tagteam.cpp steer the
+partner / assist / chase logic by "the human's side") the other suspects; they were NOT audited one by one.
+**Forced variants** (f1: `PSPRECOMP_CAM_FORCE_YAW=<rad>` / `_PITCH` hold this machine's free camera, `PSPRECOMP_TTX_SHOWN=<slot>` marks only that camera slot as
+shown, per machine through `SIDE_ENV_<A-D>=VAR=val,VAR=val` in launch.sh): A shown slot 1 + yaw 0.9, B yaw -0.9, C shown slot 0 + yaw 2.0, D pitch 0.3:
+62 samples equal before the decision, so the local camera / shown flag does not feed the simulation (in that run).
+**Still open:** after the decision every run (also p1, f1) desyncs a few hundred frames later at `fighter0.pos.x` (battle end, not this change; another agent).
