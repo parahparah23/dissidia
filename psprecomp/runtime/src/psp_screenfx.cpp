@@ -431,7 +431,7 @@ void psp_rt_refl_fx_set_enabled(bool on) { g_rt_refl_fx.store(on ? 1 : 0); }
 static std::atomic<int> g_rt_char{-1};
 int psp_rt_char_shadows() {
     int v = g_rt_char.load();
-    if (v < 0) { const char* e = std::getenv("PSPRECOMP_RT_CHAR_SHADOWS"); v = e && e[0] ? std::min(2, std::max(0, std::atoi(e))) : 0; g_rt_char.store(v); }
+    if (v < 0) { const char* e = std::getenv("PSPRECOMP_RT_CHAR_SHADOWS"); v = e && e[0] ? std::min(2, std::max(0, std::atoi(e))) : 1; g_rt_char.store(v); }   // default Soft (picked in game)
     return v;
 }
 void psp_rt_char_set_shadows(int v) { g_rt_char.store(std::min(2, std::max(0, v))); }
