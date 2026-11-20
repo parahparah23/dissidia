@@ -8,6 +8,7 @@ write to Android/data since Android 11; runtime/src/psp_android.cpp pick_workdir
 Saves in ms0/ that already exist at the destination are kept. Prints `[psp-build] PROGRESS n` lines. Python 3 standard library only.
 """
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -25,9 +26,15 @@ def main():
     work = os.path.abspath(a.workdir)
     parts = a.only.split(",") if a.only else PARTS
     files = []
+    # Texture packs (mods/texpacks/<id>) are MOVED to the game's folder: the work folder keeps no second copy (they are large), and a pack
+    # deleted in the game's settings does not come back with the next extras change. A pack of the same id there is replaced.
+    packs_src = os.path.join(work, "mods", "texpacks")
+    packs = [d for d in (os.listdir(packs_src) if os.path.isdir(packs_src) else []) if not d.startswith(".")]
     for name in parts:
         src = os.path.join(work, name)
-        for dp, _, fns in os.walk(src):
+        for dp, dns, fns in os.walk(src):
+            if os.path.abspath(dp) == os.path.abspath(packs_src):
+                dns[:] = [d for d in dns if not d.startswith(".")]   # an unfinished install (.new-*, .unpack-*)
             for fn in fns:
                 files.append((name, os.path.join(dp, fn)))
     if not any(n == "disc0" for n, _ in files):
@@ -41,6 +48,8 @@ def main():
         # Keep the game's files (thousands of texture PNGs) out of the gallery: Android's media scanner indexes Android/media, and a
         # .nomedia file in the package folder hides it and everything below (the setup app also rescans it).
         open(os.path.join(os.path.dirname(os.path.abspath(a.dest)), ".nomedia"), "a").close()
+        for pid in packs:
+            shutil.rmtree(os.path.join(a.dest, "mods", "texpacks", pid), ignore_errors=True)
         for name, p in files:
             rel = os.path.relpath(p, work)
             d = os.path.join(a.dest, rel)
@@ -57,6 +66,14 @@ def main():
     except OSError as e:
         print("[psp-build] ERROR cannot write %s: %s (is \"all files access\" allowed for this app?)" % (a.dest, e), flush=True)
         sys.exit(1)
+    for pid in packs:   # in place now: drop the work folder's copy
+        try:
+            info = json.load(open(os.path.join(packs_src, pid, ".source.json")))
+        except (OSError, ValueError):
+            info = {}
+        shutil.rmtree(os.path.join(packs_src, pid), ignore_errors=True)
+        if info.get("migrated_from") == "textures":   # the old single pack, moved into texpacks: the game's old copy is the same pack
+            shutil.rmtree(os.path.join(a.dest, "mods", "textures"), ignore_errors=True)
     print("[psp-build] DONE %s" % a.dest, flush=True)
 
 
