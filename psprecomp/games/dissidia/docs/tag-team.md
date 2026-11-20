@@ -3086,3 +3086,61 @@ the "EX Mode / EX Burst quicktime" looping on the human's screen. Terra reached 
 - **Unverified**: the retail meaning of the target status bit 4 that picks 0x13; EX Burst quicktime inputs and EX Revenge of an extra (no new evidence that they read
   anything but the extra's own brain pad: they use the same brain-pad tests); a human-driven extra (multiplayer) in a chance; desktop / devices. Debug aids added:
   `EXTESTLOG`, `EXCHLOG` (`[EXCH]` per chance frame), `EXSMLOG`, `STWATCH=<side>`, `CHWATCH=<role>`.
+
+### Assist Off, round 7 (20 Nov, tree ttcam; host-only, headless): the moved partner's attack connects like an assist; one call at a time; never "nothing happens"
+User report (RP6, `~/dissidia/rp6logs/rp6_1120_friendly_assist.log`): with Assists OFF the CPU partner's call attack did not connect. The log: all 6 calls with Terra
+(char 11) as the partner logged "foe .. in the air (0.0 m over its last floor 0.0)", the partner was put 1.2 m from a foe standing at y 0 in its AIR state (102)
+and started its air attack NEAR2: no hit in any of them. Kain (char 24) found "no air BRV attack in its moveset". Two calls 0.5 s apart used both bars (76.68 /
+77.21 s, 152.20 / 152.40 s); 6 calls logged "no floor known for the assist spot: partner stays where it is" and did nothing.
+- **Measurement** (new, any mode): `PSPRECOMP_TTCAM_AOHIT=1` writes one `[AOHIT]` line per call: helper (retail: the caller's assist actor `+0x1108`; Off: the moved
+  partner), whether it hit an enemy fighter within 4 s (`hit_victim_of`, BRV hits; an HP hit is also booked through the KO ledger), first-hit time, hit frames,
+  distance at its first attack script and at the hit, its attack scripts, the foe's scripts until the hit, foe BRV / HP (live) before and after, and "(air)" when the
+  foe was airborne at the call (game test below). Runner `~/dissidia/tt/ao7/run.sh NAME "ENV"` (natural fight, NO stilled foes, the human idle; forced calls
+  `PSPRECOMP_TTLOCK_FORCECALL=0:12:18:..:60`, assist gauge refilled before each call with `PSPRECOMP_TAGTEAM_GAUGESET=slotH:<s>:-1:10000,..`), `sum.py`, `tally.py`.
+- **How the retail assist connects** (`[AOHIT]` + `[ACTLPOS]`, retail Assist ON, the quick battle's assist char 18 / char 8 on side 1): it starts its attack
+  **4 - 9 m** from the foe (ground 10010 at 8.4 - 9.1 m, air 10002 at 4.0 m) and homes in: first hit +1.40 - 1.77 s after the call at 1 - 5 m, 10 - 100 hit
+  frames (a long multi-hit). It misses when the foe guards (foe script 300 in the window), dashes away (240) or is far; some retail calls never start an attack
+  (the controller holds the request, e.g. during another fighter's cinematic) and are counted separately below.
+- **Fixes** (`tagteam.cpp`, Assist Off block):
+  - **Air or ground by the game's own test** `game_airborne()` = `FUN_088374B0(actor)` (the attack selector's self_position check: motion airborne flags or state
+    `+0x3A4` = 0x12). The round 3 rule (`grounded_now` = script 1..9 + no vertical move, or a floor sample within 0.5 m) called a foe that attacks / guards on a floor
+    with no sample under it "airborne" (the RP6 case). A standing foe's own height is now the floor: partner 1.5 m from it (1.0 / 0.5 m when a known floor sample
+    there is > 1 m off), the ground attack. The partner's own air state is read BEFORE the PLACE (right after one the game test reads "airborne" for a standing
+    fighter too); a partner still airborne is put to script 1 and attacks 2 ticks later (stage 2). Log `.. put 1.5 m from the standing foe .. (script n)`, with
+    `[the round 3 rule called this foe airborne]` when the old rule disagrees (seen in `O18`: foe in script 470 on the floor, the call hit).
+    `PSPRECOMP_TTCAM_OLDAIR=1` = the round 3 airborne rule.
+  - **Air gap = half the reach of the air attack it will use, 1.2 .. 3.0 m** (`PSPRECOMP_TTCAM_AIRGAP=<m>` fixed). Terra's AI starts NEAR2 from 2.5 - 7.8 m.
+  - **"_A_" is not an assist entry**: in the newer naming `BR_A_*` / `HP_A_*` are the AIR attacks (where = 1). The round 4 name filter left Kain with no air
+    attack at all. Now only names with EX / LIMIT / ASSIST are skipped (`PSPRECOMP_TTCAM_NOAIRNAMES=1` = old filter).
+  - **Follow-ups (the combo)**: while the forced opener runs, each time its chain window opens (actor `+0x190` bit 4, event `chain_window`) the next record of
+    that combo is started like the opener (`dissidia_test_action`): `own_followup` finds it by name (`X` / `X_n` -> `X_2` / `X_(n+1)`; `..Yd` -> `..Y(d+1)` or
+    `..Y(d+1)_FR*`): Terra NEAR -> NEAR_2, Kain BR_A_THRUST1 -> BR_A_THRUST2_FR, BR_A_SHOOT1 -> BR_A_SHOOT2_FRO. Only for the BRV call (kind 1); max 6
+    presses, 3 s. The unforced press `FUN_08B382B8(actor, 1, current record)` returned 0 (nothing started) and is not used. `PSPRECOMP_TTCAM_NOCOMBO=1` = off.
+  - **Foe = the caller's lock target**, else its foe word, else the living enemy nearest to the caller, and it must be on the stage now (`all_fighters`): after a
+    KO tag-in the caller's foe word still named the old body, parked at (0, 0, 0) in script 1 with HP left (`O5`: 7 calls attacked the empty spot). Checked again
+    when the appear is over (`foe .. gone while the partner appeared: now ..`). `PSPRECOMP_TTCAM_FOEWORD=1` = skip the lock target.
+  - **(a) One call at a time per side** (`ao_busy`, checked every tick): from the call until the forced attack and its follow-ups are over (script leaves 10000.. ,
+    at least 20 ticks after the attack start, at most 3 s after it / 6 s after the call). A call meanwhile is refused like retail refuses one while its assist is
+    out: request word back to -1, no gauge used, `[ASSISTOFF] .. call refused, the last call's partner .. is still out`. `PSPRECOMP_TTCAM_NOBUSY=1` = off.
+    The pending attack (`g_atk_due`) is now per side (one global before: a call of the other side during an appear dropped the first side's attack).
+  - **(b) No floor known for the assist spot**: the partner appears next to the caller at the caller's height (1.5 m toward the foe) and the call goes on
+    (`spot check: no floor known: next to the caller`); it is put next to the foe at the attack anyway.
+- **Evidence** (`~/dissidia/tt/ao7`, hit rate = calls whose helper hit / calls whose helper started an attack; air = foe airborne at the call):
+
+  | runs | air | ground | all |
+  |---|---|---|---|
+  | retail Assist ON, BRV (R1-R7, RE1 enemy side) | 12/23 | 21/26 | 33/49 = 67 % (73 calls, 24 never attacked) |
+  | Assist Off before this round (O2 Terra, O3 Kain) | 3/7 | 10/10 | 13/17 |
+  | Assist Off now, BRV (O14-O19, E1, D1) | 21/31 | 33/35 | **54/66 = 81 %** |
+  | - Terra c11 / Kain c24 (incl. E1) / E1 alone (enemy-side call, Kain) | 8/12, 13/19, 3/3 | 15/17, 18/18, 7/7 | 23/29, 31/37, 10/10 |
+  | retail Assist ON, HP (RK1-RK3, FORCEKIND=2) | 3/8 | 6/9 | 9/17 = 53 % |
+  | Assist Off now, HP (K1, K2, K4, K5, K8) | 5/21 | 10/17 | 15/38 = 39 % |
+
+  First hit +1.33 - 1.43 s after the call (retail +1.40 - 1.77 s). Hit frames per call: ours 1 - 7 (opener + follow-up; Terra 4 with NEAR_2, ~170 BRV), retail
+  10 - 100 (its own long multi-hit). Fallback (b): 9 of 10 "no floor known" calls hit (O7, O13, O14, O15, K3, K4). Busy (a) `D1` (calls at 12 / 13 / 20 / 21 s):
+  13 and 21 refused, gauge 4828 -> 4826 (no bar), 12 and 20 hit. Screens `montage_D1_R6.png` (top retail call, bottom ours, 12.0 - 14.4 s every 0.2 s:
+  ASSIST banner, flash, the hit). Regression `tagteam_test.py --baseline`: `~/dissidia/tt/ao7/reg1`.
+- **Not solved / unverified**: HP calls in the air are weaker than retail (Terra's LONG_ABI2 from 1.2 - 3 m: 5/21; a forced MIDDLE_ABI1 `K6` hit 3/5 air, no
+  rule derived from one character). The retail assist's long multi-hit is not reproduced (the partner plays its own opener + named follow-ups). The follow-up
+  naming rule is checked for Terra and Kain only. Everything is headless on the host: nothing seen or played on the RP6 / desktop, no human pad call, the
+  foe's guard decisions dominate misses on both sides (foe script 300 in most air misses). Retail calls that never attacked were not investigated.
