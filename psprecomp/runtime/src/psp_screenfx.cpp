@@ -963,6 +963,7 @@ uniform int u_sun;           // 0: the sky light casts no shadows (stage_no_sun)
 uniform mat4 u_view_inv;    // view space -> PSP world space (where the triangles are)
 uniform vec3 u_light_w;     // world space, towards the light
 uniform float u_rt_len;     // ray length, world units
+uniform int u_char_wrap;     // fighters: wrap lighting from the point lights (PSPRECOMP_RT_CHAR_WRAP, default on)
 uniform int u_char_soft;     // Character Shadows Soft: a fighter's own body shadows it partly (psp_rt_char_shadows)
 uniform float u_char_amt;    // how much of the light one of its own triangles takes, x the triangle's coverage
 uniform float u_rt_self_len; // on a fighter, fighter triangles nearer than this along the shadow ray are its own body (PSPRECOMP_RT_SELF_LEN)
@@ -1175,6 +1176,9 @@ const char* const k_rt_lights = R"GLSL(
             if (dist >= rad || dist < 1e-3) continue;
             vec3 L = d / dist;
             float ndl = max(dot(nw, L), 0.0);
+            // On a fighter the normal comes from the depth of a low-poly body: each facet turned to the light differently, the light
+            // drew the facets as blocky patches (no shadow involved). Wrap lighting there: the facing only shades it gently.
+            if (self_l && u_char_wrap != 0) ndl = 0.35 + 0.65 * (0.5 + 0.5 * dot(nw, L));
             if (li >= u_fx0 && u_fx_split != 0 && v_uv.x > 0.5) continue;
             float x = 1.0 - dist / rad, att = li >= u_fx0 ? x : x * x;   // an attack's flash carries further than a lamp's pool
             if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
@@ -1855,7 +1859,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform3f(loc(mp.id, "u_light_w"), wl_n[0], wl_n[1], wl_n[2]);
         glUniform1f(loc(mp.id, "u_rt_len"), env_float("PSPRECOMP_RT_LEN", 40.f));
         glUniform1f(loc(mp.id, "u_rt_self_len"), env_float("PSPRECOMP_RT_SELF_LEN", 3.f));
-        glUniform1i(loc(mp.id, "u_char_soft"), psp_rt_char_shadows()); glUniform1f(loc(mp.id, "u_char_amt"), env_float("PSPRECOMP_RT_CHAR_AMT", 0.45f));
+        glUniform1i(loc(mp.id, "u_char_wrap"), std::getenv("PSPRECOMP_RT_CHAR_WRAP") && std::getenv("PSPRECOMP_RT_CHAR_WRAP")[0] == '0' ? 0 : 1); glUniform1i(loc(mp.id, "u_char_soft"), psp_rt_char_shadows()); glUniform1f(loc(mp.id, "u_char_amt"), env_float("PSPRECOMP_RT_CHAR_AMT", 0.45f));
         { const int q = psp_rt_quality(); glUniform1i(loc(mp.id, "u_rt_rays"), q >= 3 ? 6 : q == 2 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_soft"), psp_rt_soft_angle());
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);
