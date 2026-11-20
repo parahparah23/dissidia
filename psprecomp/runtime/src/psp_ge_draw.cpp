@@ -2247,6 +2247,15 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         if (fep_log) psp_fep_log_draw(rdram, state, prim_type, n, ge_texture_bound_pack_id());
         if (g_batch.refl > 0.f && !vb_on && path == 1) rml_capture(state, rdram, prim_type, n, g_batch.refl);   // reflectivity mask
         if (path == 2 && fighter_mask_wanted(state)) fighter_capture(state, rdram, prim_type, n);   // the fighter mask (no self-shadowing)
+        {   // PSPRECOMP_FMASK_LOG=1: which non-stage 3D draws go into the fighter mask and which do not (vertex type, path, weights)
+            static const bool fl = std::getenv("PSPRECOMP_FMASK_LOG") != nullptr;
+            if (fl && state.vertex_type != 0x11au && !ge_vtype_through(state.vertex_type)) {
+                static std::unordered_map<uint64_t, int> seen;
+                const bool in = path == 2 && fighter_mask_wanted(state);
+                const uint64_t k = (uint64_t(state.vertex_type) << 8) | (uint64_t(path) << 4) | (state.depth_write_disable ? 2u : 0u) | (in ? 1u : 0u) | (uint64_t(state.alpha_blend_enable) << 3);
+                if (seen[k]++ == 0) std::fprintf(stderr, "[FMASK] vt %06x path %d weights %d zwrite %d ztest %d blend %d atest %d tex %08x n %d -> %s\n", (unsigned)state.vertex_type, path, ge_vtype_weight(state.vertex_type), state.depth_write_disable ? 0 : 1, state.depth_test_enable, state.alpha_blend_enable, state.alpha_test_enable, (unsigned)state.tex_addr[0], n, in ? "MASK" : "-");
+            }
+        }
         if (!g_verify && n >= 512 && gpu_vcache_on()) {
             // a big draw whose decoded vertices the decode cache holds (characters: the same every frame): drawn from a
             // resident buffer made once, instead of copying ~70 bytes a vertex into the frame's ring and uploading it

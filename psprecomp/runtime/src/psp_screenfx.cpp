@@ -808,7 +808,12 @@ void main() {
         float m = texture(u_mask, snap_uv(v_uv)).a;
         if (m > 0.0) {
             float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, snap_uv(v_uv)).r));
-            if (abs(a - b) < 0.002 * a + 0.01) r = m;
+            float tol = 0.002 * a + 0.01;
+            // A fighter (byte 1): its triangles go in without their textures, so a see-through hair card in front of the face is the
+            // mask's nearest surface while the picture shows the face a little behind it: accept the picture up to 0.25 behind
+            // (the face under its own bangs was left out of the mask: self-shadowed and faceted there, issue #94)
+            bool fighter = m * 255.0 > 0.5 && m * 255.0 < 1.5;
+            if (abs(a - b) < tol || (fighter && a > b && a - b < 0.25 + tol)) r = m;
         }
     }
     o_color = vec4(0.0, 0.0, 0.0, r);
@@ -963,6 +968,7 @@ uniform int u_sun;           // 0: the sky light casts no shadows (stage_no_sun)
 uniform mat4 u_view_inv;    // view space -> PSP world space (where the triangles are)
 uniform vec3 u_light_w;     // world space, towards the light
 uniform float u_rt_len;     // ray length, world units
+uniform int u_fmask_dbg;     // PSPRECOMP_FMASK_DEBUG=1: tint the fighter mask
 uniform int u_char_wrap;     // fighters: wrap lighting from the point lights (PSPRECOMP_RT_CHAR_WRAP, default on)
 uniform int u_char_soft;     // Character Shadows Soft: a fighter's own body shadows it partly (psp_rt_char_shadows)
 uniform float u_char_amt;    // how much of the light one of its own triangles takes, x the triangle's coverage
@@ -1212,6 +1218,7 @@ const char* const k_rt_lights = R"GLSL(
         o_refl.rgb += (alb * acc + max(alb, vec3(u_fx_alb)) * acc_fx) * fd * u_lscale;
     }
     o_refl.rgb += mk * u_lscale;
+    if (u_fmask_dbg != 0 && u_fmask != 0 && fighter_at(v_uv)) o_refl = vec4(0.9, 0.0, 0.9, 0.85);   // debug (PSPRECOMP_FMASK_DEBUG): the pixels marked as fighter
 )GLSL";
 const char* const k_rt_code = R"GLSL(
             if (u_use_rt != 0) {
@@ -1859,7 +1866,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform3f(loc(mp.id, "u_light_w"), wl_n[0], wl_n[1], wl_n[2]);
         glUniform1f(loc(mp.id, "u_rt_len"), env_float("PSPRECOMP_RT_LEN", 40.f));
         glUniform1f(loc(mp.id, "u_rt_self_len"), env_float("PSPRECOMP_RT_SELF_LEN", 3.f));
-        glUniform1i(loc(mp.id, "u_char_wrap"), std::getenv("PSPRECOMP_RT_CHAR_WRAP") && std::getenv("PSPRECOMP_RT_CHAR_WRAP")[0] == '0' ? 0 : 1); glUniform1i(loc(mp.id, "u_char_soft"), psp_rt_char_shadows()); glUniform1f(loc(mp.id, "u_char_amt"), env_float("PSPRECOMP_RT_CHAR_AMT", 0.45f));
+        glUniform1i(loc(mp.id, "u_fmask_dbg"), std::getenv("PSPRECOMP_FMASK_DEBUG") ? 1 : 0); glUniform1i(loc(mp.id, "u_char_wrap"), std::getenv("PSPRECOMP_RT_CHAR_WRAP") && std::getenv("PSPRECOMP_RT_CHAR_WRAP")[0] == '0' ? 0 : 1); glUniform1i(loc(mp.id, "u_char_soft"), psp_rt_char_shadows()); glUniform1f(loc(mp.id, "u_char_amt"), env_float("PSPRECOMP_RT_CHAR_AMT", 0.45f));
         { const int q = psp_rt_quality(); glUniform1i(loc(mp.id, "u_rt_rays"), q >= 3 ? 6 : q == 2 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_soft"), psp_rt_soft_angle());
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);
