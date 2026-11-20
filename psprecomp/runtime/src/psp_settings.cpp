@@ -1373,13 +1373,14 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_RT_CHAR: {
             const bool usable = psp_rt_available() && psp_rt_quality() > 0;
             m.label = "Character Shadows";
-            m.value = psp_rt_char_shadows() ? "Soft" : "Off";
+            static const char* const names[3] = {"Off", "Soft", "Sharp"};
+            m.value = names[psp_rt_char_shadows()];
             m.disabled = !usable;
-            m.can_dec = usable && psp_rt_char_shadows() != 0;
-            m.can_inc = usable && psp_rt_char_shadows() == 0;
+            m.can_dec = usable && psp_rt_char_shadows() > 0;
+            m.can_inc = usable && psp_rt_char_shadows() < 2;
             m.help = !psp_rt_available() ? std::string("Character shadows: unavailable\n") + psp_rt_unavailable_reason()
                    : psp_rt_quality() == 0 ? "Character shadows: needs Ray-Traced Shadows on."
-                   : "Character shadows (PSPRECOMP_RT_CHAR_SHADOWS)\nHow a fighter's own body shadows it (hair on the face, an arm on the chest). Off: never, the fighter is shaded by the stage only. Soft: its own body takes part of the light, softened, so hair and clothes shade it without the blocky shapes of the low-poly models. Takes effect at once. Saved.";
+                   : "Character shadows (PSPRECOMP_RT_CHAR_SHADOWS)\nRay-traced shadows on the fighters. Off: none, the fighters keep the shading painted into their textures (the stage lights still light them). Soft: the stage's shadows fall on them and their own body shades them lightly (hair on the face, an arm on the chest), without the blocky shapes of the low-poly models. Sharp: shadowed exactly like the stage, hard edges and all. Takes effect at once. Saved.";
             break;
         }
         case ROW_RT_REFL_FX: {
@@ -1993,10 +1994,10 @@ void change(int d) {   // left / right on the selected row
     }
     case ROW_RT_CHAR: {
         if (!psp_rt_available() || psp_rt_quality() == 0) break;
-        const int v = d > 0 ? 1 : 0;
+        const int v = std::min(2, std::max(0, psp_rt_char_shadows() + d));
         if (v == psp_rt_char_shadows()) break;
         psp_rt_char_set_shadows(v);
-        save("rt_char_shadows", v ? "1" : "0");
+        save("rt_char_shadows", std::to_string(v));
         break;
     }
     case ROW_RT_REFL_FX: {
@@ -2659,7 +2660,7 @@ void confirm_row() {
     case ROW_CONTACT: change(psp_fx_contact() >= 3 ? -3 : 1); return;
     case ROW_RT_SOFT: if (psp_rt_available() && psp_rt_quality() >= 2) change(1); return;
     case ROW_RT_REFL_FX: if (psp_rt_available() && psp_rt_refl_quality() >= 2) change(1); return;
-    case ROW_RT_CHAR: if (psp_rt_available() && psp_rt_quality() > 0) change(psp_rt_char_shadows() ? -1 : 1); return;
+    case ROW_RT_CHAR: if (psp_rt_available() && psp_rt_quality() > 0) change(psp_rt_char_shadows() >= 2 ? -2 : 1); return;
     case ROW_RT: if (psp_rt_available()) change(psp_rt_quality() >= 3 ? -3 : 1); return;
     case ROW_RT_REFL: if (psp_rt_available()) change(psp_rt_refl_quality() >= 3 ? -3 : 1); return;
     case ROW_SSR: change(psp_fx_ssr() >= 3 ? -3 : 1); return;
@@ -2960,7 +2961,7 @@ void psp_settings_load_early() {
     // device (see vkgl_core.cpp want_ray_query), and the settings rows then say "Turned off for this run" with no way to switch RT back on.
     if ((it = g_saved.find("rt_soft")) != g_saved.end()) psp_rt_set_softness(std::atoi(it->second.c_str()));
     if ((it = g_saved.find("rt_refl_fx")) != g_saved.end()) psp_rt_refl_fx_set_enabled(it->second != "0");
-    if ((it = g_saved.find("rt_char_shadows")) != g_saved.end()) psp_rt_char_set_shadows(it->second != "0" ? 1 : 0);
+    if ((it = g_saved.find("rt_char_shadows")) != g_saved.end()) psp_rt_char_set_shadows(std::atoi(it->second.c_str()));
     if ((it = g_saved.find("rt_shadow_level")) != g_saved.end()) { if (it->second != "0") put("PSPRECOMP_VK_RT", it->second); }
     else if ((it = g_saved.find("rt_shadows")) != g_saved.end() && it->second == "1") put("PSPRECOMP_VK_RT", "2");   // before the levels: on = Medium
     if ((it = g_saved.find("rt_refl_level")) != g_saved.end()) { if (it->second != "0") put("PSPRECOMP_VK_RT_REFL", it->second); }
