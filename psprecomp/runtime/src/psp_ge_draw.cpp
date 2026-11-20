@@ -2256,6 +2256,15 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         if (fep_log) psp_fep_log_draw(rdram, state, prim_type, n, ge_texture_bound_pack_id());
         if (g_batch.refl > 0.f && !vb_on && path == 1) rml_capture(state, rdram, prim_type, n, g_batch.refl);   // reflectivity mask
         if (path == 2 && fighter_mask_wanted(state)) fighter_capture(state, rdram, prim_type, n);   // the fighter mask (no self-shadowing)
+        {   // PSPRECOMP_FMASK_LOG=1: which non-stage 3D draws go into the fighter mask and which do not (vertex type, path, weights)
+            static const bool fl = std::getenv("PSPRECOMP_FMASK_LOG") != nullptr;
+            if (fl && state.vertex_type != 0x11au && !ge_vtype_through(state.vertex_type)) {
+                static std::unordered_map<uint64_t, int> seen;
+                const bool in = path == 2 && fighter_mask_wanted(state);
+                const uint64_t k = (uint64_t(state.vertex_type) << 8) | (uint64_t(path) << 4) | (state.depth_write_disable ? 2u : 0u) | (in ? 1u : 0u) | (uint64_t(state.alpha_blend_enable) << 3);
+                if (seen[k]++ == 0) std::fprintf(stderr, "[FMASK] vt %06x path %d weights %d zwrite %d ztest %d blend %d atest %d tex %08x n %d -> %s\n", (unsigned)state.vertex_type, path, ge_vtype_weight(state.vertex_type), state.depth_write_disable ? 0 : 1, state.depth_test_enable, state.alpha_blend_enable, state.alpha_test_enable, (unsigned)state.tex_addr[0], n, in ? "MASK" : "-");
+            }
+        }
         if (!g_verify && n >= 512 && gpu_vcache_on()) {
             // a big draw whose decoded vertices the decode cache holds (characters: the same every frame): drawn from a
             // resident buffer made once, instead of copying ~70 bytes a vertex into the frame's ring and uploading it
@@ -2965,12 +2974,24 @@ static uint32_t g_rt_frame[GE_MAX_TARGETS];
 // view_draw * world. Re-express such triangles in the world of the frame's main view: p' = inv(view_main) * view_draw * p.
 static float g_rt_main_view[GE_MAX_TARGETS][12];   // the last completed scene's main view (for effects drawn after it)
 static bool g_rt_main_view_ok[GE_MAX_TARGETS];
+// The main view's 3x3 is inverted for real, not transposed: under 30 Hz logic the frames between two gameplay frames are drawn with
+// interpolated matrices, blended element by element, which are not pure rotations; the transpose then moved and bent the re-expressed
+// triangles (a fighter's own head, slightly off, shadowed its drawn face: issue #94).
 static void rt_fix_view(std::vector<float>& tr, size_t t0, const float* vd, const float* vm) {
     if (!std::memcmp(vd, vm, 12 * sizeof(float))) return;
+    // vm column-major 3x3: M = [vm0 vm3 vm6; vm1 vm4 vm7; vm2 vm5 vm8]; inv(M) rows below
+    const float a = vm[0], b = vm[3], c = vm[6], d = vm[1], e = vm[4], f = vm[7], g = vm[2], h = vm[5], k = vm[8];
+    const float A = e * k - f * h, B = -(d * k - f * g), C = d * h - e * g;
+    const float det = a * A + b * B + c * C;
+    if (std::fabs(det) < 1e-8f) return;
+    const float id = 1.f / det;
+    const float i00 = A * id, i01 = -(b * k - c * h) * id, i02 = (b * f - c * e) * id;
+    const float i10 = B * id, i11 = (a * k - c * g) * id, i12 = -(a * f - c * d) * id;
+    const float i20 = C * id, i21 = -(a * h - b * g) * id, i22 = (a * e - b * d) * id;
     for (size_t i = t0; i + 2 < tr.size(); i += 3) {
         const float x = tr[i], y = tr[i + 1], z = tr[i + 2];
         const float px = vd[0] * x + vd[3] * y + vd[6] * z + vd[9] - vm[9], py = vd[1] * x + vd[4] * y + vd[7] * z + vd[10] - vm[10], pz = vd[2] * x + vd[5] * y + vd[8] * z + vd[11] - vm[11];
-        tr[i] = vm[0] * px + vm[1] * py + vm[2] * pz; tr[i + 1] = vm[3] * px + vm[4] * py + vm[5] * pz; tr[i + 2] = vm[6] * px + vm[7] * py + vm[8] * pz;
+        tr[i] = i00 * px + i01 * py + i02 * pz; tr[i + 1] = i10 * px + i11 * py + i12 * pz; tr[i + 2] = i20 * px + i21 * py + i22 * pz;
     }
 }
 // Only baked stage geometry / props (vertex type 0x11a) persist: skinned models and debris move, repeat poses and would leave ghosts.

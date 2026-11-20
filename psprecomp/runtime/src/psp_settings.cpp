@@ -169,7 +169,7 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -1396,6 +1396,19 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
                            : std::string("Ray-traced reflections: unavailable\n") + psp_rt_unavailable_reason();
             break;
         }
+        case ROW_RT_CHAR: {
+            const bool usable = psp_rt_available() && psp_rt_quality() > 0;
+            m.label = "Character Shadows";
+            static const char* const names[3] = {"Off", "Soft", "Sharp"};
+            m.value = names[psp_rt_char_shadows()];
+            m.disabled = !usable;
+            m.can_dec = usable && psp_rt_char_shadows() > 0;
+            m.can_inc = usable && psp_rt_char_shadows() < 2;
+            m.help = !psp_rt_available() ? std::string("Character shadows: unavailable\n") + psp_rt_unavailable_reason()
+                   : psp_rt_quality() == 0 ? "Character shadows: needs Ray-Traced Shadows on."
+                   : "Character shadows (PSPRECOMP_RT_CHAR_SHADOWS)\nRay-traced shadows on the fighters. Off: none, the fighters keep the shading painted into their textures (the stage lights still light them). Soft: the stage's shadows fall on them and their own body shades them lightly (hair on the face, an arm on the chest), without the blocky shapes of the low-poly models. Sharp: shadowed exactly like the stage, hard edges and all. Takes effect at once. Saved.";
+            break;
+        }
         case ROW_RT_REFL_FX: {
             const bool usable = psp_rt_available() && psp_rt_refl_quality() >= 2;
             m.label = "Effect Reflections";
@@ -1524,7 +1537,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
         return K::Toggle;
-    case ROW_FXL_INT: case ROW_FXL_RAD: return K::Choice;
+    case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
     case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: return K::Action;
     case ROW_MOD_UNINSTALL: return K::Choice;
     case ROW_QUIT: return K::Danger;
@@ -2029,6 +2042,14 @@ void change(int d) {   // left / right on the selected row
         if (v != psp_fx_contact()) { psp_fx_set_contact(v); save("contact_shadows", std::to_string(v)); }
         break;
     }
+    case ROW_RT_CHAR: {
+        if (!psp_rt_available() || psp_rt_quality() == 0) break;
+        const int v = std::min(2, std::max(0, psp_rt_char_shadows() + d));
+        if (v == psp_rt_char_shadows()) break;
+        psp_rt_char_set_shadows(v);
+        save("rt_char_shadows", std::to_string(v));
+        break;
+    }
     case ROW_RT_REFL_FX: {
         if (!psp_rt_available() || psp_rt_refl_quality() < 2) break;
         const bool on = !psp_rt_refl_fx_enabled();
@@ -2154,7 +2175,7 @@ void build_rows() {
         add(ROW_SEC_RT); add(ROW_SUB_RT);
         break;
     case PAGE_RT:
-        add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
+        add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_CHAR); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
         break;
     case PAGE_CONTROLS:
         add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_P1_PAD);
@@ -2690,6 +2711,7 @@ void confirm_row() {
     case ROW_CONTACT: change(psp_fx_contact() >= 3 ? -3 : 1); return;
     case ROW_RT_SOFT: if (psp_rt_available() && psp_rt_quality() >= 2) change(1); return;
     case ROW_RT_REFL_FX: if (psp_rt_available() && psp_rt_refl_quality() >= 2) change(1); return;
+    case ROW_RT_CHAR: if (psp_rt_available() && psp_rt_quality() > 0) change(psp_rt_char_shadows() >= 2 ? -2 : 1); return;
     case ROW_RT: if (psp_rt_available()) change(psp_rt_quality() >= 3 ? -3 : 1); return;
     case ROW_RT_REFL: if (psp_rt_available()) change(psp_rt_refl_quality() >= 3 ? -3 : 1); return;
     case ROW_SSR: change(psp_fx_ssr() >= 3 ? -3 : 1); return;
@@ -2992,6 +3014,7 @@ void psp_settings_load_early() {
     // device (see vkgl_core.cpp want_ray_query), and the settings rows then say "Turned off for this run" with no way to switch RT back on.
     if ((it = g_saved.find("rt_soft")) != g_saved.end()) psp_rt_set_softness(std::atoi(it->second.c_str()));
     if ((it = g_saved.find("rt_refl_fx")) != g_saved.end()) psp_rt_refl_fx_set_enabled(it->second != "0");
+    if ((it = g_saved.find("rt_char_shadows")) != g_saved.end()) psp_rt_char_set_shadows(std::atoi(it->second.c_str()));
     if ((it = g_saved.find("rt_shadow_level")) != g_saved.end()) { if (it->second != "0") put("PSPRECOMP_VK_RT", it->second); }
     else if ((it = g_saved.find("rt_shadows")) != g_saved.end() && it->second == "1") put("PSPRECOMP_VK_RT", "2");   // before the levels: on = Medium
     if ((it = g_saved.find("rt_refl_level")) != g_saved.end()) { if (it->second != "0") put("PSPRECOMP_VK_RT_REFL", it->second); }

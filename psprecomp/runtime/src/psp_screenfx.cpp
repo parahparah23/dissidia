@@ -425,6 +425,16 @@ bool psp_rt_refl_fx_enabled() {
     return v != 0;
 }
 void psp_rt_refl_fx_set_enabled(bool on) { g_rt_refl_fx.store(on ? 1 : 0); }
+// Character Shadows (issue #94): 0 Off, no ray-traced / contact shadow on a fighter (the lights reach it unblocked, wrap-lit); 1 Soft, the
+// stage shadows it, its own triangles near the pixel let part of the light through (coverage x PSPRECOMP_RT_CHAR_AMT), a gentler fade
+// at grazing angles; 2 Sharp, shadowed and lit like the stage (its own body included).
+static std::atomic<int> g_rt_char{-1};
+int psp_rt_char_shadows() {
+    int v = g_rt_char.load();
+    if (v < 0) { const char* e = std::getenv("PSPRECOMP_RT_CHAR_SHADOWS"); v = e && e[0] ? std::min(2, std::max(0, std::atoi(e))) : 1; g_rt_char.store(v); }   // default Soft (picked in game)
+    return v;
+}
+void psp_rt_char_set_shadows(int v) { g_rt_char.store(std::min(2, std::max(0, v))); }
 const char* psp_rt_unavailable_reason() {
     if (psp_rt_available()) return "";
     if (g_psp_rt.unavailable_reason) { const char* r = g_psp_rt.unavailable_reason(); if (r && r[0]) return r; }
@@ -545,6 +555,7 @@ uniform int u_mask_on;      // 1: which surfaces reflect, and how much, is the a
 uniform int u_mask_dbg;     // PSPRECOMP_REFL_MASK_DEBUG=1: tint the reflective surfaces green by their reflectivity (red: roughness, blue: metal)
 uniform float u_wave;       // water: reflection-normal tilt per unit of ripple-pattern gradient (PSPRECOMP_REFL_WAVE)
 uniform float u_wave_max;   // the largest tilt (PSPRECOMP_REFL_WAVE_MAX)
+uniform int u_char_mode;    // Character Shadows: 0 Off (no ray-traced / contact shadow on fighters), 1 Soft, 2 Sharp (fighters like the stage)
 uniform int u_fmask;        // 1: mask byte 1 in the alpha of u_color marks a fighter (psp_ge_draw.cpp fighter_capture): a fighter is not shadowed by fighters
 // The mask byte is a fighter (1). Read with linear filtering where a march sample lands, so a range rather than an exact byte.
 bool fighter_at(vec2 uv) { float b = texture(u_color, uv).a * 255.0; return b > 0.5 && b < 1.5; }
@@ -632,7 +643,7 @@ void main() {
             vec3 O = P + n * (0.01 + 0.004 * lp);
             // A fighter's own body (and a fighter right next to it) does not shadow it: the low-poly models and their solid cards of
             // hair / fur / fringes blotched the whole body. The stage and other objects still do.
-            bool self_rx = u_fmask != 0 && fighter_at(v_uv);
+            bool self_rx = u_fmask != 0 && u_char_mode != 2 && fighter_at(v_uv);   // Sharp: a fighter is shadowed like the stage
 //@RT_CODE
             for (int j = 0; j < u_n_cs; ++j) {
                 float t = (float(j) + jit) / float(u_n_cs);
@@ -643,7 +654,7 @@ void main() {
                 if (uv2.x < 0.0 || uv2.x > 1.0 || uv2.y < 0.0 || uv2.y > 1.0) break;
                 float wd2 = wd_at(uv2);
                 if (is_far(wd2)) continue;
-                if (self_rx && fighter_at(uv2)) continue;
+                if (self_rx && (u_char_mode == 0 || fighter_at(uv2))) continue;   // Off: no contact shadow on a fighter at all
                 float diff = length(S) - length(vpos(uv2, wd2));
                 if (diff > 0.01 + 0.004 * lp && diff < u_cs_thick) { sh = facing * fd; break; }
             }
@@ -799,7 +810,12 @@ void main() {
         float m = texture(u_mask, snap_uv(v_uv)).a;
         if (m > 0.0) {
             float a = length(vpos(v_uv, wd)), b = length(vpos(v_uv, texture(u_mdepth, snap_uv(v_uv)).r));
-            if (abs(a - b) < 0.002 * a + 0.01) r = m;
+            float tol = 0.002 * a + 0.01;
+            // A fighter (byte 1): its triangles go in without their textures, so a see-through hair card in front of the face is the
+            // mask's nearest surface while the picture shows the face a little behind it: accept the picture up to 0.25 behind
+            // (the face under its own bangs was left out of the mask: self-shadowed and faceted there, issue #94)
+            bool fighter = m * 255.0 > 0.5 && m * 255.0 < 1.5;
+            if (abs(a - b) < tol || (fighter && a > b && a - b < 0.25 + tol)) r = m;
         }
     }
     o_color = vec4(0.0, 0.0, 0.0, r);
@@ -954,6 +970,9 @@ uniform int u_sun;           // 0: the sky light casts no shadows (stage_no_sun)
 uniform mat4 u_view_inv;    // view space -> PSP world space (where the triangles are)
 uniform vec3 u_light_w;     // world space, towards the light
 uniform float u_rt_len;     // ray length, world units
+uniform int u_fmask_dbg;     // PSPRECOMP_FMASK_DEBUG=1: tint the fighter mask
+uniform int u_char_wrap;     // fighters: wrap lighting from the point lights (PSPRECOMP_RT_CHAR_WRAP, default on)
+uniform float u_char_amt;    // how much of the light one of its own triangles takes, x the triangle's coverage
 uniform float u_rt_self_len; // on a fighter, fighter triangles nearer than this along the shadow ray are its own body (PSPRECOMP_RT_SELF_LEN)
 uniform int u_rt_rays;      // shadow rays per pixel (quality level: 1, 3, 6), jittered across the light disc for a soft edge
 uniform float u_rt_soft;    // half angle of the light disc, radians-ish
@@ -1155,20 +1174,47 @@ const char* const k_rt_lights = R"GLSL(
         vec3 Pw = (u_view_inv * vec4(P, 1.0)).xyz;
         vec3 nw = normalize((u_view_inv * vec4(n, 0.0)).xyz);
         vec3 acc = vec3(0.0), acc_fx = vec3(0.0);
+        // a fighter is not shadowed by its own body from these lights either (as k_rt_code does for the sun): without it the hair cards
+        // threw blocky shadows over the face under Kefka's Tower's stage lights (issue #94)
+        bool self_l = u_fmask != 0 && u_char_mode != 2 && fighter_at(v_uv);   // Sharp: lit and shadowed like the stage
         for (int li = 0; li < u_n_lights; ++li) {
             vec3 d = u_lp[li].xyz - Pw;
             float dist = length(d), rad = u_lp[li].w;
             if (dist >= rad || dist < 1e-3) continue;
             vec3 L = d / dist;
             float ndl = max(dot(nw, L), 0.0);
+            // On a fighter the normal comes from the depth of a low-poly body: each facet turned to the light differently, the light
+            // drew the facets as blocky patches (no shadow involved). Wrap lighting there: the facing only shades it gently.
+            if (self_l && u_char_wrap != 0) ndl = 0.35 + 0.65 * (0.5 + 0.5 * dot(nw, L));
             if (li >= u_fx0 && u_fx_split != 0 && v_uv.x > 0.5) continue;
             float x = 1.0 - dist / rad, att = li >= u_fx0 ? x : x * x;   // an attack's flash carries further than a lamp's pool
             if (li >= u_fx0) att *= smoothstep(0.0, 1.5, dist);   // fades out right at the effect: a caster's hand glow must not blow out her own body
             if (ndl * att < 0.002) continue;
             rayQueryEXT rl;
-            rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
-            while (rayQueryProceedEXT(rl)) {}
+            float ltrans = 1.0;
+            if (self_l && u_char_mode == 0) {   // Off: the light reaches a fighter unblocked
+                if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
+                continue;
+            }
+            if (self_l) {   // every triangle a candidate; a fighter's own (low bit of its coverage) within u_rt_self_len: passed through (Off) / part of the light (Soft)
+                rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
+                while (rayQueryProceedEXT(rl)) {
+                    if (rayQueryGetIntersectionTypeEXT(rl, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+                    uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rl, false) + rayQueryGetIntersectionPrimitiveIndexEXT(rl, false)];
+                    float th = rayQueryGetIntersectionTEXT(rl, false);
+                    if ((pc & 0x01000000u) != 0u && th < u_rt_self_len) {
+                        if (u_char_mode == 1 && th > 0.12) ltrans *= 1.0 - u_char_amt * float(pc >> 24) / 255.0;
+                        continue;
+                    }
+                    rayQueryConfirmIntersectionEXT(rl);
+                    rayQueryTerminateEXT(rl);
+                }
+            } else {
+                rayQueryInitializeEXT(rl, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Pw + nw * 0.06, 0.0, L, max(dist - 0.1 - u_lc[li].w, 0.01));
+                while (rayQueryProceedEXT(rl)) {}
+            }
             if (rayQueryGetIntersectionTypeEXT(rl, true) != gl_RayQueryCommittedIntersectionNoneEXT) continue;
+            att *= ltrans;
             if (li >= u_fx0) acc_fx += u_lc[li].rgb * (ndl * att); else acc += u_lc[li].rgb * (ndl * att);
         }
         vec3 alb = texture(u_color, v_uv).rgb;
@@ -1177,10 +1223,11 @@ const char* const k_rt_lights = R"GLSL(
         o_refl.rgb += (alb * acc + max(alb, vec3(u_fx_alb)) * acc_fx) * fd * u_lscale;
     }
     o_refl.rgb += mk * u_lscale;
+    if (u_fmask_dbg != 0 && u_fmask != 0 && fighter_at(v_uv)) o_refl = vec4(0.9, 0.0, 0.9, 0.85);   // debug (PSPRECOMP_FMASK_DEBUG): the pixels marked as fighter
 )GLSL";
 const char* const k_rt_code = R"GLSL(
             if (u_use_rt != 0) {
-              if (u_sun != 0) {
+              if (u_sun != 0 && !(self_rx && u_char_mode == 0)) {   // Off: no sun shadow on a fighter
                 vec3 Ow = (u_view_inv * vec4(O, 1.0)).xyz;
                 vec3 lw = u_light_w;
                 vec3 lu = normalize(abs(lw.y) < 0.99 ? cross(lw, vec3(0.0, 1.0, 0.0)) : cross(lw, vec3(1.0, 0.0, 0.0))), lv = cross(lw, lu);
@@ -1194,22 +1241,30 @@ const char* const k_rt_code = R"GLSL(
                     rayQueryEXT rq;
                     if (self_rx) {
                         // on a fighter: every triangle is a candidate; a fighter's triangle (low bit of its coverage, psp_ge_draw.cpp
-                        // rt_capture) within u_rt_self_len is its own body and is passed through, anything else blocks
+                        // rt_capture) within u_rt_self_len is its own body: passed through (Off) or taking part of the light (Soft:
+                        // coverage x u_char_amt, hits right at the start skipped: the faceted body's own surface), anything else blocks
+                        float trans = 1.0;
                         rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsNoOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
                         while (rayQueryProceedEXT(rq)) {
                             if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
                             uint pc = rt_tri_col[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false) + rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)];
-                            if ((pc & 0x01000000u) != 0u && rayQueryGetIntersectionTEXT(rq, false) < u_rt_self_len) continue;
+                            float th = rayQueryGetIntersectionTEXT(rq, false);
+                            if ((pc & 0x01000000u) != 0u && th < u_rt_self_len) {
+                                if (u_char_mode == 1 && th > 0.12) trans *= 1.0 - u_char_amt * float(pc >> 24) / 255.0;
+                                continue;
+                            }
                             rayQueryConfirmIntersectionEXT(rq);
                             rayQueryTerminateEXT(rq);
                         }
+                        if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) { blocked += 1.0 - trans; continue; }
                     } else {
                         rayQueryInitializeEXT(rq, u_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0x1, Ow, 0.0, ld, u_rt_len);
                         while (rayQueryProceedEXT(rq)) {}
                     }
                     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) blocked += 1.0;
                 }
-                if (blocked > 0.0) sh = facing * fd * blocked / float(u_rt_rays);
+                float fc = (self_rx && u_char_mode == 1) ? smoothstep(0.05, 0.75, dot(n, u_light)) : facing;   // Soft: a gentler terminator on the low-poly body
+                if (blocked > 0.0) sh = fc * fd * blocked / float(u_rt_rays);
               }
             } else
 )GLSL";
@@ -1626,7 +1681,9 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_depth_fbo);
     glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-    if (sr) {
+    // The colour copy is also the albedo of the stage / effect lights and holds the fighter mask (its alpha): without reflections it was not
+    // made, so lights read whatever the texture held (black once the fighter mask pass rendered into it: no stage lights since #68).
+    if (sr || n_lights > 0 || (cs > 0 && sc.fighters)) {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_color_fbo);
         glBlitFramebuffer(0, 0, w, h, 0, 0, g_hw, g_hh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     }
@@ -1772,7 +1829,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
     glUniform1f(loc(mp.id, "u_ssr_len"), ssr_len);
     glUniform1f(loc(mp.id, "u_ssr_amt"), k_sr_amt[sr]);
     glUniform1i(loc(mp.id, "u_mask_on"), mask_on && refl_mask ? 1 : 0);
-    glUniform1i(loc(mp.id, "u_fmask"), fmask ? 1 : 0);
+    glUniform1i(loc(mp.id, "u_fmask"), fmask ? 1 : 0); glUniform1i(loc(mp.id, "u_char_mode"), psp_rt_char_shadows());
     glUniform1f(loc(mp.id, "u_wave"), env_float("PSPRECOMP_REFL_WAVE", 0.8f));
     glUniform1f(loc(mp.id, "u_wave_max"), env_float("PSPRECOMP_REFL_WAVE_MAX", 0.08f));
     glUniform1i(loc(mp.id, "u_mask_dbg"), std::getenv("PSPRECOMP_REFL_MASK_DEBUG") ? 1 : 0);
@@ -1814,6 +1871,7 @@ void psp_screenfx_run(GLuint fbo, GLuint color_tex, int w, int h, const ScreenFx
         glUniform3f(loc(mp.id, "u_light_w"), wl_n[0], wl_n[1], wl_n[2]);
         glUniform1f(loc(mp.id, "u_rt_len"), env_float("PSPRECOMP_RT_LEN", 40.f));
         glUniform1f(loc(mp.id, "u_rt_self_len"), env_float("PSPRECOMP_RT_SELF_LEN", 3.f));
+        glUniform1i(loc(mp.id, "u_fmask_dbg"), std::getenv("PSPRECOMP_FMASK_DEBUG") ? 1 : 0); glUniform1i(loc(mp.id, "u_char_wrap"), std::getenv("PSPRECOMP_RT_CHAR_WRAP") && std::getenv("PSPRECOMP_RT_CHAR_WRAP")[0] == '0' ? 0 : 1); glUniform1f(loc(mp.id, "u_char_amt"), env_float("PSPRECOMP_RT_CHAR_AMT", 0.45f));
         { const int q = psp_rt_quality(); glUniform1i(loc(mp.id, "u_rt_rays"), q >= 3 ? 6 : q == 2 ? 3 : 1); }
         glUniform1f(loc(mp.id, "u_rt_soft"), psp_rt_soft_angle());
         glUniform1i(loc(mp.id, "u_n_lights"), n_lights);

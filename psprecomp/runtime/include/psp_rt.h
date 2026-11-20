@@ -44,6 +44,9 @@ inline bool psp_rt_active() { return psp_rt_available() && psp_rt_enabled(); }
 /// Settings row "Effect Reflections" (saved `rt_refl_fx`, env PSPRECOMP_RT_REFL_FX=0/1): spell / beam effects in the ray-traced reflection.
 /// On by default; used from Medium up (Low traces solid geometry only).
 bool psp_rt_refl_fx_enabled();
+/// Character Shadows: 0 Off (no ray-traced shadow on fighters), 1 Soft (stage shadows + its own body partly, softened), 2 Sharp (like the stage). Saved as rt_char_shadows.
+int psp_rt_char_shadows();
+void psp_rt_char_set_shadows(int v);
 void psp_rt_refl_fx_set_enabled(bool on);
 inline bool psp_rt_refl_active() { return psp_rt_available() && psp_rt_refl_enabled(); }
 /// Either ray-traced effect is on: the draw path captures this frame's triangles.
