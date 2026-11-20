@@ -45,6 +45,9 @@ def main():
     last = -1
     try:
         os.makedirs(a.dest, exist_ok=True)
+        # Keep the game's files (thousands of texture PNGs) out of the gallery: Android's media scanner indexes Android/media, and a
+        # .nomedia file in the package folder hides it and everything below (the setup app also rescans it).
+        open(os.path.join(os.path.dirname(os.path.abspath(a.dest)), ".nomedia"), "a").close()
         for pid in packs:
             shutil.rmtree(os.path.join(a.dest, "mods", "texpacks", pid), ignore_errors=True)
         for name, p in files:

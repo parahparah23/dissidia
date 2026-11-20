@@ -12,6 +12,7 @@ import android.content.IntentFilter;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.media.MediaScannerConnection;
 import android.database.Cursor;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -185,6 +186,7 @@ public class SetupActivity extends Activity {
             ui.postDelayed(() -> { if (page != null && page.id.equals("permission") && hasAllFilesAccess()) afterPermission(); }, 650);
         }
         resumedAt = System.currentTimeMillis();
+        hideGameFromGallery(false, false);
         if (pendingConfirm != null && page.id.equals("installing")) {
             Intent c = pendingConfirm;
             pendingConfirm = null;
@@ -1012,6 +1014,7 @@ public class SetupActivity extends Activity {
     // ------------------------------------------------------------------------------------------------------------- the build
 
     private void startPlan(String kind, String isoPath, Options o, String prev) {
+        if (!kind.startsWith("demo")) hideGameFromGallery(true, false);
         runKind = kind;
         runOpts = o.text();
         runPrev = prev;
@@ -1206,6 +1209,7 @@ public class SetupActivity extends Activity {
             return;
         }
         if (r.kind.startsWith("demo")) { go(this::showDone); return; }   // the test plan built nothing
+        hideGameFromGallery(false, true);
         // remember what was built (install.ini)
         if (r.kind.equals("install")) {
             st.put("workdir", workdir);
@@ -1417,6 +1421,37 @@ public class SetupActivity extends Activity {
 
     /** Leave the install for later: the built game and its files stay; the start page offers Install the game. */
     private long resumedAt;
+
+    /**
+     * Keeps the game's files out of the gallery and the photo pickers. The game reads them from Android/media/org.psprecomp.game, a folder
+     * Android's media scanner indexes, so the HD textures (thousands of PNGs) showed up as photos. A .nomedia file there hides the folder
+     * and everything below it from the media index; the game still reads the files directly. A rescan of the folder makes Android drop
+     * what it had already indexed (done once for an existing install, and after every build / extras change).
+     * create: make the folder if it is not there yet (before a build). rescan: rescan even when the .nomedia file was already there.
+     */
+    private void hideGameFromGallery(boolean create, boolean rescan) {
+        if (!hasAllFilesAccess()) return;
+        final File root = new File(Environment.getExternalStorageDirectory(), "Android/media/org.psprecomp.game");
+        if (!root.isDirectory() && !(create && root.mkdirs())) return;
+        File nm = new File(root, ".nomedia");
+        boolean made = false;
+        try {
+            if (!nm.isFile()) made = nm.createNewFile();
+        } catch (Exception e) {
+            return;
+        }
+        boolean first = !"1".equals(st.get("media_hidden"));
+        if (!made && !rescan && !first) return;
+        try {
+            MediaScannerConnection.scanFile(getApplicationContext(), new String[]{root.getPath()}, null, null);
+        } catch (Exception e) {
+            return;   // the next run tries again (media_hidden stays unset)
+        }
+        if (first) {
+            st.put("media_hidden", "1");
+            saveState();
+        }
+    }
 
     /**
      * Shows Android's install confirmation. Not while this app is in the background (Android 10+ drops or hides it): then onResume shows
