@@ -147,24 +147,41 @@ void panel(const TagHudFighter& f, float x, float y, double tnow) {
         g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, bx + 0.5f, y + 16.5f, LayerColor{10, 10, 30, 0.8f});
         g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, bx, y + 16.f, f.brv == 0 ? LayerColor{255, 120, 110, 1.f} : LayerColor{255, 236, 190, 1.f});
     }
-    if (!ko && f.break_flash >= 0.f && f.break_flash < 1.f) {   // the team mate's break, shown on HIS panel (not the big panel of the player: 18 Nov, user)
-        const float t = f.break_flash, al = t < 0.15f ? t / 0.15f : (t > 0.7f ? (1.f - t) / 0.3f : 1.f), em = 8.6f + 1.4f * (1.f - std::min(1.f, t * 4.f));
-        const std::string bt = "BREAK";
-        const float bw = text_w(bt, true, em), bx = right ? x - 6.f - bw : x + w + 6.f;   // beside the panel, toward the screen centre
-        g_layer.text(bt, true, em, bx + 0.6f, y + 17.f + 0.6f, LayerColor{10, 10, 30, 0.85f * al});
-        g_layer.text(bt, true, em, bx, y + 17.f, LayerColor{255, 90, 70, al});
-    }
-    hp_bar(x + 2.f, y + 18.6f, w - 4.f - 26.f + (right ? 0.f : 0.f), ko ? 0.f : float(f.hp) / float(std::max(1, f.hp_max)), right, a);
+    // HP bar over the whole panel width, filling from the outer edge (as the retail slot panels). With the gauges the HP number sits on the row under it beside the
+    // half-length assist chevrons (native layout: our side: assist at the left, HP number at the right of the box; the enemy's panel mirrored); without them it ends the bar row.
+    const float bx0 = x + 2.f, bw0 = w - 4.f;
+    hp_bar(bx0, y + 18.6f, bw0, ko ? 0.f : float(f.hp) / float(std::max(1, f.hp_max)), right, a);
     const std::string hp = ko ? "0" : std::to_string(std::max(0, f.hp));
     const float hw = text_w(hp, true, 6.2f);
-    shadow_text(hp, true, 6.2f, right ? x + 2.f + w - 4.f - 26.f - hw + 26.f - 1.f : x + w - 2.f - hw, y + 23.f, LayerColor{230, 238, 255, a});
-    if (!gauges) return;
-    if (f.assist >= 0.f) assist_chevrons(x + 2.f, y + 24.6f, w - 4.f - 26.f, ko ? 0.f : f.assist, right, f.has_assist, a);
-    if (!ko && (f.ex_mode || f.ex >= 0.999f)) {   // "EX" under the HP number: gold = the gauge is full (EX Mode ready), pulsing magenta = in EX Mode
+    if (!gauges) shadow_text(hp, true, 6.2f, right ? bx0 : x + w - 2.f - hw, y + 23.f, LayerColor{230, 238, 255, a});
+    else {
+        const float aw = bw0 * 0.5f - 6.f;   // half the former chevron length (the old gauge was the panel's width less 26)
+        const float ax = right ? x + w - 2.f - aw : bx0;
+        if (f.assist >= 0.f) assist_chevrons(ax, y + 24.6f, aw, ko ? 0.f : f.assist, right, f.has_assist, a);
+        shadow_text(hp, true, 6.2f, right ? bx0 : x + w - 2.f - hw, y + 29.3f, LayerColor{230, 238, 255, a});
+    }
+    if (!ko && (f.ex_mode || f.ex >= 0.999f)) {   // "EX" at the panel's far end of the BRV row: gold = the gauge is full (EX Mode ready), pulsing magenta = in EX Mode
         const float pulse = f.ex_mode ? 0.85f + 0.15f * static_cast<float>(std::sin(tnow * 9.0)) : 1.f;
         const std::string t = f.ex_mode ? "EX MODE" : "EX";
         const float em = f.ex_mode ? 5.0f : 6.0f, tw = text_w(t, true, em);
-        shadow_text(t, true, em, x + w - 2.f - tw, y + 29.6f, f.ex_mode ? LayerColor{255, 150, 245, pulse} : LayerColor{255, 214, 110, 1.f});
+        shadow_text(t, true, em, right ? x + 3.f : x + w - 3.f - tw, y + 15.6f, f.ex_mode ? LayerColor{255, 150, 245, pulse} : LayerColor{255, 214, 110, 1.f});
+    }
+    if (!ko && f.break_flash >= 0.f && f.break_flash < 1.f) {   // this fighter's own break (never on the big panel of the player: user, 18 + 20 Nov): the panel flashes red and
+        // shakes, "BREAK" pops over its BRV number, shards fly off it (the retail break animation, scaled down to the small panel)
+        const float t = f.break_flash, al = t < 0.1f ? t / 0.1f : (t > 0.75f ? (1.f - t) / 0.25f : 1.f), em = 9.6f + 3.f * (1.f - std::min(1.f, t * 5.f));
+        const float fl = std::max(0.f, 1.f - t * 3.5f);
+        g_layer.band(x, y, x + w, y + H, [&](float, float) { return LayerColor{255, 70, 50, 0.55f * fl * a}; });
+        const std::string bt = "BREAK";
+        const float bwid = text_w(bt, true, em), shk = t < 0.4f ? 0.9f * std::sin(t * 140.f) * (1.f - t / 0.4f) : 0.f;
+        const float bx = (right ? fx - 3.f - bwid : fx + fw + 3.f) + shk, by = y + 16.2f;
+        g_layer.band(bx - 2.f, by - em * 0.78f, bx + bwid + 2.f, by + 2.f, [&](float, float) { return LayerColor{20, 8, 18, 0.7f * al}; });
+        g_layer.text(bt, true, em, bx + 0.6f, by + 0.6f, LayerColor{10, 10, 30, 0.85f * al});
+        g_layer.text(bt, true, em, bx, by, LayerColor{255, 96, 76, al});
+        for (int i = 0; i < 7; i++) {   // shards
+            const float ang = i * 0.9f + 0.4f, d = 3.f + t * 26.f * (0.6f + 0.1f * (i % 4)), sa = std::max(0.f, 1.f - t * 1.3f);
+            const float cx = bx + bwid * 0.5f + std::cos(ang) * d * 1.6f, cy = by - 3.f + std::sin(ang) * d * 0.7f;
+            g_layer.band(cx - 1.2f, cy - 0.7f, cx + 1.2f, cy + 0.7f, [&](float, float) { return LayerColor{255, 190.f - 12.f * i, 150.f, 0.9f * sa * a}; });
+        }
     }
 }
 

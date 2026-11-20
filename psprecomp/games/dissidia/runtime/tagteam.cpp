@@ -5740,6 +5740,30 @@ bool partner_break_report(uint32_t side) {
     if (g_log) { static float lt = -1.f; if (dissidia_battle_age() - lt < 30.f) return true; lt = dissidia_battle_age(); } if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: break report on the big panel (%s, BRV %u) dropped: the team mate was broken\n", dissidia_battle_age() / 60.0f, side, role_of(P), xbrv(P));
     return true;
 }
+// FUN_089DE6EC(hud, type, node, group, 1) starts a panel animation; FUN_089DEDB0 calls it for the report mask bits: types 2 / 3 are the break animation ("BREAK" over the
+// number, node hud+204) of the side of group 120 / 36 (the source group is the opponent's). The team mate's break still reached it on the big panel of the player (host: ~1 s after the extra's break, with the
+// "Bravery Break!" banner; the 3710 / 3B54 drops above did not stop it: 20 Nov, user "Terra broke ... the words BREAK on my BRV"). That start is skipped here when the
+// group's side has a team mate (not the panel's fighter) broken; the mate's own small panel shows its break (TagHudFighter::break_flash).
+// the side's big panel shows a fighter that still has BRV while a team mate of his (an extra of the side) was broken in the last 10 s (a hit on the panel's fighter does not matter here)
+bool partner_broken_panel_whole(uint32_t side) {
+    uint32_t P = 0; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && side_of(S) == side) P = hud_panel_fighter(k); }
+    if (!ok(P, 0x12D0) || xbrv(P) == 0u) return false;
+    for (const auto& kv : g_xbreak_show) if (kv.first != P && side_of(kv.first) == side && dissidia_battle_age() - kv.second < 600.f) return true;
+    return false;
+}
+FuncPtr g_orig_hudanim = nullptr;
+void hudanim_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t hud = static_cast<uint32_t>(ctx->r[4]), type = static_cast<uint32_t>(ctx->r[5]);
+    if ((type == 2u || type == 3u) && g_bs && g_nextra && g_hud && hud == g_hud && static_cast<uint32_t>(ctx->r[6]) == hud + 204u && !std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY")) {
+        const uint32_t grp = hud + (type == 2u ? 120u : 36u);   // the broken side's group (the animation is read from the other side's: the bonus goes there)
+        for (uint32_t sd = 0; sd < 2; sd++) if (panel_group(sd) == grp && partner_broken_panel_whole(sd)) {
+            if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: break animation (type %u) on the big panel skipped: the team mate was broken\n", dissidia_battle_age() / 60.0f, sd, type);
+            ctx->r[2] = 0; return;
+        }
+    }
+    g_orig_hudanim(rdram, ctx);
+}
 void hudch1_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     if (std::getenv("PSPRECOMP_TAGTEAM_HUDCHLOG")) hudch_log("3710", ctx);
@@ -7796,6 +7820,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_hitmsg) { g_orig_hitmsg = fn(0x08AF02C0u); if (g_orig_hitmsg) psp_dispatch_register(0x08AF02C0u, hitmsg_hook); }
     if (!g_orig_banter) { g_orig_banter = fn(0x08B0E40Cu); if (g_orig_banter) psp_dispatch_register(0x08B0E40Cu, banter_hook); }
     if (!g_orig_hudch1) { g_orig_hudch1 = fn(0x08AE3710u); g_orig_hudch2 = fn(0x08AE3B54u); if (g_orig_hudch1 && g_orig_hudch2) { psp_dispatch_register(0x08AE3710u, hudch1_hook); psp_dispatch_register(0x08AE3B54u, hudch2_hook); } }
+    if (!g_orig_hudanim) { g_orig_hudanim = fn(0x089DE6ECu); if (g_orig_hudanim) psp_dispatch_register(0x089DE6ECu, hudanim_hook); }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOCTRL")) { g_orig_ctrl = fn(0x08886C88u); if (g_orig_ctrl) psp_dispatch_register(0x08886C88u, ctrl_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_ENDLOG")) install_end_log(std::make_integer_sequence<int, 16>{});
     g_orig_rel1 = psp_dispatch_probe_lookup(0x0886CAA0u); g_orig_rel2 = psp_dispatch_probe_lookup(0x0886A140u);

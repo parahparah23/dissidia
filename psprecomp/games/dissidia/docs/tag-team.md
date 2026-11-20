@@ -3199,3 +3199,29 @@ at 370.4 s (nobody left on the stage), and L never switched the lock again: 0 `l
 - **Not verified:** on a device; a mate takeover / pad swap rebuild (same code path, not driven); retail's own behaviour for the first lock of a fresh
   fighter is inferred from the battle start (+252 0, mode 1 on the opponent), not from a retail mid-battle entrance (the core step of the cycle); a multiplayer human extra (the `apply_drive` clear is
   untested); the user's other lock buttons (only L driven; the toggle gate is the same function).
+## Partner panel like the native slot panels; partner break (20 Nov, tree tthud; host-only)
+User (RP6, `rp6logs/rp6_1120_terra.log`): (1) "Terra broke and it played the break animation and the words 'break' on my BRV; it should be where the partner BRV is". (2) The partner
+panel should mimic the native panels: assist bar half its size with the HP number in the freed space; the HP number on the right of the box for our partner, on the left for the
+enemy partner (it was on the right for both).
+- **Layout** (`tagteam_hud.cpp`, `panel`): the HP bar spans the whole panel (filling from the outer edge, as the native bar). The second row (31 high panels) holds the assist
+  chevrons at HALF their old length on the OUTER side (our side: left, enemy: right) and the HP number in the other half (our partner: right end of the box, enemy
+  partner: left end, as the native slot panels). A panel without gauges keeps the HP number on the bar row (same side rule). The "EX" / "EX MODE" label moved to the far end of
+  the BRV row (the HP number took its place). Crops before / after (host, scale 3): `/tmp/tthud/crops.png` (Terra on our side, Lightning on the enemy side, Terra broken).
+- **Break flash on the partner's own panel**: `break_flash` now flashes the panel red, shakes, and pops a bigger "BREAK" over the BRV number with shards (it was a small word
+  beside the panel). Set as before from `g_xbreak_show` (1.5 s).
+- **Main panel break (host repro)**: `PARTNER_CHAR=11 CLONES=1 SETBRV=partner:9:5 SETBRV_HOLD=1`, window shots `AGESHOTS_WIN=1 AGESHOTS=<dir>:10:58:0.5` (a window shot includes the
+  tag HUD; the plain shot does not). When Terra (extraP) is hit to 0 the existing drops (`[HUDBREAK] ... report on the big panel dropped`) run, yet ~1.2 s later the game
+  still plays the break burst on the PLAYER's number (shards + "BREAK" in place of 1291) together with the "Bravery Break!" banner. Found with `CALLLOG=089DE6EC`: the HUD
+  transition step (`FUN_089DEDB0`) starts the panel animation `FUN_089DE6EC(hud, type, hud+204, group, 1)` for the report mask (`*0x08AE7CA4`, set by `FUN_08AE3B54`): type 2 / 3
+  = break of the side whose group is NOT the source group (type 3 reads group 120 = side 1's, breaks side 0's panel; type 2 the reverse), type 8 on node hud+204 ends it ~3 s later.
+  `hudanim_hook` (0x089DE6EC) skips type 2 / 3 when the broken side's big panel shows a fighter that has BRV while an extra of that side was broken in the last 10 s
+  (`partner_broken_panel_whole`; a real break of the panel's fighter has BRV 0 so it plays). Log `[HUDBREAK] ... break animation (type N) on the big panel skipped`.
+  `PSPRECOMP_TAGTEAM_PANELBREAK_ANY=1`: old.
+- **Result / NOT fully fixed**: with the skip the shard burst is gone (`a019.27` in the shots), BUT the number is still replaced by a steady "BREAK" (+ the faded old number) on the
+  player's panel for ~3 s, until the extra's break ends. That steady state is not drawn by the type 2 / 3 start: its source is unknown (not the report mask, not `hud+0..0x800`
+  per-frame diff within 1 s, not a 3B54 call in `HUDCHLOG`; `CALLLOG` of 089DE7FC / 089E839C / 089DF854 / 089DFCA4 / 089DEDB0 showed no call in the window). Next step: memory
+  watch on the panel's number node / find the draw code that substitutes "BREAK" for the number (probably reads the handler state 3 of the side's handler list, where the
+  extra's own handler copy sits).
+- **Not reproduced**: the exact RP6 sequence. In `rp6_1120_terra.log` Terra was never marked broken (`[XBRKST]` only 0 -> 1 -> 2 -> 0 after her own HP attacks, which coincide with
+  the player's own HP attack, `[HPBRV]`); the user may have seen the player's own HP attack / the number turning 0 (no `HUDCHLOG` in that log). Enemy side: with `SETBRV=enemy2`
+  the panel followed the human's target (extraE), where a BREAK is legitimate; the skip path (type 2) fired in the later break (panel on the slot fighter).
