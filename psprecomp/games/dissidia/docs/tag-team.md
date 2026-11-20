@@ -3392,3 +3392,50 @@ User: "In single player, the CPU should be able to assist call a human." Code: `
 - **Not verified / limits:** a retail-side comparison of the AI's call rate (natural calls came only with gauge refills); the human's call by a real pad session / on a device; the exact frame of the hand-over (screens are 0.3 - 1 s apart); a CPU extra on the enemy side calling a HUMAN-less match (2v1 / 1v2 modes); the AI condition reads X's move table (the partner's own assist file), not the slot fighter's; the foe at an arena edge (floor samples only where fighters stood); lock-step with a peer (Assist Off online is a later task); the hand-over `PLACE` of a partner whose assist ended inside a retail cinematic.
 
 - **Calling a human costs one bar** (20 Nov, user): when a CPU partner calls a human slot fighter (pad-driven), or a slot fighter calls a human partner (pad-driven extra, multiplayer; the partner is moved in itself, no assist actor), the call takes 5000 (one bar) whatever kind was asked (R+Circle or R+Square); the human picks its own BRV or HP move. A CPU slot fighter called in still costs 1 / 2 bars by kind. `PSPRECOMP_TTCAM_AO9HUMANKIND=1` = cost by kind for humans too.
+## White screen / freeze after a forfeit: the extras' assists fell off the fighter list (20 Nov, tree ttcam; host-reproduced, host-verified)
+Report (RP6, `~/dissidia/rp6logs/rp6_1120_forfeit_white.log`): pause > Forfeit in a single-player tag battle (Kain + CPU Terra vs Laguna + WoL, extras with their own assists), results, then at the
+battle teardown `actor 08DDEC20 freed`, `08DCF790 freed`, `08DF4260 freed` (Terra's assist) and only `[HANGDUMP] game thread stuck` with `world .. head 0 tail 0 queue 08DDEC20/08DBBBA0`.
+- **The "queue" (world +68 / +72) is the world's DELETE queue.** `FUN_088417F8` (once per frame) runs, for every object queued there, its deleting destructor (vtable +1348, entry +8, flags 3), then
+  clears the queue and moves every object of the actor list (head world+12, tail +16) whose flags +904/+908 match the global kill mask (`0x089D0000-31088/-31084`) into it. Both lists link through
+  `+0x4A0`. A queue that stays non-empty with the actor list empty = the game thread is stuck inside that loop, i.e. inside one of the queued objects' destructors.
+- **Host repro** (first try, `~/dissidia/tt/ff/m1`, `ff.py`, `sp_cpu_walk.txt`, forfeit 15 s into the fight): the same lines, and the host backtrace of the stuck thread:
+  `FUN_088417F8` (delete queue) -> `FUN_08A61C98` (the ASSIST class's deleting destructor) -> `FUN_08B2EDC4` (`FIGHTER_DTOR`), regs r4 = r7 = 0: the destructor's walk of the **fighter list** (head
+  world+20, tail world+24, link `+0x1114`) looking for the node before the assist ran off the end (reads of 0 + 0x1114) for ever - the assist was not on the list (same hang as "the release at a KO",
+  above, whose cause was left open).
+- **Cause** (logs `[FFDBG]`, `m2`/`m3`): `xas_spawn` put back `REG_PAIR0 / REG_PAIR1` after the assist's constructor, believing them a "pair table". They are `world+12` (actor list head) and
+  `world+24` = the **fighter list tail**. The constructor appends the assist (old tail +0x1114 = assist, tail = assist); restoring the tail left the assist linked behind the old tail but not the tail. Both
+  extras' assists are made in the same frame (t = 7.8 s): the second one's constructor appended itself to the restored (old) tail, overwriting its +0x1114 = the first assist is cut off the list
+  (`xas A made: on fighter list 1`, `xas B made: list .. extra, B` without A, `A ready: on fighter list 0`). At the teardown retail deletes every actor; the orphaned assist's destructor hangs.
+  Not the undo words of the ready step (checked one by one: none touches the list).
+- **Fixes** (`tagteam.cpp`):
+  1. `xas_spawn` leaves `REG_PAIR0/1` as the constructor wrote them (as the rebuild already does). `PSPRECOMP_TAGTEAM_XASSIST_UNDOPAIR=1` = the old restore (debug only; `XASSIST_KEEPPAIR` is gone).
+  2. Generic guard in `dtor_hook` (every `FIGHTER_DTOR`, retail's teardown / delete queue, our rebuilds and releases): an actor that is not on the fighter list is linked at its tail first
+     (`fighter_list_ensure`, the former `xas_list_ready`; bounded walk, a broken list is rebuilt), log `[TAGTEAM] destroyed fighter X is not on the fighter list ...: linked at the tail for the destructor`.
+     `PSPRECOMP_TAGTEAM_NODTORLIST=1` = off.
+  3. `retail_detach(A)`: takes an actor off the actor list, the delete queue (link +0x4A0) and the fighter list (+0x1114), bounded walks, logged. Found with it: an assist released during the battle
+     (`xas_release`: master down / Assist Off / another member) stayed on the world's ACTOR list after `FIGHTER_DTOR` (that destructor does not unlink it), and its block was freed 2 s later while
+     still linked (`released assist .. taken off the world list before its block is freed (prev .. next ..)` in the KO runs) - the world then walked a freed block. Now detached right after its
+     destructor (retail never updates or deletes it again) and again before the free; at a teardown within the 2 s, the pending released assists are freed then (they were dropped = leaked)
+     (`PSPRECOMP_TAGTEAM_NODEADFREE=1` = old).
+  4. `dissidia_tagteam_after_free` (the blocks an actor's destructor left allocated, freed with the actor): a block that is itself still on the actor list / delete queue / fighter list is NOT freed
+     (retail deletes it), log `.. its block X is still on a world list: left for retail to destroy`. `PSPRECOMP_TAGTEAM_NOLISTGUARD=1` = off. (Not seen firing in these runs.)
+- **Results** (host, headless GPU `BT_GPU=1`, `~/dissidia/tt/ff/ff.py WORK OUT WALK "wait;wait;.." [ENV]`: battle via `sp_cpu_walk.txt` (Jecht + CPU Terra vs Lightning + Vaan), wait, pause >
+  Forfeit > YES, cross through the results until the teardown, back to the setup and into the next battle; screenshots `bN_*.png`, `final.png` = next battle running). A hang = a `[HANGDUMP]` with a
+  non-empty delete queue (a `[HANGDUMP]` with an empty queue after the battle is the menu's vblank wait, not a hang - seen in every run, also before):
+  before: `m1`, `m2`, `m3` hang at the first teardown (3/3). After:
+  | run | forfeit when | battles | result |
+  |---|---|---|---|
+  | `f2` | mid-battle (age 19-25 s, both extras' assists out) | 3 in a row | OK, 4 actors freed per teardown, 4th battle starts |
+  | `f3` | right after the intro / banter (age 11 s; then 6.2 s and 5.3 s, before any extra stands) | 3 | OK |
+  | `f4` | Assists OFF, forced call at 12 s (round 8: partner parked, its own assist plays the call), forfeit at 13.1 s during the call (`f4_montage.png`: ASSIST banner, pause, result menu, next setup, 3rd battle) | 2 | OK |
+  | `f5` / `g1` | after a KO + call-in (`KOLIST=partner:8,cpu:11` + `_NAT`: partner KO'd -> assist released, slot 1 KO -> rebuild + call-in), forfeit at 15-26 s | 2 / 3 | OK; `g1` (fix 3) logs `released assist .. taken off the world list` for every release |
+  | `f6` | Assist ON, extras' assist gauges filled (`GAUGESET`), the partner's assist hit at 15.6 s, forfeit at 19.3 s | 2 | OK |
+  | `g2` | Assist ON, `XASSISTLOG`: the partner's assist in its attack script 10010 at 17.43 s, forfeit at 18.0 s | 2 | OK |
+  | `g3` | fix 1 OFF (`XASSIST_UNDOPAIR=1`, the orphaning back): only the guard (2) | 2 | OK: `destroyed fighter .. is not on the fighter list (2 nodes walked ..): linked at the tail` once per teardown, no hang |
+  Every "after" run: all four extra / assist actors destroyed and freed at each teardown, results -> Return to Battle Setup -> the next battle started (`final.png`). Regression
+  `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ff/reg1`). The device log's `aim fix .. foe 0 .. STALE` lines just before the teardown (retail clears the targets while the battle is being
+  killed) are harmless and not changed.
+- **This also explains** the open point of "the release at a KO no longer hangs" above: the assist that was missing from the fighter list there was most likely cut off the same way (two assists
+  made in one frame, or a rebuild's constructor appending to the restored tail).
+- **Not verified:** anything on a device (RP6 / desktop Vulkan); Communications Mode / 2-player tag battles (the changes are list words only, the same on both machines); a teardown within 2 s of an
+  assist release (the "freed now" path; not hit in these runs); fix 4 never fired, so its skip path is untested; forfeits in the Tournament with 5-member parties beyond the 3-member walk used here.

@@ -272,6 +272,9 @@ std::vector<std::pair<uint32_t, uint32_t>> g_last_undo;
 std::vector<uint32_t> g_glob_snap; uint32_t g_glob_snap_for = 0;   // debug GLOBDIFF: globals (0x08800000..0x08C40000) before the last extra constructor
 int g_nextra = 0;
 uint32_t g_bs = 0;
+bool on_fighter_list(uint32_t a, std::string* chain = nullptr);   // below (dtor_hook)
+void fighter_list_ensure(uint32_t a, const char* who);
+void retail_detach(uint32_t A, const char* who);   // below (world_unlink)
 void xas_reset(bool teardown);   // the extras' own assists (xas_*, below)
 struct Extra; uint32_t ao9_gate_open(const Extra& e); void ao9_gate_close(const Extra& e, uint32_t x); void ao9_extra_step(const Extra& e);   // Assist Off round 9: the extra calls its slot fighter (below)
 int g_mask = 3;
@@ -2171,7 +2174,11 @@ bool xas_spawn(int idx, bool forced = false) {
     const uint32_t a1 = call(0x08872B48u, 0u);
     call(0x08A61C3Cu, mem, a1, x.row, side + 2u);
     camslot_unhide(hidden); g_in_ctor = false;
-    if (!std::getenv("PSPRECOMP_TAGTEAM_XASSIST_KEEPPAIR")) { wr(REG_PAIR0, rp0); wr(REG_PAIR1, rp1); }   // the constructor registers itself in the retail pair's table: the assist is not a pair member
+    // REG_PAIR0 / REG_PAIR1 are NOT a pair table: world+12 (the world's actor list head) and world+24 (the fighter list TAIL, link +0x1114). Putting the old tail
+    // back left the assist linked behind it but no longer the tail: the next constructor (the other extra's assist, made in the same frame) linked itself after the
+    // old tail and cut this assist off the list; its destructor at the battle's teardown then walked the list for ever (white screen / freeze after a forfeit,
+    // 20 Nov). They stay as the constructor left them, as for a rebuild. PSPRECOMP_TAGTEAM_XASSIST_UNDOPAIR=1: the old restore (debug only).
+    if (std::getenv("PSPRECOMP_TAGTEAM_XASSIST_UNDOPAIR")) { wr(REG_PAIR0, rp0); wr(REG_PAIR1, rp1); }
     std::vector<std::pair<uint32_t, uint32_t>> undo;
     if (g_rel_obj) for (uint32_t o = 0; o < 0x200u; o += 4) { const uint32_t a = g_rel_obj + o; if (a < SB || a >= SB + SN * 4 || (a >= mem && a < mem + 0x12D0u)) continue; const uint32_t was = snap[(a - SB) / 4]; if (was != rd(a)) wr(a, was); }
     // the init record, as FUN_08888354 builds it
@@ -2220,7 +2227,7 @@ bool xas_spawn(int idx, bool forced = false) {
 // The destructor (FIGHTER_DTOR) unlinks the actor from the fighter list (head world+20, tail world+24, link +0x1114) by walking from the head until a node whose
 // link is the actor: an actor that is not on the list (or a list that is cut / cyclic before it) makes that walk run for ever (the hang at the first KO of a 2-player
 // tag battle). So the list is checked first (bounded walk, no other side effect) and an actor missing from it is appended at the tail, where the destructor takes it off again.
-static void xas_list_ready(uint32_t a) {
+void fighter_list_ensure(uint32_t a, const char* who) {
     const uint32_t world = rd(0x089D4958u);
     if (!ok(world, 0x40)) return;
     uint32_t last = 0; bool found = false, bad = false; int n = 0;
@@ -2230,7 +2237,7 @@ static void xas_list_ready(uint32_t a) {
         last = p;
     }
     if (found) return;
-    if (g_log) std::fprintf(stderr, "[XAS] assist %08X is not on the fighter list (%d nodes walked%s, head %08X tail %08X): linked at the tail for the destructor\n", a, n, bad ? ", list broken" : "", rd(world + 20u), rd(world + 24u));
+    std::fprintf(stderr, "[TAGTEAM] %s %08X is not on the fighter list (%d nodes walked%s, head %08X tail %08X): linked at the tail for the destructor\n", who, a, n, bad ? ", list broken" : "", rd(world + 20u), rd(world + 24u));
     if (bad) { // a broken list: rebuild it from the nodes that were walked, then the assist
         std::vector<uint32_t> v; int m = 0;
         for (uint32_t p = rd(world + 20u); p && ok(p, 0x12D0) && m < 64 && std::find(v.begin(), v.end(), p) == v.end(); p = rd(p + 0x1114u), m++) v.push_back(p);
@@ -2250,8 +2257,11 @@ void xas_release(uint32_t extra, const char* why) {
     if (ok(extra, 0x12D0) && rd(extra + 0x1108u) == x.assist) wr(extra + 0x1108u, 0);
     if (ok(x.assist, 0x12D0)) {
         for (const auto& u : x.undo) wr(u.first, u.second);   // (a not yet ready assist: its registrations go back first)
-        xas_list_ready(x.assist);
+        fighter_list_ensure(x.assist, "assist");
         g_rebuild_dtor = true; call(FIGHTER_DTOR, x.assist, 0); g_rebuild_dtor = false;
+        // the destructor takes it off the fighter list only: it stayed on the world's actor list, so the world kept updating the destroyed actor, and its block was
+        // freed while still linked (the list then ran through freed / reused memory), or a battle end in between queued it for retail's delete (a second destructor).
+        retail_detach(x.assist, "released assist");
         g_xas_dead.push_back({x.assist, x.ctl, x.mgr, dissidia_battle_age(), x.fid});
     }
     if (x.mgr) g_xas_mgrs.erase(x.mgr);
@@ -2260,6 +2270,10 @@ void xas_release(uint32_t extra, const char* why) {
 // a new battle / the teardown: nothing of the assists is kept (retail destroys the actors; the files a load made are released with the leftovers)
 void xas_reset(bool teardown) {
     if (teardown) for (const auto& kv : g_xas_files) g_leftover_load[0x10000 + static_cast<int>(kv.first)] = kv.second;
+    if (teardown && !std::getenv("PSPRECOMP_TAGTEAM_NODEADFREE")) for (const auto& d : g_xas_dead) if (ok(d.actor, 0x12D0)) {   // released in the last 2 s: off every list
+        // since the release, not freed yet; dropping the entry leaked the block (and its controller / manager copies) into the next battle's heap
+        retail_detach(d.actor, "released assist"); call(0x0883133Cu, d.actor);
+        if (g_log) std::fprintf(stderr, "[XAS] teardown: released assist %08X freed now\n", d.actor); }
     g_xas.clear(); g_xas_refs.clear(); g_xas_files.clear(); g_xas_dead.clear(); g_xas_unload_q.clear(); g_xas_mgrs.clear(); g_amgr = 0;
 }
 // every frame at the safe point (scene tick): make / ready / retire the extras' assists
@@ -2268,7 +2282,7 @@ void xas_frame() {
     const float age = dissidia_battle_age();
     if (!g_amgr) return;
     for (size_t i = 0; i < g_xas_dead.size();) {   // a destroyed assist's block is freed two seconds later (the world flushes its objects by then)
-        if (age - g_xas_dead[i].at >= 120.f) { if (ok(g_xas_dead[i].actor, 0x12D0)) call(0x0883133Cu, g_xas_dead[i].actor); g_xas_dead.erase(g_xas_dead.begin() + static_cast<long>(i)); } else i++; }
+        if (age - g_xas_dead[i].at >= 120.f) { if (ok(g_xas_dead[i].actor, 0x12D0)) { retail_detach(g_xas_dead[i].actor, "released assist"); call(0x0883133Cu, g_xas_dead[i].actor); } g_xas_dead.erase(g_xas_dead.begin() + static_cast<long>(i)); } else i++; }
     for (size_t i = 0; i < g_xas_unload_q.size();) {
         if (age - g_xas_unload_q[i].first >= 300.f) { const uint32_t f = g_xas_unload_q[i].second; if (!g_xas_refs.count(f)) xas_unlink_files(f); g_xas_unload_q.erase(g_xas_unload_q.begin() + static_cast<long>(i)); } else i++; }
     const bool off = assist_off_now();
@@ -2552,6 +2566,24 @@ void world_unlink(uint32_t A) {
     if (g_log) std::fprintf(stderr, "[TAGTEAM] world list: %08X unlinked (prev %08X next %08X)\n", A, prev, next);
 }
 
+// Before WE free an actor block (retail frees its own through the delete queue): it must be on none of the world's lists. The world's actor list
+// (world+12/+16) and the delete queue (world+68/+72, FUN_088417F8: next frame every queued object's deleting destructor runs) share the link +0x4A0, the
+// fighter list (world+20/+24) links +0x1114 (FIGHTER_DTOR takes the actor off it). A freed block left on one of them is walked (and destroyed again) by retail
+// in reused memory. Bounded walks; logs what it took off.
+void retail_detach(uint32_t A, const char* who) {
+    const uint32_t w = rd(0x089D4958u); if (!ok(w, 0x60) || !A) return;
+    struct L { uint32_t head, tail, link; const char* name; } lists[3] = {{w + 12u, w + 16u, 0x4A0u, "world list"}, {w + 68u, w + 72u, 0x4A0u, "delete queue"}, {w + 20u, w + 24u, 0x1114u, "fighter list"}};
+    for (const L& l : lists) {
+        uint32_t prev = 0; bool found = false; int n = 0;
+        for (uint32_t p = rd(l.head); p && ok(p, 0x12D0) && n < 256; prev = p, p = rd(p + l.link), n++) if (p == A) { found = true; break; }
+        if (!found) continue;
+        const uint32_t next = rd(A + l.link);
+        if (prev) wr(prev + l.link, next); else wr(l.head, next);
+        if (rd(l.tail) == A) wr(l.tail, prev);
+        wr(A + l.link, 0u);
+        std::fprintf(stderr, "[TAGTEAM] %s %08X taken off the %s before its block is freed (prev %08X next %08X)\n", who, A, l.name, prev, next);
+    }
+}
 void world_dump(const char* tag) {
     const uint32_t w = rd(0x089D4958u); if (!ok(w, 0x60)) return;
     std::fprintf(stderr, "[TAGTEAM] world list %s: head %08X tail %08X:", tag, rd(w + 12u), rd(w + 16u));
@@ -3524,8 +3556,17 @@ void addrow_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_addrow(rdram, ctx);
 }
 void appear_fx_forget(uint32_t a);   // below (Assist Off round 3)
+bool on_fighter_list(uint32_t a, std::string* chain) {   // bounded walk of the fighter list (head world+20, link +0x1114)
+    const uint32_t world = rd(0x089D4958u); if (!ok(world, 0x40)) return false;
+    int n = 0; for (uint32_t p = rd(world + 20u); p && ok(p, 0x12D0) && n < 64; p = rd(p + 0x1114u), n++) { if (chain) { char b[16]; std::snprintf(b, sizeof b, " %08X", p); *chain += b; } if (p == a) return true; }
+    return false;
+}
 void dtor_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
+    // FIGHTER_DTOR unlinks the actor from the fighter list by walking from the head until the node before it: an actor missing from the list (cut off by an
+    // older bug, or a list some constructor of ours left cut) makes that walk run for ever on null (the game thread hangs; a white screen after the battle).
+    // Any fighter destroyed (retail's teardown / delete queue, our rebuilds and assist releases) is put on the list first. PSPRECOMP_TAGTEAM_NODTORLIST=1: off.
+    { static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NODTORLIST") != nullptr; const uint32_t d = static_cast<uint32_t>(ctx->r[4]); if (!off && ok(d, 0x12D0) && !on_fighter_list(d)) fighter_list_ensure(d, "destroyed fighter"); }
     if (!g_rebuild_dtor) appear_fx_forget(static_cast<uint32_t>(ctx->r[4]));
     if (!g_rebuild_dtor) chase_restore();   // a battle ending in the middle of a chase: the slot table and lock blocks go back first
     const uint32_t a = static_cast<uint32_t>(ctx->r[4]);
@@ -7609,7 +7650,14 @@ void dissidia_tagteam_after_free(uint8_t* rdram, recomp_context* ctx, uint32_t h
     std::map<uint32_t, uint32_t> live;
     if (ok(heap, 0x20)) { const uint32_t end = rd(heap + 4u); uint32_t p = heap + 20u; for (int n = 0; p != end && n < 100000; n++) { live[p] = rd(p + 8u); const uint32_t nx = rd(p); if (nx <= p) break; p = nx; } }
     int freed = 0;
-    for (const Blk& b : blocks) { auto lv = live.find(b.addr - 0x10u); if (b.addr && lv != live.end() && (b.size == 0 || lv->second == ((b.size + 15u) & ~15u) + 0x10u)) { call(0x0883133Cu, b.addr); live.erase(lv); freed++; } }
+    std::set<uint32_t> listed;   // objects still on one of the world's lists (actor list / delete queue, link +0x4A0; fighter list, link +0x1114): retail destroys and frees
+    // those itself (the delete queue runs every queued object's deleting destructor); freeing one here left the queue walking a freed block. Kept, logged.
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOLISTGUARD")) { const uint32_t w = rd(0x089D4958u);
+        if (ok(w, 0x60)) { const uint32_t hd[3] = {w + 12u, w + 68u, w + 20u}, lk[3] = {0x4A0u, 0x4A0u, 0x1114u};
+            for (int q = 0; q < 3; q++) { int n = 0; for (uint32_t p2 = rd(hd[q]); p2 && ok(p2, 0x40) && n < 256 && !listed.count(p2); p2 = rd(p2 + lk[q]), n++) listed.insert(p2); } } }
+    for (const Blk& b : blocks) { auto lv = live.find(b.addr - 0x10u); if (b.addr && lv != live.end() && (b.size == 0 || lv->second == ((b.size + 15u) & ~15u) + 0x10u)) {
+        if (listed.count(b.addr)) { std::fprintf(stderr, "[TAGTEAM] actor %08X freed: its block %08X+%X is still on a world list: left for retail to destroy\n", ptr, b.addr, b.size); continue; }
+        call(0x0883133Cu, b.addr); live.erase(lv); freed++; } }
     if (g_log) std::fprintf(stderr, "[TAGTEAM] actor %08X freed: %d of its %zu tracked blocks were still allocated and are freed too\n", ptr, freed, blocks.size());
 }
 // hooks_models.cpp: what the sound heap (soundheap_hook) will still take from the host heap, so the model pool and the effect pool
