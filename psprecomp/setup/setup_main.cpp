@@ -13,6 +13,7 @@
 //                                            only matters when an update is found (or something fails)
 //   psprecomp_setup --headless --iso FILE --dir DIR   the install steps without a window (prints the output; for scripts/tests)
 //   psprecomp_setup --headless ... --saves SAVEDATA   also import the saves of a SAVEDATA folder
+//   psprecomp_setup --headless ... --extra KEY=VALUE  turn on an extra / give its disc (repeatable; e.g. d1_moves=1 d1_iso=FILE)
 //   psprecomp_setup --import-saves SAVEDATA --dir DIR  copy Dissidia 012 saves into an install (an install step; no window)
 //   psprecomp_setup --root DIR               use DIR as the release folder instead of this program's folder
 //   psprecomp_setup --screenshots OUTDIR     write PPM images of the pages (documentation / look checks) and exit
@@ -1210,13 +1211,15 @@ void write_ppm(const Canvas& c, const std::string& path) {
     std::fclose(f);
 }
 
-int run_headless(const setup::Layout& l, const std::string& iso, const std::string& dir, const std::string& saves) {
+int run_headless(const setup::Layout& l, const std::string& iso, const std::string& dir, const std::string& saves,
+                 const std::vector<std::pair<std::string, std::string>>& extras) {
     std::string prob = l.problem();
     if (!prob.empty()) { std::fprintf(stderr, "error: %s\n", prob.c_str()); return 2; }
     std::error_code ec;
     fs::create_directories(dir, ec);
     setup::Options o;
     o.import_saves = saves;
+    for (const auto& kv : extras) o.set(kv.first, kv.second);
     auto plan = setup::plan_install(l, iso, dir, o);
     setup::Progress prog;
     for (size_t i = 0; i < plan.size(); i++) {
@@ -1331,6 +1334,7 @@ int main(int argc, char** argv) {
     std::string root, iso, dir, play_dir, shots, import_from, saves_from;
     bool headless = false, play = false, launch = false;
     std::string unpack_to;
+    std::vector<std::pair<std::string, std::string>> extras;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&](std::string& out) { if (i + 1 < argc) out = argv[++i]; };
@@ -1341,6 +1345,12 @@ int main(int argc, char** argv) {
         else if (a == "--saves") next(saves_from);
         else if (a == "--unpack") next(unpack_to);   // single-file release: unpack the bundled release folder there and exit
         else if (a == "--headless") headless = true;
+        else if (a == "--extra" && i + 1 < argc) {
+            const std::string kv = argv[++i];
+            const size_t eq = kv.find('=');
+            if (eq == std::string::npos || eq == 0) { std::fprintf(stderr, "--extra needs KEY=VALUE\n"); return 2; }
+            extras.push_back({kv.substr(0, eq), kv.substr(eq + 1)});
+        }
         else if (a == "--launch") launch = true;
         else if (a == "--screenshots") next(shots);
         else if (a == "--play") { play = true; if (i + 1 < argc && argv[i + 1][0] != '-') play_dir = argv[++i]; }
@@ -1382,7 +1392,7 @@ int main(int argc, char** argv) {
 
     if (headless) {
         if (iso.empty() || dir.empty()) { std::fprintf(stderr, "--headless needs --iso FILE and --dir DIR\n"); return 2; }
-        return run_headless(layout, iso, dir, saves_from);
+        return run_headless(layout, iso, dir, saves_from, extras);
     }
     if (play) {
         std::string wd = play_dir.empty() ? state.workdir : play_dir;

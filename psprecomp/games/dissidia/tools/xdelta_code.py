@@ -235,7 +235,7 @@ class Ctx:
         self.work, self.game, self.env = work, game, env
 
     def recompile(self, module, prefix, analysis_path, toml, od, what):
-        r = subprocess.run([sys.executable, os.path.join(HERE, "build_overlay.py"), str(module), prefix,
+        r = subprocess.run(([os.environ["PSPRECOMP_PY_LOADER"]] if os.environ.get("PSPRECOMP_PY_LOADER") else []) + [sys.executable, os.path.join(HERE, "build_overlay.py"), str(module), prefix,
                             analysis_path, os.path.join(self.work, "analysis.json"), od, toml],
                            env=self.env, capture_output=True, text=True)
         if r.returncode != 0:
