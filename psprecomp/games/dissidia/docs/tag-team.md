@@ -3568,3 +3568,27 @@ her fall and did not move either, and the camera "moved to him".
 - **Not verified.** Nothing on a device (RP6 / 120 Hz). One run (`r3`) stopped simulating at 71.3 s (screenshots kept being taken, no `[HANGDUMP]` since it was not armed): not
   reproduced in `r5` / `r6` / `m1` (same KOs, HANGDUMP armed), cause unknown; the other runs never froze. Camera "snap" to the new body at a takeover was not
   added. The exact RP6 sequence (Squall as a CPU row called in onto the down body) was reproduced with Yuna in that role, not Squall.
+
+## EX Burst camera wrong in a tag battle (20 Nov, tree ttlock; host-only, screenshots on the host, nothing seen on a device)
+User (RP6, `rp6logs/rp6_1120_squall_exb.log`, `rp6_1120_exb2.log`): "Squall (the enemy's extra) did an EX Burst on me and the camera was wrong", then the same for the enemy slot fighter.
+Two causes, both found with `PSPRECOMP_TAGTEAM_EXBAT` + window screenshots every 0.25 s (`AGESHOTS_WIN`) and the camera log; the same burst in a plain 1v1 is the reference.
+- **How the retail burst camera works.** The camera manager's step for a lock block (ra `08B3C8A0`) puts the block of a fighter whose burst flag (actor +0x191 bit 0)
+  is set into lock mode 2 (the scripted burst camera, old mode saved at +272) **only while the block's word +0xFC (252) is 0**; the manager shows the slot whose block
+  has the shown byte +0x125 (index at mgr+0x8B8; the burster's slot during a burst). Mode back to 1 by the same step the frame after the burst.
+- **Cause 1 (slot fighter or extra as burster):** the tag targeting leaves +0xFC (the "other enemy" lock) on a third fighter, e.g. our partner. Mode 2 never came, the
+  normal lock-on camera followed the PARKED partner under the stage (look-at y falling to -20). Now the blocks of the two in the burst have +0xFC = 0 while it runs
+  and get their old value back afterwards (`g_exb_fc`; `PSPRECOMP_TAGTEAM_NOEXBLOCK=1` old).
+- **Cause 2 (an EXTRA as burster):** its lock block is in no camera slot, so the burst camera was never stepped and the manager showed the human's block: eye = look-at = 0
+  (white / black screen). Now for the burst the extra's block gets a free slot (4..7) with the camera players (+0x180..+0x2C0) copied from its slot fighter's block (as
+  the human-driven extras of a multiplayer battle have) and the shown byte moved to it; it stays in the slot until the manager's own step has put mode 2 back to 1,
+  then slot and shown bytes go back (`PSPRECOMP_TAGTEAM_NOEXBCAMSLOT=1` old). Battle state only, same on every machine.
+- **Test aid changes:** `EXBAT` now writes the burster's foe words = the asked foe before the start (the start takes the burster's own foe as victim; before, the asked
+  foe was ignored when the AI had another one; `NOEXBFOEFORCE=1` old); `EXTRAS=0` with `EXBAT` keeps `g_bs` so a plain 1v1 can be started (reference). Debug: `EXBCAM=1`
+  (camera manager, fighters, lock-mode calls every 10 frames), `EXBWATCHLB=<hex off>` (memory watch on the burster's lock block word).
+- **Results** (host, headless GL, window screenshots; `/tmp/exbtools/ev_s1.png`, `ev_x0.png` = before over after montages): the camera eye of the burst phase is identical
+  to the plain 1v1's for the same burster: slotC on slotH (-5.26,2.05,-3.37), slotH on slotC / extra on slotC / human on extra (-1.91,0.50,-2.41); before: slotC on slotH
+  with both extras = static far view at the origin or on the parked partner, extraE on slotH = eye 0,0,0. Checked: s1:s0 (3 runs), x0 on s0, x1 on s1, s0 on x0, s1 on x1,
+  s0 with and without extras (unchanged). Mode 2 -> 1 and the camera back to normal after the burst (x0, 10 s after). `tagteam_test.py --baseline` PASS.
+- **Not verified:** a naturally started burst (EX gauge + HP hit) on a device; a burst in multiplayer (two machines; the changes use battle state only); an extra bursting
+  while another chase / entrance camera runs; the victim being a human-driven extra of a multiplayer battle (it already has its own slot 4 + index: the code reuses a slot
+  that holds the block).

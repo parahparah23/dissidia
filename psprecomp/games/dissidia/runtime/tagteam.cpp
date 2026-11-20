@@ -368,6 +368,9 @@ void pause_open_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 bool is_slot_fighter(uint32_t a); int reserve_left(int team); int team_of(uint32_t side); int my_player_index();   // below
 std::map<uint32_t, uint32_t> g_extra_mod;   // extra actor -> its damage module copy (hitmsg_hook)
+uint32_t g_exb_slot_addr = 0, g_exb_slot_lb = 0;   // an extra burster's lock block put into a free camera-manager slot for the burst: table address / block
+std::map<uint32_t, uint8_t> g_exb_shown;   // lock block -> its +0x125 "shown" byte before the burst moved it to the burster
+std::map<uint32_t, uint32_t> g_exb_fc;   // lock block -> its +0xFC word cleared for the running EX Burst (burst camera)
 std::set<uint32_t> g_exb_frozen;   // fighters held out of a running EX Burst (their pad input is dropped: dissidia_tagteam_pad_blocked)
 std::map<uint32_t, float> g_xbreak_show;   // extra -> battle age of its last break (the BREAK flash on its own small panel)
 std::map<uint32_t, uint32_t> g_extra_hdl;   // extra actor -> its damage handler copy (hitreact_hook)
@@ -1122,7 +1125,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     // In a lock-step battle every machine must make the extras in the same order (their blocks, addresses and the object list follow it):
     // by side, not "the CPU's first" (which side that is depends on the local player). A single-player battle keeps its old order.
     if (psp_adhoc_in_session()) std::stable_sort(g_late_q.begin(), g_late_q.end(), [](const Late& a, const Late& b) { return a.side < b.side; });
-    if (g_nextra) g_bs = bs;
+    if (g_nextra || (std::getenv("PSPRECOMP_TAGTEAM_EXBAT") && !g_mask)) g_bs = bs;   // (EXBAT with EXTRAS=0: the plain 1v1 gets its debug bursts too)
 }
 
 // Take back the constructor's registrations (camera slot, lock block list, pair table). They are needed while the fighter
@@ -1979,6 +1982,7 @@ void refresh_hook(uint8_t* rdram, recomp_context* ctx) {
 void lock_mode_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     const uint32_t L = static_cast<uint32_t>(ctx->r[4]), mode = static_cast<uint32_t>(ctx->r[5]);
+    if (std::getenv("PSPRECOMP_TAGTEAM_EXBCAM") && ok(L, 0x200) && ok(rd(L + 248u), 0x12D0)) std::fprintf(stderr, "[LOCKMODE] t=%.2fs block %08X owner %s mode %u -> %u flag %u ra %08X bypass %d\n", dissidia_battle_age() / 60.0f, L, role_of(rd(L + 248u)), rd(L + 264u), mode, static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[31]), g_lock_bypass ? 1 : 0);
     if (g_lock_bypass) { g_orig_lock_mode(rdram, ctx); return; }
     if (g_nextra && ok(L, 0x200)) {
         const uint32_t owner = rd(L + 248u), h1 = rd(L + 304u);
@@ -3142,6 +3146,8 @@ void exb_debug_start() {
         uint32_t foe = exb_fighter(sp.foe);
         if (!foe && ok(a, 0x12D0)) foe = srd(g_bs + 56u + 4u * (side_of(a) == side_of(srd(g_bs + 56u)) ? 1u : 0u));
         if (!ok(a, 0x12D0) || !ok(foe, 0x12D0) || !alive(a) || !alive(foe)) { std::fprintf(stderr, "[EXBAT] t=%.2fs %s -> %s: no such fighter / down\n", dissidia_battle_age() / 60.0f, sp.who, sp.foe); continue; }
+        if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_EXBWATCHLB")) { const uint32_t lb = rd(a + 0x5ACu); if (ok(lb, 0x400)) { psp_mem_watch_set(lb + static_cast<uint32_t>(std::strtoul(w, nullptr, 16))); std::fprintf(stderr, "[EXBAT] watching burster lock block %08X + %s (now %08X)\n", lb, w, rd(lb + static_cast<uint32_t>(std::strtoul(w, nullptr, 16)))); } }   // debug
+        if (!std::getenv("PSPRECOMP_TAGTEAM_EXBNOFOEFORCE")) { wr(a + 0x2FCu, foe); wr(a + 0x300u, foe); }   // (the start takes the attacker's own foe word as the victim: the asked foe is what it frames)
         call(EXB_START, c, a, foe);
         std::fprintf(stderr, "[EXBAT] t=%.2fs burst %s %08X (foe asked %08X): running=%u, in it %08X / %08X\n", dissidia_battle_age() / 60.0f, sp.who, a, foe, rd(c + 0x278u), rd(c + 0x26Cu), rd(c + 0x270u));
         break;
@@ -3666,7 +3672,7 @@ void dtor_hook(uint8_t* rdram, recomp_context* ctx) {
             g_sweep_due = false;   // (replaced by the per-actor sweep in dissidia_tagteam_after_free)
         }
         if (!std::getenv("PSPRECOMP_TAGTEAM_NOLEFTOVER")) for (const auto& kv : g_own_load) g_leftover_load[kv.first] = kv.second;
-        xas_reset(true); g_nextra = 0; g_bs = 0; voice_banks_release(); portrait_reset(true); g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear(); g_down.clear(); reset_ko_state(); g_ko_mark.clear();
+        xas_reset(true); g_nextra = 0; g_bs = 0; voice_banks_release(); portrait_reset(true); g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear(); g_down.clear(); reset_ko_state(); g_ko_mark.clear();
         g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_entrant = 0; g_cycs.clear();
         g_banner_until = 0; g_banner_text.clear(); tagteam_hud_set_banner(""); tagteam_hud_clear(); g_dissidia_entr_actor = 0; g_dissidia_vic_actor = 0;   // nothing of this battle's announcements reaches the next one
         for (Extra& x : g_extra) x = Extra();
@@ -5000,7 +5006,7 @@ void reset_battle_state() {
     xas_reset(false);
     g_match_cache.clear(); g_comms_cache.clear(); g_sp_cache.clear(); g_rec_cpu_made = false;
     for (Extra& x : g_extra) x = Extra();
-    g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear();
+    g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear();
     g_down.clear(); reset_ko_state(); g_ko_mark.clear(); g_entrant = 0; g_cycs.clear(); g_late_q.clear(); g_late_load.clear();
     g_own_load.clear(); g_gone_since.clear(); g_unref_since.clear();   // (the battle's end released every file object)
     portrait_reset(false);
@@ -8219,7 +8225,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             if (d > 3.0f) { const float k = 1.8f / (d > 0.01f ? d : 1.f); wrf(e + 0x80u, rdf(h + 0x80u) + dx * k); wrf(e + 0x84u, rdf(h + 0x84u)); wrf(e + 0x88u, rdf(h + 0x88u) + dz * k); }
             if (alive(e)) { wr(h + 0x2FCu, e); wr(h + 0x300u, e); } break; }
     }
-    if (g_bs && g_nextra && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBRESTORE")) {
+    if (g_bs && (g_nextra || std::getenv("PSPRECOMP_TAGTEAM_EXBCAM")) && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBRESTORE")) {
         // An EX Burst (controller *0x08A405E0: +0x278 != 0 while it runs, +0xD8 / +0xDC the two fighters in it) parks every other fighter 100 m under
         // the stage; retail has nobody else to bring back, so the tag fighters stayed down there. Their last position before the burst is put back
         // when it ends.
@@ -8236,6 +8242,14 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             }
             for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; const float y = rdf(a + 0x84u), x = rdf(a + 0x80u); if (y > -20.0f && x < 1000.0f) good[a] = {x, y, rdf(a + 0x88u)}; }
             for (const auto& kv : gated) if (ok(kv.first, 0x12D0)) wr(kv.first + 0x380u, rd(kv.first + 0x380u) & ~2u);   // their AI back on
+            static int exb_slot_wait = 0;   // (the burst camera is put back by the manager's own step of that block, mode 2 -> 1 the frame after the burst: the block stays in its slot until then)
+            if (g_exb_slot_lb && ok(g_exb_slot_lb, 0x200) && rd(g_exb_slot_lb + 0x108u) == 2u && exb_slot_wait++ < 60) {}
+            else if (g_exb_slot_lb) { exb_slot_wait = 0; if (rd(g_exb_slot_addr) == g_exb_slot_lb) wr(g_exb_slot_addr, 0u); if (ok(g_exb_slot_lb, 0x200)) g_ram[(g_exb_slot_lb + 0x125u) & 0x07FFFFFFu] = 0;
+                for (const auto& kv : g_exb_shown) if (ok(kv.first, 0x200)) g_ram[(kv.first + 0x125u) & 0x07FFFFFFu] = kv.second;
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: the extra burster's lock block %08X taken out of its camera slot\n", dissidia_battle_age() / 60.0f, g_exb_slot_lb);
+                g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); }
+            for (const auto& kv : g_exb_fc) if (ok(kv.first, 0x200) && rd(kv.first + 0xFCu) == 0u) wr(kv.first + 0xFCu, kv.second);   // (the lock words the burst camera needed cleared)
+            g_exb_fc.clear();
             gated.clear(); held.clear(); g_exb_frozen.clear();
         } else if (!std::getenv("PSPRECOMP_TAGTEAM_NOEXBHOLD")) {
             // while it runs the fighters outside it do nothing: their AI is gated (+0x380 bit 2), their pad input dropped and they are held where the
@@ -8253,6 +8267,36 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 if (rdf(a + 0x84u) < -20.0f) { if (!held.count(a)) held[a] = {rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)};
                     const auto& h = held[a]; wrf(a + 0x80u, h[0]); wrf(a + 0x84u, h[1]); wrf(a + 0x88u, h[2]); } }
             for (auto it = gated.begin(); it != gated.end();) { if (it->second == 0) it = gated.erase(it); else ++it; }   // (only the ones gated here are let go)
+            // The burst camera: the camera manager's step for a lock block (FUN_08B3C7xx, ra 08B3C8A0) puts the block of a fighter whose burst flag (actor
+            // +0x191 bit 0, FUN_088378D8) is set into mode 2 (the scripted burst camera, mode saved at +272) only while the block's word +0xFC (252) is 0.
+            // The tag code's targeting leaves +0xFC on a third fighter (the "other enemy" lock of the enemy slot fighter / the human's cycle; seen: our parked
+            // partner), so the block stayed in the lock-on mode and the camera followed that fighter under the stage (user, RP6, 20 Nov). While the burst
+            // runs the blocks of the two in it have +0xFC = 0; the old values go back when it is over (battle state only, same on every machine).
+            // PSPRECOMP_TAGTEAM_NOEXBLOCK=1: old.
+            if (known && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBLOCK")) for (uint32_t who : {p0, p1}) { const uint32_t lb = rd(who + ACT_LOCKBLK);
+                if (ok(lb, 0x200) && rd(lb + 0xFCu) != 0u) { g_exb_fc[lb] = rd(lb + 0xFCu);
+                    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst: lock block %08X of %s %08X had +0xFC = %s %08X (no burst camera): cleared for the burst\n", dissidia_battle_age() / 60.0f, lb, role_of(who), who, role_of(rd(lb + 0xFCu)), rd(lb + 0xFCu));
+                    wr(lb + 0xFCu, 0u); } }
+            // An EXTRA as the burster: its lock block is not in the camera manager's slot table (only the slot fighters' and the assists' are), so the manager never
+            // stepped the burst camera (mode 2 and the scripted camera belong to the burster's block) and showed the human's block: eye = look-at = 0 (white /
+            // black screen, user "the camera was wrong"). For the burst the extra's block gets a free table slot (4..7) with the camera players copied from its
+            // slot fighter's block (as the human-driven extras of a multiplayer battle have), and its "shown" byte (+0x125) moves from the block that has it.
+            // Battle state only. PSPRECOMP_TAGTEAM_NOEXBCAMSLOT=1: old.
+            if (known && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBCAMSLOT")) { int xi = -1; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor == p0) xi = i;
+                const uint32_t mgr = dissidia_camera_manager(), lb = rd(p0 + ACT_LOCKBLK);
+                if (xi >= 0 && mgr && ok(lb, 0x400) && !g_exb_slot_lb) { int k = 0; for (; k < 8; k++) if (rd(mgr + 0x6D0u + 4u * static_cast<uint32_t>(k)) == lb) break;
+                    if (k == 8) { for (k = 4; k < 8; k++) if (rd(mgr + 0x6D0u + 4u * static_cast<uint32_t>(k)) == 0u) break;
+                        if (k < 8) { const uint32_t lbS = rd(g_extra[xi].slot_actor + ACT_LOCKBLK); int copied = 0;
+                            if (ok(lbS, 0x400) && lbS != lb) for (uint32_t o = 0x180u; o < 0x2C0u; o += 4) { const uint32_t v = rd(lbS + o); wr(lb + o, (v >= lbS && v < lbS + 0x600u) ? v - lbS + lb : v); copied++; }
+                            g_exb_slot_addr = mgr + 0x6D0u + 4u * static_cast<uint32_t>(k); g_exb_slot_lb = lb; wr(g_exb_slot_addr, lb);
+                            for (int q = 0; q < 8; q++) { const uint32_t ob = rd(mgr + 0x6D0u + 4u * static_cast<uint32_t>(q)); if (ok(ob, 0x200) && ob != lb && g_ram[(ob + 0x125u) & 0x07FFFFFFu]) { g_exb_shown[ob] = g_ram[(ob + 0x125u) & 0x07FFFFFFu]; g_ram[(ob + 0x125u) & 0x07FFFFFFu] = 0; } }
+                            g_ram[(lb + 0x125u) & 0x07FFFFFFu] = 1;
+                            if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst by the extra %s %08X: its lock block %08X put into camera slot %d (%d camera words from %08X), shown byte moved to it\n", dissidia_battle_age() / 60.0f, role_of(p0), p0, lb, k, copied, lbS); } } } }
+            if (g_log && std::getenv("PSPRECOMP_TAGTEAM_EXBCAM")) {   // debug: the camera manager and every fighter every 10 frames of a burst
+                static int k = 0; if (k++ % 10 == 0) { const uint32_t mgr = dissidia_camera_manager();
+                    std::fprintf(stderr, "[EXBCAM] t=%.2fs mgr %08X eye %.2f,%.2f,%.2f at %.2f,%.2f,%.2f +8B4 %08X +8B8 %u slots %08X %08X %08X %08X %08X:", dissidia_battle_age() / 60.0f, mgr, rdf(mgr + 0x40u), rdf(mgr + 0x44u), rdf(mgr + 0x48u), rdf(mgr + 0x50u), rdf(mgr + 0x54u), rdf(mgr + 0x58u), rd(mgr + 0x8B4u), rd(mgr + 0x8B8u), rd(mgr + 0x6D0u), rd(mgr + 0x6D4u), rd(mgr + 0x6D8u), rd(mgr + 0x6DCu), rd(mgr + 0x6E0u));
+                    for (int i = 0; i < nf; i++) std::fprintf(stderr, " %s(%.1f,%.1f,%.1f lb %08X)", role_of(f[i]), rdf(f[i] + 0x80u), rdf(f[i] + 0x84u), rdf(f[i] + 0x88u), rd(f[i] + 0x5ACu));
+                    std::fprintf(stderr, " ctl +D8 %08X +DC %08X | pairs", rd(c + 0xD8u), rd(c + 0xDCu)); for (uint32_t o = 0x08BAE9F0u; o < 0x08BAEA20u; o += 4) std::fprintf(stderr, " %08X", rd(o)); std::fprintf(stderr, " | 4774 %08X\n", rd(0x089D4774u)); } }
             g_exb_frozen.clear(); for (int i = 0; i < nf; i++) if (!inside(f[i])) g_exb_frozen.insert(f[i]);
             if (g_log) { static std::string last; std::string now = "in it:"; now += ok(p0, 0x12D0) ? role_of(p0) : "?"; now += ","; now += ok(p1, 0x12D0) ? role_of(p1) : "?"; now += " held:"; for (uint32_t a : g_exb_frozen) { now += " "; now += role_of(a); }
                 if (now != last) { last = now; std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst %s\n", dissidia_battle_age() / 60.0f, now.c_str()); } }   // their pads too: a human (or, in multiplayer, a remote player) does nothing either
