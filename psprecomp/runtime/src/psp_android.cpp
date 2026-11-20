@@ -85,7 +85,24 @@ static std::string pick_workdir(const std::string& data_game) {
     const std::string media_game = files == std::string::npos ? media : media.substr(0, files) + "/game";
     return has_game(media_game) ? media_game : data_game;
 }
-__attribute__((constructor(101))) static void early_env() { load_env_file(pick_workdir("/sdcard/Android/data/org.psprecomp.game/files/game")); }
+// The game folder in Android/media is indexed by Android's media scanner: its texture PNGs showed up in the gallery and photo pickers. A
+// .nomedia file in the package folder hides it (the setup app also writes one and rescans; this covers adb / PC installs). Android/data
+// is never indexed.
+static void hide_from_gallery(const std::string& game) {
+    const std::string media = "/Android/media/";
+    const size_t at = game.find(media);
+    const size_t slash = at == std::string::npos ? std::string::npos : game.rfind('/');
+    if (slash == std::string::npos || slash <= at + media.size()) return;
+    const std::string nm = game.substr(0, slash) + "/.nomedia";   // .../Android/media/<package>/.nomedia
+    struct stat st;
+    if (stat(nm.c_str(), &st) == 0) return;
+    if (FILE* f = std::fopen(nm.c_str(), "wb")) std::fclose(f);
+}
+__attribute__((constructor(101))) static void early_env() {
+    const std::string game = pick_workdir("/sdcard/Android/data/org.psprecomp.game/files/game");
+    load_env_file(game);
+    hide_from_gallery(game);
+}
 
 // Android Dynamic Performance Framework (API 33, loaded at run time so the app still runs on API 29): a performance hint session tells the
 // system how long a frame should take and how long it really took, and it raises the CPU / GPU clocks in time. Without it the GPU governor
