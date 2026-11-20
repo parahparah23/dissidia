@@ -3328,6 +3328,8 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         // debug: every 5 s one attacker/victim pair of the four fighters: the victim is put in front of the attacker, the attacker starts an attack action
         // (PSPRECOMP_TAGTEAM_HPMATRIX=<first action id>), and the victim's HP / BRV are logged before and 2 s after.
         static int step = -1; static float t0 = 0; static uint32_t att = 0, vic = 0; static int hp0 = 0, brv0 = 0, act = 0; static const char* ra = ""; static const char* rv = ""; static std::vector<int> scr, vscr; static int ah[4] = {}, ab[4] = {};
+        static const int hpm_also = std::getenv("PSPRECOMP_TAGTEAM_HPM_ALSO") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_HPM_ALSO")) : -1;   // index (0 slotH, 1 slotC, 2 extraP, 3 extraE) of a second fighter standing next to the victim: one attack hits both
+        static const float hpm_dz = std::getenv("PSPRECOMP_TAGTEAM_HPM_DZ") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_HPM_DZ"))) : 0.5f;
         const float tt = dissidia_battle_age() / 60.0f;
         const uint32_t hs = rd(g_bs + 84u);
         const uint32_t F[4] = {srd(g_bs + 56u + 4u * hs), srd(g_bs + 56u + 4u * (1u - hs)), g_extra[0].side == side_of(srd(g_bs + 56u + 4u * hs)) ? g_extra[0].actor : g_extra[1].actor, g_extra[0].side == side_of(srd(g_bs + 56u + 4u * hs)) ? g_extra[1].actor : g_extra[0].actor};
@@ -3339,11 +3341,12 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             std::fprintf(stderr, "[HPM] %s -> %s action %d: victim hp %d -> %d  brv %d -> %d  att scripts:", ra, rv, act, hp0, hp, brv0, brv); for (int x : scr) std::fprintf(stderr, " %d", x); std::fprintf(stderr, " | victim scripts:"); for (int x : vscr) std::fprintf(stderr, " %d", x); std::fprintf(stderr, "\n"); scr.clear(); vscr.clear();
             att = 0; g_down.clear(); g_ram[0x0BFFF000u & 0x07FFFFFFu] = 0;   // call-count gate off (PSPRECOMP_FIRSTCALL=0BFFF000:<file>)
         }
+        if (att && hpm_also >= 0 && std::getenv("PSPRECOMP_TAGTEAM_HPM_POSLOG")) { static int pc = 0; if (pc++ % 15 == 0) { std::fprintf(stderr, "[HPMPOS] t=%.2f att %s:", tt, ra); for (int q = 0; q < 4; q++) std::fprintf(stderr, " %s(%.2f,%.2f,%.2f)", R[q], rdf(F[q] + 0x80u) - rdf(att + 0x80u), rdf(F[q] + 0x84u) - rdf(att + 0x84u), rdf(F[q] + 0x88u) - rdf(att + 0x88u)); std::fprintf(stderr, "\n"); } }
         if (att) { for (int q = 0; q < 4; q++) { if (F[q] == F[0]) continue; wr(F[q] + 0x380u, (F[q] == att && !std::getenv("PSPRECOMP_TAGTEAM_HPM_AI")) ? (rd(F[q] + 0x380u) | 2u) : (F[q] == att ? (rd(F[q] + 0x380u) & ~2u) : (rd(F[q] + 0x380u) | 2u))); } }
         if (att) { const int a1 = static_cast<int16_t>(rd(att + 0x180u) & 0xFFFF), v1 = static_cast<int16_t>(rd(vic + 0x180u) & 0xFFFF); if (scr.empty() || scr.back() != a1) scr.push_back(a1); if (vscr.empty() || vscr.back() != v1) vscr.push_back(v1); }
         if (att && !std::getenv("PSPRECOMP_TAGTEAM_HPM_TOGETHER")) {   // the two fighters not in the pair stand 30+ m away, so a stray hit cannot land on them
             const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
-            for (int q = 0; q < 4; q++) { if (F[q] == att || F[q] == vic) continue; wrf(vec, rdf(att + 0x80u) + 30.0f + 8.0f * q); wrf(vec + 4, rdf(att + 0x84u)); wrf(vec + 8, rdf(att + 0x88u) + 30.0f); wrf(vec + 12, 1.0f); call(PLACE, F[q], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }
+            for (int q = 0; q < 4; q++) { if (F[q] == att || F[q] == vic || (hpm_also >= 0 && q == hpm_also)) continue; wrf(vec, rdf(att + 0x80u) + 30.0f + 8.0f * q); wrf(vec + 4, rdf(att + 0x84u)); wrf(vec + 8, rdf(att + 0x88u) + 30.0f); wrf(vec + 12, 1.0f); call(PLACE, F[q], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }
             g_ctx->r[29] = static_cast<int32_t>(sp0);
         }
         if (att && att != F[0] && tt - t0 < (std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP") ? 1.6f : 4.0f)) {   // AI attacker: keep the victim in front of it
@@ -3352,6 +3355,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             const uint32_t vec = sp0 - 0xC0u;
             wrf(vec, rdf(att + 0x80u) + 1.6f); wrf(vec + 4, rdf(att + 0x84u)); wrf(vec + 8, rdf(att + 0x88u)); wrf(vec + 12, 1.0f);
             tp_vec("pull away victim", vic, vec); call(PLACE, vic, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+            if (hpm_also >= 0 && ok(F[hpm_also], 0x12D0)) { wrf(vec + 8, rdf(att + 0x88u) + hpm_dz); call(PLACE, F[hpm_also], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }   // the second target next to the victim
             g_ctx->r[29] = static_cast<int32_t>(sp0);
         }
         static const float hpm_gap = std::getenv("PSPRECOMP_TAGTEAM_HPM_GAP") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_HPM_GAP"))) : 6.0f;   // seconds between pairs
@@ -3380,6 +3384,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 wrf(vec, rdf(a + 0x80u) + 1.6f); wrf(vec + 4, rdf(a + 0x84u)); wrf(vec + 8, rdf(a + 0x88u)); wrf(vec + 12, 1.0f);
                 tp_vec("pull away", v, vec); call(PLACE, v, vec, 1);
                 g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+                if (hpm_also >= 0 && ok(F[hpm_also], 0x12D0)) { wrf(vec + 8, rdf(a + 0x88u) + hpm_dz); call(PLACE, F[hpm_also], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }
                 tagteam_hpm_marker(a, v, step);
                 if (std::getenv("PSPRECOMP_TAGTEAM_HPM_GDB") && false) {   // stall so that a debugger can be attached and a hardware watchpoint set on the victim's BRV word
                     const uint32_t wa = rd(v + 0x52Cu) + 0x14u;
@@ -3693,6 +3698,7 @@ void ledger_step() {   // every battle frame, before the KO handling (a KO is se
 }
 int panel_shown(uint32_t side);   // below (hudref): the BRV number a side's panel shows, -1 = no HUD yet
 uint32_t hud_panel_fighter(uint32_t side);
+extern uint32_t g_xstep_att;   // defined below (the extra whose damage step is running)
 void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     // The HP damage step FUN_08AEFF40(?, msg): msg+0 = the victim (always the attacker's slot opponent), *(msg+4) = the attacker. An HP attack that hit an extra was booked on the slot fighter (the HUD and the rules saw the main enemy lose HP; enough
@@ -3714,13 +3720,14 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
         for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != a && side_of(g_extra[i].actor) == side_of(a) && alive(g_extra[i].actor)) mate = true;
         if (mate || reserve_left(team_of(side_of(a))) > 0) { hold = true; wr(st + 0xCu, static_cast<uint32_t>(hp0 + 1000000)); }
     }
-    const uint32_t ast = ok(att, 0x12D0) ? rd(att + 0x52Cu) : 0u; const int abrv0 = ok(ast, 0x40) ? static_cast<int>(rdh(ast + 0x14u)) : -1;
+    const uint32_t ratt = g_xstep_att ? g_xstep_att : att;   // the real attacker: inside an extra's / its assist's damage step the message still names the module's slot fighter (20 Nov RP6 partner-HP report misread that line as the human's attack)
+    const uint32_t ast = ok(ratt, 0x12D0) ? rd(ratt + 0x52Cu) : 0u; const int abrv0 = ok(ast, 0x40) ? static_cast<int>(rdh(ast + 0x14u)) : -1;
     const int sh0 = panel_shown(0), sh1 = panel_shown(1);
     g_orig_hpstep(rdram, ctx);
     if (g_log && ok(st, 0x40)) {   // BRV vs HP damage (RP6 report: the panel showed more BRV than an HP attack dealt)
         const int dmg = static_cast<int>(rd(st + 0x8u)) - pd0;
         std::fprintf(stderr, "[HPBRV] t=%.2fs %s %08X (char %d) hits %s %08X: attacker BRV before %d, HP damage %d | panel side0 shows %d (fighter %s), side1 shows %d (fighter %s)\n",
-                     dissidia_battle_age() / 60.0f, ok(att, 0x12D0) ? role_of(att) : "?", att, ok(att, 0x12D0) ? actor_char(att) : -1, ok(a, 0x12D0) ? role_of(a) : "?", a, abrv0, dmg,
+                     dissidia_battle_age() / 60.0f, ok(ratt, 0x12D0) ? role_of(ratt) : "?", ratt, ok(ratt, 0x12D0) ? actor_char(ratt) : -1, ok(a, 0x12D0) ? role_of(a) : "?", a, abrv0, dmg,
                      sh0, ok(hud_panel_fighter(0), 0x12D0) ? role_of(hud_panel_fighter(0)) : "-", sh1, ok(hud_panel_fighter(1), 0x12D0) ? role_of(hud_panel_fighter(1)) : "-");
     }
     ledger_hp_hit(a, att);   // the KO ledger: who hit whom last

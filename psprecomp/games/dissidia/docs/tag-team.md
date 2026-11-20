@@ -3439,3 +3439,20 @@ battle teardown `actor 08DDEC20 freed`, `08DCF790 freed`, `08DF4260 freed` (Terr
   made in one frame, or a rebuild's constructor appending to the restored tail).
 - **Not verified:** anything on a device (RP6 / desktop Vulkan); Communications Mode / 2-player tag battles (the changes are list words only, the same on both machines); a teardown within 2 s of an
   assist release (the "freed now" path; not hit in these runs); fix 4 never fired, so its skip path is untested; forfeits in the Tournament with 5-member parties beyond the 3-member walk used here.
+## Partner HP move hitting the mate and the enemy (20 Nov, tree tthud; host-only)
+RP6 log `rp6logs/rp6_1120_partner_hp.log`, t=269.77 s: `[FRIENDLYBLOCK] extraP ... team mate slotH` and in the same frame `[HPBRV] slotH ... hits slotC: attacker BRV before 1246,
+HP damage 1186`, then 296 at 269.83 and `[XBRKST] extraP ... state 0 -> 1 (BRV 0)`. Read as "the enemy hits were booked as the human's attack".
+- **Reproduced on the host, and the booking is already right.** New harness switch `PSPRECOMP_TAGTEAM_HPM_ALSO=<0 slotH, 1 slotC, 2 extraP, 3 extraE>` (+ `_HPM_DZ` offset, `_HPM_POSLOG=1`)
+  stands a second fighter next to the victim, so one attack hits both (Quick Battle, `_CLONES=1 _HPMATRIX=10089 _HPM_NODOWN=1 _HPM_SWEEP=<pair>`; `_SWEEP=2` + `_ALSO=0` = extraP -> enemy slotC with the human
+  in the area, `_SWEEP=0 _FRIENDLY=1 _ALSO=1` = extraP -> mate with the enemy in the area; foe = victim, no `_WRONGFOE`). Action 10089 (HP move): two blocked registrations on slotH, one on slotC, then
+  `slotC hp 9609 -> 6609 (-3000), extraP brv 3000 -> 0, slotH brv 1291 -> 1291, slotC brv unchanged, no [BONUS]`. A baseline with no mate in the area (`_SWEEP=2`, no `_ALSO`) gives the same numbers
+  and the same `[HPBRV] slotH hits slotC ... attacker BRV before 1291` line: that line was never the human's attack. `hpstep_hook` printed the module's slot fighter from the message (+4 -> +0)
+  while inside an extra's damage step; the damage comes from the extra's own handler copy (its BRV 3000 -> 0 = the damage, the human's BRV untouched in every run).
+- **Fix: log only** (`hpstep_hook`): `[HPBRV]` names the real attacker (`g_xstep_att` inside an extra's / its assist's step) and its BRV: `[HPBRV] extraP ... hits slotC: attacker BRV before 3000, HP damage 3000`.
+  No booking rule changed: the blocked mate registration leaves nothing behind (`g_hits` is written after the block), the enemy registration is recorded for the partner and spent once.
+- **In the device log** the same pattern (`FRIENDLYBLOCK extraP`, then `HPBRV slotH hits slotC`, `XBRKST extraP 0 -> 1`) appears at 50.61 s (882) and 115.24 s (2719) too; the human's real BRV afterwards is
+  unchanged (`BRVDRIFT` 1575 -> 1629 at 53.5 s) and at 269.83 s - 273 s no side-0 drift line exists, so the human was not broken there. 1186 + 296 = 1482 (the partner's BRV spent), and the enemy's
+  `BRVDRIFT t=271.00 real 3329 vs panel 1334` = +2044 = 1482 + 562 is NOT reproduced: no run of mine moved the enemy's BRV. Open: what gave slotC +2044 (a BRV hit of slotC on the partner in the same
+  second, a break bonus?); needs `HITREGLOG=1 HITREACTLOG=1` in the device log.
+- **Seen but not changed:** `ledger_hp_hit(a, att)` still credits the module's slot fighter (the human) for an extra's HP hit (KO ledger / `by_ch`, same team, label only); the mate is knocked by the move
+  (scripts 700 / 560) although the registration is blocked (victim-side reaction path, no damage / BRV change).
