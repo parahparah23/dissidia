@@ -2490,6 +2490,53 @@ User's complaint still open after the memory round: "Bartz and Vaan have no audi
 - **Effects / invisible attacks**: the invisible attacks of the desktop log were the failed pack allocation (memory round above); with it fixed and the
   bind now once per pack, Vaan's reload binds his new pack (`[FXBIND] holder 0BDA7974 pack handle 30 (alloc c30)`). Not seen on screen in this round.
 - Regression `tagteam_test.py --baseline` on this build: RESULT: PASS (`~/dissidia/tt/ffa_reg3`). Nothing heard: "plays" means the SAS mixer was given sample data from that character's own bank.
+### Sound bank slots: fighters first, missing registrations repaired (20 Nov, tree ttcam; host-only, nothing heard)
+User (RP6, `~/dissidia/rp6logs/rp6_1120_jecht_audio.log`): "My player Kain died and Jecht tagged in but has no audio." The log: `assist bank of char 15 / 11
+skipped: 0 sound bank slots free` already at 7.8 s (the registry was full before the partners' own assists (XAS) loaded their assist files), Jecht's
+`load_character(20)` at 223.1 s with no `room` line, then `voice banks of char 20 already linked (record 0BD782F0, use count 1)` and `0 sound bank slots free`.
+The RP6 build had no `PSPRECOMP_SNDREG_LOG`, so whether Jecht's own two banks got `-> #-1` is NOT in that log; what it does show is that nothing checked it.
+- **What "already linked (use count 1)" meant**: the use count (record +224) is raised by the fighter's own constructor (`FUN_08843F4C` in the slot rebuild /
+  the extra's set-up) before `voice_banks_load` runs, so every fresh record showed "already linked" - it said nothing about the banks being registered.
+  A link while the 20 slots are full leaves the record's bank entries (+96, 12 bytes each: handle, size, registry index) at index -1 = silent fighter.
+- **Host reproduction** (`~/dissidia/tt/snd`, runner `r.sh NAME WALK MS "ENV" [WORK]`, mash script `mash.txt` (Circle x3 / Square, every 0.65 s, so the human's
+  members attack), `PSPRECOMP_SNDREG_LOG=1 PSPRECOMP_HHEAP_LOG=1 PSPRECOMP_SAS_TRACE=1`; plays per bank: `~/dissidia/tt/snd/tools/sas_bank.py LOG p_`):
+  the host's stage starts with 8 system / stage banks + 2 slot fighters + their 2 retail assists' `_a` banks = 16, the two partners make it 20 of 20, the
+  partners' XAS assist files then fail (`register 'p_fiv200_a[se_0]' ... -> #-1`). The old code freed a departed loading-screen character's banks at each
+  load (`sndreg_make_room`), which was enough on the host's stage (old build `o1`/`o2`: no fighter registration failed). A stage / mode with more system
+  banks (as the RP6's apparently had: 0 free at 7.8 s) is simulated with the test aid `PSPRECOMP_TAGTEAM_SNDREG_HOG=3` (three extra registrations at
+  the first load): old behaviour (`h0`, `PSPRECOMP_TAGTEAM_NOSNDFIX=1 PSPRECOMP_TAGTEAM_NOSNDTIER2=1`): `register 'p_six100[se_0]' -> #-1`,
+  `p_six100[voice] -> #-1`, `room for load_character(11): only 0 of 2 slots could be freed` - Terra (the human's CPU partner) had **0 plays** from her own
+  banks for the whole battle (on the stage 7.8 s - 100 s); fixed (`h1`): the retail assist's `p_nin200_a` gave its 2 slots, Terra **140 plays**
+  (`p_six100[se_0]` 117 + `[voice]` 23, from t=10 s).
+- **Fix** (`tagteam.cpp`, block "Sound bank slots: fighters first"):
+  1. `sndreg_make_room(need, keep, why)` (before every `load_character`, and for a repair): frees registry slots, tier 1 = records no actor runs on any
+     more (departed members, released assists, loading-screen characters that left; users = slot fighters, extras, their assists `+0x1108`, the fighter
+     list, bodies still lying on the stage, rebuild / queued members), tier 2 = **assist banks (`p_<code>_a`, `p_<code>_a_zako`) even while the assist is out**
+     ("an assist without sound rather than a silent fighter"). A fighter's banks are never taken for another fighter. `FUN_08842650` on the record's +96 only
+     (index -1, handle unlocked, data kept).
+  2. `sndreg_fix_record(rec)`: entries with data but index -1 are registered again with `FUN_088424C4(rec+96, objentry)` while the already-registered
+     entries' handles are hidden (nothing is registered twice: refs stay 1), after making room. Run at every call-in (`voice_banks_load`: `[SNDREG] call-in
+     of char N: its record X (p_code, use count n): 2 bank(s) registered (indices a -1 b), 0 without a slot`), and once a second for every fighter on the stage
+     (`sndreg_watch`); an assist that lost its banks gets them back there when slots are free (no room is made for it: `watch (assist): ... registered again`).
+  3. Registry dump `[SNDREG] t=.. before/after load_character(N) | call-in | before/after the fix: n of 20 used | #i p_code[entry] FIGHTER|in-use|unused[/assist]`
+     (`system/stage` = not a character record) at every load. `voice_banks_load` logs `record X linked by its fighter (use count n), k bank(s) registered, m without a slot`
+     instead of "already linked".
+  Env: `PSPRECOMP_TAGTEAM_NOSLOTROOM=1` no room made; `PSPRECOMP_TAGTEAM_NOSNDFIX=1` no repair / watch; `PSPRECOMP_TAGTEAM_NOSNDTIER2=1` assists' banks never
+  taken; test aids `PSPRECOMP_TAGTEAM_SNDREG_HOG=N`, `PSPRECOMP_TAGTEAM_NOPRELOADROOM=1` (no room before the load: exercises the repair).
+- **Results** (host, headless, `sp_cpu_walk.txt` = Jecht + CPU Terra vs Lightning + Vaan, party Squall / Cloud of Darkness / Yuna, KOLIST `human:20,cpu:35,
+  human:45,cpu:60,human:70,partner:85,human:100` + `_NAT`; "plays" = SAS voices started from that bank's data):
+  | run | setting | newcomers (call-in, registry indices) | failed registrations | plays from the newcomers' banks |
+  |---|---|---|---|---|
+  | `h0` | HOG=3, old behaviour | Terra 10.3 s: -1 -1 | p_six100 (Terra) x2, p_ten200_a x2 | Terra 0 |
+  | `h2` | HOG=3, no room before loads (repair only) | Terra 7.8 s `watch: ... registered again (11, 12)`; Squall 23.2 s and Laguna 56.6 s `call-in: ... registered again` | only at the link, repaired the same frame | Terra 74, Squall 34, Laguna 16 |
+  | `f1` | HOG=3, Assists ON (final build) | Vaan 7.8, Terra 10.3, Squall 23.2 (slot), CoD 48.2 (slot), Laguna 56.6, Yuna 91.6: all 2 registered | p_for110_a (an assist) only | Squall 38, CoD 44, Laguna 106, Yuna 8, Terra 107, Vaan 83 |
+  | `f2` | HOG=3, Assists OFF + forced calls (final) | same six, all 2 registered | the round 8 assists' `_a_zako` banks only | Squall 45, CoD 29, Laguna 135, Yuna 16 |
+  | `f3` | mirror, HOG=3 (`party_battle_walk.txt`, RESERVE `24,11,15;20,26,30`, KOLIST `enemy2:12,cpu:40,human:60,enemy2:75,cpu:90`) | enemy Jecht 32.0 s while the human's Jecht fights: same record (use count 3, indices 8 9); Tifa 61.6, Kain 65.7 (slot), Vaan 93.2 (reloaded) | p_sev100_a (an assist) only | p_ten200 (both Jechts) 329, Kain 103, Tifa 42, Vaan (both stints) 70 |
+  Also without the hog (`b1` Assists ON, `b2` Assists OFF, `m2` mirror): every call-in 2 registered, 0 failures of a fighter's bank.
+  Regression `tagteam_test.py --baseline`: RESULT: PASS (`~/dissidia/tt/snd/reg1`).
+- **Not verified**: nothing heard (headless; "plays" proves the mixer was given sample data from that bank, not that it is audible). The RP6's exact registry
+  state at Jecht's call-in (no `SNDREG` log there): a device run with `PSPRECOMP_SNDREG_LOG=1` shows the table at every load and any `-> #-1`. The assist that
+  loses its slots to a fighter is silent until the watch gives them back.
 ## BRV panel runaway ("9999", Cecil flicker): the call-in extra's report object, and the real HUD layout (19 Nov, tree ttlock; host-only, screenshots on the host)
 User (desktop): Ultimecia / Tifa "9999", Cecil's BRV "0 but it is not, changing back and forth quickly", stacked gain animations. Host repro (`sp_cpu_walk.txt`,
 `PSPRECOMP_TAGTEAM_KOLIST=human:15,partner:25,enemy2:35,cpu:45 PSPRECOMP_TAGTEAM_KOLIST_NAT=1`, `~/dissidia/tt/pl1`): at the call-in at 45.0 s side 0's big panel climbs from ~1300

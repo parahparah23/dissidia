@@ -568,8 +568,14 @@ void voice_banks_release_departed();
 void unload_departed(bool at_load);
 void fx_packs_release_for_room();
 void snd_banks_release_for_room();
+constexpr int kSndSlotsNeed = 2;   // registry slots a fighter needs (its record's two banks; see sndreg_make_room)
 void sndreg_make_room();
+void sndreg_make_room(int need, uint32_t keep, const char* why);
 int sndreg_free();
+void sndreg_dump(const char* when);
+bool sndreg_fix_record(uint32_t rec, const char* who, bool room = true, bool in_use = false);
+void sndreg_watch();
+void sndreg_hog();
 void reload_if_released(int charId);
 void char_census(std::set<int>& ref, std::set<int>& live);
 // The file manager's objects (list head mgr+8, link +232; +0 = the object's objentry row, row+0 = its id).
@@ -625,7 +631,9 @@ void load_character(int charId) {
     { uint32_t tot, fr, lg; dissidia_snd_heap_free(g_ram, &tot, &fr, &lg);
       if (g_log) std::fprintf(stderr, "[LOADCHK] load_character(%d): sound heap before: free %u B, largest %u B (a character needs ~0.7 MB)\n", charId, fr, lg);
       if (lg < 760u * 1024u) snd_banks_release_for_room(); }
-    sndreg_make_room();
+    sndreg_hog();   // (test aid, PSPRECOMP_TAGTEAM_SNDREG_HOG)
+    { char t[48]; std::snprintf(t, sizeof t, "before load_character(%d)", charId); sndreg_dump(t); }
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOPRELOADROOM")) { char t[48]; std::snprintf(t, sizeof t, "load_character(%d)", charId); sndreg_make_room(kSndSlotsNeed, 0, t); }   // (test aid: =1 leaves it to the re-registration)
     reload_if_released(charId);
     unload_departed(true);            // departed characters' files (model, textures, effect pack, voice) go first: the newcomer takes their memory
     voice_banks_release_departed();   // departed characters' voice banks and effect packs go first, so the newcomer's pack can take a freed hole (mem3: released after the load, the fifth pack found 2.3 MB free in two holes and failed)
@@ -654,7 +662,7 @@ void load_character(int charId) {
     if (g_log) for (const uint32_t o : file_objects(mgr)) if (!objs_before.count(o) && ok(o, 0x40)) std::fprintf(stderr, "[LOADCHK] char %d: file object %08X id %u refs %d (new)\n", charId, o, ok(rd(o), 8) ? rdh(rd(o)) : 0u, static_cast<int16_t>(rdh(o + 226u)));
     if (g_log) for (uint32_t id : ids) if (id != 0xFFFFu) { const uint32_t o = call(FILE_FIND, mgr, id); std::fprintf(stderr, "[LOADCHK] char %d: file id %u object %08X %s refs %d\n", charId, id, o, objs_before.count(o) ? "(already loaded)" : "(made now)", o ? static_cast<int16_t>(rdh(o + 226u)) : 0); }
     if (g_log && loaded) { char tag[48]; std::snprintf(tag, sizeof tag, "after load_character(%d)", charId); dissidia_models_mem_summary(g_ram, tag); }
-    { char t[48]; std::snprintf(t, sizeof t, "after load_character(%d)", charId); integrity_scan(t); dangle_check(t); }
+    { char t[48]; std::snprintf(t, sizeof t, "after load_character(%d)", charId); integrity_scan(t); dangle_check(t); sndreg_dump(t); }
 }
 
 // The side's character record (REC_BASE + 0x1060 * side, a copy of the character's save data: level, loadout sets, ability list) is what the
@@ -4039,24 +4047,143 @@ void fx_packs_release_for_room() {   // every departed character's packs, no del
 // loading without the use count, so they stay registered after their fighters are gone (rebuilt into newcomers). At a load with fewer than kSndSlotsNeed
 // free slots, the banks of a loading-screen character no actor refers to any more are unregistered (FUN_08842650 on record +96: registry entry
 // released, handle unlocked, index -1; the data stays, the battle's end frees it as before). PSPRECOMP_TAGTEAM_NOSLOTROOM=1: off.
-constexpr int kSndSlotsNeed = 2;
-void sndreg_make_room() {
-    if (!g_bs || std::getenv("PSPRECOMP_TAGTEAM_NOSLOTROOM") || sndreg_free() >= kSndSlotsNeed) return;
-    std::set<int> ref, live; char_census(ref, live);
-    std::set<int> cand(g_start_chars.begin(), g_start_chars.end()); for (const auto& kv : g_own_load) cand.insert(kv.first);
-    for (const int c : cand) {
-        if (sndreg_free() >= kSndSlotsNeed) break;
-        if (ref.count(c) || live.count(c)) continue;
-        bool lying = false; for (const uint32_t d : g_down) if (ok(d, 0x12D0) && actor_char(d) == c && std::fabs(rdf(d + 0x80u) - 5000.f) > 1.f) lying = true;
-        if (lying) continue;
-        const uint32_t info = info_for_char(c), rec = info ? call(FILE_FIND, rd(FILE_MGR_PTR), rdh(info)) : 0u;
-        if (!ok(rec, 0xF0)) continue;
-        bool reg = false; for (uint32_t e = 0; e < 3; e++) if (static_cast<int32_t>(rd(rec + 96u + 12u * e + 8u)) >= 0 && rd(rec + 96u + 12u * e)) reg = true;
-        if (!reg) continue;
-        const int before = sndreg_free();
-        call(0x08842650u, rec + 96u);
-        if (g_log) std::fprintf(stderr, "[SNDREG] char %d (no actor left): banks of record %08X unregistered for room, free slots %d -> %d\n", c, rec, before, sndreg_free());
+// kSndSlotsNeed (2, declared with sndreg_make_room above): a fighter's record registers two banks: p_<code>[se_0] (move sounds) and p_<code>[voice]
+// ---- Sound bank slots: fighters first (20 Nov, tree ttcam) ----
+// User (RP6): "my Kain died, Jecht tagged in but has no audio". The registry was full from the battle's start (system + stage banks, the two slot
+// fighters, their two retail assists' `_a` banks and the two partners: 20 of 20), and the partners' own assists (XAS) and the Assist Off round 8
+// assist actors register their assist file's `_a` banks too when a slot is free. A fighter that came in later got `register ... -> #-1` for
+// its banks when nothing was freed in time (silent: its voice and move sounds are looked up in the registry), and `voice_banks_load` only checked
+// the record's use count ("already linked, use count 1" = its fighter's constructor linked it, NOT that the banks were registered).
+// Now:
+//  - sndreg_make_room(need, keep): frees registry slots in this order until `need` are free: 1. banks of file records no actor uses any more
+//    (departed members, released assists, loading-screen characters that left: slot fighters, extras, their assists, the fighter list, bodies
+//    still lying on the stage, queued / rebuilding members count as users); 2. assist banks (`_a` records, our own assist voice banks) even
+//    while their assist is out: an assist without sound rather than a silent fighter. Fighters' banks are never taken for another fighter.
+//    Only FUN_08842650 (the record's own unregister: registry entry released, index -1, handle unlocked); the data stays.
+//  - sndreg_fix_record(rec): a fighter's record whose bank entries have data but no registry index gets those entries registered again
+//    (FUN_088424C4 with the already-registered entries hidden, so nothing is registered twice), after making room for them. Run at every
+//    call-in (voice_banks_load), after every load and once a second for every fighter on the stage (sndreg_watch).
+//  - [SNDREG] lines with the registry's contents (who holds each of the 20 slots) at every load / fix: `[SNDREG] <when>: N of 20 used | #i name owner`.
+// PSPRECOMP_TAGTEAM_NOSLOTROOM=1: no room made; PSPRECOMP_TAGTEAM_NOSNDFIX=1: no re-registration / watch (the old behaviour).
+bool is_retail_assist(uint32_t a);   // below
+uint32_t actor_record(uint32_t a) {   // the file record (file manager object) an actor runs on: its info row (+0x2F8) names the model file id
+    if (!ok(a, 0x12D0)) return 0; const uint32_t row = rd(a + 0x2F8u); if (!ok(row, 0x44)) return 0;
+    const uint32_t id = rdh(row); if (id == 0xFFFFu) return 0; return call(FILE_FIND, rd(FILE_MGR_PTR), id);
+}
+std::string rec_bank_name(uint32_t rec) {   // "p_ten200" / "p_nin200_a": the name FUN_088424C4 registers the record's banks under (objentry row + 52)
+    std::string n; if (!ok(rec, 0xF0)) return n; const uint32_t row = rd(rec); if (!ok(row, 0x60)) return n;
+    for (uint32_t i = 0; i < 24; i++) { const char ch = static_cast<char>(g_ram[(row + 52u + i) & 0x07FFFFFFu]); if (!ch) break; n += (ch >= 32 && ch < 127) ? ch : '?'; }
+    return n;
+}
+bool rec_is_assist(uint32_t rec) { const std::string n = rec_bank_name(rec); return n.size() >= 10 && n.compare(8, 2, "_a") == 0; }   // "p_six100_a", "p_six100_a_zako" (Assist Off round 8 / XAS)
+int rec_banks(uint32_t blk, int* reg, int* failed) {   // a +96 bank block (3 entries: handle, size, registry index): entries with data, registered / not
+    int r = 0, f = 0; for (uint32_t e = 0; e < 3; e++) { if (!rd(blk + 12u * e)) continue; if (static_cast<int32_t>(rd(blk + 12u * e + 8u)) >= 0) r++; else f++; }
+    if (reg) *reg = r; if (failed) *failed = f; return r + f;
+}
+// The bank blocks that can hold registry slots: every file record's +96 and our own assist voice banks (g_vbanks)
+std::vector<uint32_t> bank_blocks() {
+    std::vector<uint32_t> v; for (const uint32_t o : file_objects(rd(FILE_MGR_PTR))) v.push_back(o + 96u);
+    for (const uint32_t o : g_vbanks) if (ok(o, 0x60)) v.push_back(o);
+    return v;
+}
+// The records some actor still runs on (see above), and the slot fighters' / extras' records (fighters on the stage)
+void records_in_use(std::set<uint32_t>& use, std::set<uint32_t>& fighters) {
+    std::vector<uint32_t> acts;
+    if (g_bs) for (uint32_t k = 0; k < 2; k++) acts.push_back(srd(g_bs + 56u + 4u * k));
+    for (int i = 0; i < g_nextra; i++) acts.push_back(g_extra[i].actor);
+    { const uint32_t w = rd(0x089D4958u); if (ok(w, 0x40)) for (uint32_t p = rd(w + 20u), n = 0; p && ok(p, 0x12D0) && n < 16; p = rd(p + 0x1114u), n++) acts.push_back(p); }
+    for (const uint32_t a : acts) {
+        if (!ok(a, 0x12D0)) continue;
+        const uint32_t r = actor_record(a);
+        if (r) { use.insert(r); if (g_ram[(a + 0x542u) & 0x07FFFFFFu] != 1 && !is_retail_assist(a) && alive(a) && !is_down(a)) fighters.insert(r); }
+        const uint32_t as = rd(a + 0x1108u); if (ok(as, 0x12D0)) { const uint32_t ra = actor_record(as); if (ra) use.insert(ra); }
     }
+    for (const uint32_t d : g_down) if (ok(d, 0x12D0) && std::fabs(rdf(d + 0x80u) - 5000.f) > 1.f) { const uint32_t r = actor_record(d); if (r) use.insert(r); }   // a body still lying on the stage (its KO line)
+    const uint32_t mgr = rd(FILE_MGR_PTR);
+    auto add_char = [&](int c) { const uint32_t info = info_for_char(c); const uint32_t r = info ? call(FILE_FIND, mgr, rdh(info)) : 0u; if (r) { use.insert(r); fighters.insert(r); } };
+    for (const RebuildJob& j : g_rebuild) add_char(j.charId);
+    for (const Late& l : g_late_q) add_char(l.charId);
+    for (const Late& l : g_late_load) add_char(l.charId);
+}
+void sndreg_dump(const char* when) {
+    if (!g_log) return;
+    const uint32_t sys = rd(0x089D6C80u); if (!ok(sys, 48u * 32u)) return;
+    std::set<uint32_t> use, fighters; records_in_use(use, fighters);
+    std::map<int, std::string> own;
+    for (const uint32_t blk : bank_blocks()) for (uint32_t e = 0; e < 3; e++) {
+        const int32_t idx = static_cast<int32_t>(rd(blk + 12u * e + 8u)); if (!rd(blk + 12u * e) || idx < 0 || idx >= 32) continue;
+        const bool fo = std::find(g_vbanks.begin(), g_vbanks.end(), blk) == g_vbanks.end(); const uint32_t rec = fo ? blk - 96u : 0u;
+        char b[96]; std::snprintf(b, sizeof b, "%s[%u] %s%s", fo ? rec_bank_name(rec).c_str() : "own-assist-voice", e, fo ? (fighters.count(rec) ? "FIGHTER" : use.count(rec) ? "in-use" : "unused") : "",
+                                  fo && rec_is_assist(rec) ? "/assist" : "");
+        own[idx] = own.count(idx) ? own[idx] + "+" + b : b;
+    }
+    int used = 0; std::string s;
+    for (uint32_t i = 0; i < 32; i++) { if (rd(sys + 48u * i) == 0xFFFFFFFFu) continue; used++;
+        char b[16]; std::snprintf(b, sizeof b, " #%u ", i); s += b; s += own.count(static_cast<int>(i)) ? own[static_cast<int>(i)] : std::string("system/stage"); }
+    std::fprintf(stderr, "[SNDREG] t=%.2fs %s: %d of 20 used |%s\n", dissidia_battle_age() / 60.f, when, used, s.c_str());
+}
+void sndreg_make_room(int need, uint32_t keep, const char* why) {
+    if (!g_bs || std::getenv("PSPRECOMP_TAGTEAM_NOSLOTROOM") || sndreg_free() >= need) return;
+    std::set<uint32_t> use, fighters; records_in_use(use, fighters);
+    const std::vector<uint32_t> blocks = bank_blocks();
+    for (int tier = 1; tier <= 2 && sndreg_free() < need; tier++)
+        for (const uint32_t blk : blocks) {
+            if (sndreg_free() >= need) break;
+            const bool own_voice = std::find(g_vbanks.begin(), g_vbanks.end(), blk) != g_vbanks.end();
+            const uint32_t rec = own_voice ? 0u : blk - 96u;
+            if (!own_voice && (rec == keep || !ok(rec, 0xF0))) continue;
+            int reg = 0; rec_banks(blk, &reg, nullptr); if (!reg) continue;
+            const bool assist = own_voice || rec_is_assist(rec);
+            if (tier == 1 && (own_voice || use.count(rec))) continue;    // tier 1: nobody runs on it any more
+            if (tier == 2 && (!assist || fighters.count(rec) || std::getenv("PSPRECOMP_TAGTEAM_NOSNDTIER2"))) continue; // tier 2: assist banks, also while the assist is out
+            if (!own_voice && rec_bank_name(rec).compare(0, 2, "p_") != 0) continue;   // only characters' banks
+            const int before = sndreg_free();
+            call(0x08842650u, blk);
+            if (g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs room for %s: banks of %s %s (%s) unregistered, free slots %d -> %d\n", dissidia_battle_age() / 60.f, why,
+                                    own_voice ? "own assist voice bank" : "record", own_voice ? "" : rec_bank_name(rec).c_str(),
+                                    tier == 1 ? "no actor uses it" : "an assist's banks: the assist goes without sound so a fighter has its own", before, sndreg_free());
+        }
+    if (sndreg_free() < need && g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs room for %s: only %d of %d slots could be freed (every slot holds a fighter's or the system's banks)\n", dissidia_battle_age() / 60.f, why, sndreg_free(), need);
+}
+void sndreg_make_room() { sndreg_make_room(kSndSlotsNeed, 0, "a load"); }
+// A fighter's record with bank data that has no registry slot (registered while the 20 were full): register those entries now.
+bool sndreg_fix_record(uint32_t rec, const char* who, bool room, bool in_use) {
+    if (!ok(rec, 0xF0) || std::getenv("PSPRECOMP_TAGTEAM_NOSNDFIX")) return false;
+    const uint32_t blk = rec + 96u; int reg = 0, failed = 0; rec_banks(blk, &reg, &failed);
+    if (!failed) return false;
+    if (!in_use && rdh(rec + 224u) == 0 && !reg) return false;   // not linked at all (nobody runs on it / its link is still to come): its fighter's link registers it
+    if (!room && sndreg_free() < failed) return false;
+    if (g_log) { std::fprintf(stderr, "[SNDREG] t=%.2fs %s: record %08X (%s) has %d bank(s) without a registry slot (registered %d; use count %d)\n", dissidia_battle_age() / 60.f, who, rec,
+                              rec_bank_name(rec).c_str(), failed, reg, static_cast<int16_t>(rdh(rec + 224u))); sndreg_dump("before the fix"); }
+    if (room) sndreg_make_room(failed, rec, who);
+    uint32_t keep[3]; for (uint32_t e = 0; e < 3; e++) { keep[e] = rd(blk + 12u * e); if (keep[e] && static_cast<int32_t>(rd(blk + 12u * e + 8u)) >= 0) wr(blk + 12u * e, 0); else keep[e] = 0; }
+    call(0x088424C4u, blk, rd(rec));   // FUN_088424C4(bank block, objentry row): registers the entries that have a handle (here: only the missing ones)
+    for (uint32_t e = 0; e < 3; e++) if (keep[e]) wr(blk + 12u * e, keep[e]);
+    int reg2 = 0, failed2 = 0; rec_banks(blk, &reg2, &failed2);
+    if (g_log) { std::fprintf(stderr, "[SNDREG] t=%.2fs %s: record %08X (%s) registered again: %d registered, %d without a slot; indices %d %d %d\n", dissidia_battle_age() / 60.f, who, rec, rec_bank_name(rec).c_str(),
+                              reg2, failed2, static_cast<int32_t>(rd(blk + 8u)), static_cast<int32_t>(rd(blk + 20u)), static_cast<int32_t>(rd(blk + 32u))); sndreg_dump("after the fix"); }
+    return failed2 == 0;
+}
+// Test aid PSPRECOMP_TAGTEAM_SNDREG_HOG=N: N more registry slots taken at the battle's start (one of the human fighter's banks registered again under
+// the names "hog_<k>"), as a stage / mode with more system banks would (the RP6 battle had 0 free slots before the partners' assists came in).
+void sndreg_hog() {
+    static uint32_t done_bs = 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_SNDREG_HOG"); if (!e || !g_bs || done_bs == g_bs) return;
+    const uint32_t s0 = srd(g_bs + 56u), rec = actor_record(s0); if (!ok(rec, 0xF0) || !rd(rec + 96u)) return;
+    done_bs = g_bs;
+    static uint32_t nm = 0; if (!nm) nm = psp_kmem_bump_alloc_named(0x20u, "TAGTEAM_SNDHOG"); if (!nm) return;
+    const uint32_t data = call(0x088A0CF8u, rd(rec + 96u)), size = rd(rec + 100u);
+    for (int k = 0; k < std::atoi(e); k++) { char b[16]; std::snprintf(b, sizeof b, "hog_%d", k); std::memcpy(g_ram + (nm & 0x07FFFFFFu), b, std::strlen(b) + 1);
+        const int idx = static_cast<int32_t>(call(0x088A0DBCu, rd(0x089D6C80u), nm, data, size, 0));
+        std::fprintf(stderr, "[SNDREG] test hog %s (data %08X size %u) -> #%d, %d free\n", b, data, size, idx, sndreg_free()); }
+}
+void sndreg_watch() {   // once a second: every fighter on the stage has its banks registered
+    sndreg_hog();
+    if (!g_bs || std::getenv("PSPRECOMP_TAGTEAM_NOSNDFIX")) return;
+    static float last = -1e9f; const float age = dissidia_battle_age(); if (age < last) last = -1e9f; if (age - last < 60.f) return; last = age;
+    std::set<uint32_t> use, fighters; records_in_use(use, fighters);
+    for (const uint32_t r : fighters) { if (rec_is_assist(r)) continue; sndreg_fix_record(r, "watch", true, true); }
+    // an assist that lost its banks to a fighter gets them back once slots are free again (no room is made for it)
+    for (const uint32_t r : use) if (!fighters.count(r) && rec_is_assist(r) && rec_bank_name(r).compare(0, 2, "p_") == 0) sndreg_fix_record(r, "watch (assist)", false, true);
 }
 void snd_banks_release_for_room() {
     TtStep tt_step_("snd_banks_release_for_room");
@@ -4236,6 +4363,7 @@ void reload_if_released(int charId) {
 void unload_departed(bool at_load) {
     TtStep tt_step_("unload_departed");
     retail_assist_note();
+    if (!at_load) sndreg_watch();
     if (!g_bs || (g_own_load.empty() && g_down.empty())) return;
     std::set<int> ref, live; char_census(ref, live);
     const float age = dissidia_battle_age();
@@ -4270,7 +4398,16 @@ int sndreg_free() { const uint32_t sys = rd(0x089D6C80u); if (!ok(sys, 48u * 32u
 void voice_banks_load(uint32_t A) {
     voice_banks_release_departed();
     if (std::getenv("PSPRECOMP_TAGTEAM_NOVOICEBANK")) return;
-    const int c = actor_char(A); if (c <= 0 || g_vbank_chars.count(c)) return;
+    const int c = actor_char(A); if (c <= 0) return;
+    // the newcomer's own banks: registered? (its fighter's constructor linked the record; with the registry full that registration got -1)
+    if (const uint32_t ar = actor_record(A)) {
+        int reg = 0, failed = 0; rec_banks(ar + 96u, &reg, &failed);
+        if (g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs call-in of char %d: its record %08X (%s, use count %d): %d bank(s) registered (indices %d %d %d), %d without a slot\n", dissidia_battle_age() / 60.f, c, ar,
+                                rec_bank_name(ar).c_str(), static_cast<int16_t>(rdh(ar + 224u)), reg, static_cast<int32_t>(rd(ar + 104u)), static_cast<int32_t>(rd(ar + 116u)), static_cast<int32_t>(rd(ar + 128u)), failed);
+        if (failed) sndreg_fix_record(ar, "call-in");
+        sndreg_dump("call-in");
+    }
+    if (g_vbank_chars.count(c)) return;
     g_vbank_chars.insert(c);
     for (int k = 0; k < 2; k++) { const uint32_t sa = srd(g_bs + 56u + 4u * k); if (ok(sa, 0x12D0) && sa != A && actor_char(sa) == c) return; }   // a character of the battle's own: its banks are there
     // the bank's file code: the character's info record names it ("P_FIV100_1P"); the RAM scan in char_code_of is a heuristic and gave Bartz Terra's code
@@ -4295,7 +4432,9 @@ void voice_banks_load(uint32_t A) {
     if (ok(frec, 0xF0) && !std::getenv("PSPRECOMP_TAGTEAM_NOBANKLINK")) {
         if (std::getenv("PSPRECOMP_TAGTEAM_OLDBANKLINK")) { call(0x08843FBCu, frec); if (g_log) std::fprintf(stderr, "[TAGTEAM] voice banks of char %d linked (record %08X)\n", c, frec); }
         else if (rdh(frec + 224u) == 0) { call(0x08843F4Cu, frec); if (g_log) std::fprintf(stderr, "[TAGTEAM] voice banks of char %d linked through the use count (record %08X)\n", c, frec); }
-        else if (g_log) std::fprintf(stderr, "[TAGTEAM] voice banks of char %d already linked (record %08X, use count %d)\n", c, frec, static_cast<int16_t>(rdh(frec + 224u)));
+        else if (g_log) { int reg = 0, failed = 0; rec_banks(frec + 96u, &reg, &failed);
+            std::fprintf(stderr, "[TAGTEAM] voice banks of char %d: record %08X linked by its fighter (use count %d), %d bank(s) registered, %d without a slot\n", c, frec, static_cast<int16_t>(rdh(frec + 224u)), reg, failed); }
+        if (rdh(frec + 224u) != 0) sndreg_fix_record(frec, "voice banks");
     }
     if (sndreg_free() < 3 && !std::getenv("PSPRECOMP_TAGTEAM_RAREALWAYS")) { if (g_log) std::fprintf(stderr, "[TAGTEAM] assist bank of char %d skipped: %d sound bank slots free\n", c, sndreg_free()); return; }
     for (int a = 0; a < 1; a++) {
