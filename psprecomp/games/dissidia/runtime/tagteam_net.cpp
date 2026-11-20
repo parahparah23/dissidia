@@ -24,6 +24,7 @@
 //   PSPRECOMP_TTLOCK_LOG=1          log the lock-step (start, drivers, calls / waits every 5 s, [TTSYNC] every fighter every 30 frames)
 //   PSPRECOMP_TTLOCK_PADTEST=1      single player: tag extras flagged human are driven by the local pad (mirror of the player)
 //   PSPRECOMP_TTLOCK_FOLLOW=1       the camera follows the extra this machine drives (splits the battle today: camera-dependent movement)
+//   PSPRECOMP_TTLOCK_TIMEOUT=<s>    seconds without a needed peer's input before this machine leaves the battle (default 10, 0 = wait forever)
 //   PSPRECOMP_TTLOCK_LAT=1          log every delivered frame in which a stream's buttons change ([TTLAT], for the latency measurement)
 //   PSPRECOMP_TTNET_LOWHP=<slot>:<frame>   test aid: that slot fighter's live HP -> 1 at that lock-step frame
 #include "psp_game_module.h"
@@ -42,6 +43,7 @@
 #include <string>
 #include <vector>
 
+bool dissidia_tagteam_decided();               // tagteam.cpp: the battle is decided (a side has nobody left; made from lock-step state, the same frame on every machine)
 bool dissidia_tagteam_comms_battle();          // tagteam.cpp: a Communications Mode tag battle (every machine of the group agrees)
 uint32_t dissidia_tagteam_battle_gen();
 int dissidia_tagteam_fighters(uint32_t* out, int max);   // tagteam.cpp: every fighter of the battle (slots, extras)        // tagteam.cpp: +1 per battle setup
@@ -86,6 +88,9 @@ Ring g_local;
 std::map<Mac, Ring> g_remote;
 Stream g_streams[MAX_STREAMS];
 uint32_t g_wait_since = 0; bool g_wait_logged = false;
+bool g_decided_logged = false;
+double g_timeout_s = 10.0;   // a peer that sends nothing for this long (wall clock) while the lock-step needs its input has left: PSPRECOMP_TTLOCK_TIMEOUT
+std::chrono::steady_clock::time_point g_wait_t0;
 struct LowHp { uint32_t slot, frame; bool done; }; std::vector<LowHp> g_lowhp;   // PSPRECOMP_TTNET_LOWHP=<slot>:<frame>[,<slot>:<frame>...]
 
 bool driver_at(int s, uint32_t f, Mac* m) {   // the stream's driver at frame f (false = nobody: the AI or no input)
@@ -108,7 +113,7 @@ uint32_t guest_call(recomp_context* ctx, FuncPtr f, uint32_t a0, uint32_t a1 = 0
 }
 
 void reset(uint32_t obj) {
-    g_running = true; g_obj = obj; g_F = rd(obj + OFF_FRAME); g_seq = g_F; g_waits = 0; g_delivered = 0; g_wait_since = 0; g_wait_logged = false;
+    g_running = true; g_obj = obj; g_F = rd(obj + OFF_FRAME); g_seq = g_F; g_waits = 0; g_delivered = 0; g_wait_since = 0; g_wait_logged = false; g_decided_logged = false;
     g_local = Ring{}; g_remote.clear(); for (LowHp& l : g_lowhp) l.done = false;
     for (int k = 0; k < 2; k++) { g_streams[k].s.clear(); g_streams[k].last = 0; }   // the extras' pads (2+) are registered by tagteam.cpp when they are made
     for (int k = 2; k < MAX_STREAMS; k++) if (g_streams[k].gen != dissidia_tagteam_battle_gen()) { g_streams[k].s.clear(); g_streams[k].pad = g_streams[k].ctrl = 0; g_streams[k].last = 0; }
@@ -172,8 +177,17 @@ void write_pad(recomp_context* ctx, uint32_t slot, uint16_t w) {
 void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     const uint32_t obj = static_cast<uint32_t>(ctx->r[4]);
-    if (!g_enabled || !ok(obj, 0x400) || !(rd(obj + OFF_FLAGS) & 1u) || !dissidia_tagteam_comms_battle()) { g_running = false; g_orig_dispatch(rdram, ctx); return; }
+    if (!g_enabled || !ok(obj, 0x400) || !(rd(obj + OFF_FLAGS) & 1u) || (rd(obj + OFF_FLAGS) & 4u) || !dissidia_tagteam_comms_battle()) { g_running = false; g_orig_dispatch(rdram, ctx); return; }
     if (!g_running || g_gen != dissidia_tagteam_battle_gen() || g_obj != obj) { g_gen = dissidia_tagteam_battle_gen(); reset(obj); }
+    if (dissidia_tagteam_decided()) {
+        // Decided: the lock-step ends here on every machine (the finish, victory pose and rewards are not lock-stepped, retail's own
+        // end-of-battle exchange follows). Nobody's input is waited for: every fighter gets an empty word and the frame counter runs on.
+        if (!g_decided_logged) { g_decided_logged = true; std::fprintf(stderr, "[TTLOCK] frame %u: the battle is decided, the lock-step stands down (no more waiting for input)\n", g_F); }
+        for (int s = 0; s < MAX_STREAMS; s++) if (g_streams[s].pad) { g_streams[s].last = 0; write_pad(ctx, g_streams[s].pad, 0); }
+        g_wait_since = 0; g_wait_logged = false; g_F++; g_delivered++; g_seq = g_F;
+        wr(obj + OFF_FRAME, g_F);
+        ctx->r[2] = 0; return;
+    }
     const int delay = psp_netplay_input_delay();
     dissidia_netplay_note_delay(delay);
     if (g_log) {   // calls / deliveries / waits per 5 s of wall time
@@ -198,7 +212,17 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     if (!ready) {
         g_waits++;
-        if (!g_wait_since) g_wait_since = g_delivered + 1;
+        if (!g_wait_since) { g_wait_since = g_delivered + 1; g_wait_t0 = std::chrono::steady_clock::now(); }
+        else if (g_timeout_s > 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - g_wait_t0).count() > g_timeout_s) {
+            // A peer that stops sending (left, crashed, long stall): treat it like the pad link does (comm_battle.cpp quit()): the battle
+            // is quit for this machine and the game's own leave path takes it back to the lobby.
+            std::fprintf(stderr, "[TTLOCK] frame %u: nothing from %s for %.0f s: the peer has left, this machine leaves the battle\n", g_F, mac_str(missing).c_str(), g_timeout_s);
+            psp_net_notice("link_end", 0, "Online: nothing from another player for %.0f s. The battle ends.", g_timeout_s);
+            wr(obj + OFF_FLAGS, rd(obj + OFF_FLAGS) | 4u);   // F_QUIT
+            wr(obj + 12u, g_F);                               // quit frame
+            g_wait_since = 0; g_running = false;
+            ctx->r[2] = 3; return;
+        }
         if (!g_wait_logged && g_waits > 0 && (g_waits % 300) == 0) { g_wait_logged = true; std::fprintf(stderr, "[TTLOCK] frame %u: still waiting for %s's input (%u waits so far)\n", g_F, mac_str(missing).c_str(), g_waits); }
         ctx->r[2] = 1; return;
     }
@@ -294,6 +318,7 @@ void dissidia_ttnet_install(uint8_t* rdram) {
     g_log = std::getenv("PSPRECOMP_TTLOCK_LOG") != nullptr;
     g_padtest = std::getenv("PSPRECOMP_TTLOCK_PADTEST") != nullptr;
     g_lat = std::getenv("PSPRECOMP_TTLOCK_LAT") != nullptr;
+    if (const char* e = std::getenv("PSPRECOMP_TTLOCK_TIMEOUT")) g_timeout_s = std::atof(e);
     if (const char* e = std::getenv("PSPRECOMP_TTNET_LOWHP")) { for (const char* q = e; q && *q;) { unsigned sl = 0, fr = 0; if (std::sscanf(q, "%u:%u", &sl, &fr) == 2) g_lowhp.push_back({sl, fr, false}); q = std::strchr(q, ','); if (q) q++; } }
     g_orig_dispatch = psp_dispatch_probe_lookup(NET_DISPATCH);
     g_orig_pad_update = psp_dispatch_probe_lookup(PAD_UPDATE);

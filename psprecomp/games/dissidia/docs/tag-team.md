@@ -3615,3 +3615,34 @@ t=269.80 `extraP ... state 0 -> 1 (BRV 0)` (HP attack that spent all BRV) and th
   addresses move with the number of env vars; the harness schedule is not deterministic: the first attack came at 19.07 s in most runs and at 23.07 s in one).
 - **Debug switches added (diagnostics only):** `PSPRECOMP_TAGTEAM_HUDCALLLOG=1` (every side-panel HUD entry call with ra and s0..s3: `anim`, `sideflag`, `sidemode`, `brkshow`, `brkhide`),
   `PSPRECOMP_TAGTEAM_HUDGATE=a:b:c:d` (FIRSTCALL phases by battle age).
+
+## Lock-step end of battle: results screen and peer loss (20 Nov, tree ttfa; host-only, headless copies on one host)
+**Bug.** In every multiplayer tag battle (4 humans 2v2, clean network too) the battle never reached the results screen: after the decision the
+winners froze on the "VICTORY!" frame logging `[TTLOCK] frame N: still waiting for <MAC>'s input`, while the losers ran the finish and sat on
+the retail "Hold: Cancel wireless" wait screen, which needs the winners' end-of-battle exchange. Circular wait: `dispatch_hook`
+(`runtime/tagteam_net.cpp`) waited for the losers' lock-step words, but the losers had already left the lock-step (the finish differs per machine).
+**Fix.**
+- **Decision stand-down.** `dissidia_tagteam_decided()` (tagteam.cpp, `g_decided`, set by the tag logic from lock-step state at the same frame on every
+  machine) is checked first in `dispatch_hook`. Once decided, the hook no longer samples, sends or waits: every stream's pad gets an empty word,
+  the lock-step frame counter runs on, the hook returns 0 (`[TTLOCK] frame N: the battle is decided, the lock-step stands down`). Retail's own finish
+  and end-of-battle exchange then run on every machine. Before the decision nothing changed (same words, same waits, same desync check).
+- **Peer loss before the decision.** The wait records its wall-clock start. A needed driver that sends nothing for `PSPRECOMP_TTLOCK_TIMEOUT` seconds
+  (default 10, 0 = wait forever) is treated like the pad link treats a lost fighter (`comm_battle.cpp` `quit()`): `psp_net_notice("link_end")`
+  ("Online: nothing from another player for N s. The battle ends."), the net object's quit flag (+16 bit 4) and quit frame (+12) are set and the
+  dispatcher returns 3, which is retail's own leave path (back to the room screen); the log line is
+  `[TTLOCK] frame N: nothing from <MAC> for N s: the peer has left, this machine leaves the battle`. Our hook is skipped for an object whose quit
+  flag is set. Short stalls are waited out. Note retail's adhoc layer declares a silent peer lost after ~4 s on its own (`[NET] Network: lost C
+  (nothing received for 4 s)`, group left, room screen), so in practice that fires first; the timeout covers a peer that is alive on the adhoc layer
+  but silent in the lock-step (e.g. a stuck game thread).
+**Verified (host, headless, offscreen).**
+- 4 players, clean network, KO list battle (decision at frame 1800): all four log the stand-down at the same frame, no `still waiting`; all four screens
+  show the Tournament round result (winners VICTORY, losers DEFEATED, both with "Hold: Cancel wireless" as before); Cross x3 on all four -> all four back
+  at Player Select; replaying the setup -> the next round ("Round 1", new tournament battle) started on all four.
+- 4 players, 150 ms lag: same (decision at frame 1840), results -> Player Select on all four, 0 `still waiting`.
+- 2 players (ttfa_mp rig, decision at frame 2107): both machines stand down; VICTORY / DEFEATED result screen, Cross -> Player Select on both.
+- Killed peer (SIGKILL C mid-battle, default timeout): A, B, D all left the battle ~4 s later through retail's adhoc loss path (room screen, none
+  frozen). SIGSTOP of C for 2 s: waited out, no leave. With `PSPRECOMP_TTLOCK_TIMEOUT=2` and C stopped 3.3 s: A, B, D log our timeout line at the same
+  frame (514) and are on the room screen.
+**Not verified:** the Internet relay; human-driven extras (tree ttx) being the silent peer; the next *tag* battle after the results (the replayed setup
+started a battle but with the default Onion Knight rows, not the tag parties); a peer that is silent only on the lock-step channel with the adhoc layer
+healthy beyond the 2 s timeout run above (simulated by the short timeout only).

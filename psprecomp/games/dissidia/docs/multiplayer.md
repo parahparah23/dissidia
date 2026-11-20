@@ -482,3 +482,5 @@ Notes from the input-delay / desync-check work (issue #66), for whoever builds r
   calls `dissidia_tagteam_frame`, the tag team's swap / call-in safe point).
 - **Re-simulation cost** (up to 8 frames per displayed frame) is unknown; the battle update was never timed without
   drawing.
+
+**Tag battles (our lock-step, 20 Nov):** the end of a tag battle and a silent peer are handled by `tagteam_net.cpp` (lock-step stands down at the decision so retail's end-of-battle exchange can run; `PSPRECOMP_TTLOCK_TIMEOUT` s of silence from a needed player = quit like above), see tag-team.md "Lock-step end of battle".

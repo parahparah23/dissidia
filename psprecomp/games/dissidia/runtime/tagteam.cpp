@@ -8554,6 +8554,7 @@ void fa2ac_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 void dissidia_ttnet_install(uint8_t* rdram);   // tagteam_net.cpp: the lock-step players and the slot fighters
 bool dissidia_tagteam_comms_battle() { return comms_battle(); }
+bool dissidia_tagteam_decided() { return g_decided; }
 int dissidia_tagteam_fighters(uint32_t* out, int max) { if (!g_bs || !g_ram) return 0; uint32_t f[8]; const int n = all_fighters(f); int k = 0; for (int i = 0; i < n && k < max; i++) out[k++] = f[i]; return k; }
 uint32_t dissidia_tagteam_battle_gen() { return g_battle_gen; }
 void dissidia_tagteam_install(uint8_t* rdram) {
