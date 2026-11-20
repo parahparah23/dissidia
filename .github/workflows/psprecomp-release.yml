@@ -36,11 +36,13 @@ jobs:
           path: psprecomp/target/release/psprecomp.exe
 
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.CI_BUILD_RUNNER || '["dissidia-build"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
       - name: Build dependencies of the bundle (SDL2 loads these libraries at run time; only their headers are needed here)
+        if: runner.environment == 'github-hosted'   # the self-hosted runner has them installed
         run: |
           # The runner image points apt at azure.archive.ubuntu.com. On 2026-11-11 that name did not resolve for hours (v0.1.8 failed twice
           # here), so use the main archive and retry with short timeouts instead of hanging for 20 minutes.
@@ -62,20 +64,26 @@ jobs:
       # build it once, keep it in the cache, and hand it to build_release.py with --bundle on every later run.
       - name: Toolchain bundle cache
         id: bundle
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
             psprecomp/work/bundle-linux-x86_64
             psprecomp/work/cache
           key: bundle-linux-x86_64-${{ hashFiles('psprecomp/toolchain/**') }}
+      - name: Toolchain bundle (kept on the self-hosted runner)
+        id: localbundle
+        if: runner.environment == 'self-hosted'
+        run: python3 release/ci_bundle.py restore --platform linux-x86_64 --key ${{ hashFiles('psprecomp/toolchain/**') }} --work work
       - name: linux-x86_64 release
         run: |
           BUNDLE=""
-          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-linux-x86_64"; fi
+          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ] || [ "${{ steps.localbundle.outputs.hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-linux-x86_64"; fi
           python3 release/build_release.py --platform linux-x86_64 --version "${VERSION#v}" --work work $BUNDLE
+      - name: Keep the toolchain bundle
+        if: runner.environment == 'self-hosted' && steps.localbundle.outputs.hit != 'true'
+        run: python3 release/ci_bundle.py save --platform linux-x86_64 --key ${{ hashFiles('psprecomp/toolchain/**') }} --work work
       - name: Collect
-        env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           mkdir dist
           cp work/DissidiaRecomp-*.tar.xz* dist/
@@ -115,12 +123,14 @@ jobs:
             -F "title=Dissidia $VERSION install test FAILED" -F "message=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" -F "priority=8"
 
   build-windows:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.CI_BUILD_RUNNER || '["dissidia-build"]') }}
     needs: recompiler-windows
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
       - name: Build dependencies of the bundle (SDL2 loads these libraries at run time; only their headers are needed here)
+        if: runner.environment == 'github-hosted'   # the self-hosted runner has them installed
         run: |
           # The runner image points apt at azure.archive.ubuntu.com. On 2026-11-11 that name did not resolve for hours (v0.1.8 failed twice
           # here), so use the main archive and retry with short timeouts instead of hanging for 20 minutes.
@@ -146,6 +156,7 @@ jobs:
       # build it once, keep it in the cache, and hand it to build_release.py with --bundle on every later run.
       - name: Toolchain bundle cache
         id: bundle
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
@@ -153,14 +164,19 @@ jobs:
             psprecomp/work/bundle-windows-x86_64.host
             psprecomp/work/cache
           key: bundle-windows-x86_64-${{ hashFiles('psprecomp/toolchain/**') }}
+      - name: Toolchain bundle (kept on the self-hosted runner)
+        id: localbundle
+        if: runner.environment == 'self-hosted'
+        run: python3 release/ci_bundle.py restore --platform windows-x86_64 --key ${{ hashFiles('psprecomp/toolchain/**') }} --work work
       - name: windows-x86_64 release
         run: |
           BUNDLE=""
-          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-windows-x86_64"; fi
+          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ] || [ "${{ steps.localbundle.outputs.hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-windows-x86_64"; fi
           python3 release/build_release.py --platform windows-x86_64 --version "${VERSION#v}" --work work --recompiler recompiler-windows/psprecomp.exe $BUNDLE
+      - name: Keep the toolchain bundle
+        if: runner.environment == 'self-hosted' && steps.localbundle.outputs.hit != 'true'
+        run: python3 release/ci_bundle.py save --platform windows-x86_64 --key ${{ hashFiles('psprecomp/toolchain/**') }} --work work
       - name: Collect
-        env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           mkdir dist
           cp work/DissidiaRecomp-*.zip* dist/
@@ -175,13 +191,15 @@ jobs:
     # The Android setup app (DissidiaRecomp-Setup-<version>-android.apk): an Android app (native views + the C++ install engine over JNI) that builds the game ON the phone from the player's own disc.
     # It carries its own compiler (zig), recompiler, Python and the prebuilt Android core, so nothing but the APK is downloaded.
     # Design and the verified steps: docs/android.md "Building on the phone".
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.CI_BUILD_RUNNER || '["dissidia-build"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
         with:
           targets: aarch64-unknown-linux-musl
       - name: Tools and the Android SDK pieces
+        if: runner.environment == 'github-hosted'   # the self-hosted runner has them (ANDROID_HOME in its .env)
         run: |
           set -e
           sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
