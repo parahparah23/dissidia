@@ -3722,3 +3722,31 @@ partner / assist / chase logic by "the human's side") the other suspects; they w
 shown, per machine through `SIDE_ENV_<A-D>=VAR=val,VAR=val` in launch.sh): A shown slot 1 + yaw 0.9, B yaw -0.9, C shown slot 0 + yaw 2.0, D pitch 0.3:
 62 samples equal before the decision, so the local camera / shown flag does not feed the simulation (in that run).
 **Still open:** after the decision every run (also p1, f1) desyncs a few hundred frames later at `fighter0.pos.x` (battle end, not this change; another agent).
+## Lock-on camera on the enemy partner (20 Nov, tree ttcam; host-only, window shots, nothing seen on a device)
+User (RP6, `rp6logs/rp6_1120_lockcam.log`, then "it has nothing to do with forfeiting, it does it in a fresh battle, the camera follows the centre of the stage"):
+with the lock cycled onto the enemy partner (Lightning, extraE) the camera did not turn to her.
+- **Never worked since the extras have their own assist.** The lock camera's aim point is `FUN_08B40858(out, block)`: the +252 override when set, else by the
+  cycle selector (mode handler [1] +28): 0 = the foe (`FUN_08B3B668`), **1 = `FUN_08B3B748`**, 2 = the EX core. `FUN_08B3B748` is retail's "the foe's assist":
+  it takes the owner's foe (vtable +304, the +0x300 word, which `refresh_hook` sets to the other enemy) and aims at that fighter's **+0x1108 (its assist
+  object)**, only falling back to the fighter itself when +0x1108 is 0. The lock target (`LOCK_GET`, mgr +0x8B4, the HUD panel, the cursor) did follow
+  the cycle; only the camera's aim point did not. Since the extras have their own assist (`[XAS]`, 19 Nov) extraE's +0x1108 is that assist, parked at
+  (0, 0, 0) while it is not called: the camera aimed at the stage centre (device: `[XAS] assist 08DF5E40 of extra 08DCF830 ... pos 0.0 0.0 0.0`;
+  host r2 / r4: look-at on the line player -> origin, extraE 113-142 deg off the view while locked). Not related to the forfeit, rebuild_lock (+252 is
+  0, so the selector path runs) or the EX Burst camera change (+0xFC / camera slots 4-7 are not read by this path). Whether a build before the own
+  assists framed her (+0x1108 = 0 then -> the foe fallback) is inferred from the code, not run.
+- **Fix (`lock_other_pos_hook` on `FUN_08B3B748`).** In a tag battle, for a lock block whose owner is a fighter, selector 1 aims at the other enemy
+  itself (`other_enemy(owner, slot_enemy(owner))`, the same answer `lock_other_hook` gives the cycle) through retail's own point function
+  `FUN_08B3B81C(block, out, fighter, FUN_08835378(fighter))`, i.e. the way the foe path aims at the slot enemy. Battle state only (same on every
+  machine), works for every pad-driven lock (both humans in multiplayer). Logged once per change: `[TAGTEAM] t=.. lock camera of <who> aims at the
+  other enemy ... (retail: foe X's +0x1108 Y)`. `PSPRECOMP_TAGTEAM_NOOTHERCAM=1` = retail's aim.
+- **Debug:** `[CAMAIM]` (with `PSPRECOMP_TAGTEAM_CAMDBG=1`): once a second, each fighter's horizontal angle off the view line (eye -> look-at), its
+  distance from the eye and position; `*` marks the lock target.
+- **Evidence** (headless GL, `party_battle_walk.txt` 1 v 2 with AI on (`BT_NO_FREEZE=1`), L presses `~/dissidia/tt/lkcam/l2.txt`, runs in `~/dissidia/tt/lkcam`):
+  before (r2, r4 = `NOOTHERCAM=1`): locked on extraE the camera stays behind the player looking at the stage centre, extraE at -113..-142 deg
+  (r2 19-23 s), look-at (0, 2.6, 0); after (r3): locked on extraE she is within -13..+5 deg once the camera settled (11-17 s, 24-29 s, 36-44 s;
+  one 1-s sample at -26 / -34 while she dashed), the slot enemy within -11..+18 deg after cycling back (18-23 s, 30-35 s), cycling back and forth 6 times.
+  EX Burst after a lock on extraE (r5, `EXBAT=s0:14`): the burst camera as before (14-25 s), afterwards the lock is still on extraE and the camera
+  frames her (-6..+6 deg, 26-40 s). Screens: `before_top_after_bottom.png` (top r4 before, bottom r3 after), `exburst_after.png`, `r3_montage.png`.
+- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lkcam/reg1`): RESULT: PASS.
+- **Not verified:** on a device; multiplayer (two machines / a human extra's own lock); a forfeit followed by a new battle (the user ruled the forfeit
+  out; the hook keeps no state across battles apart from a log map); a pre-XAS build run for comparison.

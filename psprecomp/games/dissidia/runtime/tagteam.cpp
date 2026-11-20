@@ -116,6 +116,7 @@ constexpr uint32_t LOCK_SET = 0x08B3B0B4u;       // battle overlay: lock block: 
 constexpr uint32_t BRAIN_TICK = 0x08A64400u;     // battle overlay: the CPU brain tick (a0 = brain, actor +0x5C4)
 constexpr uint32_t TARGET_REFRESH = 0x08B2F17Cu; // battle overlay: copy the lock block's result into actor +0x2FC (a0 = actor)
 constexpr uint32_t LOCK_OTHER = 0x08B40994u;     // battle overlay: the lock cycle's 2nd candidate, retail = the foe's assist (a0 = handler, a1 = lock block)
+constexpr uint32_t LOCK_OTHER_POS = 0x08B3B748u; // battle overlay: the lock camera's aim point for cycle selector 1 (a0 = lock block, a1 = vec4 out): retail = the foe's assist (+0x1108), else the foe
 constexpr uint32_t LOCK_GET = 0x08B3B280u;       // battle overlay: the lock block's current target (a0 = block)
 constexpr uint32_t LOCK_MODE = 0x08B3B3ECu;      // battle overlay: change the lock block's mode (a0 = block, a1 = mode, a2 = flag): L toggles 1 <-> 0 through it
 constexpr uint32_t START_ACTION = 0x0882FA10u;   // EBOOT: start an action (a0 = actor + 304, a1 = id, a2 = 0, f12 = f13 = 0)
@@ -127,7 +128,7 @@ constexpr uint32_t REG_PAIR0 = 0x08BAE9FCu, REG_PAIR1 = 0x08BAEA08u;   // ctor w
 constexpr uint32_t LAST_FIGHTER_OBJ = 0x089D4774u;   // EBOOT global: the TAIL of the object list at 0x089D4770 (link +120) the constructor appends to. Never restore it: an older tail orphans the newest node and its later unlink (FUN_0880ABF4) loops forever
 constexpr uint32_t ACT_VT = 0x544u, ACT_FLAGS = 0x5B0u, ACT_LOCKBLK = 0x5ACu;
 
-FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_stock = nullptr, g_orig_rule = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
+FuncPtr g_orig_setup = nullptr, g_orig_flow = nullptr, g_orig_tick = nullptr, g_orig_lock_other = nullptr, g_orig_refresh = nullptr, g_orig_lock_mode = nullptr, g_orig_lock_other_pos = nullptr, g_orig_stock = nullptr, g_orig_rule = nullptr, g_orig_rel1 = nullptr, g_orig_rel2 = nullptr;
 bool g_in_ctor = false;   // inside the extra's constructor: the resource releases are skipped (see rel_hook)
 bool g_oneround = true;   // KO rules, one continuous round: a KO'd slot fighter is swapped with its living team mate at once, no stock hack / round restart (PSPRECOMP_TAGTEAM_ONEROUND=0: the old restart flow)
 bool g_tagin = true;      // KO rules: a KO'd slot fighter with a living team mate is replaced by him (PSPRECOMP_TAGTEAM_TAGIN=0 turns it off)
@@ -422,6 +423,7 @@ void rule_hook(uint8_t* rdram, recomp_context* ctx);
 void lock_other_hook(uint8_t* rdram, recomp_context* ctx);
 void refresh_hook(uint8_t* rdram, recomp_context* ctx);
 void lock_mode_hook(uint8_t* rdram, recomp_context* ctx);
+void lock_other_pos_hook(uint8_t* rdram, recomp_context* ctx);
 uint32_t g_natko_vic = 0; int g_natko_frames = 0;   // debug: NATKO victim traced every frame (frame hook)
 // The lock cycle of each pad-driven slot fighter (the human; in a Communications Mode battle both slot fighters): 0 foe, 1 the other enemy
 // (target), 2 EX core. Kept per fighter, not for the local human only, so every machine of a lock-step battle runs the same cycle for each player.
@@ -1068,6 +1070,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!g_orig_lock_other) {
         g_orig_lock_other = fn(LOCK_OTHER); g_orig_refresh = fn(TARGET_REFRESH); g_orig_lock_mode = fn(LOCK_MODE);
         if (g_orig_lock_other && g_orig_refresh && g_orig_lock_mode) { psp_dispatch_register(LOCK_OTHER, lock_other_hook); psp_dispatch_register(TARGET_REFRESH, refresh_hook); psp_dispatch_register(LOCK_MODE, lock_mode_hook); }
+        if (!std::getenv("PSPRECOMP_TAGTEAM_NOOTHERCAM")) { g_orig_lock_other_pos = fn(LOCK_OTHER_POS); if (g_orig_lock_other_pos) psp_dispatch_register(LOCK_OTHER_POS, lock_other_pos_hook); }
         else std::fprintf(stderr, "[TAGTEAM] lock cycle hooks not installed\n");
     }
     if (!g_orig_rule && std::getenv("PSPRECOMP_TAGTEAM_RULELOG")) { g_orig_rule = fn(0x08A040BCu); if (g_orig_rule) psp_dispatch_register(0x08A040BCu, rule_hook); }
@@ -1960,6 +1963,29 @@ void lock_other_hook(uint8_t* rdram, recomp_context* ctx) {
         }
     }
     g_orig_lock_other(rdram, ctx);
+}
+
+// FUN_08B3B748(block, out): where the lock-on camera aims while the cycle selector (mode handler [1] +28) is 1. The camera's aim point
+// (FUN_08B40858: +252 override, else selector 0 the foe FUN_08B3B668, 1 this, 2 the EX core) is retail's "foe's assist": the foe word's
+// +0x1108 when set, else the foe. In a tag battle selector 1 is the other enemy (lock_other_hook), a fighter of its own: the camera framed
+// that fighter's assist pointer instead (an extra's own assist / the slot's assist, parked off the stage), so a lock on the enemy partner
+// kept the camera on the player. Now it aims at the other enemy itself, the same point (FUN_08B3B81C on the fighter's model) the foe
+// path uses for the slot enemy. Battle state only (the same on every machine). PSPRECOMP_TAGTEAM_NOOTHERCAM=1: retail's aim.
+void lock_other_pos_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const uint32_t L = static_cast<uint32_t>(ctx->r[4]), out = static_cast<uint32_t>(ctx->r[5]);
+    if (g_nextra && ok(L, 0x310) && ok(out, 16)) {
+        const uint32_t owner = rd(L + 248u);
+        if (ok(owner, 0x12D0) && g_ram[(owner + 0x542u) & 0x07FFFFFFu] == 0) {
+            const uint32_t t = other_enemy(owner, slot_enemy(owner));   // lock_other_hook's answer: what the cycle's selector 1 locks
+            if (ok(t, 0x12D0) && g_ram[(t + 0x542u) & 0x07FFFFFFu] == 0) {
+                const uint32_t h = call(0x08835378u, t), r = call(0x08B3B81Cu, L, out, t, h);
+                if (g_log) { static std::map<uint32_t, uint32_t> last; if (last[L] != t) { last[L] = t; std::fprintf(stderr, "[TAGTEAM] t=%.2fs lock camera of %s %08X aims at the other enemy %s %08X (%.1f,%.1f,%.1f) (retail: foe %08X's +0x1108 %08X)\n", dissidia_battle_age() / 60.0f, role_of(owner), owner, role_of(t), t, rdf(out), rdf(out + 4u), rdf(out + 8u), rd(owner + 0x300u), ok(rd(owner + 0x300u), 0x12D0) ? rd(rd(owner + 0x300u) + 0x1108u) : 0u); } }
+                ctx->r[2] = static_cast<int32_t>(r); return;
+            }
+        }
+    }
+    g_orig_lock_other_pos(rdram, ctx);
 }
 
 // FUN_08B2F17C copies the lock result into actor+0x2FC but, for a fighter that is not an assist, always writes the foe (+0x300). Afterwards
@@ -5626,7 +5652,15 @@ void chase_debug_step() {
             std::fprintf(stderr, "[CAMDBG] t=%.1fs player %08X c%d (%.1f,%.1f,%.1f) lb %08X(+278 %08X +2A0 %X) own %08X mode %u lockT %08X | eye (%.1f,%.1f,%.1f) at (%.1f,%.1f,%.1f) near %s %.1f m | mgr shown %u +8B4 %08X +8C0 %08X slots %08X %08X %08X %08X cam %08X\n",
                 a / 60.f, H, ok(H, 0x12D0) ? actor_char(H) : -1, rdf(H + 0x80u), rdf(H + 0x84u), rdf(H + 0x88u), L, ok(L, 0x310) ? rd(L + 0x278u) : 0u, ok(L, 0x310) ? rd(L + 0x2A0u) : 0u, ok(L, 0x200) ? rd(L + 248u) : 0u, ok(L, 0x200) ? rd(L + 264u) : 0u, ok(L, 0x200) ? call(LOCK_GET, L) : 0u,
                 rdf(mgr + 0x40u), rdf(mgr + 0x44u), rdf(mgr + 0x48u), rdf(mgr + 0x50u), rdf(mgr + 0x54u), rdf(mgr + 0x58u), ok(near, 0x12D0) ? role_of(near) : "-", std::sqrt(best),
-                mgr ? rd(mgr + 0x8B8u) : 0u, mgr ? rd(mgr + 0x8B4u) : 0u, mgr ? rd(mgr + 0x8C0u) : 0u, mgr ? rd(mgr + 0x6D0u) : 0u, mgr ? rd(mgr + 0x6D4u) : 0u, mgr ? rd(mgr + 0x6D8u) : 0u, mgr ? rd(mgr + 0x6DCu) : 0u, g_dissidia_last_cam); }
+                mgr ? rd(mgr + 0x8B8u) : 0u, mgr ? rd(mgr + 0x8B4u) : 0u, mgr ? rd(mgr + 0x8C0u) : 0u, mgr ? rd(mgr + 0x6D0u) : 0u, mgr ? rd(mgr + 0x6D4u) : 0u, mgr ? rd(mgr + 0x6D8u) : 0u, mgr ? rd(mgr + 0x6DCu) : 0u, g_dissidia_last_cam);
+            // [CAMAIM]: where each fighter is relative to the view: the horizontal angle between the eye -> look-at line and the eye -> fighter line
+            // (0 = straight ahead, +/- = right / left, |a| > ~35 = off the screen's sides), and its distance from the eye
+            const float vx = rdf(mgr + 0x50u) - rdf(mgr + 0x40u), vz = rdf(mgr + 0x58u) - rdf(mgr + 0x48u);
+            std::fprintf(stderr, "[CAMAIM] t=%.1fs", a / 60.f);
+            for (int i = 0; i < nf; i++) { const float fx = rdf(f[i] + 0x80u) - rdf(mgr + 0x40u), fz = rdf(f[i] + 0x88u) - rdf(mgr + 0x48u);
+                const float ang = std::atan2(vx * fz - vz * fx, vx * fx + vz * fz) * 57.29578f;
+                std::fprintf(stderr, " %s%s %+.0fdeg %.1fm (%.1f,%.1f,%.1f)", role_of(f[i]), f[i] == (ok(L, 0x200) ? call(LOCK_GET, L) : 0u) ? "*" : "", -ang, std::sqrt(fx * fx + fz * fz), rdf(f[i] + 0x80u), rdf(f[i] + 0x84u), rdf(f[i] + 0x88u)); }
+            std::fprintf(stderr, "\n"); }
     }
     if (!st) { if (was) std::fprintf(stderr, "[CHASEDBG] t=%.2fs chase over\n", dissidia_battle_age() / 60.0f); was = 0; return; }
     const bool first = !was; was = st;
