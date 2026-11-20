@@ -2987,7 +2987,7 @@ void rebuild_frame() {
         if (j.newlb && ok(j.L, 0x310)) g_ram[(j.L + 0x125u) & 0x07FFFFFFu] = j.view125;   // the shown camera stays this player's
         if (j.drive) apply_drive(j.A, j.drive);   // multiplayer handover: who drives the slot now (before the lock: a pad-driven slot gets the player's lock below)
         if (ok(j.L, 0x200)) rebuild_lock(j);
-        if (j.drive) {}
+        if (j.drive == 1) {}   // (a pad-driven slot: apply_drive cleared the gate)
         else if (!is_down(j.A) && !std::getenv("PSPRECOMP_TAGTEAM_KEEPSLOTGATE")) {
             // The constructor leaves its AI gate (+0x380 bit 2) set and nothing else lifts it for a slot (the tick hook clears it for extras only;
             // the entrance's end clears it only when the rebuild finished before that). A rebuilt CPU slot then never thought again (the 3rd party

@@ -3489,3 +3489,35 @@ only, after the decision. **Assists** do not read the save: the own-assist code 
 **Not verified:** two player-row call-ins per side in one battle (the roster has one player-row call-in per side), Vaan's call-in on BOTH machines of one battle, the second round of a tournament (the
 round-2 table of A and B differed in r5: the retail per-round exchange is not decoded), real LAN / relay, anything on a device.
 SP regression: `tagteam_test.py --baseline` RESULT: PASS (`/tmp/ttfa_reg/o1`).
+
+## "When all my players are dead my CPU partner stops moving" (20 Nov, tree ttx; host-only, headless, nothing seen on a device)
+RP6 report (`rp6_1120_partner_last.log`): the human's last own member fell, the CPU partner (Terra) took his slot (`[TTSP] ... the CPU partner takes the slot (AI-driven)`,
+`[TTLOCK] ... is now AI-driven`) and stood still while her brain kept ticking (`act380=02000002`); later the next partner (Squall, an extra) took the slot after
+her fall and did not move either, and the camera "moved to him".
+- **Cause.** The constructor of a rebuilt slot fighter leaves its AI gate (`+0x380` bit 2: the CPU brain skips the actor) set. `rebuild_frame` cleared it only
+  `if (j.drive) {} else ...`, i.e. never for `drive != 0`: `apply_drive(.., 1)` (pad) clears it itself, `apply_drive(.., 2)` (the AI, single player's mate takeover
+  / CPU member into the slot, multiplayer AI handover) did not. A call-in into the slot is rescued by the entrance's end (it clears the bit), the mate takeover
+  has no entrance, so the body stayed gated for ever (it still reacted to hits, never attacked or walked). Not the pad (a controller with `+0x48 = 1` is the
+  normal AI-driven state, the pause list still reads the human's pad through it), not the lock override (`LOCK_SET` +252 is what a CPU slot has), not
+  `ai_off_blocks`.
+- **Reproduction (before the fix).** `sp_cpu_walk.txt`, `KOLIST=human:8,human:15,human:22` + `KOLIST_NAT=1` (Jecht, Squall, Cloud of Darkness fall, Terra takes
+  the slot at 23.6 s): `~/dissidia/ttx/r2` Terra: `[RBWATCH] ... +380 00000002` for the whole rest of her life, only damage reactions (561 / 560 / 700), no
+  `[HOMING]` attack of her own; her brain tick `act380=02000002`.
+- **Fix.** `rebuild_frame`: `if (j.drive == 1) {}` (only the pad drive keeps its own gate handling), so an AI-driven slot gets the gate lifted when it stands
+  (an entrance still running re-gates it every frame, as before; a down body stays gated). Camera: nothing to change, it already follows the slot fighter's
+  own lock block like the player's camera (see below); the "wrong camera" was the camera on a fighter that did not act.
+- **After the fix** (`~/dissidia/ttx/r5`, `r6`, `m1`): Terra attacks from 23.7 s (scripts 471 / 440 / 240 / 10020 ..., gate bit cleared, `[RBWATCH] +380 00000000`),
+  when she falls the extra Yuna (called in as the new partner, 20 s later) takes the slot at 61.6 s / 87.5 s and fights on (`r6`: 122 attack lines of the slot
+  body between 87.5 and 162.9 s; she falls naturally at 162.9 s, `the battle is decided`, tally from the ledger, result menu without "Proceed to next battle":
+  `r6/battle_gl_180.png`..`270` seen). Camera (`PSPRECOMP_TAGTEAM_CAMDBG=1`, r5): shown slot 0, lock block = the slot body's own, mode 1, look-at on the
+  fighter's lock target (`lockT`), eye 1-3 m behind the fighter once settled (66 s: eye (-32.0,1.7,8.7), body (-31.1,0,8.5), look-at (-12.4,1.2,14.7) = foe);
+  for ~1 s after a takeover the eye catches up from the old position (up to ~12 m, the carried-over block values), then it is the normal player camera.
+  Screenshots `r3/battle_gl_026..040` (behind Terra, lock cursor on the foe).
+- **Pause.** The pause still belongs to the human's slot fighter and its controller (`pause_open_hook`), also when that is AI-driven (`cpu 1`): driven through the
+  real pad (`m1`, `menu_drive`: START, Down / Up moved the cursor, Cross on "Return to Game" resumed, a second START + Circle resumed as well; the AI-driven
+  fighter kept fighting after both, Yuna took the slot at 45 s and fought on to 99 s). No stuck state seen; no code change for the pause. (A START tap by the
+  test script itself never closes the pause: the script clock is game time and stops with it; use `menu_drive.py` for pause tests.)
+- Regression `tagteam_test.py --baseline` (`~/dissidia/ttx/reg1`): RESULT: PASS.
+- **Not verified.** Nothing on a device (RP6 / 120 Hz). One run (`r3`) stopped simulating at 71.3 s (screenshots kept being taken, no `[HANGDUMP]` since it was not armed): not
+  reproduced in `r5` / `r6` / `m1` (same KOs, HANGDUMP armed), cause unknown; the other runs never froze. Camera "snap" to the new body at a takeover was not
+  added. The exact RP6 sequence (Squall as a CPU row called in onto the down body) was reproduced with Yuna in that role, not Squall.
