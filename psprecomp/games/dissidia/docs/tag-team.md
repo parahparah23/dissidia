@@ -3504,6 +3504,43 @@ HP damage 1186`, then 296 at 269.83 and `[XBRKST] extraP ... state 0 -> 1 (BRV 0
 - **Seen but not changed:** `ledger_hp_hit(a, att)` still credits the module's slot fighter (the human) for an extra's HP hit (KO ledger / `by_ch`, same team, label only); the mate is knocked by the move
   (scripts 700 / 560) although the registration is blocked (victim-side reaction path, no damage / BRV change).
 
+## An extra's HP attack hurt the human who was not hit (20 Nov, tree ttcam; host-reproduced, host-verified, window shots)
+RP6 log `rp6logs/rp6_1120_hpnohit.log`, t=15.44 s: `[HPBRV] extraE (char 1 = Warrior of Light) hits slotH: attacker BRV before 944, HP damage 944`, `[DMG] extra ... foe 08DE2980`
+(= extraP, our partner Terra); break shots `bs_1120/breakshots/1_0015.48_extraE_1_brv0_{0,1,2}.png`: "Shield of Light" (WoL script 10090), the human Kain dodging (script
+410 at 14.94 s), Kain 10171 -> 9227, Terra 10586 unchanged.
+- **Cause: every HP hit of an extra was booked on the opposite slot fighter.** An extra's hits go through its own copy of its slot's damage module (`afd424_hook` mode 8).
+  The HP damage step `FUN_08AEFF40(?, msg)` takes the victim from `msg+0`, which in the module copy is the module's slot opponent (slotH for an enemy extra, slotC for
+  ours), and `msg+4` names the module's slot fighter, not the extra. `hpstep_hook`'s redirect looked up `hit_victim_of(<that slot fighter>)` (nothing), and the extra's own
+  registration had already been spent before the step (`g_hits[].frame = -1000`), so the damage always went to `msg+0`. The 20 Nov partner-HP case (extraP -> slotC) was
+  right only because slotC was the default victim. The extra's BRV, break and reactions were already booked on the fighter hit (foe swapped to it for the step).
+- **Fix (`hpstep_hook`)**: inside an extra's (or its assist's) step the victim is `g_xstep_vic`, the fighter its hit registered on (extra or slot fighter, both sides).
+  No registered hit, or a victim with no HP left: the HP step is skipped (`[HPWHIFF]`), nobody loses HP and the step does not touch the attacker's BRV (retail's whiff;
+  the HP move's own BRV drop elsewhere still happens). The KO ledger is credited to the extra itself (it was the module's slot fighter). `PSPRECOMP_TAGTEAM_NOXSTEPHP=1`: old.
+- **Fix (`hitreg_hook`)**: one attack that registers on two fighters in one frame keeps the hit on the attacker's FOE for the damage step (`[HITFOE]`); before, the last
+  registration won, and the actor-list order made that always the extra (WoL aiming at the human with our partner beside him: the partner lost the HP).
+  `PSPRECOMP_TAGTEAM_NOHITFOEPREF=1`: old. Still one victim per HP step: a bystander hit by the same HP move loses no HP (only BRV/reaction where retail gives them).
+- **Harness additions**: `PSPRECOMP_TAGTEAM_HPM_ALSO_ACT="<action>:<s>,..."` (window k starts entry k, cycled, on the `_HPM_ALSO` fighter `<s>` s after the window start:
+  410 dodge, 470 block, `-:0` nothing), `PSPRECOMP_TAGTEAM_HPM_AHP=<hp>` (attacker HP at each window start; the clone WoL has 1671 HP and our partner's AI killed it).
+  Runs: `~/dissidia/tt/hpnh/r.sh` (Quick Battle clones, `_ENEMY2_CHAR=1 _HPM_PAIRS=7` = extraE -> extraP, `_HPM_GAP=5`, `_HPM_NODOWN=1 _HPM_VBRV0=1`, `_HPMATRIX=10090`
+  Shield of Light or 10098 an ordinary WoL HP attack; both land ~0.9 s after the start).
+- **Host numbers (before = `NOXSTEPHP=1`, after = new; HP of slotH human / extraP partner after each window)**:
+  - human far away (no `_ALSO`, `_AHP=9000`): 10090 before (`k90b`): extraE hit registered on extraP only, slotH 9844 -> 6844, extraP 9844; after (`k90a`): extraP 9844 -> 6844,
+    slotH never changes (BRV only). 10098 (`k98b`/`k98a`): the same (slotH -6844 / extraP -6844).
+  - human beside the victim (`_ALSO=0`), dodging (410 at +0.83 s, invincible when the hit lands: no registration on him) - `n90b`: registered extraP only, slotH 9844 -> 6844;
+    `n90a`: extraP 9844 -> 6844, slotH 9844. Blocking (470) / dodge at +0.6 s / standing: registered on both -> before slotH, after extraP (its foe). A dodge that is
+    over when the hit lands registers on the human (`d90*`, `d98*` +0.0..0.4 s): then he is really hit (retail's own hit test) and pays only when he is the victim kept.
+  - WoL aiming at the human with our partner beside him (`_HPM_PAIRS=5 _ALSO=2`, 10098): `h98b` (`NOHITFOEPREF=1`): both registered, extraP 9844 -> 844 over three windows,
+    human untouched; `h98a`: `[HITFOE]`, slotH 9844 -> 6844 -> 3844 -> 844, extraP untouched.
+  - our partner's HP move (Squall 10089, `_HPM_PAIRS=3`, enemy slotC beside extraE): `p89b`: registered slotC and extraE, slotC 9972 -> 6972 -> ... -> -2031, extraE 1671 untouched;
+    `p89a`: extraE 1671 -> -1329 (KO), slotC untouched; later HP steps of the partner with the victim down: `[HPWHIFF]`, nothing booked.
+- **Window shots** (`~/dissidia/tt/hpnh`, 480x272 window, top row before, bottom after): `dodge_before_after.png` (n90, 9.5 s / 11.5 s: before the human's big panel
+  9844 -> 6844 while he dodges and the partner's small panel stays 9844; after the partner's small panel 6844, the human 9844), `far_before_after.png` (k90), `foepref_before_after.png` (h98),
+  `partner_before_after.png` (q89, our partner's HP move at 49.7 s: before the enemy slot panel 9972 -> 6972, after it stays; the small panels are not drawn in that view, the log has extraE 1671 -> KO).
+- **Not verified**: on a device; whether the device hit registered on Terra or nowhere (no `HITREGLOG` in that log; both cases are fixed: Terra loses the HP, or nobody does);
+  HP moves through spawned objects (projectiles) of extras (in these ~30 runs every registrant was a fighter or an assist): if a registration named the object rather than the extra, the step now finds no victim and books
+  nothing (`[HPWHIFF] ... no registered hit`), where before the slot opponent paid; the slot-vs-slot `slotC hits slotH ... HP damage 750` steps with no registration seen in
+  these runs are retail slot paths and were left alone; assists of extras (same `g_xstep_vic` path, not exercised here).
+
 ## Owner records: every member's character record in a lock-step battle comes from his owner's save (20 Nov, tree ttfa; host-only, two headless copies on one host)
 **Problem.** `record_for` (call-in / rebuild of a party member) took the member's record from the LOCAL save (0x778-byte records at `0x08BAFC90`), so two real players, whose saves differ,
 built different fighters at the first call-in (keep1: level 58 on A, 57 on B -> HP differs -> desync).
