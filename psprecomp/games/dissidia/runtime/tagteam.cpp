@@ -273,6 +273,7 @@ std::vector<uint32_t> g_glob_snap; uint32_t g_glob_snap_for = 0;   // debug GLOB
 int g_nextra = 0;
 uint32_t g_bs = 0;
 void xas_reset(bool teardown);   // the extras' own assists (xas_*, below)
+struct Extra; uint32_t ao9_gate_open(const Extra& e); void ao9_gate_close(const Extra& e, uint32_t x); void ao9_extra_step(const Extra& e);   // Assist Off round 9: the extra calls its slot fighter (below)
 int g_mask = 3;
 bool g_two_v_one = false;   // Settings > Debug > Tag Team 2v1: only the partner is added (you and a partner against one enemy)
 bool g_one_v_two = false;   // Settings > Debug > Tag Team 1v2: only the enemy's second fighter is added (you alone against two); both 2v1 and 1v2 on = 2v2
@@ -6427,8 +6428,8 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
                 call(0x08AE090Cu, h_of[i], mod_of[i]); call(0x08AE09C4u, h_of[i], mod_of[i]);
                 g_ctx->r[29] = static_cast<int32_t>(sp0);
             }
-            xgauge_step(i, e, m, mod_of[i], h_of[i]);
-            xas_update(e);
+            { const uint32_t gx = ao9_gate_open(e); xgauge_step(i, e, m, mod_of[i], h_of[i]); ao9_gate_close(e, gx); }
+            xas_update(e); ao9_extra_step(e);
             continue;
         }
         if (mode >= 3) {   // modes: 3 kind 0 + pointer shown, 4 every frame, 5 kind 1 no pointer, 6 kind 1 + pointer every frame, 7 kind 1 no pointer every frame (flag-gated otherwise). The extra visits the loop as a second assist: only when its flag word says "hit" (the loop reads actor+0x380 & 0x200), with the slot's assist pointer showing it during the call only
@@ -7190,7 +7191,27 @@ bool ao8_try(uint32_t k, uint32_t M, uint32_t kind) {
 void ao8_finish(uint32_t k, const char* why) {
     Ao8& a = g_ao8[k]; if (!a.M) return;
     if (a.gen == g_battle_gen && ok(a.M, 0x12D0) && rd(a.M + 0x1108u) == a.X) wr(a.M + 0x1108u, a.prev);
+    // Round 9 (user report): the partner's body takes over where the assist actor stands when the call ends (position, height, facing, air state), not the old spot. The assist's state is read BEFORE it is dismissed.
+    static const bool oldback = std::getenv("PSPRECOMP_TTCAM_AO8BACK") != nullptr;
+    bool handover = false; float hx = 0, hy = 0, hz = 0, hyaw = 0; bool hair = false; uint32_t hfoe = 0;
+    if (!oldback && a.gen == g_battle_gen && a.parked && ok(a.X, 0x12D0) && ok(a.P, 0x12D0) && alive(a.P) && !is_down(a.P)) {
+        hx = rdf(a.X + 0x80u); hy = rdf(a.X + 0x84u); hz = rdf(a.X + 0x88u); hyaw = rdf(a.X + 0x9Cu); hfoe = rd(a.X + 0x300u); hair = game_airborne(a.X);
+        if (std::isfinite(hx) && std::isfinite(hy) && std::isfinite(hz) && std::fabs(hx) < 3000.f && std::fabs(hz) < 3000.f) {
+            GPos g{}; const char* how = "the assist's own spot";
+            if (!ground_near(hx, hz, &g, false)) { GPos n{}; const float d = nearest_sample(hx, hz, &n, false);
+                if (d >= 0.f && d <= 12.f) { hx = n.x; hz = n.z; if (!hair) hy = n.y; how = "nearest known floor (the assist's spot is off the map)"; } else how = "no floor known near it: the assist's spot"; }
+            handover = true; std::fprintf(stderr, "[AO8] t=%.2fs side %u hand-over: partner %08X takes the assist's place (%.1f,%.1f,%.1f) %s, %s, foe %08X\n", dissidia_battle_age() / 60.0f, k, a.P, hx, hy, hz, hair ? "in the air" : "on the ground", how, hfoe);
+        }
+    }
     if (a.gen == g_battle_gen && ok(a.X, 0x12D0) && static_cast<int16_t>(rd(a.X + 0x180u) & 0xFFFFu) != 1) start_script(a.X, 1);   // the assist is dismissed: its hidden idle state
+    if (a.gen == g_battle_gen && a.parked && ok(a.P, 0x12D0) && handover) {
+        wr(a.P + 0x380u, rd(a.P + 0x380u) & ~2u); g_appear_guard.erase(a.P);
+        place_at(a.P, hx, hy, hz, "assist off r9: partner takes over the assist's place");
+        wrf(a.P + 0x9Cu, hyaw); wrf(a.P + 0x320u, hyaw);
+        if (ao_foe_ok(hfoe, a.M)) { wr(a.P + 0x300u, hfoe); wr(a.P + 0x2FCu, hfoe); ao_lock_foe(a.P, hfoe); face_foe(a.P); } else model_face_yaw(a.P);
+        start_script(a.P, hair ? 102u : 1u);   // an assist that ended in the air: the partner goes on in its air state and falls from there
+        a.px = hx; a.py = hy; a.pz = hz;
+    } else
     if (a.gen == g_battle_gen && a.parked && ok(a.P, 0x12D0)) {
         wr(a.P + 0x380u, rd(a.P + 0x380u) & ~2u); g_appear_guard.erase(a.P);
         if (alive(a.P) && !is_down(a.P)) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
@@ -7295,6 +7316,134 @@ void assist_off_move(uint32_t k, uint32_t M, uint32_t kind) {
     std::fprintf(stderr, "[ASSISTOFF] t=%.2fs side %u master %08X kind %u: assist call cancelled, partner %08X (char %d) moved to (%.1f,%.1f,%.1f), foe %08X (%s)\n", age, k, M, kind, P, actor_char(P), px, py, pz, foe, fwhy);
     aohit_start(k, M, P, foe, true);
 }
+// ---- Assist Off, round 9: the CPU partner (extra) calls its slot fighter in as ITS assist (single player) ----
+// The extra's own AI decides: retail's CPU assist call is the AI node FUN_08A6DD08 (HP / BRV rolls) -> the CPU's virtual pad presses R+Circle / R+Square -> the control function FUN_08B3526C
+// sets the caller's +0x5B6 bit 0x1 (kind 1) / 0x2 (kind 2) when FUN_08B3418C / FUN_08B341E8 allow it (the caller's "may call now" byte +0x12AC and its assist gauge status +0x1C >= 5000 / 10000).
+// Assist ON keeps +0x12AC fresh through the extra's manager copy (xas_update); Assist Off never ran it for an extra, so the AI never called. Here +0x12AC is set by us each frame the call
+// would be allowed (the called slot fighter is not busy, no call of that side is out, no EX Burst, a foe exists) and cleared otherwise; a +0x5B6 call bit that shows up afterwards is the AI's
+// decision: cleared again and answered by ao9_call. The gauge is the extra's own (status +0x1C, 5000 per bar kind). The called slot fighter is moved next to the extra's foe (air / ground by the game's
+// own test, floor-checked spot, appear fx + sound, slow motion + ASSIST banner), turned to it and locked on it: the HUMAN with ao_lock_foe (no +252 override: L cycling works), no forced attack, no
+// scripts after the first stand / air state; a CPU slot fighter gets round 7's appear + own opener. Refused with no bar used when the called fighter is busy (ao_partner_busy) or a call of that side is out.
+// Switches: PSPRECOMP_TTCAM_AO9=0 off. Test aids: PSPRECOMP_TTCAM_AO9FORCE="extraP@12,extraE@30" (calls at battle second; kind = PSPRECOMP_TTCAM_FORCEKIND), PSPRECOMP_TTCAM_AO9STATE="slotH:600@17.9,.."
+// (puts that fighter into that script first), PSPRECOMP_TTCAM_AO9LOG=1 (every +0x5B6 / +0x12AC change of the extras). Battle ticks + game state only.
+struct Ao9 { uint32_t E = 0, M = 0, foe = 0, gen = 0; float t0 = 0; bool human = false; } g_ao9[2];
+bool ao9_on() { static const char* e = std::getenv("PSPRECOMP_TTCAM_AO9"); return !(e && e[0] == '0'); }
+bool ao9_out(uint32_t k) {   // a call by the extra of side k is still out (the human is "out" for 1.5 s: appear + placement; a CPU slot fighter until its opener is over, see ao_busy)
+    if (k > 1) return false;
+    Ao9& a = g_ao9[k]; if (!a.E) return false;
+    if (a.gen != g_battle_gen || dissidia_battle_age() - a.t0 > 360.f) { a = Ao9(); return false; }
+    if (a.human) { if (dissidia_battle_age() - a.t0 < 90.f) return true; a = Ao9(); return false; }
+    if (ao_busy(k)) return true;
+    a = Ao9(); return false;
+}
+uint32_t ao9_slot_k(uint32_t M) { if (!g_bs) return 2u; for (uint32_t q = 0; q < 2; q++) if (srd(g_bs + 56u + 4u * q) == M) return q; return 2u; }
+// the spot next to the foe for the called fighter M: ground / air by the game's own test, never off known floor
+void ao9_place(uint32_t k, uint32_t M, uint32_t foe, bool human) {
+    const float age = dissidia_battle_age() / 60.0f;
+    const bool m_air0 = game_airborne(M), foe_air = game_airborne(foe);
+    float ux = rdf(M + 0x80u) - rdf(foe + 0x80u), uz = rdf(M + 0x88u) - rdf(foe + 0x88u); const float ul = std::sqrt(ux * ux + uz * uz); if (ul < 1e-3f) { ux = 0.f; uz = -1.f; } else { ux /= ul; uz /= ul; }
+    const float fx = rdf(foe + 0x80u), fy = rdf(foe + 0x84u), fz = rdf(foe + 0x88u);
+    const float gaps[4] = {human ? 3.0f : 1.5f, human ? 2.0f : 1.0f, human ? 1.0f : 0.5f, 0.5f};
+    float x = fx + gaps[3] * ux, z = fz + gaps[3] * uz; int gi = 3; GPos g{}; bool found0 = false;
+    for (int pi = 0; pi < 8 && gi == 3 && !found0; pi++) {
+        const int i = pi & 3; const bool pass = pi >= 4;
+        const float cx = fx + gaps[i] * ux, cz = fz + gaps[i] * uz;
+        if (!ground_near(cx, cz, &g, true) && !(pass && ground_near(cx, cz, &g, false))) continue;   // (a spot with no known floor near it: nearer to the foe, which stands on floor; pass 1: any sample, early in the battle few are 'usable')
+        if (!foe_air && std::fabs(g.y - fy) > 1.0f) continue;   // a ledge / step: nearer
+        x = cx; z = cz; gi = i; found0 = true; break;
+    }
+    const bool found = found0;
+    place_at(M, x, fy, z, "assist off r9: the called fighter next to the foe");
+    wr(M + 0x300u, foe); wr(M + 0x2FCu, foe); face_foe(M);
+    const int sc = static_cast<int16_t>(rd(M + 0x180u) & 0xFFFFu);
+    if (human) {   // the player's action is cut (its old script would run on at the new place): the stand / air state, control stays with the pad
+        if (foe_air) start_script(M, 102u); else start_script(M, 1u);
+    }
+    std::fprintf(stderr, "[AO9] t=%.2fs side %u: called fighter %08X (char %d, script %d%s) put %.1f m from the %s foe %08X at (%.1f,%.1f,%.1f)%s, script now %d\n", age, k, M, actor_char(M), sc, m_air0 ? ", airborne" : "", gaps[gi], foe_air ? "airborne" : "standing", foe, x, fy, z,
+                 found ? "" : " [no floor sample there: next to the foe]", static_cast<int16_t>(rd(M + 0x180u) & 0xFFFFu));
+}
+bool ao9_call(uint32_t k, uint32_t E, uint32_t M, uint32_t kind, const char* by) {
+    const float age = dissidia_battle_age() / 60.0f;
+    auto refuse = [&](const char* why) { std::fprintf(stderr, "[AO9] t=%.2fs side %u: extra %08X (char %d, %s) kind %u call refused (%s): no bar used\n", age, k, E, actor_char(E), by, kind, why); return false; };
+    if (!ok(E, 0x12D0) || !ok(M, 0x12D0) || k > 1) return false;
+    const uint32_t st = rd(E + 0x52Cu); const float cost = 5000.0f * static_cast<float>(kind >= 2 ? 2 : 1);
+    if (!alive(E) || is_down(E) || ko_script(E)) return refuse("the extra is knocked out");
+    if (exb_running()) return refuse("an EX Burst is running");
+    if (g_ao8[k].M) return refuse("the slot fighter's own call is still out");
+    if (ao9_out(k) || ao_busy(k)) return refuse("the last call of this side is still out");
+    if (const char* bw = ao_partner_busy(M)) { char b[160]; std::snprintf(b, sizeof b, "the called fighter %08X (char %d) is %s, script %d", M, actor_char(M), bw, static_cast<int16_t>(rd(M + 0x180u) & 0xFFFFu)); return refuse(b); }
+    if (!ok(st, 0x40) || rdf(st + 0x1Cu) < cost) { char b[120]; std::snprintf(b, sizeof b, "assist gauge %.0f < %.0f", ok(st, 0x40) ? static_cast<double>(rdf(st + 0x1Cu)) : -1.0, static_cast<double>(cost)); return refuse(b); }
+    const char* fw = ""; const uint32_t foe = ao_pick_foe(E, M, &fw); if (!foe) return refuse("no foe");
+    const bool human = pad_driven(M);
+    ao9_place(k, M, foe, human);
+    if (human) ao_lock_foe(M, foe); else { const uint32_t L = rd(M + 0x5ACu); if (ok(L, 0x200)) call(LOCK_SET, L, foe); }
+    appear_fx_start(k, M, E);
+    if (!std::getenv("PSPRECOMP_TTCAM_NOCALLFX")) {   // slow motion (channel 6, 0.4) + the ASSIST banner of the side, as ao call 4 (released by callfx_step)
+        const uint32_t sm = rd(0x08A62280u); const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u);
+        if (ok(sm, 0x40)) { g_ctx->f[12] = 0.4f; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + 66.f; g_callfx_gen = g_battle_gen; }
+        g_ctx->f[12] = 5.0f; call(0x0888A154u, k, 0u);
+        g_ctx->r[29] = static_cast<int32_t>(sp1);
+        std::fprintf(stderr, "[AO9] t=%.2fs call effects: slow motion + the ASSIST banner of side %u\n", age, k);
+    }
+    g_appear_guard_gen = g_battle_gen; g_appear_guard[M] = dissidia_battle_age() + (human ? 30.f : 70.f);
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); (void)sp0;
+    if (!human) {   // a CPU slot fighter: round 7's appear script + own opener on the foe
+        g_ao_busy[k] = AoBusy{M, g_battle_gen, dissidia_battle_age(), -1.f};
+        const int sc = static_cast<int16_t>(rd(M + 0x180u) & 0xFFFFu); bool appear = false;
+        start_script(M, 240u); appear = static_cast<int16_t>(rd(M + 0x180u) & 0xFFFFu) == 240;
+        std::fprintf(stderr, "[AO9] t=%.2fs CPU slot fighter %08X (was script %d): appear script 240 %s\n", age, M, sc, appear ? "playing, attack in 1 s" : "not available, attack now");
+        if (appear) { g_atk_due[k] = {M, foe, dissidia_battle_age() + 62.f, dissidia_battle_age(), 0, kind}; wr(M + 0x380u, rd(M + 0x380u) | 2u); }
+        else launch_attack(k, M, foe, 0, kind);
+        g_atk_watch = {M, foe, 0, -2};
+    }
+    wrf(st + 0x1Cu, std::max(0.0f, rdf(st + 0x1Cu) - cost));
+    g_ao9[k] = Ao9{E, M, foe, g_battle_gen, dissidia_battle_age(), human};
+    aohit_start(k, E, M, foe, true);
+    std::fprintf(stderr, "[AO9] t=%.2fs side %u: extra %08X (char %d, %s) called %s %08X (char %d) kind %u, foe %08X (%s): assist gauge -> %.0f\n", age, k, E, actor_char(E), by, human ? "the HUMAN" : "its CPU slot fighter", M, actor_char(M), kind, foe, fw, static_cast<double>(rdf(st + 0x1Cu)));
+    return true;
+}
+// The extra's assist gauge only fills while its owner has an assist pointer (+0x1108, the gauge gate FUN_08AEDA5C); with Assist Off an extra has none (its assist actor X is only linked from X),
+// so it never could afford a call. Around xgauge_step the extra's +0x1108 names X (Assist ON's own state), then it is put back. Needs X (loaded 4 s into the battle).
+uint32_t ao9_gate_open(const Extra& e) {
+    if (!ao9_on() || std::getenv("PSPRECOMP_TTCAM_AO9NOGATE") || !g_bs || !assist_off_now() || !ok(e.actor, 0x12D0) || pad_driven(e.actor) || rd(e.actor + 0x1108u) != 0) return 0;
+    const uint32_t X = xas_forced(e.actor); if (!X) return 0;
+    wr(e.actor + 0x1108u, X); return X;
+}
+void ao9_gate_close(const Extra& e, uint32_t x) { if (x && ok(e.actor, 0x12D0) && rd(e.actor + 0x1108u) == x) wr(e.actor + 0x1108u, 0); }
+// per frame, from the extra's module step
+void ao9_extra_step(const Extra& e) {
+    if (!ao9_on() || !g_bs || !e.started || !ok(e.actor, 0x12D0) || !ok(e.slot_actor, 0x12D0) || !assist_off_now() || pad_driven(e.actor)) return;
+    const uint32_t E = e.actor, M = e.slot_actor, k = ao9_slot_k(M); if (k > 1) return;
+    // The AI's call condition (FUN_08A77934, via FUN_08A6DD08) reads the caller's ASSIST actor (+0x1108 -> its character's move table: is there an assist attack for the foe's air / ground state) and is
+    // false without one: the extra's +0x1108 names its own assist actor X (as Assist ON does; every module code path of the extras already zeroes / restores it around hit booking). Also opens the gauge gate.
+    if (!std::getenv("PSPRECOMP_TTCAM_AO9NOLINK")) if (const uint32_t X = xas_forced(E)) if (rd(E + 0x1108u) != X) wr(E + 0x1108u, X);
+    const float age = dissidia_battle_age() / 60.0f;
+    if (const char* st = std::getenv("PSPRECOMP_TTCAM_AO9STATE")) {   // "<role>:<script>@<s>,.."
+        static std::set<std::string> done;
+        for (const char* q = st; *q; ) { const char* c = std::strchr(q, ','); const std::string it = c ? std::string(q, c) : std::string(q); const size_t col = it.find(':'), at = it.find('@');
+            if (col != std::string::npos && at != std::string::npos && age >= static_cast<float>(std::atof(it.c_str() + at + 1)) && !done.count(it)) {
+                const std::string role = it.substr(0, col); uint32_t f[8]; const int nf = all_fighters(f);
+                for (int i = 0; i < nf; i++) if (role == role_of(f[i])) { done.insert(it); const int id = std::atoi(it.c_str() + col + 1);
+                    if (id == 0) { g_xbroken.insert(f[i]); } else start_script(f[i], static_cast<uint32_t>(id));
+                    std::fprintf(stderr, "[AO9] t=%.2fs test: %s %08X put in state %s (script now %d)\n", age, role.c_str(), f[i], it.c_str(), static_cast<int16_t>(rd(f[i] + 0x180u) & 0xFFFFu)); break; } }
+            if (!c) break; q = c + 1; }
+    }
+    const char* fw = ""; const bool may = alive(E) && !is_down(E) && !ko_script(E) && !g_ao8[k].M && !ao9_out(k) && !ao_busy(k) && !exb_running() && !ao_partner_busy(M) && ao_pick_foe(E, M, &fw) != 0 && !std::getenv("PSPRECOMP_TTCAM_AO9NOMAY");
+    g_ram[(E + 0x12ACu) & 0x07FFFFFFu] = may ? 1u : 0u;
+    const uint8_t b = g_ram[(E + 0x5B6u) & 0x07FFFFFFu];
+    if (std::getenv("PSPRECOMP_TTCAM_AO9LOG")) { static std::map<uint32_t, uint32_t> last; const uint32_t cur = (static_cast<uint32_t>(b) << 8) | (may ? 1u : 0u); auto it = last.find(E);
+        if (it == last.end() || it->second != cur) { last[E] = cur; const uint32_t st = rd(E + 0x52Cu); std::fprintf(stderr, "[AO9LOG] t=%.2fs %s %08X: may-call %u +5B6 %02X gauge %.0f script %d\n", age, role_of(E), E, may ? 1u : 0u, b, ok(st, 0x40) ? static_cast<double>(rdf(st + 0x1Cu)) : -1.0, static_cast<int16_t>(rd(E + 0x180u) & 0xFFFFu)); } }
+    uint32_t kind = (b & 2u) ? 2u : (b & 1u) ? 1u : 0u; const char* by = "its AI";
+    if (kind) g_ram[(E + 0x5B6u) & 0x07FFFFFFu] = static_cast<uint8_t>(b & ~3u);   // the bits are the AI's decision, taken here (the retail manager would turn them into a request)
+    if (const char* fc = std::getenv("PSPRECOMP_TTCAM_AO9FORCE")) {
+        static std::set<std::string> done;
+        for (const char* q = fc; *q; ) { const char* c = std::strchr(q, ','); const std::string it = c ? std::string(q, c) : std::string(q); const size_t at = it.find('@');
+            if (at != std::string::npos && it.substr(0, at) == role_of(E) && age >= static_cast<float>(std::atof(it.c_str() + at + 1)) && done.insert(it).second) { kind = std::getenv("PSPRECOMP_TTCAM_FORCEKIND") ? static_cast<uint32_t>(std::atoi(std::getenv("PSPRECOMP_TTCAM_FORCEKIND"))) : 1u; by = "test"; }
+            if (!c) break; q = c + 1; }
+    }
+    if (!kind) return;
+    ao9_call(k, E, M, kind, by);
+}
 }  // namespace
 bool dissidia_tagteam_sp_assist_on() { return g_sp_assist_on; }
 void dissidia_tagteam_sp_assist_toggle() { g_sp_assist_on = !g_sp_assist_on; std::fprintf(stderr, "[TTSP] Assist: %s\n", g_sp_assist_on ? "On" : "Off"); }
@@ -7361,6 +7510,7 @@ void actl_hook(uint8_t* rdram, recomp_context* ctx) {
             if (rd(ctl + 8u + 24u * k) != 0u) continue;   // 0 = a new call request (-1 idle / running)
             const uint32_t M = ok(P, 0x100) ? rd(P + 56u + 4u * k) : 0u; if (!ok(M, 0x12D0)) continue;
             const uint32_t kind = g_ram[(ctl + 12u + 24u * k) & 0x07FFFFFFu];
+            if (ao9_out(k)) { wr(ctl + 8u + 24u * k, 0xFFFFFFFFu); std::fprintf(stderr, "[ASSISTOFF] t=%.2fs side %u master %08X kind %u: call refused, the partner's call of this slot fighter (round 9) is still out: no bar used\n", dissidia_battle_age() / 60.0f, k, M, kind); continue; }
             if (g_ao8[k].M) {   // round 8: the partner's assist call is still out: refused like retail (no bar used, the request word back to idle)
                 wr(ctl + 8u + 24u * k, 0xFFFFFFFFu);
                 std::fprintf(stderr, "[ASSISTOFF] t=%.2fs side %u master %08X kind %u: call refused, the last call's assist %08X is still out (%.2f s since that call): no bar used\n", dissidia_battle_age() / 60.0f, k, M, kind, g_ao8[k].X, (dissidia_battle_age() - g_ao8[k].t0) / 60.0f);
