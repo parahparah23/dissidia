@@ -3159,7 +3159,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t hs = rd(g_bs + 84u);
         const uint32_t F[4] = {srd(g_bs + 56u + 4u * hs), srd(g_bs + 56u + 4u * (1u - hs)), g_extra[0].side == side_of(srd(g_bs + 56u + 4u * hs)) ? g_extra[0].actor : g_extra[1].actor, g_extra[0].side == side_of(srd(g_bs + 56u + 4u * hs)) ? g_extra[1].actor : g_extra[0].actor};
         const char* R[4] = {"slotH", "slotC", "extraP", "extraE"};
-        auto stv = [&](uint32_t a, int& hp, int& brv) { const uint32_t st = rd(a + 0x52Cu); hp = static_cast<int32_t>(rd(st + 0xCu)); brv = static_cast<int>(rdh(st + 0x14u)); };
+        auto stv = [&](uint32_t a, int& hp, int& brv) { const uint32_t st = rd(a + 0x52Cu); hp = hp_eff(a); brv = static_cast<int>(rdh(st + 0x14u)); };
         if (step >= 0 && att && tt - t0 >= (std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP") ? 1.6f : 4.0f)) {
             int hp, brv; stv(vic, hp, brv);
             { std::fprintf(stderr, "[HPM2] %s -> %s changed:", ra, rv); for (int q = 0; q < 4; q++) { int h2, b2; stv(F[q], h2, b2); if (h2 != ah[q] || b2 != ab[q]) std::fprintf(stderr, " %s(hp %d->%d brv %d->%d)", R[q], ah[q], h2, ab[q], b2); } std::fprintf(stderr, "\n"); }
@@ -3197,7 +3197,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             if (ok(a, 0x12D0) && ok(v, 0x12D0)) {
                 att = a; vic = v; ra = R[PP[pi][0]]; rv = R[PP[pi][1]];
                 g_ram[0x0BFFF000u & 0x07FFFFFFu] = (round == 0) ? static_cast<uint8_t>(pi + 1) : 0;   // call-count phase of this pair
-                g_down.clear(); for (int q = 0; q < 4; q++) if (F[q] != F[0] && (F[q] != a || !std::getenv("PSPRECOMP_TAGTEAM_HPM_AI"))) g_down.push_back(F[q]);   // everybody else stands still (AI gated)
+                g_down.clear(); for (int q = 0; q < 4 && !std::getenv("PSPRECOMP_TAGTEAM_HPM_NODOWN"); q++) if (F[q] != F[0] && (F[q] != a || !std::getenv("PSPRECOMP_TAGTEAM_HPM_AI"))) g_down.push_back(F[q]);   // everybody else stands still (AI gated)
                 stv(v, hp0, brv0); for (int q = 0; q < 4; q++) stv(F[q], ah[q], ab[q]);
                 const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
                 g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
@@ -6015,6 +6015,13 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
         // it on the fighter actually hit; before, only hits on the other side were recorded and the damage of Bartz's Holy on Tifa went to his default
         // victim (his foe, the player: BRV 0 / break, 18 Nov device log). [FRIENDLY] is information only.
         if (ok(vic, 0x12D0) && vic != att && side_of(vic) == side_of(att) && g_log) { static int c = 0; if (c++ < 100) std::fprintf(stderr, "[FRIENDLY] t=%.2fs %s %08X (char %d, side %u) hits its own team mate %s %08X (char %d); the damage is booked on %08X (attacker foe %08X)\n", dissidia_battle_age() / 60.0f, role_of(att), att, actor_char(att), side_of(att), role_of(vic), vic, actor_char(vic), vic, rd(att + 0x300u)); }
+        // A hit on the attacker's own team mate does not register at all (20 Nov RP6: a team mate's HP move spent the attacker's BRV, its damage went
+        // to the enemy slot fighter): no damage, BRV loss / steal, break, reaction or credit; the attack goes through the mate like a miss.
+        // PSPRECOMP_TAGTEAM_FRIENDLYFIRE=1: the old rules (the hit lands on the mate, booked_extra_victim / hitreact_hook reactions).
+        if (ok(vic, 0x12D0) && vic != att && side_of(vic) == side_of(att) && !std::getenv("PSPRECOMP_TAGTEAM_FRIENDLYFIRE")) {
+            if (g_log) { static int c = 0; if (c++ < 100) std::fprintf(stderr, "[FRIENDLYBLOCK] t=%.2fs %s %08X (char %d) hit on its team mate %s %08X (char %d) not registered\n", dissidia_battle_age() / 60.0f, role_of(att), att, actor_char(att), role_of(vic), vic, actor_char(vic)); }
+            ctx->r[2] = 0; return;
+        }
         if (ok(vic, 0x12D0) && vic != att && g_ram[(vic + 0x542u) & 0x07FFFFFFu] == 0) {
             int i = 0; while (i < g_nhits && g_hits[i].att != att) i++;
             if (i == g_nhits && g_nhits < 8) g_nhits++;

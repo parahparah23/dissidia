@@ -3144,3 +3144,19 @@ and started its air attack NEAR2: no hit in any of them. Kain (char 24) found "n
   rule derived from one character). The retail assist's long multi-hit is not reproduced (the partner plays its own opener + named follow-ups). The follow-up
   naming rule is checked for Terra and Kain only. Everything is headless on the host: nothing seen or played on the RP6 / desktop, no human pad call, the
   foe's guard decisions dominate misses on both sides (foe script 300 in most air misses). Retail calls that never attacked were not investigated.
+## Friendly HP hits keep BRV (20 Nov, tree ttfa; host-only)
+RP6 log `rp6logs/rp6_1120_friendly_assist.log`, t=181.67 s: extraP hit its own team mate slotH with an HP move; the partner's BRV went to 0 (`[XBRKST] extraP ... state 0 -> 1 (BRV 0)`)
+and `[HPBRV] slotH hits slotC ... HP damage 2368`. Reproduced on the host (`PSPRECOMP_TAGTEAM_FRIENDLYFIRE=1` = old rules; menu-walk tag battle, `_CLONES=1 _HPMATRIX=10084
+_HPM_SWEEP=0 _HPM_WRONGFOE=1 _HPM_VBRV0=1 _HPM_FRIENDLY=1 _HPM_NODOWN=1`): the same two lines at 24.73 s, and the numbers show what the HPBRV line meant: the extra's HP attack
+(its BRV 3000 -> 0) was booked on the module's default victim, so the ENEMY slot fighter Lightning lost 3000 HP twice (9684 -> 6684 -> 3684; panel 6609 in
+`~/dissidia/tt/friendly_old_26.png`) while the mate hit lost nothing. Not a credit bug only: real HP loss of an uninvolved fighter. Friendly BRV hits (old): the attacker stole the mate's BRV
+(extraE 991 -> 4893, slotC 1060 -> 225).
+- **Fix: a hit on the attacker's own team mate no longer registers** (`hitreg_hook`: same side, other fighter -> `[FRIENDLYBLOCK]`, original not called, v0 = 0). No damage, BRV loss / steal,
+  break, reaction, KO credit or HP redirect, for extras, slot fighters and assists, both sides, human or CPU. The BRV hit rules already work like that now (same path). The attack goes through
+  the mate like a miss. `PSPRECOMP_TAGTEAM_FRIENDLYFIRE=1`: the old rules (booked_extra_victim / hitreact_hook friendly reactions stay in place for that switch).
+- **Host numbers (same sweep, new):** 32 `[FRIENDLYBLOCK]`, no `[HPBRV]`, no `[XBRKST]`, enemy HP 9684 untouched, attacker extraP BRV stays 3000 (`~/dissidia/tt/friendly_new_26.png`: Lightning 9684,
+  human 9249). BRV matrix (`_HPMATRIX=10000`, all four same-side pairs): attackers keep 3000, no steal. Harness: `_HPM_NODOWN=1` (the matrix's g_down stand-still made the KO ledger end the
+  battle in the menu-walk tag battle) and `[HPM2]` HP is now the effective HP (status +0xC minus +8).
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/fx/reg1`). Logs `~/dissidia/tt/fx/{s2 (old HP), s3 (new HP), c0/c1 (BRV new/old), q_old/q_new (shots)}`.
+- Unverified: on device; a hit that is in the middle of a multi-hit attack (retail per-attack hit memory may re-test every frame: the log shows repeated [FRIENDLYBLOCK] lines, harmless on the host);
+  an attack that has an effect only on connect (e.g. a Holy cast that would heal / buff the mate) now does nothing to the mate.
