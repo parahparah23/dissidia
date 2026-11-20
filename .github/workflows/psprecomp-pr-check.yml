@@ -33,7 +33,9 @@ defaults:
 jobs:
   core-and-wizard:
     name: ${{ matrix.platform }} core + wizard
-    runs-on: ubuntu-22.04
+    # The maintainer's self-hosted runner (faster, keeps the toolchain bundle); pull requests from forks always use GitHub's runners.
+    # vars.CI_BUILD_RUNNER = '"ubuntu-22.04"' sends everything back to GitHub's runners (e.g. while that machine is off).
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-22.04' || fromJSON(vars.CI_BUILD_RUNNER || '["dissidia-build"]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
       - name: Build dependencies of the bundle (same as the release job)
+        if: runner.environment == 'github-hosted'   # the self-hosted runner has them installed
         run: |
           sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
           APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
@@ -60,6 +64,7 @@ jobs:
       # The same cache key and folders as the release workflow: whichever run builds the bundle first saves it for the others.
       - name: Toolchain bundle cache
         id: bundle
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
@@ -67,8 +72,15 @@ jobs:
             psprecomp/work/bundle-${{ matrix.platform }}.host
             psprecomp/work/cache
           key: bundle-${{ matrix.platform }}-${{ hashFiles('psprecomp/toolchain/**') }}
+      - name: Toolchain bundle (kept on the self-hosted runner)
+        id: localbundle
+        if: runner.environment == 'self-hosted'
+        run: python3 release/ci_bundle.py restore --platform ${{ matrix.platform }} --key ${{ hashFiles('psprecomp/toolchain/**') }} --work work
       - name: Core and wizard for ${{ matrix.platform }}
         run: |
           BUNDLE=""
-          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-${{ matrix.platform }}"; fi
+          if [ "${{ steps.bundle.outputs.cache-hit }}" = "true" ] || [ "${{ steps.localbundle.outputs.hit }}" = "true" ]; then BUNDLE="--bundle work/bundle-${{ matrix.platform }}"; fi
           python3 release/build_release.py --platform ${{ matrix.platform }} --version 0.0.0-pr --work work --check-only $BUNDLE
+      - name: Keep the toolchain bundle
+        if: runner.environment == 'self-hosted' && steps.localbundle.outputs.hit != 'true'
+        run: python3 release/ci_bundle.py save --platform ${{ matrix.platform }} --key ${{ hashFiles('psprecomp/toolchain/**') }} --work work
