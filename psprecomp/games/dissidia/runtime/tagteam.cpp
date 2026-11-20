@@ -7311,7 +7311,7 @@ void assist_off_move(uint32_t k, uint32_t M, uint32_t kind) {
             g_atk_watch = {P, foe, 0, -2};
         } else std::fprintf(stderr, "[ASSISTOFF] t=%.2fs partner %08X: no forced attack (%s)\n", age, P, pad_driven(P) ? "human driven" : "disabled");
     }
-    { const uint32_t st = rd(M + 0x52Cu); if (ok(st, 0x40)) { const float v = rdf(st + 0x1Cu), cost = 5000.0f * static_cast<float>(kind >= 2 ? 2 : 1); wrf(st + 0x1Cu, v > cost ? v - cost : 0.0f);   // retail takes 5000 per bar when the controller starts the call (kind 1 = 9517 -> 4517 seen; +0x18 is the EX gauge)
+    { const uint32_t st = rd(M + 0x52Cu); if (ok(st, 0x40)) { const float v = rdf(st + 0x1Cu), cost = 5000.0f * static_cast<float>(kind >= 2 && !(pad_driven(P) && !std::getenv("PSPRECOMP_TTCAM_AO9HUMANKIND")) ? 2 : 1); wrf(st + 0x1Cu, v > cost ? v - cost : 0.0f);   // a human partner called in: always one bar (user, 20 Nov). retail takes 5000 per bar when the controller starts the call (kind 1 = 9517 -> 4517 seen; +0x18 is the EX gauge)
         std::fprintf(stderr, "[ASSISTOFF] assist gauge %.0f -> %.0f (kind %u)\n", static_cast<double>(v), static_cast<double>(rdf(st + 0x1Cu)), kind); } }
     std::fprintf(stderr, "[ASSISTOFF] t=%.2fs side %u master %08X kind %u: assist call cancelled, partner %08X (char %d) moved to (%.1f,%.1f,%.1f), foe %08X (%s)\n", age, k, M, kind, P, actor_char(P), px, py, pz, foe, fwhy);
     aohit_start(k, M, P, foe, true);
@@ -7366,7 +7366,9 @@ bool ao9_call(uint32_t k, uint32_t E, uint32_t M, uint32_t kind, const char* by)
     const float age = dissidia_battle_age() / 60.0f;
     auto refuse = [&](const char* why) { std::fprintf(stderr, "[AO9] t=%.2fs side %u: extra %08X (char %d, %s) kind %u call refused (%s): no bar used\n", age, k, E, actor_char(E), by, kind, why); return false; };
     if (!ok(E, 0x12D0) || !ok(M, 0x12D0) || k > 1) return false;
-    const uint32_t st = rd(E + 0x52Cu); const float cost = 5000.0f * static_cast<float>(kind >= 2 ? 2 : 1);
+    // Calling a human always costs one bar, whatever the kind (the human picks its own BRV or HP move; user, 20 Nov). PSPRECOMP_TTCAM_AO9HUMANKIND=1: kind decides.
+    const bool human_one_bar = pad_driven(M) && !std::getenv("PSPRECOMP_TTCAM_AO9HUMANKIND");
+    const uint32_t st = rd(E + 0x52Cu); const float cost = 5000.0f * static_cast<float>(kind >= 2 && !human_one_bar ? 2 : 1);
     if (!alive(E) || is_down(E) || ko_script(E)) return refuse("the extra is knocked out");
     if (exb_running()) return refuse("an EX Burst is running");
     if (g_ao8[k].M) return refuse("the slot fighter's own call is still out");
