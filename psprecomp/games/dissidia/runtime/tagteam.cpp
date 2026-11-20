@@ -5446,7 +5446,12 @@ void hg_hook(uint8_t* rdram, recomp_context* ctx) {
 int g_hframe = 0;   // controller frames (hit attribution)
 FuncPtr g_orig_ctrl = nullptr;
 void ctrl_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram; g_ctx = ctx; g_hframe++;
+    g_ram = rdram; g_ctx = ctx;
+    {   // hit-attribution clock: one tick per DELIVERED lock-step frame. This hook runs on every game loop iteration, including those where the lock-step waited for a
+        // peer (a machine-local count), and the hit age tests (hit_victim_of: age <= 2) then expired recorded hits on some machines only.
+        static uint32_t last_lf = ~0u; const bool lk = dissidia_ttnet_running() && !std::getenv("PSPRECOMP_TTLOCK_HFRAME_OLD");
+        if (!lk) g_hframe++; else if (dissidia_ttnet_frame() != last_lf) { last_lf = dissidia_ttnet_frame(); g_hframe++; }
+    }
     if (g_log && g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_PDIFF2")) {   // debug: which shared objects (pointer words the human and its partner clone share) change when the partner leaves idle
         static std::vector<std::pair<uint32_t, uint32_t>> objs; static std::vector<uint32_t> snap; static int last_script = -1, shown = 0; static bool init = false;
         const uint32_t hs = rd(g_bs + 84u), hum = srd(g_bs + 56u + 4u * hs);
@@ -6693,7 +6698,12 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
             if ((vic == ca || vic == co) && att != ca && att != co) { g_chase_int = {att, vic, g_hframe}; if (g_log) std::fprintf(stderr, "[CHASE] t=%.2fs hit of %s %08X on %s %08X, a fighter of the running chase (%s %08X <-> %s %08X)\n", dissidia_battle_age() / 60.0f, role_of(att), att, role_of(vic), vic, role_of(ca), ca, role_of(co), co); }
         }
     }
+    const bool hfl = g_log && std::getenv("PSPRECOMP_TAGTEAM_HITFLAGS") && ok(att, 0x12D0) && ok(info, 0x40);
+    const uint32_t hv = hfl ? rd(info + 28u) : 0u, a0 = hfl ? rd(att + 0x380u) : 0u, v0 = (hfl && ok(hv, 0x12D0)) ? rd(hv + 0x380u) : 0u;
+    const uint32_t sa2 = static_cast<uint32_t>(ctx->r[6]);
     g_orig_hitreg(rdram, ctx);
+    if (hfl) std::fprintf(stderr, "[HITFLAGS] lf %u hf %d att %08X flags %08X -> %08X vic %08X flags %08X -> %08X info %08X %08X %08X %08X +16 %08X +20 %08X +24 %08X\n", dissidia_ttnet_frame(), g_hframe, att, a0, rd(att + 0x380u), hv, v0, ok(hv, 0x12D0) ? rd(hv + 0x380u) : 0u, rd(info), rd(info + 4u), rd(info + 8u), rd(info + 12u), rd(info + 16u), rd(info + 20u), rd(info + 24u));
+    if (hfl) { const uint32_t a2 = sa2; std::fprintf(stderr, "[HITFLAGS2] lf %u att %08X a2 %08X:", dissidia_ttnet_frame(), att, a2); if (ok(a2, 0x40)) for (uint32_t o = 0; o < 0x40u; o += 4) std::fprintf(stderr, " %X:%08X", o, rd(a2 + o)); std::fprintf(stderr, "\n"); }
 }
 void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
@@ -6803,7 +6813,7 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
                 xgauge_hit_orbs(e, hv);
                 wr(e.actor + 0x1108u, keep); wr(e.actor + 0x300u, foe0);
                 wr(e.actor + 0x380u, rd(e.actor + 0x380u) & ~0x200u);   // the hit has been booked: not again next frame
-                if (g_log) { static int c = 0; if (c++ < 80) std::fprintf(stderr, "[DMG] extra %08X module step (flags %08X -> %08X) foe %08X\n", e.actor, fl, rd(e.actor + 0x380u), rd(e.actor + 0x300u)); }
+                if (g_log) { static int c = 0; if (c++ < 80) std::fprintf(stderr, "[DMG] lf %u hf %d extra %08X module step (flags %08X -> %08X) foe %08X\n", dissidia_ttnet_frame(), g_hframe, e.actor, fl, rd(e.actor + 0x380u), rd(e.actor + 0x300u)); }
             }
             if (const uint32_t as = xas_ptr(e.actor)) {   // the extra's own assist: its hits are booked through the same module copy (pass 2: the assist is the module's second actor, +0x1108 kept)
                 uint32_t afl = rd(as + 0x380u); const uint32_t hva = hit_victim_of(as);

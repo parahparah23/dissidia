@@ -253,6 +253,12 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         write_pad(ctx, st.pad, w);
     }
     dissidia_netplay_frame_delivered(g_F);
+    {   // The effect LCG (0x09AFB89C) is seeded per machine and drawn from by cosmetic code whose amount depends on the local view (camera, visibility, effects shown):
+        // it differed on every machine from frame 0 while the gameplay LCG (0x09AF84D0) stayed equal. Any simulation code that reads it (hit variants, knockback
+        // spread) then rolls differently per machine. Each delivered frame starts it from shared state only: the gameplay LCG and the frame number.
+        static const bool off = std::getenv("PSPRECOMP_TTLOCK_FXRNG_OFF") != nullptr;
+        if (!off) { uint32_t h = (rd(0x09AF84D0u) ^ 0x9E3779B9u) + g_F * 2654435761u; h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15; wr(0x09AFB89Cu, h); }
+    }
     if (g_log2) {   // [TTSYNC2] every frame: what feeds each fighter's input path (pad words, controller, lock-block camera, camera manager slots), compare across machines
         uint32_t f[8]; const int n = dissidia_tagteam_fighters(f, 8); auto fl = [&](uint32_t a) { float v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; };
         auto hsh = [&](uint32_t a, uint32_t len) { uint32_t h = 2166136261u; for (uint32_t o = 0; o < len; o += 4) h = (h ^ rd(a + o)) * 16777619u; return h; };
@@ -260,6 +266,7 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         for (int i = 0; i < n; i++) {
             const uint32_t A = f[i], lb = rd(A + 0x5ACu), ct = rd(A + 0x5A0u), pad = ok(ct, 0x50) ? rd(ct + 0x40u) : 0u;
             std::snprintf(b, sizeof b, " | %08X p%.2f,%.2f,%.2f tgt%08X scr%d", A, fl(A + 0x80u), fl(A + 0x84u), fl(A + 0x88u), rd(A + 0x2FCu), static_cast<int16_t>(rd(A + 0x180u) & 0xFFFFu)); line += b;
+            { const uint32_t br = rd(A + 0x5C4u); std::snprintf(b, sizeof b, " fg%08X,%08X,%08X br%u", rd(A + 0x380u), rd(A + 0x384u), rd(A + 0x388u), ok(br, 0x60) ? rd(br + 0x54u) : 99u); line += b; }   // module flag words + brain pad mode: the damage step's inputs
             if (ok(pad, 0x60)) { std::snprintf(b, sizeof b, " pad%08X,%08X,%08X,%08X st%.3f,%.3f", rd(pad + 64u), rd(pad + 68u), rd(pad + 72u), rd(pad + 76u), fl(pad + 0x54u), fl(pad + 0x58u)); line += b; }
             if (ok(ct, 0x50)) { std::snprintf(b, sizeof b, " ct%08X", hsh(ct, 0x50)); line += b; if (std::getenv("PSPRECOMP_TTLOCK_LOG2_RAW")) { line += " CT"; for (uint32_t o = 0; o < 0x50u; o += 4) { std::snprintf(b, sizeof b, ":%X", rd(ct + o)); line += b; } line += " PAD"; for (uint32_t o = 0; o < 0x60u; o += 4) { std::snprintf(b, sizeof b, ":%X", rd(pad + o)); line += b; } } }
             if (ok(lb, 0x400)) { std::snprintf(b, sizeof b, " lb%08X cam%08X +F8:%08X +FC:%08X", lb, hsh(lb + 0x180u, 0x140u), rd(lb + 0xF8u), rd(lb + 0xFCu)); line += b; }
@@ -267,7 +274,7 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t mgr = dissidia_camera_manager();
         if (mgr) for (uint32_t k = 0; k < 8; k++) { const uint32_t s = mgr + 0x110u + 0x30u * k, lbk = rd(mgr + 0x6D0u + 4u * k); if (!lbk) continue;
             std::snprintf(b, sizeof b, " | cs%u e%.3f,%.3f,%.3f t%.3f,%.3f,%.3f", k, fl(s), fl(s + 4u), fl(s + 8u), fl(s + 0x10u), fl(s + 0x14u), fl(s + 0x18u)); line += b; }
-        std::fprintf(stderr, "[TTSYNC2] frame %u pu%u ca%u%s\n", g_F, g_pu_calls, g_ca_calls, line.c_str()); g_pu_calls = g_ca_calls = 0;
+        std::fprintf(stderr, "[TTSYNC2] frame %u pu%u ca%u rng%08X,%08X%s\n", g_F, g_pu_calls, g_ca_calls, rd(0x09AF84D0u), rd(0x09AFB89Cu), line.c_str());   // the two shared LCGs (gameplay / effects) g_pu_calls = g_ca_calls = 0;
     }
     if (g_log && g_F % 30 == 0) {   // every fighter (extras too) at the start of this frame: compare the machines' [TTSYNC] lines
         uint32_t f[8]; const int n = dissidia_tagteam_fighters(f, 8); uint32_t h = 2166136261u; std::string line; char b[96];
@@ -277,7 +284,7 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
             float x, z; std::memcpy(&x, g_ram + ((f[i] + 0x80u) & 0x07FFFFFFu), 4); std::memcpy(&z, g_ram + ((f[i] + 0x88u) & 0x07FFFFFFu), 4);
             std::snprintf(b, sizeof b, " [%.2f,%.2f hp %u sc %d]", x, z, hp, static_cast<int16_t>(rd(f[i] + 0x180u) & 0xFFFFu)); line += b;
         }
-        std::fprintf(stderr, "[TTSYNC] frame %u n %d hash %08X%s\n", g_F, n, h, line.c_str());
+        std::fprintf(stderr, "[TTSYNC] frame %u n %d hash %08X rng %08X,%08X%s\n", g_F, n, h, rd(0x09AF84D0u), rd(0x09AFB89Cu), line.c_str());
     }
     for (LowHp& l : g_lowhp) if (!l.done && g_F >= l.frame) {
         l.done = true;

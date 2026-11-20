@@ -3759,6 +3759,42 @@ partner / assist / chase logic by "the human's side") the other suspects; they w
 shown, per machine through `SIDE_ENV_<A-D>=VAR=val,VAR=val` in launch.sh): A shown slot 1 + yaw 0.9, B yaw -0.9, C shown slot 0 + yaw 2.0, D pitch 0.3:
 62 samples equal before the decision, so the local camera / shown flag does not feed the simulation (in that run).
 **Still open:** after the decision every run (also p1, f1) desyncs a few hundred frames later at `fighter0.pos.x` (battle end, not this change; another agent).
+## Lock-step desync at a human extra's attack: module flag 0x400, machine-local state (20 Nov, agent ttx; cause NOT pinned)
+Finding from the 10-player run (`~/dissidia/tt/net10/logs/clean2`): first unequal `[TTSYNC]` at 2220, as the human extra 08E6D470 (driven by d4) hit the
+slot fighter 08DCA410. `[DMG] extra .. module step (flags 02001B88 -> ..)` on h1 and d4, `02001F88` on the other eight.
+**What the 0x400 is.** Not set by our module-step code (nothing in tagteam.cpp writes it). Retail `FUN_08838734(actor, info, a2, a3)` (the on-hit
+registration, our `hitreg_hook`) ORs 0x100 / 0x200 / 0x800 into `actor+0x380` and 0x400 only when `*(a2+8) & 2` (`a2` = the hit-data record of
+the attack, e.g. `0BD790D8: 0A0C 00FF0D02 84 ..`). So the flag word is a readout of WHICH hit record the retail hit response passed: 0x1B88 = bit clear, 0x1F88 = set.
+In the clean2 log the groups were h1 + d4 (the victim's driver and the attacker's driver) against the rest, the two machines that had a hit
+record different from the other eight on 4 of 7 hits of one multi-hit move; at the next sample the victim's knockback differed (x -27.08 vs -28.70). So
+the divergence is in the hit data / the attacker's attack state, not in our module-step wrapper, and the 0x400 is the visible symptom.
+**Added diagnostics** (all lock-step logging, `PSPRECOMP_TTLOCK_LOG=1`): `[TTSYNC2]` per fighter `fg<+380>,<+384>,<+388> br<brain+0x54>` and the two
+LCGs `rng<0x09AF84D0>,<0x09AFB89C>` per frame; `[TTSYNC]` the LCGs too; `PSPRECOMP_TAGTEAM_HITFLAGS=1` (+ TAGTEAM_LOG): `[HITFLAGS]` (lock-step frame, hit
+clock, actor flags before / after the retail registration, victim flags, info words) and `[HITFLAGS2]` (the `a2` hit record's 16 words) for every hit.
+**Machine-local state found** (4-player rig `~/dissidia/tt/net4t`, a copy of net4x with ports 976x / process name net4trt, runs t3..t8):
+1. the effect LCG `0x09AFB89C` differs on EVERY machine from frame 0 (seeded per machine, drawn by cosmetic code), the gameplay LCG `0x09AF84D0` is
+   equal on all machines for the whole run (7216 frames). `framerate.cpp` says the two are "shared by gameplay and effects"; any simulation reader of the
+   effect LCG (hit variants, knockback spread - suspected, not proven) rolls differently per machine.
+2. `+0x388 & 0x20000000` (on the opponent slot of the local human's team) and `+0x380 & 0x00200000` (transient, on the victim / the local team's extra, seen on
+   the machines of one team only) are set by retail relative to the LOCAL human (`bs+84`): machine-local by design. They did not diverge the simulation in
+   any 4-player run (positions / HP / hit flags otherwise equal).
+3. `g_hframe` (the hit attribution clock, `ctrl_hook`) was `lock-step frame - 3` on all machines in every run (also at 60 ms lag), so it was not the cause;
+   it now ticks once per delivered frame by construction (`PSPRECOMP_TTLOCK_HFRAME_OLD=1` = old, per hook call).
+4. a separate finding of run t6 (60 ms lag + 15 ms jitter): the party lists differed per machine at the battle start (`[TTCPU] battle setup` lines:
+   `[me .. 27o 28] [peer .. 27 28o]` against different counts per machine, everyone "party 0" after a late regroup), so extra 1 became human-driven on B only
+   (`brain+0x54` 1 on B, 0 on A / D): that run split at frame 235 (A, D equal; B and C away). A start-up (party / driver) agreement problem under lag, not the attack bug.
+**Change** (`tagteam_net.cpp`, per delivered frame): the effect LCG is set from shared state only (gameplay LCG xor frame number, hashed);
+`PSPRECOMP_TTLOCK_FXRNG_OFF=1` = old. Rationale: with the 4-player runs equal either way, this removes one proven per-machine input
+(item 1) without touching retail data.
+**Evidence.** 4-player clean runs (t3 with the old clock, t7 without the change, t8 with it): `[TTSYNC]` (hash, positions, HP, script) equal on all four machines
+at all 262 samples; `[HITFLAGS]` / `[HITFLAGS2]` equal across machines (only the machine-local victim bit `+0x380 & 0x200000` differs); a human extra
+(B) attacked 19-25 times per run. Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/reg_ttx_fx1`).
+**NOT verified:** the clean2 failure did not reproduce in 4 players (clean network or 60 ms lag), so (a) that the effect LCG is what feeds the hit record, (b)
+that the change fixes clean2, and (c) the 10-player run (host 4 + desktop 6) were not done. Next step: run net10 with `LOG=1 LOG2=1 TAGTEAM_HITFLAGS=1` and look at the
+first `[HITFLAGS2]` whose `a2` words differ between machines (the first differing word is the cause); if `a2` is equal and the victim's knockback differs, the
+cause is in the victim; if the effect LCG differs at that frame (`rng` second field, logged before the reseed only if the reseed is off: use `FXRNG_OFF=1` for the
+diagnosis run) it is the LCG.
+
 ## Lock-on camera on the enemy partner (20 Nov, tree ttcam; host-only, window shots, nothing seen on a device)
 User (RP6, `rp6logs/rp6_1120_lockcam.log`, then "it has nothing to do with forfeiting, it does it in a fresh battle, the camera follows the centre of the stage"):
 with the lock cycled onto the enemy partner (Lightning, extraE) the camera did not turn to her.
