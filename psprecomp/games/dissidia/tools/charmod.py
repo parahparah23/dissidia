@@ -866,11 +866,11 @@ def _build(a, added):
         print('nothing changed')
     if retail_moves or os.path.isdir(os.path.join(a.mods, '.net')):   # online: deltas of the listed packs this dir has
         import subprocess                                             # installed byte for byte (netpack.py)
-        subprocess.call([sys.executable, os.path.join(HERE, 'netpack.py'), 'deltas', a.mods, '--disc', a.disc])
+        subprocess.call(([os.environ['PSPRECOMP_PY_LOADER']] if os.environ.get('PSPRECOMP_PY_LOADER') else []) + [sys.executable, os.path.join(HERE, 'netpack.py'), 'deltas', a.mods, '--disc', a.disc])
     if roster_changed:
         print('roster or move names changed: rebuilding main.bin')
         import subprocess
-        r = subprocess.call([sys.executable, os.path.join(HERE, 'roster_mainbin.py'), a.disc, a.mods])
+        r = subprocess.call(([os.environ['PSPRECOMP_PY_LOADER']] if os.environ.get('PSPRECOMP_PY_LOADER') else []) + [sys.executable, os.path.join(HERE, 'roster_mainbin.py'), a.disc, a.mods])
         if r:
             print('roster_mainbin.py failed (%d); run it by hand: roster_mainbin.py %s %s' % (r, a.disc, a.mods))
     return 0

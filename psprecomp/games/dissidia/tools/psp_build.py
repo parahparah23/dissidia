@@ -308,7 +308,7 @@ def main():
 
     # xdelta (ISO patch) mods that change code: their functions, recompiled into overlays/xmods (always written, empty
     # without such mods, because the runtime links its table; quick, and only changed files are rewritten)
-    run([sys.executable, os.path.join(HERE, "xdelta_mod.py"), "build-code", "--work", work, "--psprecomp", psprecomp,
+    run(PYEXE + [os.path.join(HERE, "xdelta_mod.py"), "build-code", "--work", work, "--psprecomp", psprecomp,
          "--game", game], env=env)
 
     if a.no_compile:
