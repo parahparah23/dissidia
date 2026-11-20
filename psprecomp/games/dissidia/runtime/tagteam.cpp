@@ -2410,6 +2410,9 @@ void apply_drive(uint32_t A, int drive) {
         if (!std::getenv("PSPRECOMP_TTLOCK_KEEPGATE")) { const uint32_t f = rd(A + 0x380u); if (f & 2u) { wr(A + 0x380u, f & ~2u); std::fprintf(stderr, "[TTLOCK] %08X: AI gate bit (+0x380 bit 2) cleared for the pad (was %08X)\n", A, f); } }
         if (ok(brain, 0x60)) wr(brain + 0x54u, 1u);
         if (ok(ctrl, 0x50)) { wr(ctrl + 0x48u, 0u); wr(ctrl + 0x30u, 0u); }
+        // a pad now drives it: no override look target left in its lock block (LOCK_SET from the AI / call-in set-up; while +252 != 0 the L toggle
+        // FUN_08B3AFD4 does nothing - see rebuild_lock). Not while a chase pair holds it (chase_pair_step puts the block back at the chase end).
+        if (ok(lb, 0x200) && rd(lb + 252u) && !chase_pair_holds(A) && !std::getenv("PSPRECOMP_TAGTEAM_REBUILD_LOCKSET")) { std::fprintf(stderr, "[TTLOCK] %08X: lock block %08X override target %08X cleared (pad-driven now)\n", A, lb, rd(lb + 252u)); wr(lb + 252u, 0u); }
     } else if (drive == 2) {
         // every word of RAM CPU_MODE changes (the guest stack window excluded) is recorded: the first measurement (3 words in the brain) was not
         // the whole story, the fighter then ignored the pad after the undo (a1)
@@ -2446,6 +2449,7 @@ struct RebuildJob {
     int hp = 0, brv = 0, charId = 0; float x = 0, y = 0, z = 0; uint32_t lockmode = 0; float since = 0; int waited = 0;
     bool own_stats = false;   // a member called in: his own max HP / base BRV once built (not the KO'd one's)
     bool newlb = false; uint8_t view125 = 0;   // the rebuilt fighter keeps the constructor's NEW lock block (made for its character); view125: the shown-camera byte of the old one
+    uint32_t lbw[6] = {};     // the old lock block's +0x100 (dt source), +0x120 (pad object), +0x126 (camera input byte), +252 (override target), +276, +356: logged, +0x100 / +0x126 carried to a new block
     int drive = 0;            // multiplayer handover: once it stands, 1 = a pad drives the slot (brain +0x54, controller +0x48 = 0), 2 = the AI (CPU_MODE); 0 = as it was
     uint32_t new_lb = 0, t0 = 0, t1 = 0, lastfo = 0, player = 0;   // player: the world's player actor (world+20), which the destructor / constructor move off the slot
     std::string entr;   // a member called in straight into the slot: his name for the entrance (pose, pause, banner) once he stands
@@ -2578,6 +2582,7 @@ bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     // Only when that slot holds this fighter's own block (a slot fighter): an extra shares its side's slot index, the slot holds the slot fighter's block.
     j.newlb = !std::getenv("PSPRECOMP_TAGTEAM_REBUILD_OLDLB") && ok(j.L, 0x310) && ok(mgr, 0x700) && rd(mgr + 0x6D0u + 4u * camslot) == j.L;
     if (j.newlb) j.view125 = g_ram[(j.L + 0x125u) & 0x07FFFFFFu];
+    if (ok(j.L, 0x310)) { j.lbw[0] = rd(j.L + 0x100u); j.lbw[1] = rd(j.L + 0x120u); j.lbw[2] = g_ram[(j.L + 0x126u) & 0x07FFFFFFu]; j.lbw[3] = rd(j.L + 252u); j.lbw[4] = rd(j.L + 276u); j.lbw[5] = rd(j.L + 356u); }
     // A new block's camera starts at its defaults (eye (0, 4.3, 5.5) looking at the stage origin) and flies to the fighter from there: on a raised
     // level (stage 12, y 23) it came up through the floor / framed the enemy for a second or two. Its camera position words (+0x00..+0xCF: eye /
     // look-at and their previous / goal copies, velocities) are carried over from the old block. PSPRECOMP_TAGTEAM_NOLBCARRY=1: off.
@@ -2723,6 +2728,34 @@ void latediff_step() {
         std::fprintf(stderr, "[LATEDIFF] %08X +%.1fs: %d words changed since standing:%s\n", d.A, age / 60.0f, n, out.c_str());
     }
 }
+// The lock of a rebuilt fighter once it stands (every rebuild path: slot call-in, mate takeover, pad swap, multiplayer handover).
+// LOCK_SET (FUN_08B3B0B4) is retail's OVERRIDE look target: it writes the block's +252, and while +252 != 0 the L toggle FUN_08B3AFD4 (called by the
+// character handler FUN_08B3526C on an L release) returns at once - the press never reaches FUN_08B3B3EC (lock_mode_hook). The rebuild used it to lock
+// the new body on its foe, so a player's rebuilt fighter could never switch or release his lock again (RP6 1120: Kain fell, Jecht came into the slot,
+// 0 lock-mode calls for the rest of the battle; the "human lock" line showed target 00000000 -> foe = +252 set). A pad-driven fighter now gets the lock
+// the way a battle start leaves it: foe word = the SLOT enemy (his cycle starts over on the foe: g_cycs.erase in rebuild_begin; the old member's
+// cycle had left the foe on the enemy partner), +252 = 0, mode 1 through LOCK_MODE with g_lock_bypass (not an L press), selector 0.
+// CPU-driven fighters keep the LOCK_SET (their AI reads the lock target). PSPRECOMP_TAGTEAM_REBUILD_LOCKSET=1: old behaviour for everyone.
+void rebuild_lock(const RebuildJob& j) {
+    static const bool old = std::getenv("PSPRECOMP_TAGTEAM_REBUILD_LOCKSET") != nullptr;
+    const uint32_t L = j.L;
+    if (j.newlb && ok(L, 0x310) && !old) {   // the new block's camera dt source / input byte as the battle start set them on the old one (FUN_08B0E200; the constructor leaves 0)
+        if (j.lbw[0] != rd(L + 0x100u) || j.lbw[2] != g_ram[(L + 0x126u) & 0x07FFFFFFu]) { if (g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: new lock block %08X +0x100 %u -> %u, +0x126 %u -> %u (the old block's)\n", j.A, L, rd(L + 0x100u), j.lbw[0], g_ram[(L + 0x126u) & 0x07FFFFFFu], j.lbw[2]); }
+        wr(L + 0x100u, j.lbw[0]); g_ram[(L + 0x126u) & 0x07FFFFFFu] = static_cast<uint8_t>(j.lbw[2]);
+    }
+    if (old || !pad_driven(j.A)) { call(LOCK_SET, L, j.foe); if (j.lockmode == 1 && rd(L + 264u) != 1) call(LOCK_MODE, L, 1, 0); }
+    else {
+        uint32_t f = j.foe; const uint32_t se = slot_enemy(j.A);
+        if (ok(se, 0x12D0) && se != j.A && side_of(se) != side_of(j.A) && alive(se) && !is_down(se) && !is_rebuilding(se)) f = se;
+        if (ok(f, 0x12D0)) { call(SET_FOE, j.A, f); wr(j.A + 0x2FCu, f); }
+        wr(L + 252u, 0u);
+        if (j.lockmode == 1 && rd(L + 264u) != 1) { g_lock_bypass = true; call(LOCK_MODE, L, 1, 0); g_lock_bypass = false; }
+        const uint32_t h1 = rd(L + 304u); if (ok(h1, 0x40) && rd(L + 264u) == 1) wr(h1 + 28u, 0u);
+        cyc_of(j.A) = CycState();
+    }
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: lock %s: block %08X mode %u +252 %08X +276 %u +356 %u +0x100 %u +0x120 %08X (ctrl %08X) +0x126 %u, target %08X foe %08X (was foe %08X; old block +252 %08X +276 %u +356 %u +0x120 %08X)\n",
+        j.A, (old || !pad_driven(j.A)) ? "LOCK_SET (CPU)" : "player's (no override)", L, rd(L + 264u), rd(L + 252u), rd(L + 276u), rd(L + 356u), rd(L + 0x100u), rd(L + 0x120u), rd(j.A + 0x5A0u), g_ram[(L + 0x126u) & 0x07FFFFFFu], call(LOCK_GET, L), rd(j.A + 0x300u), j.foe, j.lbw[3], j.lbw[4], j.lbw[5], j.lbw[1]);
+}
 void rebuild_frame() {
     TtStep tt_step_("rebuild_frame");
     g_frame_ticks++;
@@ -2756,8 +2789,9 @@ void rebuild_frame() {
         g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
         call(START_ACTION, j.A + 304u, 1, 0);
         if (j.newlb && ok(j.L, 0x310)) g_ram[(j.L + 0x125u) & 0x07FFFFFFu] = j.view125;   // the shown camera stays this player's
-        if (ok(j.L, 0x200)) { call(LOCK_SET, j.L, j.foe); if (j.lockmode == 1 && rd(j.L + 264u) != 1) call(LOCK_MODE, j.L, 1, 0); }
-        if (j.drive) apply_drive(j.A, j.drive);   // multiplayer handover: who drives the slot now
+        if (j.drive) apply_drive(j.A, j.drive);   // multiplayer handover: who drives the slot now (before the lock: a pad-driven slot gets the player's lock below)
+        if (ok(j.L, 0x200)) rebuild_lock(j);
+        if (j.drive) {}
         else if (!is_down(j.A) && !std::getenv("PSPRECOMP_TAGTEAM_KEEPSLOTGATE")) {
             // The constructor leaves its AI gate (+0x380 bit 2) set and nothing else lifts it for a slot (the tick hook clears it for extras only;
             // the entrance's end clears it only when the rebuild finished before that). A rebuilt CPU slot then never thought again (the 3rd party

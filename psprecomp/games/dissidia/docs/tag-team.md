@@ -3160,3 +3160,42 @@ _HPM_SWEEP=0 _HPM_WRONGFOE=1 _HPM_VBRV0=1 _HPM_FRIENDLY=1 _HPM_NODOWN=1`): the s
 - Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/fx/reg1`). Logs `~/dissidia/tt/fx/{s2 (old HP), s3 (new HP), c0/c1 (BRV new/old), q_old/q_new (shots)}`.
 - Unverified: on device; a hit that is in the middle of a multi-hit attack (retail per-attack hit memory may re-test every frame: the log shows repeated [FRIENDLYBLOCK] lines, harmless on the host);
   an attack that has an effect only on connect (e.g. a Holy cast that would heal / buff the mate) now does nothing to the mate.
+
+## Lock switching after a slot call-in (20 Nov, tree ttcam; host-only, headless, nothing seen on a device)
+User (RP6, `rp6logs/rp6_1120_jecht_lock.log`, battle 2): Kain (human slot 08D4CF20) fell at 367.12 s at the end of a chase, Jecht came into the slot
+at 370.4 s (nobody left on the stage), and L never switched the lock again: 0 `lock mode call` lines after 370.4 s.
+- **Cause: the rebuild's `LOCK_SET` is retail's OVERRIDE look target.** `FUN_08B3B0B4` (`LOCK_SET`) stores its actor in the lock block's +252 (+0xFC) and
+  forces lock-on. The L toggle `FUN_08B3AFD4` (called by the character handler `FUN_08B3526C` on an L release) starts with `if (block+252 != 0) return;`:
+  with an override set the press never reaches `FUN_08B3B3EC` (`lock_mode_hook`), so neither retail's toggle nor our cycle runs. `rebuild_frame` locked
+  every rebuilt fighter with `LOCK_SET(new block, foe)` and nothing cleared +252 again. The device log shows it: `human lock: ... target 00000000 ->
+  08D8D600` at 370.4 s (the logged "target" is +252; it is 0 at every other moment of the log, also right after the chase ended: `[CHASEPAIR] ... +252 00000000`).
+  The chase was not the cause (its lock-block restore had run); the lock block, the camera slot and the controller pointer (+0x120 = the actor's +0x5A0)
+  were all right. Retail itself uses +252 briefly (the enemy's assist: set, cleared ~1.1 s later); in one host run (b2) that retail release cleared our
+  stale override by chance and L worked again from then on - which is why the bug looked intermittent.
+- **Initial target.** The old member's cycle had left his foe word on the enemy partner (cyc 1, extraE), and `rebuild_begin` carries the foe into the
+  new body, so the new body locked onto the enemy partner (device: 08D8D600 = Ultimecia) while its cycle state (erased) said "on the foe".
+- **Fix (`rebuild_lock`, called from `rebuild_frame` for every rebuild path: slot call-in, mate takeover, pad swap, multiplayer handover; and
+  `apply_drive(drive 1)`).** A pad-driven fighter gets the lock a battle start leaves: foe / target word = the slot enemy (when alive, on the stage, not
+  being rebuilt; else the carried foe), +252 = 0, mode 1 through `LOCK_MODE` with `g_lock_bypass` (not taken as an L press), selector h1+28 = 0, cycle
+  state reset. CPU-driven fighters keep the `LOCK_SET` (their AI reads the lock target). The new block also gets the old block's +0x100 (dt source) and
+  +0x126 (camera input byte, set to 1 by the battle start `FUN_08B0E200`; the constructor leaves 0). `apply_drive(1)` (a pad takes a fighter over) clears
+  a leftover +252 unless a chase pair holds the fighter. Logged: `[TAGTEAM] rebuild X: lock player's (no override): block .. mode 1 +252 00000000 ..,
+  target <slot enemy> foe <slot enemy> (was foe <old>; old block ...)`. `PSPRECOMP_TAGTEAM_REBUILD_LOCKSET=1` = old behaviour.
+- **Evidence (host, headless GL, `party_battle_walk.txt` = 1 v 2, `KOLIST=human:12` + `KOLIST_NAT=1`, script `~/dissidia/tt/lksc/lpress.txt`: one L
+  before the KO (cycle to the enemy partner, like the user), then L every 2.5 s; runs in `~/dissidia/tt/lksc`):**
+  - before (b1, b2): after the call-in `human lock: ... target 00000000 -> <foe>`, then no `lock mode call` for any press (b1: 15.3 - 61.5 s, 11 presses;
+    b2: 15.1 - 30.2 s, 6 presses, until retail's assist override replaced and released +252; the 2nd rebuild at 55.9 s set it again). b2 also locked the
+    new body on the enemy partner (foe 08D9D2B0 = extraE), as on the device.
+  - after (a1, a2): `lock player's (no override) ... +252 00000000 ... target <slotC> foe <slotC> (was foe <extraE>)`; every press after the entrance gives
+    `lock cycle: slotC -> the other enemy` / `-> back to the foe` (a1: 23.8, 26.3, ... 48.8 s, 12 of 12; a2 the same from 22.1 s, also across two chases).
+    Screens `a1_cycle.png` (23.5 - 32 s: the right panel and the lock cursor follow Lightning / Vaan / Lightning), `b1_nocycle.png` (before: stays).
+  - chase + KO (`FORCECHASE=cpu FORCECHASE_AT=10.8 FORCECHASE_HUMAN=1`, KO during the chase at 11.4 / 11.1 s, chase over 13.3 / 13.7 / 11.9 s, the
+    lethal hit landing in the chase): before (b3) the same as without a chase - the call-in locks the enemy partner (foe 08DBE590 = extraE, cycle on it
+    at the KO), +252 set, presses ignored from 14.6 to 35.8 s (until retail's assist override replaced / released +252). After (a3, a4): the chase end
+    puts the old block back (`+252 08D927A0 -> 00000000`), the call-in locks the slot enemy (a4: was foe extraE), and the cycle works from the first
+    press after the entrance, across later chained chases (a3) and with an EX core out (a4: `retail went to the EX core, steered to the other enemy`).
+    The chase is not needed for the bug: the rebuild alone sets the override.
+- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lksc/reg1`): RESULT: PASS.
+- **Not verified:** on a device; a mate takeover / pad swap rebuild (same code path, not driven); retail's own behaviour for the first lock of a fresh
+  fighter is inferred from the battle start (+252 0, mode 1 on the opponent), not from a retail mid-battle entrance (the core step of the cycle); a multiplayer human extra (the `apply_drive` clear is
+  untested); the user's other lock buttons (only L driven; the toggle gate is the same function).
