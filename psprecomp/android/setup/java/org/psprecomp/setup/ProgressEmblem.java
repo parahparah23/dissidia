@@ -52,6 +52,31 @@ final class ProgressEmblem extends View {
         showPercent = s;
     }
 
+    private final android.graphics.RectF ringBox = new android.graphics.RectF();
+
+    /** One half of the tilted orbit ring and the lights running on it: front = the half nearer the viewer (lower half of the ellipse). */
+    private void drawRing(Canvas c, float cx, float cy, float rw, float rh, boolean front) {
+        c.save();
+        c.translate(cx, cy);
+        c.rotate(-14);
+        stroke.setStrokeWidth(Theme.dpf(front ? 1.4f : 1));
+        stroke.setColor(Theme.alpha(Theme.GOLD, front ? 0.6f : 0.28f));
+        ringBox.set(-rw, -rh, rw, rh);
+        c.drawArc(ringBox, front ? 0 : 180, 180, false, stroke);   // angles run clockwise: 0..180 is the lower (near) half
+        float speed = mode == SPIN ? 2.4f : 1.1f;
+        for (int k = 0; k < 2; k++) {
+            float a = t * speed + k * 3.1416f;
+            float sy = (float) Math.sin(a);
+            if ((sy > 0) != front) continue;   // a light on the far half is hidden by the crystal where it passes behind
+            float ox = (float) Math.cos(a) * rw, oy = sy * rh, depth = 0.75f + 0.25f * sy;
+            paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.9f * depth));
+            c.drawCircle(ox, oy, Theme.dpf(2.4f) * depth, paint);
+            paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.18f * depth));
+            c.drawCircle(ox, oy, Theme.dpf(8) * depth, paint);
+        }
+        c.restore();
+    }
+
     @Override
     protected void onDraw(Canvas c) {
         if (getWidth() < 4 || getHeight() < 4) return;   // not laid out (yet): gradients need a size
@@ -82,24 +107,9 @@ final class ProgressEmblem extends View {
         c.drawCircle(cx, (top + bot) / 2, halo, paint);
         paint.setShader(null);
 
-        // orbit ring with a running light
-        c.save();
-        c.translate(cx, (top + bot) / 2);
-        float rw = gw * 0.95f, rh = gh * 0.14f;
-        stroke.setStrokeWidth(Theme.dpf(1));
-        stroke.setColor(Theme.alpha(Theme.GOLD, 0.35f));
-        c.rotate(-14);
-        c.drawOval(-rw, -rh, rw, rh, stroke);
-        float speed = mode == SPIN ? 2.4f : 1.1f;
-        for (int k = 0; k < 2; k++) {
-            float a = t * speed + k * 3.1416f;
-            float ox = (float) Math.cos(a) * rw, oy = (float) Math.sin(a) * rh;
-            paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.9f));
-            c.drawCircle(ox, oy, Theme.dpf(2.4f), paint);
-            paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.18f));
-            c.drawCircle(ox, oy, Theme.dpf(8), paint);
-        }
-        c.restore();
+        // the ring around the crystal: its far half (and lights on it) behind the crystal, its near half in front (drawn below)
+        final float ringW = gw * 0.95f, ringH = gh * 0.14f, ringY = (top + bot) / 2;
+        drawRing(c, cx, ringY, ringW, ringH, false);
 
         // the glass
         paint.setColor(0xFFFFFFFF);   // a shader is multiplied by the paint's alpha
@@ -161,6 +171,8 @@ final class ProgressEmblem extends View {
             k.lineTo(cx - gw * 0.02f, top + gh * 0.82f);
             c.drawPath(k, stroke);
         }
+        drawRing(c, cx, ringY, ringW, ringH, true);   // the near half passes in front of the crystal
+
         if (mode == DONE && since < 1.6f) {   // a burst of rays when it is finished
             float e = since / 1.6f;
             paint.setColor(Theme.alpha(Theme.GOLD_LIGHT, 0.6f * (1 - e)));

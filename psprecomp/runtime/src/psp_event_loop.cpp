@@ -793,6 +793,16 @@ int psp_runtime_init_sdl() {
     uint32_t wflags = (use_vk ? SDL_WINDOW_VULKAN : SDL_WINDOW_OPENGL) | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE |
                       SDL_WINDOW_ALLOW_HIGHDPI;
     if (fs_env && fs_env[0] && fs_env[0] != '0') wflags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#ifndef PSP_GLES
+    {   // PSPRECOMP_BORDERLESS=1 (settings: Display > Borderless): a window with no frame that fills the display
+        const char* bl = std::getenv("PSPRECOMP_BORDERLESS");
+        if (bl && bl[0] && bl[0] != '0' && !(wflags & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+            wflags |= SDL_WINDOW_BORDERLESS;
+            SDL_Rect r{0, 0, 0, 0};
+            if (SDL_GetDisplayBounds(0, &r) == 0 && r.w > 0) { win_w = r.w; win_h = r.h; }
+        }
+    }
+#endif
 #ifdef PSP_GLES
     wflags |= SDL_WINDOW_FULLSCREEN;   // Android: one full-screen window; SDL sizes it to the display
     win_w = win_h = 0;

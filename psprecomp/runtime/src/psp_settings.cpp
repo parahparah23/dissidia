@@ -169,7 +169,7 @@ bool updates_choice();
 bool texpack_choice();
 bool texpack_at_start();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -243,6 +243,7 @@ int g_pending_wide = -1;               // widescreen (0 / 1) waiting for the gam
 // Display: fullscreen or a window. Window sizes: k x 480x272, or the Steam Deck's 1280 x 800 (k = K_DECK; the
 // picture is letterboxed as on the Deck), or a size set by hand (k = -1, listed so the row can show it).
 struct ResOpt { int k; int w, h; };
+constexpr int k_fov_min = -20, k_fov_max = 40;
 constexpr int K_DECK = 100, DECK_W = 1280, DECK_H = 800;
 std::vector<ResOpt> g_res;
 int g_win_sel = -1;                    // the window size used in Window mode (index into g_res)
@@ -285,6 +286,21 @@ bool is_fullscreen() {
     SDL_Window* w = win();
     return w && (SDL_GetWindowFlags(w) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
 }
+// Borderless window: windowed, no title bar or border, filling the display. Not offered on Android (always full screen).
+bool is_borderless() {
+    SDL_Window* w = win();
+    return w && !is_fullscreen() && (SDL_GetWindowFlags(w) & SDL_WINDOW_BORDERLESS) != 0;
+}
+enum { DM_WINDOW, DM_BORDERLESS, DM_FULL };
+bool display_has_borderless() {
+#ifdef PSP_GLES
+    return false;
+#else
+    return true;
+#endif
+}
+int display_mode() { return is_fullscreen() ? DM_FULL : is_borderless() ? DM_BORDERLESS : DM_WINDOW; }
+bool is_fixed_size() { return is_fullscreen() || is_borderless(); }   // the window size is not the user's choice (Window Size row hidden)
 int res_index(int ww, int wh) {   // the option of that size, added as a hand-set size if there is none
     for (size_t i = 0; i < g_res.size(); ++i)
         if (g_res[i].w == ww && g_res[i].h == wh) return int(i);
@@ -295,7 +311,7 @@ int res_index(int ww, int wh) {   // the option of that size, added as a hand-se
 // one, else the largest whole multiple that fits.
 void pick_window_size() {
     SDL_Window* w = win();
-    if (w && !is_fullscreen()) {
+    if (w && !is_fixed_size()) {
         int ww = 0, wh = 0;
         SDL_GetWindowSize(w, &ww, &wh);
         g_win_sel = res_index(ww, wh);
@@ -781,17 +797,19 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "No mods\nPut a mod folder (it has a mod.json) in the mods folder: " + mods_dir_path() + ". It shows up here, where it can be turned on and off.";
             break;
         case ROW_DISPLAY: {
-            const bool fs = is_fullscreen();
+            const int dm = display_mode();
             m.label = "Display";
-            if (fs) {
+            if (dm == DM_FULL || dm == DM_BORDERLESS) {
                 int dw = 0, dh = 0;
                 if (win()) SDL_GetWindowSize(win(), &dw, &dh);
-                std::snprintf(buf, sizeof buf, "Fullscreen  %d x %d", dw, dh);
+                std::snprintf(buf, sizeof buf, "%s  %d x %d", dm == DM_FULL ? "Fullscreen" : "Borderless", dw, dh);
                 m.value = buf;
             } else m.value = "Window";
-            m.can_dec = fs;    // left: Window
-            m.can_inc = !fs;   // right: Fullscreen
-            m.help = "Fullscreen or window\nFullscreen fills the screen. Saved. (F11 / Alt+Enter switch for this session only.)";
+            m.can_dec = dm > DM_WINDOW;    // left: towards Window
+            m.can_inc = dm < DM_FULL;                                           // right: towards Fullscreen
+            m.help = display_has_borderless()
+                ? "Window, borderless or fullscreen\nBorderless is a window without a title bar or border that fills the display (it stays a normal window, so alt-tabbing and other screens are quick). Fullscreen takes the screen over. Saved. (F11 / Alt+Enter switch fullscreen for this session only.)"
+                : "Fullscreen or window\nFullscreen fills the screen. Saved. (F11 / Alt+Enter switch for this session only.)";
             break;
         }
         case ROW_RES: {
@@ -806,7 +824,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             while (hi < int(g_res.size()) && g_res[size_t(hi)].k < 0) hi++;
             m.can_dec = lo >= 0 || o.k < 0;
             m.can_inc = hi < int(g_res.size());
-            m.help = is_fullscreen()
+            m.help = is_fixed_size()
                 ? "Window size\nUsed when Display is Window: multiples of the PSP's 480 x 272, or the Deck's screen."
                 : "Window size\nMultiples of the PSP's 480 x 272, or the Deck's screen (1280 x 800). Saved.";
             break;
@@ -1219,6 +1237,14 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "Flicker test (--ge-sync)\nWaits for the GPU at each step: slower, rules out timing. This session only.";
             break;
         }
+        case ROW_FOV: {
+            const int v = ge_fov_offset();
+            m.label = "Field of View";
+            m.value = v == 0 ? "Default" : (v > 0 ? "+" : "") + std::to_string(v) + "\xC2\xB0";
+            m.can_dec = v > k_fov_min; m.can_inc = v < k_fov_max;
+            m.help = "Field of view (PSPRECOMP_FOV)\nWidens (+) or narrows (-) the 3D camera's view by this many degrees from the game's own, for the whole 3D scene. A wider view shows more of the stage and makes the fighters look smaller. The HUD and lock-on ring keep the game's own camera, so they drift a little off the fighters at large values. Saved.";
+            break;
+        }
         case ROW_TALL: {
             const bool on = psp_touch_tall_enabled();
             m.label = "Tall Screen";
@@ -1468,6 +1494,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
 bool slider_of(Row r, int* steps, int* cur) {
     auto lin = [&](int lo, int hi, int step, int v) { *steps = (hi - lo) / step + 1; *cur = std::clamp((v - lo) / step, 0, *steps - 1); return true; };
     switch (r) {
+    case ROW_FOV: return lin(k_fov_min, k_fov_max, 5, ge_fov_offset());
     case ROW_BRIGHT: return lin(50, 150, 5, psp_post_brightness());
     case ROW_CONTRAST: return lin(50, 150, 5, psp_post_contrast());
     case ROW_SAT: return lin(0, 200, 5, psp_post_saturation());
@@ -1650,26 +1677,40 @@ void size_window(const ResOpt& o) {
     SDL_SetWindowPosition(w, SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_GetWindowDisplayIndex(w)),
                           SDL_WINDOWPOS_CENTERED_DISPLAY(SDL_GetWindowDisplayIndex(w)));
 }
-void apply_display(bool fullscreen) {
+void apply_display(int mode) {
     SDL_Window* w = win();
-    if (!w || fullscreen == is_fullscreen()) return;
-    if (fullscreen) {
+    if (!w) return;
+    if (mode == DM_BORDERLESS && !display_has_borderless()) mode = DM_FULL;
+    if (mode == display_mode()) return;
+    if (mode == DM_FULL) {
         if (SDL_SetWindowFullscreen(w, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0)
             std::fprintf(stderr, "[SETTINGS] fullscreen failed: %s\n", SDL_GetError());
+        else SDL_SetWindowBordered(w, SDL_TRUE);
         save("display", "fullscreen");
+    } else if (mode == DM_BORDERLESS) {
+        SDL_SetWindowFullscreen(w, 0);
+        SDL_SetWindowBordered(w, SDL_FALSE);
+        const int disp = std::max(0, SDL_GetWindowDisplayIndex(w));
+        SDL_Rect r{0, 0, 0, 0};
+        if (SDL_GetDisplayBounds(disp, &r) == 0 && r.w > 0) {
+            SDL_SetWindowPosition(w, r.x, r.y);
+            SDL_SetWindowSize(w, r.w, r.h);
+        }
+        save("display", "borderless");
     } else {
         SDL_SetWindowFullscreen(w, 0);
+        SDL_SetWindowBordered(w, SDL_TRUE);
         if (g_win_sel >= 0 && g_win_sel < int(g_res.size())) size_window(g_res[size_t(g_win_sel)]);
         save("display", "window");
     }
-    std::fprintf(stderr, "[SETTINGS] display: %s\n", fullscreen ? "fullscreen" : "window");
+    std::fprintf(stderr, "[SETTINGS] display: %s\n", mode == DM_FULL ? "fullscreen" : mode == DM_BORDERLESS ? "borderless" : "window");
 }
 // Window size: resizes the window now, or (in fullscreen) is remembered for Window mode. Saved either way.
 void apply_res(int i) {
     if (i < 0 || i >= int(g_res.size()) || g_res[size_t(i)].k < 0) return;
     g_win_sel = i;
     const ResOpt& o = g_res[size_t(i)];
-    if (!is_fullscreen()) size_window(o);
+    if (!is_fixed_size()) size_window(o);
     if (o.k == K_DECK) {
         unsave("window_scale");
         save("window_size", std::to_string(o.w) + "x" + std::to_string(o.h));
@@ -1677,7 +1718,7 @@ void apply_res(int i) {
         unsave("window_size");
         save("window_scale", std::to_string(o.k));
     }
-    std::fprintf(stderr, "[SETTINGS] window size %dx%d%s\n", o.w, o.h, is_fullscreen() ? " (for Window mode)" : "");
+    std::fprintf(stderr, "[SETTINGS] window size %dx%d%s\n", o.w, o.h, is_fixed_size() ? " (for Window mode)" : "");
 }
 void apply_render_scale(int n) {
     n = std::max(1, std::min(n, k_max_rs));
@@ -1790,7 +1831,11 @@ void change(int d) {   // left / right on the selected row
     if (const EnvOpt* o = env_row_opt(g_rows[size_t(g_sel)])) { env_change(*o, d, false); g_dirty = true; return; }
     switch (g_rows[size_t(g_sel)]) {
     case ROW_DISPLAY:
-        apply_display(d > 0);
+        {
+            int m = std::clamp(display_mode() + (d > 0 ? 1 : -1), int(DM_WINDOW), int(DM_FULL));
+            if (m == DM_BORDERLESS && !display_has_borderless()) m = d > 0 ? int(DM_FULL) : int(DM_WINDOW);
+            apply_display(m);
+        }
         break;
     case ROW_RES: {
         int i = g_win_sel < 0 ? 0 : g_win_sel;
@@ -1936,6 +1981,11 @@ void change(int d) {   // left / right on the selected row
     case ROW_SHARP: {
         const int v = std::min(4, std::max(0, psp_post_sharpen() + d));
         if (v != psp_post_sharpen()) { psp_post_set_sharpen(v); save("sharpen", std::to_string(v)); }
+        break;
+    }
+    case ROW_FOV: {
+        const int v = std::clamp(ge_fov_offset() + d * 5, k_fov_min, k_fov_max);
+        if (v != ge_fov_offset()) { ge_set_fov_offset(v); save("fov", std::to_string(v)); }
         break;
     }
     case ROW_BRIGHT: case ROW_CONTRAST: case ROW_SAT: {
@@ -2099,7 +2149,7 @@ void build_rows() {
     auto add = [&](Row r) { g_rows.push_back(r); };
     switch (page_id()) {
     case PAGE_DISPLAY:
-        add(ROW_SEC_WINDOW); add(ROW_DISPLAY); if (!is_fullscreen()) add(ROW_RES); add(ROW_WIDE); if (window_is_tall()) add(ROW_TALL); add(ROW_UPSCALE);
+        add(ROW_SEC_WINDOW); add(ROW_DISPLAY); if (!is_fixed_size()) add(ROW_RES); add(ROW_WIDE); add(ROW_FOV); if (window_is_tall()) add(ROW_TALL); add(ROW_UPSCALE);
         add(ROW_SEC_PERF);
         if (g_fps.get && g_fps.count > 1) add(ROW_FPS);
         add(ROW_VSYNC);
@@ -2562,7 +2612,7 @@ void confirm_row() {
         set_open(false);
         return;
     case ROW_DISPLAY:
-        apply_display(!is_fullscreen());
+        apply_display(display_mode() == DM_FULL ? DM_WINDOW : display_mode() + 1);   // cycle: Window, Borderless, Fullscreen
         break;
     case ROW_RES: {   // cycle forward
         const int i = g_win_sel < 0 ? -1 : g_win_sel;
@@ -2652,6 +2702,7 @@ void confirm_row() {
     case ROW_RING: change((g_ring_next >= 0 ? g_ring_next : ge_draw_ring_mode()) ? -1 : 1); return;
     case ROW_SOFT: change(ge_soft_focus() ? -1 : 1); return;
     case ROW_TALL: change(psp_touch_tall_enabled() ? -1 : 1); return;
+    case ROW_FOV: change(ge_fov_offset() >= k_fov_max ? -(k_fov_max - k_fov_min) / 5 : 1); return;
     case ROW_AA: change(psp_post_aa() >= POST_AA_SMAA ? -int(POST_AA_SMAA) : 1); return;
     case ROW_SHARP: change(psp_post_sharpen() >= 4 ? -4 : 1); return;
     case ROW_HDR: if (psp_hdr_available()) change(psp_hdr_wanted() ? -1 : 1); return;
@@ -2933,6 +2984,7 @@ void psp_settings_load_early() {
         }
     auto it = g_saved.find("display");
     if (it != g_saved.end() && it->second == "fullscreen") put("PSPRECOMP_FULLSCREEN", "1");
+    else if (it != g_saved.end() && it->second == "borderless") { put("PSPRECOMP_FULLSCREEN", "0"); put("PSPRECOMP_BORDERLESS", "1"); }
     else if (it != g_saved.end() && it->second == "window") {
         put("PSPRECOMP_FULLSCREEN", "0");
         auto k = g_saved.find("window_scale");
@@ -2941,6 +2993,7 @@ void psp_settings_load_early() {
     if ((it = g_saved.find("render_scale")) != g_saved.end() && std::atoi(it->second.c_str()) > 0)
         put("PSPRECOMP_RENDER_SCALE", it->second);
     if ((it = g_saved.find("widescreen")) != g_saved.end()) put("PSPRECOMP_WIDESCREEN", it->second == "1" ? "1" : "0");
+    if ((it = g_saved.find("fov")) != g_saved.end()) put("PSPRECOMP_FOV", it->second);
     if ((it = g_saved.find("soft_focus")) != g_saved.end()) put("PSPRECOMP_SOFT_FOCUS", it->second == "0" ? "0" : "1");
     if ((it = g_saved.find("tall_screen")) != g_saved.end()) put("PSPRECOMP_TALL_SCREEN", it->second == "0" ? "0" : "1");
     if ((it = g_saved.find("post_aa")) != g_saved.end()) put("PSPRECOMP_POST_AA", it->second == "2" ? "2" : it->second == "1" ? "1" : "0");
@@ -3149,7 +3202,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
     }
     case SDL_WINDOWEVENT:
         if (open) {   // size change (or F11): the display rows follow
-            if (!is_fullscreen()) pick_window_size();
+            if (!is_fixed_size()) pick_window_size();
             g_dirty = true;
         }
         return false;
@@ -3265,7 +3318,7 @@ void psp_settings_tick() {
     g_last_present = t;
     if ((g_dirty || t >= g_rows_next) && page_id() == PAGE_DISPLAY && g_sub < 0) {   // Window Size only shows while windowed
         const bool has_res = std::find(g_rows.begin(), g_rows.end(), ROW_RES) != g_rows.end();
-        if (has_res == is_fullscreen()) build_rows();
+        if (has_res == is_fixed_size()) build_rows();
     }
     if (g_dirty || t >= g_rows_next) {
         g_set_rows = make_set_rows();

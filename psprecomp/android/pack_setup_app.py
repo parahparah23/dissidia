@@ -14,6 +14,8 @@ import argparse, hashlib, os, shutil, subprocess, sys, tempfile, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
+sys.path.insert(0, os.path.join(REPO, "release"))
+from assemble import game_keep  # noqa: E402  (one list of game files for the desktop release and this payload)
 SYSROOT = "toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 CLANG_RT = "toolchains/llvm/prebuilt/linux-x86_64/lib/clang/18/lib/linux"
 INTERP = "/data/data/org.psprecomp.setup/files/ld-musl"
@@ -78,17 +80,13 @@ def main():
                           (rt + "/aarch64/libunwind.a", "libunwind.a"), (rt + "/aarch64/libatomic.a", "libatomic.a")):
             z.write(src, "android/ndk/clang-rt/" + name)
         z.writestr("android/ndk/.psprecomp-ndk", json.load(open(os.path.join(ap_, "versions.json")))["ndk"]["version"] + "\n")
-        # the game's tools and analysis (the same whitelist as release/assemble.py)
+        # the game's files: the same list as the desktop release (release/assemble.py game_keep), so the tools find what they need
+        # (e.g. d1_moves/, the Bartz moves' patches, was missing here in 0.1.19)
         for dp, dns, fns in os.walk(a.game):
-            rel_dir = os.path.relpath(dp, a.game).replace("\\", "/")
-            top = rel_dir.split("/")[0]
-            dns[:] = [d for d in dns if d not in ("__pycache__", ".venv")]
-            for fn in fns:
-                rel = os.path.normpath(os.path.join(rel_dir, fn)).replace("\\", "/")
-                keep = (top == "analysis" and not rel.endswith(".py")) or rel in ("game.toml", "features.ini", "package_paths.txt") or \
-                    (rel.startswith("overlay_") and rel.endswith(".toml")) or \
-                    (top == "tools" and rel.count("/") == 1 and rel.endswith((".py", ".json", ".txt")) and not fn.startswith("test_"))
-                if keep:
+            dns[:] = sorted(d for d in dns if d not in ("__pycache__", ".venv"))
+            for fn in sorted(fns):
+                rel = os.path.relpath(os.path.join(dp, fn), a.game).replace("\\", "/")
+                if game_keep(rel):
                     z.write(os.path.join(dp, fn), "game/" + rel)
                     fp_inputs.append(("game/" + rel, os.path.join(dp, fn)))
         keyfile = a.update_key or os.path.join(a.game, "update_key.pub")   # the updater only accepts a manifest signed with this key

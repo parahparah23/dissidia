@@ -26,12 +26,28 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
 
+
+
+def game_keep(rel):
+    """Which files of games/dissidia (path relative to it, '/' separated) a release carries in game/. The Android setup app's payload
+    (android/pack_setup_app.py) uses this same list, so a file the tools need reaches both."""
+    top = rel.split("/")[0]
+    if top in ("analysis", "fx_shaders", "icon") and not rel.endswith(".py"):
+        return True
+    if rel in ("game.toml", "features.ini", "package_paths.txt", "README.md", "net_packs.json") or (rel.startswith("overlay_") and rel.endswith(".toml")):
+        return True
+    if top == "d1_moves" and rel.endswith((".json", ".npd")):   # Bartz's Dissidia 1 moves: patches against the player's discs
+        return True
+    if top == "tools" and rel.count("/") == 1 and rel.endswith((".py", ".json", ".txt")) and not os.path.basename(rel).startswith("test_"):
+        return True
+    return False
 
 def die(msg):
     print("assemble: " + msg, file=sys.stderr)
@@ -116,17 +132,6 @@ def main():
 
     game_src = os.path.join(a.repo, "games", "dissidia")
 
-    def game_keep(rel):
-        top = rel.split("/")[0]
-        if top in ("analysis", "fx_shaders", "icon") and not rel.endswith(".py"):
-            return True
-        if rel in ("game.toml", "features.ini", "package_paths.txt", "README.md", "net_packs.json") or (rel.startswith("overlay_") and rel.endswith(".toml")):
-            return True
-        if top == "d1_moves" and rel.endswith((".json", ".npd")):   # Bartz's Dissidia 1 moves: patches against the player's discs
-            return True
-        if top == "tools" and rel.count("/") == 1 and rel.endswith((".py", ".json", ".txt")) and not os.path.basename(rel).startswith("test_"):
-            return True
-        return False
     copy_tree(game_src, os.path.join(out, "game"), lambda rel: False)
     # (copy_tree cannot filter by "keep"; prune afterwards)
     for dp, dns, fns in os.walk(os.path.join(out, "game"), topdown=False):
@@ -222,11 +227,22 @@ def main():
     base = os.path.basename(out.rstrip("/\\"))
     arch = out + (".zip" if win else ".tar.xz")
     if win:
+        # A zip entry's date has no time zone: written from the CI runner's UTC clock and read as local time by Windows, the files of a
+        # hand-unpacked release were up to a few hours in the future west of UTC, newer than anything the build makes from them, and ninja
+        # gave up ("manifest 'build.ninja' still dirty after 100 tries"). Every entry gets the build time minus 14 h: in the past in every
+        # time zone, and still later than the previous release's files (an update still relinks).
+        stamp = time.gmtime(time.time() - 14 * 3600)[:6]
         with zipfile.ZipFile(arch, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for dp, dns, fns in os.walk(out):
                 for fn in fns:
                     p = os.path.join(dp, fn)
-                    z.write(p, os.path.join(base, os.path.relpath(p, out)))
+                    zi = zipfile.ZipInfo.from_file(p, os.path.join(base, os.path.relpath(p, out)))
+                    zi.date_time = stamp
+                    zi.compress_type = zipfile.ZIP_DEFLATED
+                    zi._compresslevel = 9   # (open() reads the level from the entry: 3.7-3.12 name)
+                    zi.compress_level = 9   # (3.13+ name)
+                    with open(p, "rb") as src, z.open(zi, "w", force_zip64=True) as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
     else:
         # Python's lzma is single threaded (about 3.5 min for this archive on a CI runner): write the tar, then compress it with the
         # xz tool on all cores (-T0). Same format, any xz reads it. Falls back to the library when the tool is not installed.
