@@ -571,6 +571,32 @@ std::set<uint32_t> file_objects(uint32_t mgr) {
     for (uint32_t o = rd(mgr + 8u), n = 0; o && ok(o, 0xF0) && n < 4096; o = rd(o + 232u), n++) v.insert(o);
     return v;
 }
+// Debug (PSPRECOMP_TTLOCK_INTEGRITY=1): the data blocks every file object of the file manager points at (offsets 8..0xE4 of the object), hashed at each call;
+// a later call reports the blocks of a still-present object whose contents changed ("[INTEG] ... CHANGED"): something wrote into a live character's file data.
+void dangle_check(const char* tag);
+struct IntegBlk { uint32_t addr, size; uint64_t h; };
+std::map<uint64_t, IntegBlk> g_integ;   // (object << 8 | offset) -> block as last seen
+void integrity_scan(const char* tag) {
+    static const bool on = std::getenv("PSPRECOMP_TTLOCK_INTEGRITY") != nullptr;
+    if (!on || !g_log) return;
+    const uint32_t mgr = rd(FILE_MGR_PTR); if (!ok(mgr, 0x10)) return;
+    int changed = 0, seen = 0, fresh = 0; std::set<uint64_t> keep;
+    for (const uint32_t o : file_objects(mgr)) {
+        const uint32_t id = ok(rd(o), 8) ? rdh(rd(o)) : 0u;
+        for (uint32_t off = 8; off < 0xE4u; off += 4) {
+            const uint32_t b = rd(o + off); if (b < 0x08900000u || b >= 0x0C000000u || (b & 15u) || !ok(b - 0x10u, 0x10)) continue;
+            const uint32_t csz = rd(b - 8u); if (csz < 0x20u || csz > 0x1000000u) continue;
+            const uint32_t sz = csz - 0x10u; if (!ok(b, sz)) continue;
+            uint64_t h = 1469598103934665603ull; for (uint32_t k = 0; k < sz; k += 4) { h ^= rd(b + k); h *= 1099511628211ull; }
+            const uint64_t key = (static_cast<uint64_t>(o) << 8) | off; keep.insert(key); seen++;
+            auto it = g_integ.find(key);
+            if (it == g_integ.end() || it->second.addr != b || it->second.size != sz) { g_integ[key] = {b, sz, h}; fresh++; continue; }
+            if (it->second.h != h) { changed++; std::fprintf(stderr, "[INTEG] %s: file object %08X id %u +%u block %08X (%u B) CHANGED\n", tag, o, id, off, b, sz); it->second.h = h; }
+        }
+    }
+    for (auto it = g_integ.begin(); it != g_integ.end();) { if (!keep.count(it->first)) it = g_integ.erase(it); else ++it; }
+    std::fprintf(stderr, "[INTEG] %s: %d blocks checked, %d new, %d CHANGED\n", tag, seen, fresh, changed);
+}
 std::map<int, std::vector<uint32_t>> g_leftover_load;   // the teardown's copy of g_own_load: mid-battle characters whose files retail's Retry / end does NOT release (leftover_unload)
 std::map<int, std::vector<uint32_t>> g_own_load;   // character -> file ids its mid-battle load made (only those are unloaded again)
 std::map<int, float> g_gone_since;                 // character -> battle age since which no fighter of it is standing (unload_departed)
@@ -584,6 +610,7 @@ void load_character(int charId) {
     if (!rec) { std::fprintf(stderr, "[TAGTEAM] load_character(%d): no file record\n", charId); return; }
     const uint32_t mgr = rd(FILE_MGR_PTR), heap = load_heap();
     if (!heap) { std::fprintf(stderr, "[TAGTEAM] load_character(%d): no staging heap\n", charId); return; }
+    { char t[48]; std::snprintf(t, sizeof t, "before load_character(%d)", charId); integrity_scan(t); }
     const uint32_t fail0 = dissidia_fx_fail_count();
     { uint32_t tot, fr, lg; dissidia_fx_pool_free(g_ram, &tot, &fr, &lg);
       if (g_log) std::fprintf(stderr, "[LOADCHK] load_character(%d): effect pool before: free %u B, largest %u B (a pack needs ~1.2 MB)\n", charId, fr, lg);
@@ -620,6 +647,7 @@ void load_character(int charId) {
     if (g_log) for (const uint32_t o : file_objects(mgr)) if (!objs_before.count(o) && ok(o, 0x40)) std::fprintf(stderr, "[LOADCHK] char %d: file object %08X id %u refs %d (new)\n", charId, o, ok(rd(o), 8) ? rdh(rd(o)) : 0u, static_cast<int16_t>(rdh(o + 226u)));
     if (g_log) for (uint32_t id : ids) if (id != 0xFFFFu) { const uint32_t o = call(FILE_FIND, mgr, id); std::fprintf(stderr, "[LOADCHK] char %d: file id %u object %08X %s refs %d\n", charId, id, o, objs_before.count(o) ? "(already loaded)" : "(made now)", o ? static_cast<int16_t>(rdh(o + 226u)) : 0); }
     if (g_log && loaded) { char tag[48]; std::snprintf(tag, sizeof tag, "after load_character(%d)", charId); dissidia_models_mem_summary(g_ram, tag); }
+    { char t[48]; std::snprintf(t, sizeof t, "after load_character(%d)", charId); integrity_scan(t); dangle_check(t); }
 }
 
 // The side's character record (REC_BASE + 0x1060 * side, a copy of the character's save data: level, loadout sets, ability list) is what the
@@ -2512,6 +2540,38 @@ std::set<uint32_t> objlist_links() {
     for (int n = 0; p && ok(p, 0x80) && n < 8192; p = rd(p + 120u), n++) v.insert(p + 120u);
     return v;
 }
+// A block the destructor of fighter A left allocated is freed only when nobody else uses it. The blocks come from A's own constructor / init, but a fighter of the
+// SAME character (a mirror match: the human's Kain and the enemy's Kain) can hold a pointer into one when the constructor found shared data already made
+// (a cache, a template) and the allocation order of the two differs. Scanned for pointers into [addr, addr + size): the actor blocks and the owned blocks (up to
+// 16 KB each) of every other live fighter in the world's fighter list, the slots and the extras. Returns the user's address, 0 = unused.
+// PSPRECOMP_TTLOCK_NOLEFTGUARD=1: free as before.
+struct DangleRec { uint32_t holder, addr, size; uint64_t h; bool freed; };   // a leftover block something outside still points at: kept (or freed with PSPRECOMP_TTLOCK_NOLEFTGUARD) and watched
+std::vector<DangleRec> g_dangle;
+uint64_t blk_hash(uint32_t a, uint32_t n) { uint64_t h = 1469598103934665603ull; for (uint32_t k = 0; k + 4 <= n; k += 4) { h ^= rd(a + k); h *= 1099511628211ull; } return h; }
+void dangle_check(const char* tag) {   // later: does the holder still point at the block, and did the block's contents change (reused by a newcomer's allocation)?
+    for (DangleRec& d : g_dangle) {
+        if (!ok(d.addr, d.size ? d.size : 16u)) continue;
+        const uint32_t cur = rd(d.holder); const bool still = cur >= d.addr && cur < d.addr + (d.size ? d.size : 16u);
+        const uint64_t h = blk_hash(d.addr, std::min<uint32_t>(d.size ? d.size : 16u, 0x1000u));
+        if (!still || h != d.h) { std::fprintf(stderr, "[TTLOCK] %s: leftover block %08X+%X (%s) referenced from %08X: holder %s, block contents %s\n", tag, d.addr, d.size, d.freed ? "FREED" : "kept", d.holder, still ? "still points at it" : "changed", h != d.h ? "CHANGED" : "same"); d.h = h; }
+    }
+}
+struct LeftRefs { std::vector<std::pair<uint32_t, uint32_t>> rng; std::map<uint32_t, uint32_t> holder; };   // candidate [lo, hi) -> first outside holder word address
+// One pass over guest RAM (0x08800000 .. 0x0C000000): every word that points into one of the candidate blocks and lives outside the candidates themselves, their heap
+// headers and the actor A is a live reference (a fighter of the same character, a global, a registry, a world object ...).
+void leftover_scan(uint32_t A, const std::vector<Blk>& cand, LeftRefs& out) {
+    std::vector<std::pair<uint32_t, uint32_t>> r; for (const Blk& b : cand) r.push_back({b.addr, b.addr + (b.size ? b.size : 16u)});
+    std::sort(r.begin(), r.end()); out.rng = r;
+    auto in_cand = [&](uint32_t a) { for (const auto& q : r) if (a + 0x10u >= q.first && a < ((q.second + 15u) & ~15u) + 0x10u) return true; return false; };   // block + its own header + the next chunk's header
+    constexpr uint32_t lo0 = 0x08800000u, hi0 = 0x0C000000u; const uint32_t lo = r.front().first, hi = r.back().second;
+    for (uint32_t a = lo0; a < hi0; a += 4) {
+        const uint32_t v = rd(a); if (v < lo || v >= hi) continue;
+        auto it = std::upper_bound(r.begin(), r.end(), std::make_pair(v, 0xFFFFFFFFu)); if (it == r.begin()) continue; --it;
+        if (v < it->first || v >= it->second) continue;
+        if ((a >= A && a < A + 0x12D0u) || in_cand(a)) continue;
+        out.holder.emplace(it->first, a);
+    }
+}
 bool g_rebuild_fresh_brain = false;   // set by reuse_parked: the rebuilt extra gets the constructor's new brain (see there)
 bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     TtStep tt_step_("rebuild_begin");
@@ -2562,7 +2622,16 @@ bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
         const std::vector<Blk> prevlist = g_leak_watch.count(A) ? g_leak_watch[A] : std::vector<Blk>();   // only a character a rebuild built: the retail character's leftovers stay in use (the HUD stays bound to it, e.g. the portrait)
         // (j.ctrl: an extra's private controller copy, start_extra; the rebuilt fighter keeps it - freeing it here let the heap hand it out again while the
         // actor still wrote to it: the world list got corrupted and the next constructor looped, u10f)
-        for (const Blk& b : prevlist) { if (b.addr == A || b.addr == j.B || b.addr == j.L || b.addr == j.ctrl) continue; auto it = live.find(b.addr - 0x10u); if (it != live.end() && (b.size == 0 || it->second == ((b.size + 15u) & ~15u) + 0x10u)) { call(0x0883133Cu, b.addr); live.erase(it); freed++; } }
+        static const bool no_guard = std::getenv("PSPRECOMP_TTLOCK_NOLEFTGUARD") != nullptr; int kept_used = 0;
+        LeftRefs lrefs;
+        { std::vector<Blk> cand; for (const Blk& b : prevlist) { if (b.addr == A || b.addr == j.B || b.addr == j.L || b.addr == j.ctrl) continue; auto it = live.find(b.addr - 0x10u); if (it != live.end() && (b.size == 0 || it->second == ((b.size + 15u) & ~15u) + 0x10u)) cand.push_back(b); }
+            if (!cand.empty()) leftover_scan(A, cand, lrefs); }
+        for (const Blk& b : prevlist) { if (b.addr == A || b.addr == j.B || b.addr == j.L || b.addr == j.ctrl) continue; auto it = live.find(b.addr - 0x10u); if (it != live.end() && (b.size == 0 || it->second == ((b.size + 15u) & ~15u) + 0x10u)) {
+            if (auto h = lrefs.holder.find(b.addr); h != lrefs.holder.end()) g_dangle.push_back({h->second, b.addr, b.size, blk_hash(b.addr, std::min<uint32_t>(b.size ? b.size : 16u, 0x1000u)), no_guard});
+            if (!no_guard) if (auto h = lrefs.holder.find(b.addr); h != lrefs.holder.end()) { kept_used++; if (g_log) { std::string who = "static / unowned"; for (auto& kv : g_owned) for (const Blk& o : kv.second) if (h->second >= o.addr && h->second < o.addr + (o.size ? o.size : 1u)) who = (o.addr == kv.first ? "actor block of " : "a block of ") + std::to_string(kv.first); std::fprintf(stderr, "[TTLOCK] rebuild %08X: leftover block %08X+%X is referenced from %08X (%s): not freed\n", A, b.addr, b.size, h->second, who.c_str()); std::fprintf(stderr, "[TTLOCK]   holder %08X words:", h->second - 8u); for (int q = 0; q < 8; q++) std::fprintf(stderr, " %08X", rd(h->second - 8u + 4u * q)); std::fprintf(stderr, " | block words:"); for (int q = 0; q < 6; q++) std::fprintf(stderr, " %08X", rd(b.addr + 4u * q)); std::fprintf(stderr, "\n"); } continue; }
+            if (g_log && std::getenv("PSPRECOMP_TTLOCK_LEFTLOG")) std::fprintf(stderr, "[TTLOCK] rebuild %08X: leftover block %08X+%X freed\n", A, b.addr, b.size);
+            call(0x0883133Cu, b.addr); live.erase(it); freed++; } }
+        if (kept_used && g_log) std::fprintf(stderr, "[TTLOCK] rebuild %08X: %d leftover blocks kept (a live fighter points into them)\n", A, kept_used);
         if (g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: %d blocks of the old character left by the destructor freed\n", A, freed);
     }
     if (g_log) { world_dump("before"); world_state("before", A); }
@@ -2806,6 +2875,7 @@ void rebuild_frame() {
         if (ok(st, 0x40)) { wr(st + 0xCu, static_cast<uint32_t>(j.hp)); wr(st + 0x8u, 0); wr(st + 0x14u, static_cast<uint32_t>(j.brv)); }
         g_ctx->r[29] = static_cast<int32_t>(sp0);
         if (auto hh = g_extra_hdl.find(j.A); hh != g_extra_hdl.end() && ok(hh->second, 0x40) && ok(st, 0x40)) wr(hh->second + 28u, rdh(st + 20u));   // the handler copy's last reported BRV = the member's own (else FUN_08AE090C reports the difference every frame)
+        integrity_scan("rebuilt fighter stands"); dangle_check("rebuilt fighter stands");
         if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs rebuild %08X: char %d stands (script %d, hp %d brv %08X)%s\n", dissidia_battle_age() / 60.0f, j.A, actor_char(j.A), static_cast<int16_t>(rd(j.A + 0x180u) & 0xFFFFu), j.hp, static_cast<uint32_t>(j.brv), timeout ? " [timeout]" : "");
         g_rb_watch.push_back({j.A, 300});
         if (std::getenv("PSPRECOMP_TAGTEAM_LATEDIFF")) { LateDiff d; d.A = j.A; d.t0 = dissidia_battle_age(); d.side = side_of(j.A); latediff_snap(d); g_latediff.push_back(d); }

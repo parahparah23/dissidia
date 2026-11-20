@@ -3225,3 +3225,32 @@ enemy partner (it was on the right for both).
 - **Not reproduced**: the exact RP6 sequence. In `rp6_1120_terra.log` Terra was never marked broken (`[XBRKST]` only 0 -> 1 -> 2 -> 0 after her own HP attacks, which coincide with
   the player's own HP attack, `[HPBRV]`); the user may have seen the player's own HP attack / the number turning 0 (no `HUDCHLOG` in that log). Enemy side: with `SETBRV=enemy2`
   the panel followed the human's target (extraE), where a BREAK is legitimate; the skip path (type 2) fired in the later break (panel on the slot fighter).
+## Same character on both sides: shared resources on rebuild (20 Nov, tree ttlock; host-only, headless, the reported symptom itself NOT reproduced)
+User report (RP6, `~/dissidia/rp6logs/rp6_1120_kain_wind2.log`, `rp6_1120_terra.log`): human Kain (char 24) + CPU partner Terra (11) vs Cecil -> Kain (the enemy slot, same
+character as the human, same file ids 568 / 538) -> Ultimecia, extra Kain -> Ultimecia -> Lightning (478.6 s): afterwards Kain's wind move (BR_L_AERO1, script 10040) and
+Terra's moves "do not work".
+- **What the logs rule out.** The census keeps char 24 live while the human's Kain stands (`counted live by: slot 08D92090 ...`), so neither the file release nor the
+  effect pack / voice bank release touched Kain's or Terra's files; packs have separate handles (14 Kain, 15 Terra, 16 Ultimecia, 17 Lightning), no `FAILED` line.
+  The `staging slot raised` line is printed at every load (same text at the Ultimecia load), not new at Lightning.
+- **Found (host, measured): the rebuild's "blocks of the old character left by the destructor freed" step frees blocks that other memory still points at.**
+  `rebuild_begin` frees every block of the old body's constructor that the destructor left allocated (`g_leak_watch`), on the assumption that nothing refers to them.
+  Scanning guest RAM (0x08800000..0x0C000000) for words pointing into those blocks before freeing showed otherwise on a SLOT rebuild (the slot fighter's blocks, 14-16 of them,
+  like the 16 blocks of the log): 3-7 blocks per rebuild are referenced from static data outside any fighter (side / slot objects around `0x08BFFD00..0x08C00A00`,
+  `0x08CBB5xx`, `0x09D84xxx..0x09D86xxx`, `0x0A16Cxxx`; one 60 KB block (`+EDA8`), one 13 KB (`+34E0`), one 5 KB (`+1430`)), e.g. `[TTLOCK] rebuild 08D835D0: leftover block
+  08DD8510+1430 is referenced from 09D84AC0`, `rebuild 08DE1CF0: leftover block 08E60C20+EDA8 is referenced from 08BFFFD4`. With the old behaviour (`PSPRECOMP_TTLOCK_NOLEFTGUARD=1`)
+  the freed block is handed out again and overwritten while the reference stays: `[TTLOCK] rebuilt fighter stands: leftover block 08E1B970+310 (FREED) referenced from 08BFFD5C:
+  holder still points at it, block contents CHANGED` (runs `~/dissidia/tt/tl8` vs `tl7`). In the report the 16 freed blocks of the slot rebuild at 457 s were handed to Lightning's
+  constructor at 478.6 s: a stale static reference into them is a candidate for the broken moves of fighters that were not rebuilt; NOT proven to be the cause (no host run
+  reproduced "Kain's wind / Terra's magic stop"; the RP6 log has no heap-level data for the 16 blocks).
+- **Fix** (`tagteam.cpp`, `rebuild_begin`): before the leftover blocks are freed, one pass over guest RAM (`leftover_scan`) finds every word outside the candidate blocks (their own
+  heap headers and the old actor excluded) that points into one; those blocks are NOT freed (a small leak until the battle's own teardown sweep), logged as `[TTLOCK] rebuild A:
+  leftover block X+S is referenced from H (...): not freed`. Generic: independent of the character, it also protects a block a same-character fighter points into.
+  `PSPRECOMP_TTLOCK_NOLEFTGUARD=1`: old behaviour. `PSPRECOMP_TTLOCK_LEFTLOG=1`: log every freed block.
+- **Debug aids**: `PSPRECOMP_TTLOCK_INTEGRITY=1` hashes every file object's data blocks at each `load_character` / rebuild and logs `[INTEG] ... CHANGED` (the only blocks that
+  changed in the runs were ids 71 / 43 / 64 = HUD / stage data that change by design, no character data); `dangle_check` re-checks the watched blocks after each load / rebuild
+  (`[TTLOCK] after load_character(N): leftover block ... (kept|FREED) referenced from H: ... block contents same|CHANGED`).
+- **Recipe**: `~/dissidia/tt/bin/tlrun.sh NAME party_battle_walk.txt 3000 "PSPRECOMP_TTLOCK_LEFTLOG=1 PSPRECOMP_TAGTEAM_LOG=1 PSPRECOMP_TAGTEAM_KOLIST_NAT=1 PSPRECOMP_TAGTEAM_CALLIN_DELAY=4
+  PSPRECOMP_TAGTEAM_RESERVE=9,27,5,24;20,16,31,33 PSPRECOMP_TAGTEAM_KOLIST=cpu:9,enemy2:14,cpu:20,enemy2:26,cpu:32,enemy2:38,cpu:46,enemy2:54"` (enemy rotation Jecht (the human's
+  character) -> Ultimecia -> Lightning -> Yuffie; the host runs at 1/50 speed under load, ~25 min to t = 40 s).
+- **Not verified**: that the dangling references are what broke the moves (needs the user's device or a host run with the effect pool nearly full: the host pool had 5.4 MB free where
+  the RP6 had 1.1 MB); screenshots of Kain's wind move; whether the kept blocks leak enough to matter over a very long battle (~70-80 KB per slot rebuild).
