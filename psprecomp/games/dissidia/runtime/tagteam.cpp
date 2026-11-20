@@ -3292,12 +3292,14 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             tp_vec("pull away victim", vic, vec); call(PLACE, vic, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
             g_ctx->r[29] = static_cast<int32_t>(sp0);
         }
-        if (!att && tt >= 9.0f && tt - t0 >= (std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP") ? 2.5f : 6.0f)) {
+        static const float hpm_gap = std::getenv("PSPRECOMP_TAGTEAM_HPM_GAP") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_HPM_GAP"))) : 6.0f;   // seconds between pairs
+        if (!att && tt >= 9.0f && tt - t0 >= (std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP") ? 2.5f : hpm_gap)) {
             step++; t0 = tt;
             const int base = std::atoi(std::getenv("PSPRECOMP_TAGTEAM_HPMATRIX"));
             // pairs: opposite sides only (0,2 = human team, 1,3 = enemy team)
             static const int P[8][2] = {{0, 1}, {0, 3}, {2, 1}, {2, 3}, {1, 0}, {3, 0}, {1, 2}, {3, 2}};
             int pi = step % 8; const int round = step / 8;
+            if (const char* pl = std::getenv("PSPRECOMP_TAGTEAM_HPM_PAIRS")) { const size_t n = std::strlen(pl); if (n) pi = (pl[static_cast<size_t>(step) % n] - '0') & 7; }   // e.g. "604": only these pairs, in this order
             static const int PF[8][2] = {{2, 0}, {0, 2}, {3, 1}, {1, 3}, {2, 0}, {0, 2}, {3, 1}, {1, 3}};   // PSPRECOMP_TAGTEAM_HPM_FRIENDLY=1: same-side pairs (friendly fire)
             static const bool hpm_friendly = std::getenv("PSPRECOMP_TAGTEAM_HPM_FRIENDLY") != nullptr;
             const int ids[3] = {base, base + 1, base + 70};
@@ -3331,6 +3333,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 call(LOCK_SET, rd(a + 0x5ACu), v);
                 if (std::getenv("PSPRECOMP_TAGTEAM_HPM_WRONGFOE")) { uint32_t other = 0; for (int q = 0; q < 4; q++) if (F[q] != a && F[q] != v && side_of(F[q]) != side_of(a)) other = F[q]; if (!other) for (int q = 0; q < 4; q++) if (F[q] != a && F[q] != v) other = F[q]; if (other) call(SET_FOE, a, other); }   // the foe is somebody else than the victim: damage must still go to the victim
                 { const uint32_t st = rd(a + 0x52Cu); wr(st + 0x14u, (3000u << 16) | 3000u); }
+                if (const char* vb = std::getenv("PSPRECOMP_TAGTEAM_HPM_VBRV")) { const uint32_t sv = rd(v + 0x52Cu); wr(sv + 0x14u, (rd(sv + 0x14u) & 0xFFFF0000u) | (static_cast<uint32_t>(std::atoi(vb)) & 0xFFFFu)); }   // victim's bravery n (a small n: the BRV attack breaks it)
                 if (std::getenv("PSPRECOMP_TAGTEAM_HPM_VBRV0")) { const uint32_t sv = rd(v + 0x52Cu); wr(sv + 0x14u, rd(sv + 0x14u) & 0xFFFF0000u); }   // victim's bravery 0: an HP attack does HP damage
                 g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
                 if (!std::getenv("PSPRECOMP_TAGTEAM_HPM_PAD") && (a == F[0] || !std::getenv("PSPRECOMP_TAGTEAM_HPM_AI"))) call(START_ACTION, a + 304u, static_cast<uint32_t>(act), 0);
@@ -5745,8 +5748,16 @@ uint32_t g_cl_addr[8] = {}; FuncPtr g_cl_orig[8] = {};
 template <int I> void calllog_hook(uint8_t* rdram, recomp_context* ctx) {
     static int n = 0;
     static const bool only_chase = std::getenv("PSPRECOMP_TAGTEAM_CALLLOG_CHASE") != nullptr;   // only while a chase runs (chase ctl +0 != 0)
-    const bool in = !only_chase || (g_chase_ctl_now && rd(g_chase_ctl_now) != 0);
-    if (in && n++ < 2000) {
+    bool in = !only_chase || (g_chase_ctl_now && rd(g_chase_ctl_now) != 0);
+    // PSPRECOMP_TAGTEAM_CALLLOG_WIN=t0:t1 (seconds of battle age): only calls inside that window, up to 100000; b:t0:t1 = seconds after an extra's last break
+    static float w0 = -1.f, w1 = -1.f; static bool wrel = false;
+    static const bool win = [] { const char* w = std::getenv("PSPRECOMP_TAGTEAM_CALLLOG_WIN"); if (w && *w == 'b') { wrel = true; w += 2; } return w && std::sscanf(w, "%f:%f", &w0, &w1) == 2; }();
+    if (win) {
+        float t = dissidia_battle_age() / 60.0f;
+        if (wrel) { float last = -1e9f; for (const auto& kv : g_xbreak_show) last = std::max(last, kv.second / 60.0f); t -= last; }
+        in = in && t >= w0 && t <= w1;
+    }
+    if (in && n++ < (win ? 100000 : 2000)) {
         if (std::getenv("PSPRECOMP_TAGTEAM_CALLLOG_OWNER")) {   // which fighter's field holds a1 (or a1 - 0x20)
             uint32_t f[6]; const int nf = g_bs ? all_fighters(f) : 0; const uint32_t a1 = static_cast<uint32_t>(ctx->r[5]);
             for (int i = 0; i < nf; i++) for (uint32_t o = 0; o < 0x12D0u; o += 4) { const uint32_t v = rd(f[i] + o); if (v == a1 || v + 0x20u == a1) std::fprintf(stderr, "[CALLLOG]   a1 %08X ~ %s+%04X\n", a1, role_of(f[i]), o); }
@@ -5840,6 +5851,90 @@ void hudanim_hook(uint8_t* rdram, recomp_context* ctx) {
         }
     }
     g_orig_hudanim(rdram, ctx);
+}
+// FUN_08889FB8(side, kind, on) -> FUN_089DE660(hud, side, kind, on) -> FUN_089DFD68(group hud+36+84*side, kind, on): kind 0 is the STEADY "BREAK" that replaces the
+// BRV number on the side's big panel (the old number faded behind it) while the fighter is broken. The damage handler sets it at a break (FUN_08AE1040, on 1) and clears
+// it when the BRV is back (FUN_08AE10B0 / 08AE1300 / 08AE16AC / 08AE3E34, on 0), with side = its owner's actor+4300. The extras' private handler copies (g_extra_hdl) run the
+// same code, so a team mate's break showed "BREAK" on the slot fighter's panel for the whole break (20 Nov, user "Terra broke ... the words BREAK on my BRV"). An extra's
+// call (the caller's s0 = the handler, its owner at +16) only reaches the panel while that extra IS the panel's fighter (the lock-on panel); its "off" only clears a
+// BREAK it set itself. The extra's own small panel shows its break (TagHudFighter::break_flash). PSPRECOMP_TAGTEAM_PANELBREAK_ANY=1: old.
+FuncPtr g_orig_sidebrk = nullptr, g_orig_sideflag = nullptr; uint32_t g_sidebrk_by[2] = {};   // per side: the fighter whose break set the panel's BREAK (0 = none / a slot fighter)
+// the extra whose damage handler copy makes this call (the caller's s0 = the handler, its owner at +16), if it is not the side's panel fighter; else 0
+uint32_t sidebrk_foreign_extra(recomp_context* ctx, uint32_t side) {
+    if (side > 1u || !g_bs || !g_nextra) return 0;
+    const uint32_t h = static_cast<uint32_t>(ctx->r[16]), owner = ok(h, 0x20) ? rd(h + 16u) : 0u;
+    bool extra = false; for (int i = 0; i < g_nextra; i++) if (owner && g_extra[i].actor == owner) extra = true;
+    if (!extra) return 0;
+    uint32_t P = 0; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && side_of(S) == side) P = hud_panel_fighter(k); }
+    return owner != P ? owner : 0u;
+}
+// FUN_08889F70(side, kind) -> FUN_089DE568 -> FUN_089DFB68(group, kind): clears the group's flag byte +28+kind; kind 0 is called by the same break start / early end
+// (FUN_08AE1040 / 08AE1300) right before the steady BREAK call: an extra's handler copy is kept off the slot fighter's panel the same way.
+void sideflag_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
+    if (static_cast<uint32_t>(ctx->r[5]) == 0u && !any) if (const uint32_t x = sidebrk_foreign_extra(ctx, static_cast<uint32_t>(ctx->r[4]))) {
+        if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: panel flag 0 reset dropped: it is %s's break\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[4]), role_of(x));
+        ctx->r[2] = 0; return;
+    }
+    g_orig_sideflag(rdram, ctx);
+}
+// The break word itself: the damage handler's break sub-object (handler+680) holds the side panel's "BREAK" UI element at +72; FUN_08ADFC84(sub) plays its show
+// animation on entering break state 4 (FUN_08AE163C), FUN_08ADFCC4(sub) puts it back when the break ends (FUN_08AE10B0 / 08AE1300 / 08AE16AC / 08AE3E34 / 08AE4310) and
+// stops the effect at sub+88. An extra's handler copy holds the SLOT fighter's element (a copied pointer): its break showed "BREAK" over the player's number. Both calls
+// are skipped for an extra's copy unless that extra is the side's panel fighter (the lock-on panel) at the start; an end is let through when its start was.
+FuncPtr g_orig_brkshow = nullptr, g_orig_brkhide = nullptr; std::set<uint32_t> g_brkshow_x;   // extras whose break word was let onto a panel
+uint32_t brkword_foreign_extra(uint32_t sub) {   // the extra owning handler copy sub-680 if it is not its side's panel fighter, else 0
+    static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; g_brkshow_x.clear(); }
+    if (!g_bs || !g_nextra || sub < 680u) return 0;
+    const uint32_t h = sub - 680u; uint32_t x = 0;
+    for (const auto& kv : g_extra_hdl) if (kv.second == h) x = kv.first;
+    if (!x) return 0;
+    uint32_t P = 0; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && side_of(S) == side_of(x)) P = hud_panel_fighter(k); }
+    return x != P ? x : 0u;
+}
+void brkshow_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
+    const uint32_t sub = static_cast<uint32_t>(ctx->r[4]);
+    if (!any) {
+        if (const uint32_t x = brkword_foreign_extra(sub)) {
+            if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs \"BREAK\" word of %s's break kept off the big panel\n", dissidia_battle_age() / 60.0f, role_of(x));
+            g_brkshow_x.erase(x); ctx->r[2] = 0; return;
+        }
+        for (const auto& kv : g_extra_hdl) if (kv.second + 680u == sub) g_brkshow_x.insert(kv.first);
+    }
+    g_orig_brkshow(rdram, ctx);
+}
+void brkhide_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
+    const uint32_t sub = static_cast<uint32_t>(ctx->r[4]);
+    if (!any) {
+        static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; g_brkshow_x.clear(); }
+        uint32_t x = 0; for (const auto& kv : g_extra_hdl) if (kv.second + 680u == sub) x = kv.first;
+        if (x) { if (!g_brkshow_x.count(x)) { ctx->r[2] = 0; return; } g_brkshow_x.erase(x); }
+    }
+    g_orig_brkhide(rdram, ctx);
+}
+void sidebrk_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t side = static_cast<uint32_t>(ctx->r[4]), kind = static_cast<uint32_t>(ctx->r[5]), on = static_cast<uint32_t>(ctx->r[6]) & 0xFFu;
+    static const bool any = std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") != nullptr;
+    static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; g_sidebrk_by[0] = g_sidebrk_by[1] = 0; }
+    if (kind == 0u && side < 2u && g_bs && g_nextra && !any) {
+        const uint32_t h = static_cast<uint32_t>(ctx->r[16]), owner = ok(h, 0x20) ? rd(h + 16u) : 0u;
+        bool extra = false; for (int i = 0; i < g_nextra; i++) if (owner && g_extra[i].actor == owner) extra = true;
+        if (extra) {
+            uint32_t P = 0; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && side_of(S) == side) P = hud_panel_fighter(k); }
+            if (owner != P && !(on == 0u && g_sidebrk_by[side] == owner)) {
+                if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: steady BREAK %s on the big panel (%s) dropped: it is %s's break\n", dissidia_battle_age() / 60.0f, side, on ? "on" : "off", ok(P, 0x12D0) ? role_of(P) : "-", role_of(owner));
+                ctx->r[2] = 0; return;
+            }
+            g_sidebrk_by[side] = on ? owner : 0u;
+        } else g_sidebrk_by[side] = 0u;
+    }
+    g_orig_sidebrk(rdram, ctx);
 }
 void hudch1_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
@@ -7668,6 +7763,20 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x20)) { wr(st + 0x14u, (rd(st + 0x14u) & 0xFFFF0000u) | (v & 0xFFFFu)); std::fprintf(stderr, "[SETBRV] %s %08X brv -> %u\n", role_of(f[i]), f[i], v); held = f[i]; } break; }
         }
     }
+    if (g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_XHSTATE")) {   // debug: "<partner|enemy2>:<s>:<state>": write that extra's damage handler copy state (+8) once at battle age s, its BRV 0
+        static bool done = false; char who[16] = {}; float at = 0; unsigned v = 0;
+        if (std::getenv("PSPRECOMP_TAGTEAM_XHSTATE_FC") && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_XHSTATE"), "%15[^:]:%f:%u", who, &at, &v) == 3) {   // FIRSTCALL gate (PSPRECOMP_FIRSTCALL=0BFFF000:<file>): phase 1 the second before, 2 the second after +1 s
+            const float t = dissidia_battle_age() / 60.0f; g_ram[0x0BFFF000u & 0x07FFFFFFu] = (t >= at - 1.f && t < at) ? 1 : (t >= at + 1.f && t < at + 2.f) ? 2 : 0; }
+        if (g_hud && ok(g_hud, 0x200) && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_XHSTATE"), "%15[^:]:%f:%u", who, &at, &v) == 3) {   // the two panel groups, 0.5 s before and every 1 s after
+            static int last = -99; const float t = dissidia_battle_age() / 60.0f; const int slot = static_cast<int>(std::floor((t - at) * 2.f));
+            if (slot != last && (slot == -1 || (slot >= 1 && slot % 2 == 1 && slot < 14))) { last = slot;
+                for (uint32_t g : {36u, 120u}) { std::fprintf(stderr, "[XHGRP] t=%.2fs group %u:", t, g); for (uint32_t o = 0; o < 84u; o += 4) std::fprintf(stderr, " %08X", rd(g_hud + g + o)); std::fprintf(stderr, "\n"); } } }
+        if (!done && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_XHSTATE"), "%15[^:]:%f:%u", who, &at, &v) == 3 && dissidia_battle_age() / 60.0f >= at) {
+            done = true;
+            for (const auto& kv : g_extra_hdl) if (ok(kv.first, 0x12D0) && ok(kv.second, 0x40) && std::strcmp(role_of(kv.first), std::strcmp(who, "partner") == 0 ? "extraP" : "extraE") == 0) {
+                wr(kv.second + 8u, v); xbrv_set(kv.first, 0); std::fprintf(stderr, "[XHSTATE] t=%.2fs %s handler %08X state -> %u, BRV 0\n", dissidia_battle_age() / 60.0f, role_of(kv.first), kv.second, v); }
+        }
+    }
     if (g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_E2NEAR") && dissidia_battle_age() / 60.0f > static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_E2NEAR")))) {   // debug: keep enemy2 within 2 m of the human
         const uint32_t h = srd(g_bs + 56u + 4u * rd(g_bs + 84u));
         for (int i = 0; i < g_nextra; i++) { const uint32_t e = g_extra[i].actor; if (!g_extra[i].started || !ok(e, 0x12D0) || side_of(e) == side_of(h) || !ok(h, 0x12D0)) continue;
@@ -8026,6 +8135,9 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_banter) { g_orig_banter = fn(0x08B0E40Cu); if (g_orig_banter) psp_dispatch_register(0x08B0E40Cu, banter_hook); }
     if (!g_orig_hudch1) { g_orig_hudch1 = fn(0x08AE3710u); g_orig_hudch2 = fn(0x08AE3B54u); if (g_orig_hudch1 && g_orig_hudch2) { psp_dispatch_register(0x08AE3710u, hudch1_hook); psp_dispatch_register(0x08AE3B54u, hudch2_hook); } }
     if (!g_orig_hudanim) { g_orig_hudanim = fn(0x089DE6ECu); if (g_orig_hudanim) psp_dispatch_register(0x089DE6ECu, hudanim_hook); }
+    if (!g_orig_sidebrk) { g_orig_sidebrk = fn(0x08889FB8u); if (g_orig_sidebrk) psp_dispatch_register(0x08889FB8u, sidebrk_hook); }
+    if (!g_orig_brkshow) { g_orig_brkshow = fn(0x08ADFC84u); g_orig_brkhide = fn(0x08ADFCC4u); if (g_orig_brkshow && g_orig_brkhide) { psp_dispatch_register(0x08ADFC84u, brkshow_hook); psp_dispatch_register(0x08ADFCC4u, brkhide_hook); } }
+    if (!g_orig_sideflag && !std::getenv("PSPRECOMP_TTCAM_NOSIDEFLAG")) { g_orig_sideflag = fn(0x08889F70u); if (g_orig_sideflag) psp_dispatch_register(0x08889F70u, sideflag_hook); }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOCTRL")) { g_orig_ctrl = fn(0x08886C88u); if (g_orig_ctrl) psp_dispatch_register(0x08886C88u, ctrl_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_ENDLOG")) install_end_log(std::make_integer_sequence<int, 16>{});
     g_orig_rel1 = psp_dispatch_probe_lookup(0x0886CAA0u); g_orig_rel2 = psp_dispatch_probe_lookup(0x0886A140u);

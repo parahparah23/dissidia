@@ -3217,7 +3217,7 @@ enemy partner (it was on the right for both).
   `hudanim_hook` (0x089DE6EC) skips type 2 / 3 when the broken side's big panel shows a fighter that has BRV while an extra of that side was broken in the last 10 s
   (`partner_broken_panel_whole`; a real break of the panel's fighter has BRV 0 so it plays). Log `[HUDBREAK] ... break animation (type N) on the big panel skipped`.
   `PSPRECOMP_TAGTEAM_PANELBREAK_ANY=1`: old.
-- **Result / NOT fully fixed**: with the skip the shard burst is gone (`a019.27` in the shots), BUT the number is still replaced by a steady "BREAK" (+ the faded old number) on the
+- **Result of that skip (superseded, see the next section)**: with the skip the shard burst is gone (`a019.27` in the shots), BUT the number is still replaced by a steady "BREAK" (+ the faded old number) on the
   player's panel for ~3 s, until the extra's break ends. That steady state is not drawn by the type 2 / 3 start: its source is unknown (not the report mask, not `hud+0..0x800`
   per-frame diff within 1 s, not a 3B54 call in `HUDCHLOG`; `CALLLOG` of 089DE7FC / 089E839C / 089DF854 / 089DFCA4 / 089DEDB0 showed no call in the window). Next step: memory
   watch on the panel's number node / find the draw code that substitutes "BREAK" for the number (probably reads the handler state 3 of the side's handler list, where the
@@ -3301,3 +3301,38 @@ User: "When the CPU assist is called, can we have them use their normal assist m
 - **Not verified / limits:** nothing on a device or seen by a human; pad-driven partner lock; EX Mode / EX Burst / chance refusals (state read from `+0x784`, flag cleared by `chclear_hook` before the check in the host test, so only the code path); a real
   chase refusal (only the script range 800..816 was driven); lock-step with a peer (decisions use battle ticks and game state; X loading depends on pool room, like Assist ON's); the partner's body parked at (5000, y, 5000) for up to ~5 s can still be
   an enemy's foe word (its AI may walk toward it); a call during a retail cinematic can be held by the controller (call "never attacked", as retail); memory use of one more assist file group per side with Assist Off.
+
+### The steady "BREAK" on the big panel: the extras' handler copies drive the side panel (20 Nov, tree ttcam; host-only, window screenshots, nothing seen on a device)
+- **Cause**: the steady state is not drawn from the report channels at all. The fighter's damage handler (vtable `08AE7B50`, state word +8, state entry table
+  `08AE7CE4`: 0 `08AE1300`, 3 `08AE1624`, 4 `08AE163C`; state 3 update `08AE1040`, state 4 update = BRV refill `08AE10B0`) talks to the HUD directly, by its owner's side
+  (actor+4300), not by fighter:
+  - `FUN_08889FB8(side, kind, on)` -> `FUN_089DDC98` -> `FUN_089DE660(hud, side, kind, on)` -> `FUN_089DFD68(group hud+36+84*side, kind, on)`: kind 0 = the steady break mode of
+    the side's number group (byte group+35, element group+48: the number fades, "BREAK" over it). Set by `08AE1040` (on 1), cleared by `08AE10B0` / `08AE1300` / `08AE16AC` /
+    `08AE3E34` (on 0). Kind 1 is the per-frame "BRV >= HP" state from `089F249C` / `089F602C` / `089F83AC`.
+  - `FUN_08889F70(side, 0)` -> `089DDC10` -> `089DE568` -> `089DFB68(group, 0)`: clears the group's flag byte +28 (same callers, before the kind 0 call).
+  - The break WORD: the handler's break sub-object (handler+680) holds the side panel's "BREAK" UI element at +72 (copied pointer!): `FUN_08ADFC84(sub)` plays its show
+    animation on entering state 4, `FUN_08ADFCC4(sub)` puts it back (and stops the effect at sub+88) when the break ends.
+  The extras' private handler copies (`g_extra_hdl`, a word-for-word copy of the slot fighter's handler block) run the same code: same side, and the SLOT fighter's element
+  pointer, so the team mate's break set the side's steady BREAK and played the slot's break word for the whole break (state 3 -> 4 -> 0).
+- **Found with**: `PSPRECOMP_TAGTEAM_XHSTATE=<partner|enemy2>:<s>:<state>` (debug, new): writes the extra's handler copy state once at battle age s (and its BRV 0). State 3
+  reproduces the bug every time without any hit (the copy goes 3 -> 4 by itself and back to 0 when its BRV is refilled, ~4 s); state 0 + BRV 0 does not. Then
+  `PSPRECOMP_TAGTEAM_XHSTATE_FC=1` + `PSPRECOMP_FIRSTCALL=0BFFF000:<file>` (phase 1 = the second before, 2 = 1..2 s after): `08AE10B0` only in phase 2, whose end calls
+  `08889FB8(side, 0, 0)`; after dropping kind 0 the word was still there (number now unfaded) -> the state 4 entry `08AE163C` -> `08ADFC84`.
+  `[XHGRP]` lines (with XHSTATE) dump the two number groups.
+- **Fix** (`tagteam.cpp`, all three hooks keyed on the CALLER being an extra's handler copy: s0 = the handler (owner at +16) for 08889FB8 / 08889F70, a0 - 680 for the word):
+  - `sidebrk_hook` (08889FB8, kind 0) and `sideflag_hook` (08889F70, kind 0): an extra's call is dropped unless that extra is the side's panel fighter
+    (`hud_panel_fighter`, the lock-on panel); its "off" only goes through when its own "on" did (`g_sidebrk_by`). Slot fighters' calls are untouched.
+  - `brkshow_hook` / `brkhide_hook` (08ADFC84 / 08ADFCC4): the same rule for the break word; a hide from an extra goes through only after its show did (`g_brkshow_x`).
+  - Logs `[HUDBREAK] ... steady BREAK on|off ... dropped`, `... panel flag 0 reset dropped`, `"BREAK" word of X's break kept off the big panel`.
+    `PSPRECOMP_TAGTEAM_PANELBREAK_ANY=1`: old (all of them and the earlier skips); `PSPRECOMP_TTCAM_NOSIDEFLAG=1`: no 08889F70 hook.
+  - The earlier skip of the burst start (`hudanim_hook`, types 2 / 3) stays: it is the hit-time animation, these are the break state's own HUD calls.
+- **Verified (host, window shots, `/tmp/ttcamhud`)**: XHSTATE partner (f9): the player's panel keeps 1291 unfaded with no word for the whole break, Terra's small panel counts
+  her refill; XHSTATE enemy2 (f10): the same on the enemy panel (1099). Real slot break while the enemy partner is broken (m3: matrix harness pair 0 = the human's BRV attack
+  on slotC at BRV 5, plus XHSTATE enemy2 at 8.5 s): slotC's panel plays the retail burst + "BREAK" over the refilling number, and keeps it after the extra's break ended
+  (21.9 s; its "off" calls were dropped). Before the fix (f1): BREAK + faded 1291 on the player's panel 10.0 -> 14.3 s.
+- **Harness additions (debug)**: `PSPRECOMP_TAGTEAM_HPM_PAIRS=<digits>` (matrix pairs in this order, e.g. `0` = slotH > slotC), `_HPM_GAP=<s>` (default 6),
+  `_HPM_VBRV=<n>` (the victim's BRV n before the attack: a small n gives a real break, `_HPM_VBRV0` does not: BRV 0 is not broken); `PSPRECOMP_TAGTEAM_CALLLOG_WIN=t0:t1`
+  (or `b:t0:t1` = seconds after an extra's last break) limits CALLLOG to a window (up to 100000 lines).
+- **Not verified**: a natural (hit) break of an extra after the fix (the idle quick-battle CPUs never attacked Terra in 4 tries on this host); the lock-on case (the enemy
+  panel showing extraE, whose break then goes through by design); anything on a device.
+- Side note: `partner_break_report` compares `dissidia_battle_age() - kv.second < 10.f` in FRAMES (0.17 s), its comment says 10 s; not changed here.
