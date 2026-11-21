@@ -3844,3 +3844,74 @@ right panel showed Yuna (retail BREAK, correct) and the small panel showed the s
   Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/th/reg1`).
 - **Not verified**: the RP6 itself; the human's own side (the same code, but its big panel never follows a lock); the multiplayer view-only panels (`comms_handover`); the swap exactly at the frame of a retail
   break burst (the swap shots show the fading word for a frame); swaps in the first 0.1 s of a break; a real hit break (XHSTATE writes the handler state, the host runs did not get a natural extra break in the window).
+
+## Assist Off, round 10: Squall's assist "missed", the crystal look, locks follow the assist, a hit assist switches with its partner (20 Nov, tree ttcam; host-only, headless + window shots, nothing seen on a device)
+User (RP6, `~/dissidia/rp6logs/rp6_1120_squall_assist.log`): "I did a Squall assist and it missed, are they spawning in the correct position?"; "they are using the 'crystal' outfit"; "my lock was on that CPU that
+teleported, and my lock was locked to the empty air"; "Sephiroth hit my Squall assist, which locked the assist, and the normal CPU's Squall came out, but the assist Squall is still here". Code: `tagteam.cpp` round 8 block
+(`ao8_*`), `xas_spawn` (forced), `lock_other_hook`, `lock_other_pos_hook`, `refresh_hook`, `hud_panel_fighter`, `aim_fix`, `assist_aim_follow`, the controller hook's cycle write, `hitreg_hook`, `hitguard_hook`; test aid in `direct_battle.cpp`.
+Runs: `~/dissidia/tt/sq` (`run.sh NAME "ENV" [script]`, `SHOTS=from:to:step` = window shots by battle age, `tools/tally.py`, `tools/mont.py`); human Kain (`PSPRECOMP_TEST_CHAR_SWAP=15=24`, as on the device), forced calls every 6 s 12 - 60 s with the gauge refilled (`fc.txt`).
+- **Test aid `PSPRECOMP_TEST_ASSIST_SET=<side>=<char>[:<object id>]`** (direct_battle.cpp): the side record's retail assist (+0xF3E object id = the first assist entry, type 8 / 13, of that character; +4186 char, +4187 0), so a retail
+  Assist ON call of any character's assist can be compared with ours (`N15` = retail Squall assist).
+- **Placement / attack: identical to retail.** The device call (t 61.31) is the controller's own: X appears 4.1 m from the lock target (Yuna, extraE, in hitstun 560 from Kain's combo), attack NEAR 10000 (Squall's assist file: NEAR 10000 reach 4 +
+  NEAR_COMBO 10001-10006 ground, AIR_NEAR 10040 air, MIDDLE_FINISH 10094 / AIR_NEAR_FINISH 10095 HP) at +1.13 s, 3.7 m. Host, same call, retail ON (`R1`, `N15`) vs Off (`O1`, `O2`, `H15*`): `[AOHIT]` dist at the call 4.0 m, at the
+  attack 3.0 m, first hit +1.33 s, scripts 10000 -> 10001 -> 10003 -> 10005 -> 10006 on the ground / 10040 in the air (first hit +1.80 s, 5.9 m), in both. X's words at the call: master `+0x1108` = caller, `+0x300` / `+0x2FC` / lock = the caller's
+  lock target, as retail's (`[AO8DIAG]` / `[CALLDIAG]`, `PSPRECOMP_TTCAM_AO8DIAG=1`). X starts from wherever it stood; the controller PLACEs it (`[ACTLPOS]`: master (-10,0,8), foe (10,0,8) -> X (7.2,0,5.2)). The device miss is a moving foe
+  (comboed by the caller), not the placement. The ZAKO (manikin) and 1P assist files have the same move table (O2 vs O2z dumps).
+- **Bug 1 (found): calls that did nothing for 5 s.** The controller refuses a call when `FUN_08B02784(manager, side)` is 0 (assist machine `*(0x089D69F8)+40+4k` state 2 = Assist Lock; the assist actor not "available":
+  `FUN_08837990` = (+904 & *0x089C7FC0 (0x10000)) | (+908 & *0x089C7FC4); master states). `ao8_try` parked the partner anyway: the partner vanished for 5 s ("the assist never attacked"): H15 3 / H11 4 / H31 3 of 9 calls, O1 6 of 9.
+  Now `ao8_try` asks the same gate first: refused -> request word -1, caller's assist word back, partner stays (`[AO8] .. the controller will not start a call now (assist machine state n[ = Assist Lock]) ..`). `PSPRECOMP_TTCAM_AO8NOGATE=1` = old.
+- **Bug 2 (found): a call ended early left X "unavailable".** The controller clears X's +904 bit 0x10000 while it is out and sets it when X's attack ends by itself; a call ended by our caps or the hit switch left it clear and the gate refused every
+  later call (K3, K11, H15f: 9 - 17 refusals per run after one such end). `ao8_finish` sets the bit again.
+- **Costume.** `xas_spawn(forced)` used costume 0: `FUN_088FB934(char, costume, 1)` -> `FUN_088470DC` picks the object entry with byte 6 = char, byte 7 = costume: costume 0 = `P_<code>_ZAKO_A` (manikin, the crystal look; Squall id 1170),
+  1 - 3 = `P_<code>_<n>P_A` (998 - 1000). Now the costume byte of the partner's own model entry (info `+0x2F8` row, byte 7) is used (`[XAS] .. forced assist costume 1 (its model's entry ..)`; Squall 998, Lightning 1385 instead of 1389).
+  Retail's assist look is that same `_<n>P_A` file (`R1` with `ASSIST_SET` loads 998). `PSPRECOMP_TTCAM_AO8COSTUME=<n>` forces one. Screens: `costume_side_by_side.png` (partner on stage | its assist new | old manikin, `C1` / `C0`, NOPARK so both show).
+- **Locks follow the assist (user addition).** While a partner is parked for its call, `ao8_stand_in(P)` = X / `ao8_body_of(X)` = P: the lock cycle's 2nd candidate (`lock_other_hook`) and the lock camera's aim (`lock_other_pos_hook`) name X,
+  the target refresh accepts X, the controller's cycle write and `assist_aim_follow` write X, `aim_fix` treats X as valid, the big panel shows P when the human targets X. Every tick `ao8_retarget(P -> X)` moves the opponents' (and their
+  assists') +0x300 / +0x2FC / lock override +252 from P to X (`[AO8LOCK]`); at the end X -> P (a pad-driven fighter's +252 is cleared, never left set). The lock camera's aim point is replaced by the actor's position when the model node is
+  still off the map (one frame after a PLACE: host K2 looked at (907, 2, 910) at the hand-over). Evidence `K15` (human locked on extraE, enemy forced calls 13 - 55 s): `lock camera of slotH aims at .. 08DECD20` (X) at each call, back
+  to extraE at each end, `human lock .. +0x2FC 08DECD20` during the calls; 90 look-at samples all on the stage. `K0` = before (`PSPRECOMP_TTCAM_AO8NOFOLLOW=1`): extraE at (5000, y, 5000), -51..-147 deg off the view while locked.
+  Screens `lock_before_K0.png`, `lock_after_K15.png` (small, the cursor is hard to see; the logs are the evidence).
+- **A hit assist switches with its partner (user addition).** Retail: a hit on the assist plays its hit reaction, clears its "available" bit, and the side's assist machine goes to the Assist Lock. Now (`ao8_hit_switch` from `hitreg_hook`,
+  `FUN_08838734`): an enemy's hit registered on X of a running call ends the call in that frame (`ao8_finish`: partner PLACEd at X's spot / facing, no stand script), the hit record's victim (+28) becomes the partner (damage / BRV / credit on
+  the partner); X's own reaction, which starts a moment later, is undone in `ao8_tick` (its +0x380..+0x38C words back, +904 "available", hidden idle script 1) and the partner plays that reaction when it has none of its own (`[AO8] .. hits the assist ..`,
+  `.. started its reaction 500: undone ..; partner .. -> the same reaction`). A dismissed X between calls is never a target (`hitreg_hook` drops the hit, `hitguard_hook` answers 0). `PSPRECOMP_TTCAM_AO8HITLOCK=1` = retail behaviour;
+  `_AO8NOMIRROR=1` = no copied reaction. Evidence: K13 27.70, K14 45.67, K15 56.60, H15f 49.73, H15g 55.13, H11g 19.80 / 25.53 / 33.03 (both sides, attackers extraP / extraE / slotC): no Assist Lock afterwards, the next call
+  played each time (H11g 24 / 30 / 36 s, K15 60.33 s, H15g 60 s). Tried first: a stand-in hit test with the partner's position words at X's spot inside `FUN_08808EE4` never hit (K10, 8 tests: the collision reads the model's nodes).
+- **Hit rate** (forced calls, natural fight, calls that attacked; tally counts both sides' calls in the K runs):
+
+  | runs (side 0 calls only, `tools/tally0.py`) | hit / attacked | calls that never attacked |
+  |---|---|---|
+  | Squall Off before (O1, O2, H15, H15b) | 15/21 | 11 of 32 (partner parked 5 s for nothing) |
+  | Squall Off after (H15d, H15f, H15g) | 10/22 (2 of the misses: the assist was hit and switched) | 1 of 23 (+ 3 refused up front in H15f, before the +904 fix; partner stayed) |
+  | Squall retail ON (R1, N15) | 10/15 | 4 of 19 (retail's controller held them) |
+  | Terra Off before (H11) / after (H11d, H11g) / retail (N11) | 0/4 / 0/16 / 0/8 | 5 / 0 / 1 |
+  | Lightning Off before (H31) / retail (N31) | 2/6 / 0/6 | 3 / 4 |
+
+  Same scripts and distances as retail; the misses are the foe's guard / dodge / movement on both sides (Terra's LONG1 / Lightning's casts start 9 - 18 m away and miss a moving foe in retail too). The "after" Squall runs
+  attacked many more calls (no lost calls); the hit rate per attack did not improve (10/22 vs 15/21 before, retail 10/15): no placement change was made, and
+  per-call rates vary a lot between runs of the natural fight (single runs 1/2 .. 4/5).
+- Regression `tagteam_test.py --baseline`: `~/dissidia/tt/sq/reg1.txt`.
+- **Not verified / limits:** nothing on a device; the device's own miss was not reproduced frame by frame (no AOHIT there); retail's Assist Lock rule itself was not read (only its effect: machine state 2); the copied reaction is
+  the assist's reaction script id (the partner's own reaction from the redirected hit record usually follows a frame later, e.g. K13 500 -> 560); an assist hit by an HP attack (KO of the partner by the switched hit) not seen; lock-step
+  peers (all decisions read game state, but untested); the screenshots of the lock cursor / the switch are too small or too busy to be strong evidence.
+
+## Assist gauge log + "my 2 assist bars disappeared" (20 Nov, tree ttfa; host-only, headless)
+User report (RP6, Assists OFF, human Kain, partner Squall, `rp6_1120_gauge.log`): "I had 2 assist bars and they randomly disappeared". The log had no gauge lines.
+- **Shipped gauge log (ON in tag battles, `agauge_watch` in `tagteam.cpp`, called once per frame from `actl_hook`).** `[AGAUGE] t=.. role addr char c: 9500 -> 4500 (-5000) by <cause>` for every change of any fighter's
+  assist gauge (status `+0x1C`) that crosses a bar boundary (5000) or drops by >= 500 (drops add up since the last logged value; slow fill is not logged), a `summary:` line with all four gauges every 10 s, and for an
+  unexplained drop of >= 3000 a `context:` line (every fighter's script, BRV, HP, `+0x380`, `+0x5B6`, `+0x1108`, gauge, and the controller words). Causes: our own writes are named (`Assist Off call (round 8)`, `Assist Off round 9`,
+  `test aid GAUGESET`, `hit booked via the module step of extra ..` = the extras' hit booking), everything else prints `retail rule (hp/brv change this frame, assist machine state/previous, +5B6, call word, assist actor, ..)`
+  (no writer ra on a device: no memory-write hook; on the host `PSPRECOMP_FUNC_TRACE=1 PSPRECOMP_MEM_WATCH=<status+0x1C> PSPRECOMP_MEM_WATCH_HI=00` gives the writer's neighbours). `PSPRECOMP_TAGTEAM_AGAUGELOG=0` off, `=2` every change.
+- **Hypothesis "the extras' copies write the slot fighter's gauge": refuted.** `xgauge_step` now snapshots every OTHER fighter's `+0x1C` around the extra's EX handler / assist machine run, logs `[AGAUGE] !! xgauge_step of .. changed ..`
+  and restores it (`PSPRECOMP_TAGTEAM_AGAUGE_NOGUARD=1` = log only). Over 15 host runs (Assist Off and On, ~2000 s of battle, human attacking, gauge set to 10000, partner / enemies hit and broken, round 9 calls) it never fired.
+  The extras' status block (`actor+0x52C`) is their own; their machine copies only drain their own gauge. The extras' round 9 call costs 5000 from the extra's own gauge (never the human's).
+- **Retail rules seen on the host (all four fighters, so they exist without our code; retail 1v1 shows the idle drain, `docs/testing.md`):**
+  1. **Idle drain**: a gauge that is not fed (no own attacks for a few seconds) runs down with an accelerating curve (10000 -> 0 in about 6 s on an idle human, `-500` steps every 0.15 - 1.3 s). Attacks refill it (state 1). A human who stands still, runs or defends for a few seconds loses bars: the most likely "randomly".
+  2. **HP hit on the owner takes 500 - 600 (about 5 % of the damage)** of the victim's gauge per hit (human: -600 x 4 at 35.9 / 47.1 / 47.4 / 57.8 s, matches the user's HP hits); an enemy takes 1500 - 1900 per hit. Hits booked through an extra's module copy do the same (`hit booked via ..` lines).
+  3. **Assist call**: state 3, `FUN_08AED83C` takes 5000 for `+0x5B6` bit 4 (kind 1) or sets 0 for bit 8 (kind 2) unless an ability roll makes it free.
+  4. **Round / stock reset**: after a KO the fighters are re-initialised; gauges were seen to drop to 0 .. 748 in the same frame (below, partly unverified).
+- **Not our code but unexplained, reproduced 4 times (a_off .. h1)**: a one-frame drop of the human's gauge (10000 -> 0, 9500 -> 0) together with the partner's gauge going to 0 in the SAME frame (`e2` 104.33 s, `h1` 99.53 s, `d_as0` 120.57 s, `d_as1` 75.20 s), no call, no HP loss;
+  in `h1` the round guard (`round guard: rules step skips slot actor ..`) had just fired 1.6 s before, in `h3` (109.53 s, extraP KO, HP back to full, gauge 9998 -> 748) a round restart. The gauge is zeroed by the game's rules / round code, not by `xgauge_step`, the Assist Off calls
+  or the extras' hit booking (none of them logged at that frame). I did not find the exact writer (the memory watch run did not hit the event again; the hook on `FUN_08AED83C` never fired, so that call-start state is not the path).
+- **Nothing changed in game logic** (only the guard in `xgauge_step`, which never fired). Evidence: `~/dissidia/tt/ttfa/{a_off,b_as0,b_as1,c_as0,c_as1,d_as0,d_as1,e1..e3,f1..f3,h1..h3}/run_30.log`, runner `~/dissidia/tt/ttfa/run.sh NAME "ENV" script` (scripts `atk135.txt` = human locks and mashes Circle).
+- **Open / next:** pin the writer of the team-wide zeroing (suspect: the round guard path `FUN_08A23DA8` skipped / half-run, or a round re-init); on the device read `[AGAUGE]` lines around the loss (cause text and `context:` line tell the case).
