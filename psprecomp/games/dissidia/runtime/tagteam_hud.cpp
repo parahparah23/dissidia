@@ -215,6 +215,7 @@ void hit_floating(double tnow) {
     }
 }
 
+constexpr double kLethalPulse = 4.65;   // rad/s of the lethal-BRV glow (retail's shimmer, period 1.35 s, measured from window shots of the big panel)
 // one compact panel: 112 x 24 design units (31 with the gauges), plus the EX tube at its outer edge
 void panel(const TagHudFighter& f, float x, float y, double tnow) {
     const bool right = f.side != 0, ko = f.hp <= 0, gauges = f.ex >= 0.f || f.assist >= 0.f;
@@ -234,6 +235,14 @@ void panel(const TagHudFighter& f, float x, float y, double tnow) {
         const float bw = g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, 0, 0, LayerColor{0, 0, 0, 0}, true);
         const float bx = right ? fx - 3.f - bw : fx + fw + 3.f;
         g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, bx + 0.5f, y + 16.5f, LayerColor{10, 10, 30, 0.8f});
+        if (f.lethal && f.brv > 0) {   // lethal BRV (>= the HP of this fighter's own target, an HP attack would KO): the number glows purple and shimmers, as the retail big panel's
+            const float ph = 0.5f + 0.5f * static_cast<float>(std::sin(tnow * kLethalPulse)), r = 0.9f + 0.7f * ph;   // soft halo radius breathes with the pulse
+            for (int ring = 0; ring < 2; ring++) {
+                const float rr = r * (ring ? 1.9f : 1.f), al = (ring ? 0.16f : 0.34f) * (0.55f + 0.45f * ph);
+                for (int k = 0; k < 8; k++) { const float an = k * 0.7853982f; g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, bx + rr * std::cos(an), y + 16.f + rr * std::sin(an), LayerColor{120, 70, 235, al}); }
+            }
+            g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, bx, y + 16.f, LayerColor{180.f + 30.f * ph, 145.f + 60.f * ph, 255.f, 1.f});
+        } else
         g_layer.serif_caps(b, 7.6f, 1.f, 0.2f, bx, y + 16.f, f.brv == 0 ? LayerColor{255, 120, 110, 1.f} : LayerColor{255, 236, 190, 1.f});
     }
     // HP bar over the whole panel width, filling from the outer edge (as the retail slot panels). With the gauges the HP number sits on the row under it beside the

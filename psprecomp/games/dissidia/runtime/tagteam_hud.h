@@ -17,6 +17,7 @@ struct TagHudFighter {
     float assist = -1.f;        // assist gauge 0..1 (status +0x1C / 10000, two levels of 0.5); < 0: not shown
     bool ex_mode = false;       // in EX Mode (actor +0x5B2 bit 2)
     uint32_t id = 0;            // the actor this panel shows (HP hit indicator / trail key)
+    bool lethal = false;        // BRV >= the HP of this fighter's own target: the BRV number glows purple (retail's lethal-BRV look)
     bool has_assist = true;     // the fighter has an assist (actor +0x1108); without one retail never fills the gauge: drawn dim
 };
 struct TagHudReserve {

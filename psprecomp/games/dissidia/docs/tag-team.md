@@ -4086,3 +4086,48 @@ within 80 s of the stand-down; w9 (POST=360, no input after the decision): all t
 (5 DEFEATED "1 - 4", 5 VICTORY "4 - 1") for 6 minutes without any machine on a "Hold: Cancel wireless" wait; one Cross on each machine -> all ten back at the setup screen
 (replayable). w10 (old party code, KO list, decision at frame 3600): same, all ten on the round result (0-4 / 4-0), [TTSYNC] 120 samples + 66 hit records equal. The 20 Nov 5 / 5 split was
 not seen in any of 4 decided runs (w6, w9, w10 + one earlier); its cause is NOT known. Candidates only (unproven): the party flip, or a simulation that had already desynced (issue 1 / the call-in heap above).
+
+## Lethal-BRV glow on the small panels; a swapped-in partner's HP bar no longer full (21 Nov, tree tthud; host-only, window shots, nothing seen on a device)
+- **Retail's look** (window shots of the left big panel, `~/dissidia/tt/lb/{k5s,p1s}`): the BRV number is filled with a violet gradient (about RGB 165 / 140 / 255 on average, lilac highlights), blue-violet sparkles around it,
+  and shimmers with a period of 1.35 s (peaks at 9.23 / 10.6 / 11.9 s in `p1s`, shots every 0.1 s). It shows on the big panel when the fighter's BRV >= the HP of the fighter's **actual target**: the human locked on the
+  enemy partner (HP 1) got the purple 895 while the slot enemy had 3972 HP; the right big panel number (the enemy slot fighter's BRV) stayed white against the human's 9811. So retail compares against the real target
+  (lock), not the slot foe, for the human. Not verified: the right big panel when the human is locked on the enemy partner and the partner's BRV beats ITS own target (never produced).
+- **Small panels**: `TagHudFighter::lethal` (tagteam_hud.h), set in `hud_update` by `hud_lethal(actor, brv)` (tagteam.cpp): the drawn fighter's target = `+0x2FC` (else the foe word `+0x300`), alive, on the other side, among
+  `all_fighters`, and `brv >= hp_eff(target)` (BRV 0 never). The panel draws the number with two rings of purple halo copies (radius breathing with the pulse) and a violet fill that pulses (period 1.35 s,
+  `kLethalPulse` in tagteam_hud.cpp). With HUDLOCK the small panel's fighter is the slot fighter it shows, so the glow follows it. `PSPRECOMP_TAGTEAM_NOLETHALGLOW=1` off.
+- **New test aid** `PSPRECOMP_TAGTEAM_SLOTDMG=<slotC|slotH|enemy2|partner>:<s>:<dmg>`: that fighter takes dmg HP like a natural hit (status `+0x8`, `+0x20`, high half of `+0x0`).
+- **Verified (host, window shots `~/dissidia/tt/lb/g1s`, `g2s`)**: left: partner Terra `SETBRV=partner:8:3000`, enemy Terra extra takes 8000 at 12 s: off before, purple from 12.6 s, off when the BRV is spent (0).
+  Right: `SLOTDMG=slotH:12:8900` (human at 944 HP), enemy Terra's BRV 1154: off until 12 s, purple after, off again once its BRV changed.
+- **Second item, "after the opponent's partner falls the HP shows full" (user report)**: the retail panel reads its MAXIMUM from status `+0xC` and the HP as `+0xC` - damage taken (`+0x8`); setting `+0xC` to a current
+  HP with no damage (aids do it too: `KO_HPVAL`, `NATKO`) shows that HP as full (k1: HP 900 -> full bar). The rebuild that finishes a swap / call-in (`rebuild stands`) wrote `+0xC = j.hp` (the CURRENT HP of the member
+  swapped in) and `+0x8 = 0`: **reproduced** with `PARTNER_CHAR=11 ENEMY2_CHAR=11 SLOTDMG=enemy2:8:6000 KOLIST_NAT=1 KOLIST=cpu:12` (enemy slot fighter KO'd, its damaged partner Terra 4171 / 10171 takes the slot): the
+  right big panel showed 4171 with a FULL bar (`s1s`). **Fix**: the rebuild now writes `+0xC` = the body's real max (`+0x10B0`) and books max - hp as damage (`+0x8`, `+0x20`, high half of `+0x0`); same run: bar 41 %
+  (`s2s`). `PSPRECOMP_TAGTEAM_NOMAXFIX=1` = old. The small panels were never wrong (they use `+0x10B0`), HP-only kills of an extra without a swap showed correct bars (k3 / k4 / k5: slot enemy 3972 stays 43 % after the
+  enemy extra's KO, with and without the lock on the extra). Not verified: our own side's swap (same code, not run), a call-in with a damaged member (call-ins start at full HP).
+
+## Accessories per fighter: audit, no defect found on the host (21 Nov, tree ttlock; host-only, headless)
+RP6 report: "accessories are not working correctly, it's just applying the accessories from the first original players; it needs to be per player".
+- **Where retail reads them.** Every battle-overlay reader of the equipment set / accessory slots goes through the fighter's OWN record copy, not the side
+  record: `FUN_08835468` (called by the fighter's init `FUN_08B2EAC0(actor, record, buf)`, not by the constructor) allocates a 0x778-byte copy of the record it is
+  given and stores it at **actor +0x30C** (780), then builds the ability block (0x634 bytes, **actor +0x310**; bit n of the words at +8 = ability / accessory effect n,
+  tested by `FUN_088BD640` / `FUN_088BF4CC(FUN_08835778(actor), id)`) from it. The set code reads `*(actor + 780) + 16 + 0xC6 * *(+0x773)` (`FUN_08B33B08/6C/D4`,
+  `FUN_08B0AD88`, `FUN_08AF1DFC`, `FUN_08AF23B4`, `FUN_08B08C14`); the 31 other battle functions with the side-record literal (`0x09B00000 - 18272`) never read
+  the current set (`+0x773`) or the slot count (`+0x775`). The constructor itself leaves `+0x30C`, `+0x310` and the status block (`+0x52C`) at 0.
+- **What the tag code gives each fighter.** `spawn_fighter` (partners) and `rebuild_begin` (KO rebuilds, call-ins) run the constructor with the side record and the init with
+  `record_for(...)`: the member's own save record (single player), the matchup / CPU-builder record (CPU rows), the owner's table record (Communications Mode).
+  So the fighter's `+0x30C` copy, ability block and HP / stats come from the member.
+- **Log** (`PSPRECOMP_TAGTEAM_LOG=1 PSPRECOMP_TAGTEAM_ACCLOG=1`; `=2` adds the status block): `[ACC] <stage> actor A side S: own-save=SAME|DIFF|NOSAVE actor rec ... char C Lv set N nacc K acc[10 ids] ... | side-record ...`
+  after the constructor and after the init of every extra / rebuild and for every fighter at hframe 200 / 900 / 2400; `[ACCABIL]` = the ability block pointer and its bitset.
+  `PSPRECOMP_TAGTEAM_ACCTEST=ctor|init|both` clears the accessory slots of the record handed to that stage (test aid).
+- **Evidence** (party walk, `SP_PARTNER=1`, `KOLIST=human:12,partner:25,human:40`, `~/dissidia/tt/acc3`, `acct1`): slot Jecht (char 20) acc `0 1 2 218 64 65 77 79 62 204`; call-in char 15 `204 218 0` (nacc 3), then
+  char 6 `1 8 0 2 204 78 79 218 64 77`, then char 11 (set 2) `78 79 28 160 3 204 218 26 47 82`, partner char 11 the same from its own record; every one `own-save=SAME`, every
+  ability block distinct (e.g. bits word 0: 00004002 for 15 and 20, 00000002 for 6 and 11). Effect on stats: max HP (status +0xC) of the rebuilt char 15 = 0x2674 with its accessories, 0x25AC
+  with `ACCTEST=init` (accessories cleared in the init's record), unchanged (0x2674) with `ACCTEST=ctor` (the constructor's record plays no part); char 6: 0x2673 / 0x25AB / 0x2673.
+  The CPU enemy partner (char 30) has the builder's set for its matchup node (`own-save=DIFF` by design: retail's CPU builder makes it), not the side CPU's.
+- **Result: the reported symptom is not reproduced.** No code change to the character record / call-in / rebuild path was needed; the audit log and the test
+  `tools/tagteam_acc_test.py --work $X --out DIR` (5 checks: partner + rebuilds own-save=SAME, per-member sets differ from the side record's) stay in.
+- **Not verified / where the report could still come from.** Nothing seen on a device. (a) The pause-menu / HUD views of equipment, if they read the side record (the earlier
+  note above says the HUD icons did not change; no HUD code reading the side record was found, but the pause-menu "Status" page was not traced). (b) `record_for`'s fall-back
+  (`PSPRECOMP_TAGTEAM_NOSAVEREC`, a save whose first record is not character 1, a member with level 0 in the save) makes the record from the SIDE record: then the first member's accessories
+  ARE used (`character record for char N made from the side record of char M` in the log); worth grepping the RP6 log for that line. (c) CPU party rows (player / CPU toggle) use
+  retail's CPU builder, so their accessories are the builder's, not the save's. (d) Multiplayer owner records and the summonstone were not run for this audit.
