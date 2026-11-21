@@ -7448,7 +7448,7 @@ void ai_target() {
 // the caller's foe and given that foe as its target; the assist gauge is used up. Without a standing partner nothing happens (no assist either).
 // PSPRECOMP_TAGTEAM_ASSIST=0 forces Off, =1 forces On; PSPRECOMP_TAGTEAM_ASSISTTOGGLE=0: Square keeps "Swap format" and assists stay retail.
 namespace {
-bool g_sp_assist_on = true;   // per program run, set from the setup screen
+bool g_sp_assist_on = false;   // per program run, set from the setup screen (default Assists OFF, user 21 Nov)
 bool assist_off_now() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
     const bool on = e ? e[0] != '0' : g_sp_assist_on;

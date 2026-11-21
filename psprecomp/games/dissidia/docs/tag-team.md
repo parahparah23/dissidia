@@ -4031,3 +4031,5 @@ Report: "I forfeited a match and started again and Kuja did not have banter audi
   done, intro_load, every `FUN_08B0D7F4` load and `FUN_08B0D8D8` free, setup and teardown.
 - Retail plays only one banter line per battle in these logs (one `ATRAC id=1` before our first intro); our intro_load frees both retail objects ~5 s
   after the start, so a second retail line that would play later is not heard (not verified that retail ever plays it).
+
+- **Assists OFF is the default** (21 Nov, user): the setup screen starts on "Assists: OFF" (Square toggles it, per program run); online the host's choice is sent (PR #118), so a session also starts with Assist Off unless the host turns assists on or a player sets PSPRECOMP_TAGTEAM_MP_ASSISTOFF=0.
