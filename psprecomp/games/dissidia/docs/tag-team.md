@@ -4010,3 +4010,24 @@ Regression (--baseline) passes.
 - **Sound heap back in high RAM** (20 Nov, late): the silent battle audio blamed on the sound heap in region 3 was the Japanese-voice bug (issue #119; English plays fine). The heap is in region 3 again by default (~10 MB of room for voice banks); `PSPRECOMP_SOUNDHEAP_LOW=1` keeps it in region 1.
 
 - **HP indicator bigger, feed clear of the job-power bars** (21 Nov, user): panel numbers 13 px (small panels, was 10) / 14 px (big panels, was 11), stacked by 0.75 em; the hit feed 9.4 px (was 7.4) with 10.5 px lines and placed below the job-power bars along the top edge (they covered it when a fighter fell).
+
+### Banter silent in the next battle after a KO-finish (RP6 report 21 Nov, Kuja)
+Report: "I forfeited a match and started again and Kuja did not have banter audio this time" (`rp6_1121_kuja.log`, Kain c24 vs Kuja c18, partners Golbez / Terra).
+- Cause (log): the intro line we play for an entrant (`g_intro_obj`, loaded with `FUN_08B0D7F4` into the sound pool, FUN_088A3E9C, two slots at
+  `0x09B4D418`) is freed 8 s of battle time after it starts. In the log the Terra call-in was at t=140.0 s and the human slot fighter fell at 147.0 s
+  ("finish phase ... forfeit, team 0 loses"), the teardown followed: the free (`g_intro_free_at`) was never reached, and the reset of the tag state
+  (`g_battle_gen`) only zeroed the object (the pool slot stayed taken). Battle 2 (21942) then logs no retail banter ATRAC at all; the same again after
+  the next end (22921). Battles whose last intro was older than 8 s (9628, 16335) were followed by a working banter.
+- Host reproduction: `INTRO_HOLD=1` (test aid, the line is never freed in the battle) + pause > Forfeit through `tagteam_menu_walk.txt`
+  (`/tmp`-style driver = `~/dissidia/tt/bin/menu_drive.py`, runtime from `mkx.sh`): at the next setup the pool is `09B4D3B0 00000000`, the banter
+  loads ONE line (`+108` gets slot `09B4D3E4`, `+124` none) and no retail banter ATRAC plays (`~/dissidia/tt/tth/g5`). Retail's own frees at the end
+  (`FUN_08B0D8D8` on the two zeroed banter objects) do not release our object, so nothing but our code can.
+- Fix: `intro_release()` stops (`FUN_08B0D9B0`) and frees our intro line when it still owns a pool slot, at the battle teardown (`dtor_hook`) and at the
+  start of the next setup (covers a battle left without our teardown); `PSPRECOMP_TAGTEAM_NOINTROREL=1` = old behaviour. Same run with the fix
+  (`g4`): setup starts with `00000000 00000000`, both banter lines get slots (`09B4D3B0`, `09B4D3E4`) and the retail banter ATRAC plays.
+- A pause > Forfeit itself does not leak on the host (retail frees the pool wholesale at that point); the defeat / forfeit voice line is a plain streamed voice
+  (ATRAC ch=1 in high RAM), not a pool line.
+- Debug (`PSPRECOMP_TAGTEAM_LOG=1`): `[SNDPOOL]` lines = the pool's slots, the banter ctx objects (+108 / +124) and our intro object at banter start /
+  done, intro_load, every `FUN_08B0D7F4` load and `FUN_08B0D8D8` free, setup and teardown.
+- Retail plays only one banter line per battle in these logs (one `ATRAC id=1` before our first intro); our intro_load frees both retail objects ~5 s
+  after the start, so a second retail line that would play later is not heard (not verified that retail ever plays it).

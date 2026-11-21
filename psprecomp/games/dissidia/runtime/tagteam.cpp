@@ -1034,6 +1034,8 @@ void diff(const char* tag, const Snap& s) {
 int hp_eff(uint32_t a);   // below (live HP = status+0xC - damage taken +0x8)
 void hang_arm();   // below (debug: PSPRECOMP_TAGTEAM_HANGDUMP)
 int actor_char(uint32_t a);
+void pool_dump(const char* tag);
+void intro_release(const char* why);
 void reset_battle_state();   // below: every per-battle container of the tag code (a new setup / the teardown)
 void leftover_unload(bool force);
 void leftover_unload_fwd() { leftover_unload(true); }
@@ -1047,6 +1049,7 @@ void files_state_dump(const char* tag) {   // debug (PSPRECOMP_TAGTEAM_LOG=1): t
 void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t bs = static_cast<uint32_t>(ctx->r[4]);
     g_ram = rdram; g_ctx = ctx;
+    pool_dump("setup start"); intro_release("setup");
     if (!g_orig_ctor) {   // ownership recording for the retail pair (the constructor and the init run inside the original setup)
         g_orig_ctor = fn(FIGHTER_CTOR);
         const uint32_t vfn0 = rd(FIGHTER_VT + 256u + 4u);
@@ -1060,6 +1063,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_log) files_state_dump("battle setup done");
     if (std::getenv("PSPRECOMP_TAGTEAM_HANGDUMP")) hang_arm();
     g_ram = rdram; g_ctx = ctx;
+    pool_dump("setup done");
     g_battle_gen++;   // a new battle (the setup object bs is usually at the same address as the last battle's)
     xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_real_partner[0] = g_real_partner[1] = 0;
     reset_battle_state();   // (a forfeited / left battle may not have run the teardown: nothing of it may reach this one)
@@ -3773,6 +3777,7 @@ void dtor_hook(uint8_t* rdram, recomp_context* ctx) {
             g_swaps.clear();
         }
         if (g_log) files_state_dump("at the teardown");
+        pool_dump("teardown"); intro_release("teardown");
         if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs battle teardown (fighter %08X destroyed): tag team state dropped\n", dissidia_battle_age() / 60.0f, a);
         {   // what retail's teardown leaves allocated of ours: the extras' (and rebuilt slots') constructor blocks and the tag code's own helper objects. Left in the
             // battle heap they made the next loading screen's big file read take the allocator's wrap-around path, which wrote a block over a live one: the heap
@@ -4113,24 +4118,51 @@ void intro_free() {
     if (!g_intro_obj || !(rd(g_intro_obj) || rd(g_intro_obj + 4u))) return;
     call(0x08B0D8D8u, g_intro_obj); g_intro_free_at = 0.f;
 }
+// A battle that ends before the intro line is freed (a KO within 8 s of an entrance, a forfeit during one: RP6 log 21 Nov, call-in at 140.0 s, KO at 147.0 s)
+// left our line object holding one of the pool's two slots: the next battle's banter got only one slot (Kuja's line silent). The line is stopped and freed
+// at the teardown and at the next setup (only while the object still owns a pool slot: the game may have reset the pool). PSPRECOMP_TAGTEAM_NOINTROREL=1: off (test aid).
+void intro_release(const char* why) {
+    if (!g_intro_obj || !(rd(g_intro_obj) || rd(g_intro_obj + 4u))) { g_intro_free_at = 0.f; return; }
+    const uint32_t slot = rd(g_intro_obj + 4u);
+    const bool owns = slot && (rd(0x09B4D418u) == slot || rd(0x09B4D41Cu) == slot);
+    if (g_log) std::fprintf(stderr, "[SNDPOOL] release intro line at %s: obj [%08X %08X %08X %08X] owns a pool slot %d\n", why, rd(g_intro_obj), rd(g_intro_obj + 4u), rd(g_intro_obj + 8u), rd(g_intro_obj + 12u), owns);
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOINTROREL") && owns) { call(0x08B0D9B0u, g_intro_obj, 0); call(0x08B0D8D8u, g_intro_obj); }
+    for (uint32_t o = 0; o < 16; o += 4) wr(g_intro_obj + o, 0);
+    g_intro_free_at = 0.f;
+    pool_dump("after intro release");
+}
 // The sound pool (FUN_088A3E9C, two slots at 0x09B4D418) is held by the battle-start banter's two line objects (FUN_08B0E40C(ctx, ...) loads them into
 // ctx+108 / ctx+124) until the battle ends: they are freed (FUN_08B0D8D8 zeroes them, the game's own free at the end then does nothing) before the
 // entrant's line is loaded. The banter is long over by then.
 FuncPtr g_orig_banter = nullptr; uint32_t g_banter_ctx = 0;
-void banter_hook(uint8_t* rdram, recomp_context* ctx) { g_banter_ctx = static_cast<uint32_t>(ctx->r[4]); g_orig_banter(rdram, ctx); }
+void pool_dump(const char* tag) {   // debug (PSPRECOMP_TAGTEAM_LOG=1): the sound pool's two slots and the banter / intro line objects
+    if (!g_log) return;
+    std::fprintf(stderr, "[SNDPOOL] %s: slots", tag);
+    for (uint32_t o = 0; o < 0x40; o += 4) std::fprintf(stderr, " %08X", rd(0x09B4D418u + o));
+    std::fprintf(stderr, " | banter ctx %08X:", g_banter_ctx);
+    if (ok(g_banter_ctx, 0x90)) for (uint32_t o = 108; o <= 124; o += 16) std::fprintf(stderr, " [+%u %08X %08X %08X %08X]", o, rd(g_banter_ctx + o), rd(g_banter_ctx + o + 4u), rd(g_banter_ctx + o + 8u), rd(g_banter_ctx + o + 12u));
+    if (g_intro_obj) std::fprintf(stderr, " | intro [%08X %08X %08X %08X]", rd(g_intro_obj), rd(g_intro_obj + 4u), rd(g_intro_obj + 8u), rd(g_intro_obj + 12u));
+    std::fprintf(stderr, "\n");
+}
+FuncPtr g_orig_lload = nullptr, g_orig_lfree = nullptr;
+void lload_hook(uint8_t* rdram, recomp_context* ctx) { g_ram = rdram; const uint32_t o = static_cast<uint32_t>(ctx->r[4]); if (g_log) std::fprintf(stderr, "[SNDPOOL] line load obj %08X actor %08X (ours %d)\n", o, static_cast<uint32_t>(ctx->r[5]), o == g_intro_obj); g_orig_lload(rdram, ctx); if (g_log) std::fprintf(stderr, "[SNDPOOL] line loaded obj %08X: [%08X %08X %08X %08X]\n", o, rd(o), rd(o + 4u), rd(o + 8u), rd(o + 12u)); pool_dump("after load"); }
+void lfree_hook(uint8_t* rdram, recomp_context* ctx) { g_ram = rdram; const uint32_t o = static_cast<uint32_t>(ctx->r[4]); if (g_log) { std::fprintf(stderr, "[SNDPOOL] line free obj %08X (ours %d) t=%.1f\n", o, o == g_intro_obj, dissidia_battle_age() / 60.0f); pool_dump("before free"); } g_orig_lfree(rdram, ctx); pool_dump("after free"); }
+void banter_hook(uint8_t* rdram, recomp_context* ctx) { g_ram = rdram; g_banter_ctx = static_cast<uint32_t>(ctx->r[4]); pool_dump("banter start"); g_orig_banter(rdram, ctx); pool_dump("banter done"); }
 void intro_load(uint32_t A) {
     if (std::getenv("PSPRECOMP_TAGTEAM_NOINTROVOICE")) return;
     if (!g_intro_obj) { g_intro_obj = psp_kmem_bump_alloc_named(0x10u, "TAGTEAM_INTRO_VOICE"); if (!g_intro_obj) return; for (uint32_t o = 0; o < 16; o += 4) wr(g_intro_obj + o, 0); }
+    pool_dump("intro_load before");
     intro_free();
     if (ok(g_banter_ctx, 0x90)) for (uint32_t o = 108; o <= 124; o += 16) if (rd(g_banter_ctx + o) || rd(g_banter_ctx + o + 4u)) { call(0x08B0D9B0u, g_banter_ctx + o, 0); call(0x08B0D8D8u, g_banter_ctx + o); }
     g_ctx->r[9] = -1;
     call(0x08B0D7F4u, g_intro_obj, A, 2u, 0x09AFDFB0u, 0u);
+    pool_dump("intro_load after");
     if (g_log) { const uint32_t r = rd(g_intro_obj + 12u); std::fprintf(stderr, "[TAGTEAM] entrance of %08X: intro line %s %s\n", A, ok(r, 0x20) ? reinterpret_cast<const char*>(g_ram + (r & 0x07FFFFFFu)) : "(none)", rd(g_intro_obj + 4u) ? "loaded" : "NOT loaded"); }
 }
 void intro_play() {
     if (!g_intro_obj || !rd(g_intro_obj + 4u)) return;
     call(0x08B0D938u, g_intro_obj);
-    g_intro_free_at = dissidia_battle_age() + 8.f * 60.f;
+    g_intro_free_at = dissidia_battle_age() + 8.f * 60.f + (std::getenv("PSPRECOMP_TAGTEAM_INTRO_HOLD") ? 100000.f : 0.f);   // (_HOLD: test aid, the line is never freed in the battle)
     if (g_log) std::fprintf(stderr, "[TAGTEAM] intro line playing\n");
 }
 
@@ -9375,6 +9407,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_hitreact2) { g_orig_hitreact2 = fn(0x08AE3320u); if (g_orig_hitreact2) psp_dispatch_register(0x08AE3320u, hitreact2_hook); }
     if (!g_orig_hitreact && std::getenv("PSPRECOMP_TAGTEAM_HITQUEUE")) { g_orig_hitreact = fn(0x08ADFBFCu); if (g_orig_hitreact) psp_dispatch_register(0x08ADFBFCu, hitreact_hook); }   // (superseded by hitreact2_hook)
     if (!g_orig_hitmsg) { g_orig_hitmsg = fn(0x08AF02C0u); if (g_orig_hitmsg) psp_dispatch_register(0x08AF02C0u, hitmsg_hook); }
+    if (!g_orig_lload && g_log) { g_orig_lload = fn(0x08B0D7F4u); g_orig_lfree = fn(0x08B0D8D8u); if (g_orig_lload && g_orig_lfree) { psp_dispatch_register(0x08B0D7F4u, lload_hook); psp_dispatch_register(0x08B0D8D8u, lfree_hook); } else g_orig_lload = nullptr; }
     if (!g_orig_banter) { g_orig_banter = fn(0x08B0E40Cu); if (g_orig_banter) psp_dispatch_register(0x08B0E40Cu, banter_hook); }
     if (!g_orig_hudch1) { g_orig_hudch1 = fn(0x08AE3710u); g_orig_hudch2 = fn(0x08AE3B54u); if (g_orig_hudch1 && g_orig_hudch2) { psp_dispatch_register(0x08AE3710u, hudch1_hook); psp_dispatch_register(0x08AE3B54u, hudch2_hook); } }
     if (!g_orig_hudanim) { g_orig_hudanim = fn(0x089DE6ECu); if (g_orig_hudanim) psp_dispatch_register(0x089DE6ECu, hudanim_hook); }
