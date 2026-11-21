@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include "gim_decode.h"
 #include "menu_layer.h"
@@ -30,6 +31,8 @@ dissidia::MenuLayer g_layer;
 bool g_layer_shown = false;
 std::vector<TagHudFighter> g_fighters;
 std::vector<TagHudReserve> g_reserves;
+std::vector<TagHudOverhead> g_overhead; int g_overhead_style = 0;
+const uint8_t* g_hud_ram = nullptr;
 std::string g_banner;
 struct Notice { std::string text; int kind; double until, start; };   // wall-clock seconds
 std::vector<Notice> g_notices;
@@ -361,11 +364,56 @@ void tagteam_hud_big_panels(uint32_t l, uint32_t r) { g_big[0] = l; g_big[1] = r
 void tagteam_hud_clear() { g_hits.clear(); g_notices.clear(); g_banner.clear(); }
 
 void tagteam_hud_set_banner(const std::string& t) { g_banner = t; }
+void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style) { g_overhead = bars; g_overhead_style = style; }
+void tagteam_hud_set_ram(const uint8_t* rdram) { g_hud_ram = rdram; }
+
+
+namespace {
+// One bar over a fighter's head (2.05 m above the feet): the retail HP bar's colours on a dark plate, the target's bravery above it.
+void overhead_bar(const TagHudOverhead& o) {
+    if (!g_hud_ram || !o.actor) return;
+    float pos[3]; std::memcpy(pos, g_hud_ram + ((o.actor + 0x80u) & 0x07FFFFFFu), 12);
+    if (!std::isfinite(pos[0]) || !std::isfinite(pos[1]) || !std::isfinite(pos[2]) || std::fabs(pos[0]) > 1000.f || std::fabs(pos[2]) > 1000.f) return;   // (a fighter parked away from the stage)
+    const float head[3] = {pos[0], pos[1] + 2.05f, pos[2]};
+    float x, y; if (!tagteam_fx_project(head, x, y)) return;
+    if (g_overhead_style == 3) return;   // the game's own panels, half size (tagteam.cpp npanel)
+    if (g_overhead_style == 2) {   // the mini status panel: 64 x 19 above the head, the target's at 150 / 256 of full strength, the others at 70 / 256 (plugin v0.61)
+        const float w = 64.f, h = 19.f, x0 = x - w * 0.5f, y0 = y - h;
+        if (x0 + w < 0.f || x0 > 480.f || y0 + h < 0.f || y0 > 272.f) return;
+        g_layer.opacity = o.target ? 150.f / 256.f : 70.f / 256.f;
+        plate(x0, y0, x0 + w, y0 + h, 1.f, true);
+        g_layer.band(x0 + w - 1.f, y0, x0 + w, y0 + h, [&](float, float) { return kEdgeR; });
+        std::string nm = o.name; for (char& ch : nm) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        shadow_text(nm, true, 5.6f, x0 + 2.f, y0 + 6.2f, LayerColor{255, 255, 255, 1.f});
+        if (o.brv >= 0) {
+            const std::string b = std::to_string(o.brv);
+            const float bw = g_layer.serif_caps(b, 9.f, 1.f, 0.2f, 0, 0, LayerColor{0, 0, 0, 0}, true), bx = x0 + w - 2.5f - bw;
+            g_layer.serif_caps(b, 9.f, 1.f, 0.2f, bx + 0.5f, y0 + 11.5f, LayerColor{10, 10, 30, 0.8f});
+            g_layer.serif_caps(b, 9.f, 1.f, 0.2f, bx, y0 + 11.f, o.brv == 0 ? LayerColor{255, 120, 110, 1.f} : LayerColor{255, 236, 190, 1.f});
+        }
+        hp_bar(x0 + 2.f, y0 + 12.6f, w - 4.f, static_cast<float>(o.hp) / static_cast<float>(std::max(1, o.hp_max)), true, 1.f);
+        const std::string hp = std::to_string(std::max(0, o.hp));
+        shadow_text(hp, true, 4.8f, x0 + 2.f, y0 + 18.6f, LayerColor{230, 238, 255, 1.f});
+        g_layer.opacity = 1.f;
+        return;
+    }
+    const float w = o.target ? 36.f : 26.f, a = o.target ? 1.f : 0.6f;
+    if (x < -w || x > 480.f + w || y < 0.f || y > 272.f) return;
+    const float x0 = x - w * 0.5f;
+    g_layer.band(x0 - 1.f, y - 1.f, x0 + w + 1.f, y + 4.2f, [&](float, float) { return LayerColor{14, 16, 40, 0.7f * a}; });
+    hp_bar(x0, y, w, static_cast<float>(o.hp) / static_cast<float>(std::max(1, o.hp_max)), false, a);
+    if (o.target && o.brv >= 0) {
+        const std::string b = std::to_string(o.brv);
+        shadow_text(b, true, 7.f, x - text_w(b, true, 7.f) * 0.5f, y - 2.f, LayerColor{255, 236, 170, a});
+    }
+}
+}  // namespace
+
 
 void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vector<TagHudReserve>& reserves) {
     g_fighters = fighters; g_reserves = reserves;
 }
-void tagteam_hud_hide() { g_hits.clear(); g_fighters.clear(); g_reserves.clear(); g_banner.clear(); g_notices.clear(); }
+void tagteam_hud_hide() { g_hits.clear(); g_fighters.clear(); g_reserves.clear(); g_overhead.clear(); g_banner.clear(); g_notices.clear(); }
 
 bool tagteam_fx_draw(dissidia::MenuLayer& layer);   // tagteam_fx.cpp
 
@@ -375,11 +423,14 @@ void tagteam_layer_frame(bool in_battle) {
     const double tnow = now_s();
     g_notices.erase(std::remove_if(g_notices.begin(), g_notices.end(), [&](const Notice& n) { return n.until <= tnow; }), g_notices.end());
     g_hits.erase(std::remove_if(g_hits.begin(), g_hits.end(), [&](const HitRec& r) { return tnow - r.t0 >= kFeedLife + 0.1; }), g_hits.end());
-    const bool any = !g_fighters.empty() || !g_hits.empty() || !g_reserves.empty() || !g_banner.empty() || !g_notices.empty();
+    const bool any = !g_fighters.empty() || !g_hits.empty() || !g_reserves.empty() || !g_overhead.empty() || !g_banner.empty() || !g_notices.empty();
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
     if (any) {
+        for (const TagHudOverhead& o : g_overhead) if (!o.target) overhead_bar(o);   // (under the panels; the target's bar last, on top of the others)
+        for (const TagHudOverhead& o : g_overhead) if (o.target) overhead_bar(o);
         int row[2] = {0, 0};
         for (const TagHudFighter& f : g_fighters) {
+            if (g_overhead_style != 0) break;   // the overhead styles replace the side panels
             const int s = f.side != 0;
             const bool g = f.ex >= 0.f || f.assist >= 0.f;   // with the gauges a panel is 31 high (rows 34 apart) and its EX tube sits outside it
             panel(f, s == 0 ? (g ? 9.f : 4.f) : 480.f - (g ? 9.f : 4.f) - 112.f, 142.f - (g ? 34.f : 27.f) * row[s]++, tnow);

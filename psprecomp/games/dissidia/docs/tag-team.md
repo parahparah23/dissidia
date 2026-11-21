@@ -2056,6 +2056,18 @@ with its own off switch `PSPRECOMP_TAGTEAM_AI_<X>=0`; master `PSPRECOMP_TAGTEAM_
 A broken or helped current target is kept (no CLOSER / SPREAD away). Applied like `aim_fix`: lock block (`LOCK_SET`), foe +0x300, target +0x2FC. Only game state and
 the battle clock are read (no local player, no wall clock). Log: `[AITARGET]` with `PSPRECOMP_TAGTEAM_LOG=1`.
 
+## Score-based CPU targeting, the PPSSPP plugin's (21 Nov; host-only, headless)
+User: "check whether the AI would respond like ours" (the plugin's v0.39 scoring). It did not: `ai_target()` used the rule list above, checked once per 4 s.
+`ai_score_target()` (tagteam.cpp) now runs first and is the default; `PSPRECOMP_TAGTEAM_AI_SCORE=0` = the rule list. Every ~0.25 s (15 battle-clock units) each
+CPU fighter (slot or extra, not pad-driven) scores every living enemy: closeness 60 / (1 + d^2 / 150) (d in m), +25 if that enemy's foe is me, up to +40 if it
+hit me in the last 3 s (fading, x retaliation), +30 below 30 % HP (x aggression), +10 broken, +15 for the current target, -10 if my mate is on it (not when
+it is low), +0..9 noise. Switch when another enemy wins by 20 and the 1.5 s cool-down is over, or at once when the current target is over 30 m away and the
+other within 12 m. Applied only while calm (script 1..9), outside chases / EX bursts / entrances, like `aim_fix` (lock block, foe, target).
+- Lock-step safe: aggression / retaliation (0.7..1.3) and the noise are hashes of the fighter's address, side and the battle clock (the plugin used a local RNG).
+- Hits are read each frame from `hit_victim_of` (attacker -> victim), kept per (victim, attacker).
+- Seen (`~/dissidia/ohg_ai1`, 2 v 2 clones, 95 s): 4 switches, e.g. slotC 16 m target -> a 6 m enemy (60 vs 80), two "opportunity" switches (31 / 37 m -> 10 / 5 m).
+  Log `[AISCORE]` with PSPRECOMP_TAGTEAM_LOG=1.
+
 ## After the player's slot rebuild: camera, chase camera, moves, voice, BRV panel (18 Nov, tree ttlock; host-only, nothing seen on a device)
 Runs: `party_battle_walk.txt`, 1 v 2, `KOLIST=human:12` (Jecht -> Squall at 15.2 s) and `human:12,human:40` (-> Cloud of Darkness at 43.2 s); `~/dissidia/tt/pr*`.
 New debug (all opt-in, need `PSPRECOMP_TAGTEAM_LOG=1`): `PSPRECOMP_TAGTEAM_CAMDBG=1` (`[CAMDBG]` once a second: player, its lock block with +0x278 / +0x2A0,
@@ -4150,3 +4162,71 @@ only the icon types were stale (the old fighter's).
   becomes `-1 -1 8 8 8 3 9 6 6 10` at the swap and back when the lock ends (6 swaps in the run). Window shots `~/dissidia/tt/ttu3s` (`AGESHOTS_WIN`) show the top rows changing (montage `~/dissidia/tt/ttu3_top.png`). Regression `tagteam_test.py --baseline` PASS (`ttu_reg1`).
 - **Not verified**: nothing on a device; no forced-condition negative test (the original fighter's boost not applying to the call-in is shown by distinct blocks / masks / scales and the code reading only its own block, not by forcing a condition);
   that each boost's numeric effect on damage is per fighter beyond the block scale (+1508) was not measured; multiplayer not run; the fade restarts from 0 after a rebuild (icons fade in again).
+## Overhead HUD: three styles (21 Nov; Settings > Debug)
+Three Debug rows, one style at a time (turning one on turns the others off); `PSPRECOMP_TAGTEAM_OVERHEAD=1|2|3` starts with one on. With any of them on,
+the small side panels are not drawn (user: "if the overhead hud is toggled on, no need for this one").
+- **Overhead HP Bars** (1): a thin HP bar over each enemy; the target's wider and brighter, with its Bravery.
+- **Overhead Mini Panels** (2): a 64 x 19 panel over each enemy (name, Bravery, HP bar and number); the target's at 150 / 256, the other enemy at 70 / 256.
+- **Overhead PPSSPP HUD** (3): the PPSSPP plugin's HUD (v0.52-v0.61), ported as it was: extra copies of the GAME'S OWN status panel, made and updated
+  with the retail panel functions (`npanel` in tagteam.cpp), at half size. One over each enemy (the lock target at 150 / 256, the other at 70 / 256 on
+  the root sprite, as the plugin), with its Bravery number; two at the bottom whose HP bars sit where the assist gauges are (the ally; the enemy that
+  is not the target), 235 / 256, no Bravery number. Assist Off: the native assist gauges are hidden and the bottom panels take their place (as the
+  plugin, whose 2 v 2 had no assists). Assist on (user: the assist has priority): the bottom panels keep that row, and each big panel's own assist gauge
+  is moved beside its Bravery number, over the HP bar, at 0.72 size (own side right of the number, the enemy's left of it; `move_gauges`, group moved
+  after the game's layout each frame, put back when the style is turned off). The spot is fixed, just past a 4-digit number (user: "make the number
+  to begin a fixed place, the same place when the bravery is 4 digit"): offsets +86 / -86 px, so 0, 3 digits and the word BREAK never move it.
+  Checked: 3 and 4 digits on both sides, the enemy's BREAK and player 1's BREAK (`ohg_nb1`, `ohg_rc1`). Window shots `~/dissidia/ohs3g_on`, `ohs3g_off`.
+- **Styles 1 and 2 share style 3's bottom of the screen** (user, 21 Nov: "save this position of the HUD for overhead HUD layout version 1
+  and 2 also", "for version 1 and 2 where's the allies hp bar below the character?"): the two bottom panels (the ally; the enemy that is not
+  the target) under the HP bars, the assist gauges (Assist on: the fixed spot; Assist off: hidden, the bottom panels take their row) and the
+  summon orbs. Only the two panels over the enemies are style 3's own; styles 1 and 2 draw their own overhead bars / mini panels.
+  - Test note: battle_test.py sees the fight start by the dark assist-gauge boxes at y 262, which this style moves or hides; `tools_dbg/overhead_shots.py`
+    takes `BT_HUD_AFTER=<s>` (count the HUD as up after that long).
+  - Panel: ctor 089E5218, init 089E538C (11 arguments: the last three at 0(sp) / 4(sp) / 8(sp), checked in the recompiled function), updates
+    089E56EC / 089E57C4 / 089E5988, text 089E5660, release 089E5314; Bravery number 089DF6D8 / 089DF808 / 089DF628.
+  - Hooks: the HUD root update 089DD7A8 (build / update ours after it), the panels' text 089E7F2C (our text after it), the panels' release 089E7AFC
+    (ours first), the child layout 088DA0A8 (offsets scaled while one of ours updates), and the existing fighter getter hook 089E95B0 (answers our
+    panel's fighter while it is built / updated / drawn). Memory: one `TAGTEAM_NPANEL` block (4 x 0x140 + a matrix).
+  - A panel is bound to one fighter (its face and name are set at init): when the wanted fighter changes (KO, a new member, the bottom enemy after a
+    target switch) the panel is released and made again.
+  - Hidden during an EX Burst unless the keep-fighting rule runs and this player is outside it.
+  - Summon orb (user: "the red orb is the summon orb ... for player 1 also ... same position"): with Assist on each side's orb sits above its own
+    portrait badge, by the EX tube, at about (446, 191) on the right and (34, 191) on the left (4 px lower than first tried, user) (480 x 272 screen), clear of the moved assist gauge.
+    The orb is not a HUD sprite: it is drawn from the HUD effect data, whose keyframe records ("... -1.0f ... s16 x, s16 y") carry its centre
+    (322, 233) / (158, 233) and its top-left corner (311, 223) / (146, 223). `orb_move` finds those keys once per battle (RAM 0x09800000 and up,
+    a record's -1.0f word within 20 bytes before the position, or the "pos, colour, pos" pair) and shifts each side by the same offset; turning the
+    style off writes the original values back. Editing only the centre keys moved nothing; the orb's body uses the corner keys. Checked: the
+    enemy's orb with Assist on and off (`ohs3g_on`, `ohs3g_off`); player 1's orb too, after Ifrit was equipped on Squall in Customization (the game autosaves on leaving the menu; test save
+    `work/ms0` updated, the old one in `~/dissidia/save_backup_ULUS10566GameData00_20261121`): above his portrait with Assist on, by the HP bar
+    with Assist off (`ohg_ifr_s3on1`, `ohg_ifr_s3off1`, `ohg_ifr_s1on1`). Copying the CPU's battle record did not give him a summon.
+    Assist off (user: "reset the summon orb position to its normal or default place"): the original keys are written back, the orb is where the game
+    puts it, in every style.
+    How it was found: a whole-RAM scan for s16 pairs at the orb's spot (the sprite / layout / float scans found nothing, because none of them place it).
+  - Log `[NPANEL]` (with PSPRECOMP_TAGTEAM_LOG): each panel made, and its spot every 120 frames.
+- `MenuLayer::opacity` (new) fades a whole group of elements; the runtime's Debug page takes 10 game-module rows (was 6).
+
+### Style 1 details
+**What it shows.** An HP bar over each enemy of the fighter this machine controls, 2.05 m above its feet. That fighter is `hud_panel_fighter(bs+84)`:
+the slot fighter in single player, the driven fighter online.
+- The lock target (`+0x2FC`) gets a wider, full-strength bar with its Bravery above it. An Assist Off assist actor counts as its partner.
+- The other enemies get fainter bars.
+- No bar over the player's own fighter or the allies, a fallen / KO'd fighter, or a fighter parked away from the stage; no bars during an EX Burst.
+- View only: nothing in the battle state changes, so online each player chooses for himself.
+
+**How.**
+- `tagteam.cpp` `overhead_update()` hands the list to `tagteam_hud_overhead()` on each HUD tick.
+- `tagteam_hud.cpp` reads each actor's position (+0x80) every frame (`tagteam_hud_set_ram`) and projects it with `tagteam_fx_project()`: the last
+  3D draw's matrices, as the entrance effect does.
+- Off by default. The toggles last the session, like the other Tag Team rows.
+
+**Evidence.** Offline 2 v 2 (clones, AI fighting), `BT_WINDOW_SHOT=1` window shots: style 1 `~/dissidia/ohb2`, `ohs1`; style 2 `ohs2`; style 3 `ohs3`
+(earlier drawn version); native panels `ohs3n` (both enemies' panels over their heads, the target's brighter; the bottom HP bars on the gauge row):
+- bars over both enemies, the target's brighter with its Bravery;
+- the HP shown follows the hits.
+
+The `S` capture (the 480 x 272 render target) does not contain the game layer; use `V` (or `BT_WINDOW_SHOT=1`).
+
+**Not checked:**
+- online (two machines with different targets);
+- widescreen;
+- a fighter very close to the camera (the bar is not scaled with distance).

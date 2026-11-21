@@ -27,6 +27,23 @@ struct TagHudReserve {
     float countdown = -1.f;           // seconds until this side's next member is called in (< 0: nobody is waiting)
 };
 
+// An HP bar over a fighter's head (Settings > Debug > Overhead HP Bars): the enemies of the fighter this machine controls. The position is
+// read from the actor (+0x80, the feet) every frame, so the bar follows the fighter between HUD ticks.
+struct TagHudOverhead {
+    uint32_t actor = 0;
+    int hp = 0, hp_max = 1;
+    int brv = -1;           // bravery (-1: not shown)
+    bool target = false;    // the lock target: brighter, wider, with its bravery
+    std::string name;       // short label (mini panel styles)
+    std::string code;       // file code of the character: its face strip (style 3)
+};
+// The bars for the next frames (once per HUD tick); an empty list removes them. style: 1 = a thin HP bar (the target's with its Bravery),
+// 2 = a mini status panel (name, Bravery, HP bar and number), 3 = the PPSSPP plugin's HUD (v0.52-v0.61): half-size panels with the face over the
+// enemies, the ally and the other enemy on the assist-gauge row at the bottom; 0 = off. With 1, 2 or 3 the side panels are not drawn.
+void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style = 1);
+// Guest memory, for the bars' positions (tagteam.cpp, every frame before tagteam_layer_frame).
+void tagteam_hud_set_ram(const uint8_t* rdram);
+
 // Draws the overlay for these fighters and reserves and hands it to the engine; draws nothing (and clears an earlier overlay)
 // when both lists are empty.
 void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vector<TagHudReserve>& reserves);

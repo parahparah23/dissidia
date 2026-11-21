@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <functional>
 #include <cctype>
 #include <string>
 #include <map>
@@ -1912,6 +1913,29 @@ void init_reserve() {
 
 uint32_t g_fe_ctr = 0, g_hud_fe = 0;   // game frames (frame end, every state) and the last one the panels were refreshed in
 uint32_t g_frame_ctr = 0, g_hud_last = 0; bool g_hud_up = false;   // the overlay is cleared when the battle stops ticking the HUD (match over, left, results screen)
+bool exb_running();   // below
+// Settings > Debug > Overhead HP Bars (PSPRECOMP_TAGTEAM_OVERHEAD=1: on from the start): an HP bar over each enemy of the fighter this machine
+// controls; the lock target's is brighter and shows its bravery. View only (no battle state).
+// 0 = off, 1 = HP bars, 2 = mini panels, 3 = the PPSSPP plugin's HUD (Settings > Debug; PSPRECOMP_TAGTEAM_OVERHEAD=1/2/3). With any of them the side panels are not drawn.
+int g_overhead = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e ? std::atoi(e) : 0; }();
+void overhead_update() {
+    std::vector<TagHudOverhead> bars;
+    if (g_overhead && g_bs && !exb_running()) {
+        const uint32_t me = hud_panel_fighter(rd(g_bs + 84u) & 1u);
+        uint32_t tgt = ok(me, 0x12D0) ? rd(me + 0x2FCu) : 0u; if (const uint32_t b = ao8_body_of(tgt)) tgt = b;
+        uint32_t f[8] = {}; const int n = all_fighters(f);
+        for (int i = 0; i < n; i++) {
+            const uint32_t a = f[i];
+            if (!ok(a, 0x12D0) || a == me || !alive(a) || is_down(a) || (ok(me, 0x12D0) && side_of(a) == side_of(me))) continue;
+            TagHudOverhead o; o.actor = a; o.hp = std::max(0, hp_eff(a)); o.hp_max = std::max(static_cast<int>(rd(a + 0x10B0u)), std::max(o.hp, 1));
+            const uint32_t st = rd(a + 0x52Cu); o.brv = ok(st, 0x40) ? static_cast<int>(rdh(st + 0x14u)) : -1; o.target = a == tgt;
+            o.name = char_label(g_label_char.count(a) ? g_label_char[a] : actor_char(a), true);
+            o.code = code_for_char(g_label_char.count(a) ? g_label_char[a] : actor_char(a));
+            bars.push_back(o);
+        }
+    }
+    tagteam_hud_overhead(bars, g_overhead);
+}
 void hud_update() {
     // The reserve lists are battle state (reserve_left / next_member_char decide KOs and call-ins), so they are kept up to date with the HUD off too:
     // in a lock-step battle one player may have the overlay off.
@@ -1920,6 +1944,7 @@ void hud_update() {
     update_party_reserve();
     if (!g_hud_on) return;
     g_hud_last = g_frame_ctr; g_hud_fe = g_fe_ctr; g_hud_up = true;
+    overhead_update();
     std::vector<TagHudFighter> fs;
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
@@ -6191,9 +6216,293 @@ void hudref_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     g_orig_hudref(rdram, ctx);
 }
+// ---- Overhead style 3 (Settings > Debug > Overhead PPSSPP HUD): the game's OWN status panel, extra copies at half size (port of the PPSSPP plugin v0.61) ----
+// The HUD root's panel block P = root + 0x1DC (native panels at P + 0x650 + side * 0xDC, 0xDC bytes; resources P + 0x648, HP bar resource P + 0x64C).
+// Panel: ctor 089E5218, init 089E538C (11 arguments, the last three on the stack), release 089E5314, per-frame updates 089E56EC / 089E57C4 / 089E5988, text
+// 089E5660; +0xD0 root sprite, +0x84 assist gauge (+0x10..+0x38 its sprites). Bravery number (0x54 bytes): init 089DF6D8(num, side, res, P + 0x10, value),
+// update 089DF808, release 089DF628; value +4, sprites +0x2C..+0x40. Sprite: +0x10 / +0x14 position, +0x18 / +0x1C scale, +0x2B alpha; FUN_088D9B84(sprite,
+// matrix) places it. FUN_088DA0A8 lays a child out from its parent's anchor: while g_anchor_scale is set the child's offset is scaled.
+// The panel asks FUN_089E95B0(side) for its fighter: hudget_hook answers g_fighter (g_opp for the other side) while one of ours is built / updated / drawn.
+// Views: one panel over each enemy (fixed per enemy; the lock target at 150 / 256, the other at 70 / 256, as the plugin), and two at the bottom where the
+// assist gauges are: the ally (own layout) and the enemy that is not the target (enemy layout), 235 / 256, no Bravery number.
+namespace npanel {
+constexpr uint32_t CTOR = 0x089E5218u, INIT = 0x089E538Cu, FREE = 0x089E5314u, UPD1 = 0x089E56ECu, UPD2 = 0x089E57C4u, UPD3 = 0x089E5988u, TEXT = 0x089E5660u;
+constexpr uint32_t NUM_INIT = 0x089DF6D8u, NUM_UPD = 0x089DF808u, NUM_FREE = 0x089DF628u, ANCHOR = 0x088DA0A8u, SETMTX = 0x088D9B84u;
+constexpr uint32_t HUD_ROOT = 0x089DD7A8u, PANELS_TXT = 0x089E7F2Cu, PANELS_RESET = 0x089E7AFCu;
+constexpr float OH_SCALE = 0.5f, OH_HALF_W = 100.f, OH_HEAD_Y = 2.1f, BOT_SCALE = 0.5f;
+constexpr int OH_ALPHA_MAIN = 150, OH_ALPHA_SUB = 70, BOT_ALPHA = 235;
+enum { V_E0, V_E1, V_ALLY, V_SUB, NV };
+const char* const kName[NV] = {"overhead enemy 1", "overhead enemy 2", "bottom ally", "bottom other enemy"};
+struct View { uint32_t panel = 0, num = 0, f = 0; bool ok = false, num_ok = false; int side = 0, alpha = 0; float s = 0.5f; };
+View g_v[NV];
+uint32_t g_root = 0, g_mtx = 0, g_fighter = 0, g_opp = 0, g_side = 0;
+float g_anchor_scale = 0.f;
+FuncPtr g_orig_root = nullptr, g_orig_txt = nullptr, g_orig_reset = nullptr, g_orig_anchor = nullptr;
+
+// a guest call with up to 11 arguments (8 in a0-a3 / t0-t3, the rest at 0(sp), 4(sp) ...), registers restored afterwards
+uint32_t ncall(recomp_context* c, uint32_t addr, std::initializer_list<uint32_t> args) {
+    FuncPtr f = fn(addr);
+    if (!f) { std::fprintf(stderr, "[NPANEL] no function at %08X\n", addr); return 0; }
+    const recomp_context saved = *c;
+    const uint32_t sp = (static_cast<uint32_t>(c->r[29]) - 64u) & ~15u;
+    c->r[29] = static_cast<int32_t>(sp);
+    int i = 0;
+    for (uint32_t a : args) { if (i < 8) c->r[4 + i] = static_cast<int32_t>(a); else wr(sp + 4u * static_cast<uint32_t>(i - 8), a); i++; }
+    f(g_ram, c);
+    const uint32_t v = static_cast<uint32_t>(c->r[2]);
+    *c = saved;
+    return v;
+}
+uint8_t rb(uint32_t a) { return g_ram[a & 0x07FFFFFFu]; }
+void wb(uint32_t a, uint8_t v) { g_ram[a & 0x07FFFFFFu] = v; }
+float rf(uint32_t a) { float f; std::memcpy(&f, g_ram + (a & 0x07FFFFFFu), 4); return f; }
+bool spr_ok(uint32_t sp) { return (sp & 3u) == 0 && ok(sp, 0x40); }
+void spr_place(recomp_context* c, uint32_t sp, float x, float y, float sx, float sy) {
+    for (uint32_t k = 0; k < 16; k++) wrf(g_mtx + 4u * k, 0.f);
+    wrf(g_mtx + 0, sx); wrf(g_mtx + 20, sy); wrf(g_mtx + 40, 1.f); wrf(g_mtx + 60, 1.f); wrf(g_mtx + 48, x); wrf(g_mtx + 52, y);
+    ncall(c, SETMTX, {sp, g_mtx});
+}
+void spr_fade(uint32_t sp, int alpha) { wb(sp + 0x2Bu, static_cast<uint8_t>((rb(sp + 0x2Bu) * alpha) >> 8)); }
+void hide_assist(uint32_t panel) {
+    if (!rb(panel + 0x84u)) return;
+    for (uint32_t k = 0x10; k <= 0x38; k += 4) { const uint32_t sp = rd(panel + 0x84u + k); if (spr_ok(sp)) wb(sp + 0x2Bu, 0); }
+}
+uint32_t native_panel(uint32_t P, int side) { return P + 0x650u + static_cast<uint32_t>(side) * 0xDCu; }
+int brv_of(uint32_t f) { const uint32_t st = ok(f, 0x12D0) ? rd(f + 0x52Cu) : 0u; return ok(st, 0x40) ? static_cast<int>(static_cast<int16_t>(rdh(st + 0x14u))) : 0; }
+uint32_t opp_of(uint32_t f, uint32_t me) { uint32_t t = ok(f, 0x12D0) ? rd(f + 0x2FCu) : 0u; if (const uint32_t b = ao8_body_of(t)) t = b; return ok(t, 0x12D0) ? t : me; }
+
+void release(recomp_context* c, View& w) {
+    if (w.num_ok) ncall(c, NUM_FREE, {w.num});
+    if (w.ok) ncall(c, FREE, {w.panel});
+    w.ok = w.num_ok = false; w.f = 0; w.alpha = 0;
+}
+void create(recomp_context* c, uint32_t P, int v, uint32_t f, uint32_t me) {
+    View& w = g_v[v];
+    const uint32_t res = rd(P + 0x648u), hp = rd(P + 0x64Cu);
+    if (!ok(res, 0x200) || !ok(hp, 4)) return;
+    for (uint32_t k = 0; k < 0xE0u; k += 4) wr(w.panel + k, 0);
+    ncall(c, CTOR, {w.panel});
+    g_fighter = f; g_opp = opp_of(f, me); g_side = static_cast<uint32_t>(w.side);
+    const uint32_t s = static_cast<uint32_t>(w.side);
+    const uint32_t r = ncall(c, INIT, {w.panel, s, rd(res + 0x1A4u + 4u * s), rd(res + 0x1ACu + 4u * s), rd(res + 0x1BCu), rd(res + 0x1B8u), rd(res + 0x1D0u),
+                                       rd(res + 0x1B4u), rd(res + 0x1A0u), P + 0x858u, rd(hp)});
+    uint32_t rn = 0xFFFFFFFFu;
+    if (r == 0) {
+        w.ok = true; w.f = f;
+        if (v == V_E0 || v == V_E1) {   // (the plugin: no Bravery number on the bottom panels, it covered the HP numbers)
+            for (uint32_t k = 0; k < 0x60u; k += 4) wr(w.num + k, 0);
+            rn = ncall(c, NUM_INIT, {w.num, s, res, P + 0x10u, static_cast<uint32_t>(brv_of(f))});
+            w.num_ok = rn == 0;
+        }
+    } else ncall(c, FREE, {w.panel});
+    g_fighter = g_opp = 0;
+    if (g_log) std::fprintf(stderr, "[NPANEL] t=%.2fs %s: %s %08X, panel %d, Bravery number %d\n", dissidia_battle_age() / 60.0f, kName[v], ok(f, 0x12D0) ? role_of(f) : "?", f,
+                            static_cast<int>(r), static_cast<int>(rn));
+}
+void update(recomp_context* c, uint32_t P, int v, uint32_t me, uint32_t tgt, bool hide) {
+    View& w = g_v[v];
+    if (!w.ok) return;
+    float rx = 0.f, ry = 0.f; int alpha = 0;
+    if (!hide && (v == V_E0 || v == V_E1)) {
+        float pos[3]; std::memcpy(pos, g_ram + ((w.f + 0x80u) & 0x07FFFFFFu), 12);
+        const float head[3] = {pos[0], pos[1] + OH_HEAD_Y, pos[2]};
+        float x, y;
+        if (!is_down(w.f) && alive(w.f) && std::isfinite(pos[0]) && std::fabs(pos[0]) < 1000.f && std::fabs(pos[2]) < 1000.f && tagteam_fx_project(head, x, y) &&
+            x > -60.f && x < 540.f && y > -30.f && y < 320.f) {
+            alpha = w.f == tgt ? OH_ALPHA_MAIN : OH_ALPHA_SUB;
+            rx = x + (w.side ? 1.f : -1.f) * OH_HALF_W * OH_SCALE;   // (the layout's root is the panel's outer end)
+            ry = y;
+        }
+    } else if (!hide) {   // the mini HP bar where the assist gauge is, the panel's bottom on the native panel's bottom
+        const uint32_t np = native_panel(P, w.side), root = rd(np + 0xD0u), hb = rd(np + 0x34u), g = rd(np + 0x84u + 0x2Cu);
+        float gx = w.side ? 413.f : 67.f, hx = w.side ? 414.f : 66.f, ox = w.side ? 480.f : 0.f, oy = 272.f;
+        if (spr_ok(g)) gx = rf(g + 0x10u);
+        if (spr_ok(hb)) hx = rf(hb + 0x10u);
+        if (spr_ok(root)) { ox = rf(root + 0x10u); oy = rf(root + 0x14u); }
+        rx = gx - (hx - ox) * BOT_SCALE; ry = oy;   // (Assist on: the big panel's own gauge moves beside its Bravery number, move_gauge)
+        alpha = alive(w.f) ? BOT_ALPHA : 0;
+    }
+    w.alpha = alpha;
+    { static int n[NV] = {}; if (g_log && (n[v]++ % 120) == 0 && n[v] < 2000) std::fprintf(stderr, "[NPANEL] t=%.2fs %s at %.1f,%.1f alpha %d root %08X\n", dissidia_battle_age() / 60.0f, kName[v], rx, ry, alpha, rd(w.panel + 0xD0u)); }
+    g_fighter = w.f; g_opp = opp_of(w.f, me); g_side = static_cast<uint32_t>(w.side);
+    ncall(c, UPD1, {w.panel});
+    ncall(c, UPD2, {w.panel});
+    const uint32_t root = rd(w.panel + 0xD0u);
+    if (spr_ok(root)) { spr_place(c, root, rx, ry, w.s, w.s); if (alpha == 0) wb(root + 0x2Bu, 0); else spr_fade(root, alpha); }
+    g_anchor_scale = w.s;
+    ncall(c, UPD3, {w.panel});
+    g_anchor_scale = 0.f;
+    hide_assist(w.panel);
+    if (w.num_ok) {
+        wr(w.num + 4u, static_cast<uint32_t>(brv_of(w.f)));
+        ncall(c, NUM_UPD, {w.num});
+        const uint32_t base = rd(w.num + 0x2Cu);
+        if (spr_ok(base)) {
+            const float bx = rf(base + 0x10u), by = rf(base + 0x14u);
+            const uint32_t nr = rd(native_panel(P, w.side) + 0xD0u);   // keep the native offset from the panel root, scaled
+            const float ox = spr_ok(nr) ? rf(nr + 0x10u) : (w.side ? 480.f : 0.f), oy = spr_ok(nr) ? rf(nr + 0x14u) : 272.f;
+            const float tx = rx + (bx - ox) * w.s, ty = ry + (by - oy) * w.s;
+            for (uint32_t k = 0x2C; k <= 0x40; k += 4) {
+                const uint32_t sp = rd(w.num + k);
+                if (!spr_ok(sp)) continue;
+                spr_place(c, sp, tx + (rf(sp + 0x10u) - bx) * w.s, ty + (rf(sp + 0x14u) - by) * w.s, rf(sp + 0x18u) * w.s, rf(sp + 0x1Cu) * w.s);
+                if (alpha == 0) wb(sp + 0x2Bu, 0); else spr_fade(sp, alpha);
+            }
+        }
+    }
+    g_fighter = g_opp = 0;
+}
+// Assist on: the big panels' assist gauges (+0x84 sprites) moved up beside the Bravery number, over the HP bar, a little smaller (user, 21 Nov): the small
+// panels keep the gauges' old row under the HP bar, as with Assist off. The sprites are moved as a group
+// (scaled about their centre) after the game's own layout each frame; a sprite the game did not place again keeps its remembered base.
+struct GBase { float x, y, sx, sy, px, py; };
+std::map<uint32_t, GBase> g_gbase;
+void move_gauge(recomp_context* c, uint32_t panel, float dx, float dy, float sc) {
+    if (!rb(panel + 0x84u)) return;
+    uint32_t sp[11]; int n = 0; float cx = 0.f, cy = 0.f;
+    for (uint32_t k = 0x10; k <= 0x38; k += 4) {
+        const uint32_t a = rd(panel + 0x84u + k);
+        if (!spr_ok(a)) continue;
+        const float x = rf(a + 0x10u), y = rf(a + 0x14u);
+        auto it = g_gbase.find(a);
+        if (it == g_gbase.end() || std::fabs(it->second.px - x) > 0.01f || std::fabs(it->second.py - y) > 0.01f)   // placed again by the game: a new base
+            g_gbase[a] = GBase{x, y, rf(a + 0x18u), rf(a + 0x1Cu), x, y};
+        const GBase& b = g_gbase[a];
+        cx += b.x; cy += b.y; sp[n++] = a;
+    }
+    if (!n) return;
+    cx /= static_cast<float>(n); cy /= static_cast<float>(n);
+    for (int i = 0; i < n; i++) {
+        GBase& b = g_gbase[sp[i]];
+        const float x = cx + dx + (b.x - cx) * sc, y = cy + dy + (b.y - cy) * sc;
+        spr_place(c, sp[i], x, y, b.sx * sc, b.sy * sc);
+        b.px = rf(sp[i] + 0x10u); b.py = rf(sp[i] + 0x14u);
+    }
+}
+// Assist on: each big panel's gauge at one fixed spot just past a 4-digit Bravery number (user, 21 Nov), whatever the number shows (0, 3 digits, BREAK)
+void move_gauges(recomp_context* c, uint32_t P) { move_gauge(c, native_panel(P, 0), 86.f, -29.f, 0.72f); move_gauge(c, native_panel(P, 1), -86.f, -29.f, 0.72f); }
+void restore_gauges(recomp_context* c) {
+    for (auto& [a, b] : g_gbase) if (spr_ok(a) && std::fabs(rf(a + 0x10u) - b.px) < 0.01f && std::fabs(rf(a + 0x14u) - b.py) < 0.01f) spr_place(c, a, b.x, b.y, b.sx, b.sy);
+    g_gbase.clear();
+}
+// The summon orb: not a HUD sprite but an effect whose keyframes carry its centre as s16 pairs, (322,233) for the right
+// panel and (158,233) for the left one (key "pos, colour, pos, colour"). Style 3 moves both above their portrait badges.
+struct OrbW { uint32_t a, orig, now; };
+std::vector<OrbW> g_orb; bool g_orb_scanned = false;
+constexpr uint32_t ORB_R = 0x00E90142u, ORB_L = 0x00E9009Eu;
+uint32_t orb_pos(float x, float y) { return (static_cast<uint32_t>(static_cast<int16_t>(std::lround(y))) << 16) | static_cast<uint16_t>(static_cast<int16_t>(std::lround(x))); }
+void orb_restore() { for (const OrbW& o : g_orb) if (rd(o.a) == o.now) wr(o.a, o.orig); g_orb.clear(); g_orb_scanned = false; }
+void orb_move() {   // every orb key (centre or top-left corner) in the effect data, shifted by the same offset per side
+    if (!g_orb_scanned) { g_orb_scanned = true;
+        constexpr uint32_t TL_R = 0x00DF0137u, TL_L = 0x00DF0092u;   // (311,223) / (146,223)
+        constexpr float DX = 446.f - 322.f, DY = 191.f - 233.f;
+        for (uint32_t q = 0x09800000u; q < 0x09FFFFF0u && g_orb.size() < 1024; q += 4) {
+            const uint32_t w = rd(q);
+            const bool right = (w == ORB_R || w == TL_R), left = (w == ORB_L || w == TL_L);
+            if (!right && !left) continue;
+            bool key = false;
+            for (uint32_t k = 4; k <= 20 && !key; k += 4) key = rd(q - k) == 0xBF800000u;   // (a key record: "... -1.0f ... pos")
+            if (!key && rd(q + 8u) != w && rd(q - 8u) != w) continue;
+            const float x = static_cast<float>(static_cast<int16_t>(w & 0xFFFFu)), y = static_cast<float>(static_cast<int16_t>(w >> 16));
+            g_orb.push_back({q, w, orb_pos(x + (right ? DX : -DX), y + DY)});
+        }
+        if (g_log) std::fprintf(stderr, "[NPANEL] summon orb keys: %zu\n", g_orb.size());
+    }
+    for (const OrbW& o : g_orb) if (rd(o.a) == o.orig) wr(o.a, o.now);
+}
+void release_all(recomp_context* c) { restore_gauges(c); orb_restore(); for (View& w : g_v) release(c, w); g_root = 0; }
+// the views' panels and Bravery numbers and the matrix spr_place writes (one guest block, kept for the session)
+bool alloc_mem() {
+    if (g_mtx) return true;
+    const uint32_t mem = psp_kmem_bump_alloc_named(NV * (0xE0u + 0x60u) + 0x40u + 0x10u, "TAGTEAM_NPANEL");
+    if (!mem) return false;
+    const uint32_t base = (mem + 15u) & ~15u;
+    for (int v = 0; v < NV; v++) { g_v[v].panel = base + static_cast<uint32_t>(v) * 0x140u; g_v[v].num = g_v[v].panel + 0xE0u; }
+    g_mtx = base + NV * 0x140u;
+    return true;
+}
+// once per HUD frame (after the HUD root's own update)
+void frame(recomp_context* c, uint32_t a0) {
+    const uint32_t P = a0 + 0x1DCu;
+    // styles 1 and 2 share style 3's bottom of the screen (user, 21 Nov): the ally / other-enemy panels under the HP bars, the gauges and the summon
+    // orbs as below; only the two panels over the enemies are style 3's own (styles 1 and 2 draw their own bars / mini panels there)
+    const bool want = g_overhead >= 1 && g_overhead <= 3 && g_bs && g_nextra > 0 && ok(a0, 0x1DC + 0x900) && rb(P) == 1;
+    if (g_root && g_root != P) { for (View& w : g_v) { w.ok = w.num_ok = false; w.f = 0; } g_root = 0; g_gbase.clear(); g_orb.clear(); g_orb_scanned = false; }   // (a new HUD: the old one's panels went with it)
+    if (!want) { if (g_root == P) release_all(c); return; }
+    if (!alloc_mem()) return;
+    g_root = P;
+    const uint32_t hs = rd(g_bs + 84u) & 1u, me = hud_panel_fighter(hs);
+    if (!ok(me, 0x12D0)) return;
+    uint32_t tgt = rd(me + 0x2FCu); if (const uint32_t b = ao8_body_of(tgt)) tgt = b;
+    uint32_t f[8] = {}; const int n = all_fighters(f);
+    uint32_t en[2] = {}, ally = 0; int ne = 0;
+    for (int i = 0; i < n; i++) {
+        const uint32_t a = f[i];
+        if (!ok(a, 0x12D0) || a == me || !alive(a) || is_down(a)) continue;
+        if (side_of(a) == side_of(me)) { if (!ally) ally = a; } else if (ne < 2) en[ne++] = a;
+    }
+    const uint32_t sub = en[0] == tgt ? en[1] : (en[1] == tgt ? en[0] : en[1]);
+    const uint32_t wantf[NV] = {en[0], en[1], ally, sub};
+    const int eside = static_cast<int>(hs ^ 1u);
+    const bool hide = exb_running() && (!exb_rule_fight() || exb_in(me));
+    for (int v = 0; v < NV; v++) {
+        View& w = g_v[v];
+        w.side = v == V_ALLY ? static_cast<int>(hs) : eside; w.s = v <= V_E1 ? OH_SCALE : BOT_SCALE;
+        if (v <= V_E1 && g_overhead != 3) { if (w.ok) release(c, w); continue; }
+        if (w.ok && w.f != wantf[v]) release(c, w);
+        if (!w.ok && wantf[v]) create(c, P, v, wantf[v], me);
+        update(c, P, v, me, tgt, hide);
+    }
+    if (assist_off_now()) orb_restore(); else orb_move();   // Assist on: the summon orbs above the portrait badges; Assist off: their own spot (user, 21 Nov)
+    if (assist_off_now()) { hide_assist(native_panel(P, 0)); hide_assist(native_panel(P, 1)); }   // Assist off: the bottom panels take the gauges' place (as the plugin)
+    else move_gauges(c, P);   // Assist on: the gauge beside the Bravery number
+}
+void root_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_root(rdram, ctx);
+    frame(ctx, a0);
+}
+void txt_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_txt(rdram, ctx);
+    if (!g_root || a0 != g_root || !g_bs) return;
+    const uint32_t me = hud_panel_fighter(rd(g_bs + 84u) & 1u);
+    for (View& w : g_v) {
+        if (!w.ok || !w.alpha || !ok(w.f, 0x12D0)) continue;
+        g_fighter = w.f; g_opp = opp_of(w.f, me); g_side = static_cast<uint32_t>(w.side); g_anchor_scale = w.s;
+        ncall(ctx, TEXT, {w.panel});
+        g_anchor_scale = 0.f; g_fighter = g_opp = 0;
+    }
+}
+void reset_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    if (g_root && static_cast<uint32_t>(ctx->r[4]) == g_root) { release_all(ctx); if (g_log) std::fprintf(stderr, "[NPANEL] released\n"); }
+    g_orig_reset(rdram, ctx);
+}
+void anchor_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t par = static_cast<uint32_t>(ctx->r[4]), out = static_cast<uint32_t>(ctx->r[6]);
+    const float s = g_anchor_scale;
+    g_orig_anchor(rdram, ctx);
+    if (s != 0.f && out && ok(out, 0x40) && ok(par, 0x18)) {
+        wrf(out + 48u, rf(par + 16u) + (rf(out + 48u) - rf(par + 16u)) * s);
+        wrf(out + 52u, rf(par + 20u) + (rf(out + 52u) - rf(par + 20u)) * s);
+    }
+}
+void install() {
+    if (g_orig_root) return;
+    g_orig_root = fn(HUD_ROOT); g_orig_txt = fn(PANELS_TXT); g_orig_reset = fn(PANELS_RESET); g_orig_anchor = fn(ANCHOR);
+    if (!g_orig_root || !g_orig_txt || !g_orig_reset || !g_orig_anchor) { std::fprintf(stderr, "[NPANEL] functions missing: no overhead PPSSPP HUD\n"); g_orig_root = nullptr; return; }
+    psp_dispatch_register(HUD_ROOT, root_hook); psp_dispatch_register(PANELS_TXT, txt_hook); psp_dispatch_register(PANELS_RESET, reset_hook); psp_dispatch_register(ANCHOR, anchor_hook);
+}
+}  // namespace npanel
+
 void hudget_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     const uint32_t side = static_cast<uint32_t>(ctx->r[4]);
+    if (npanel::g_fighter) { ctx->r[2] = static_cast<int32_t>(npanel::g_opp && side != npanel::g_side ? npanel::g_opp : npanel::g_fighter); return; }   // one of the overhead PPSSPP panels
     g_orig_hudget(rdram, ctx);
     if (g_nextra && side < 2) { const uint32_t p = hud_panel_fighter(side); if (p) ctx->r[2] = static_cast<int32_t>(p);
         static uint32_t last[2] = {}; if (g_log && p != last[side]) { std::fprintf(stderr, "[HUDLOCK] t=%.2fs side %u panel -> %s %08X (human target %08X)\n", dissidia_battle_age() / 60.0f, side, ok(p, 0x12D0) ? role_of(p) : "?", p, rd(srd(g_bs + 56u + 4u * rd(g_bs + 84u)) + 0x2FCu)); last[side] = p; } }
@@ -7525,11 +7834,79 @@ void aim_fix() {
 //   CLOSER PSPRECOMP_TAGTEAM_AI_CLOSER the nearest enemy when it is < 70 % of the current distance and > 2 m closer
 // A target that is broken / being helped is kept (no CLOSER / SPREAD away from it). Master switch PSPRECOMP_TAGTEAM_AI_TARGET=0. Only game state is read
 // (positions, scripts, HP / BRV, the battle clock), so every machine of a lock-step battle decides the same. Applied like aim_fix: foe, target, lock block.
+// Score-based CPU targeting (21 Nov, user: "check whether the AI would respond like ours" = the PPSSPP plugin's v0.39 scoring, ported). Default ON;
+// PSPRECOMP_TAGTEAM_AI_SCORE=0 = the rule list below (HELP / BROKEN / SPREAD / CLOSER). Every ~0.25 s each CPU fighter (slot or extra, not pad-driven) scores
+// every living enemy:
+//   closeness  60 / (1 + d^2 / 150)            (d in m)
+//   + 25 if that enemy is on me (its foe word)
+//   + up to 40 if it hit me in the last 3 s (fading)  x my retaliation (0.7..1.3)
+//   + 30 if its HP is below 30 %                       x my aggression (0.7..1.3)
+//   + 10 if it is broken (BRV <= 0)
+//   + 15 if it is my current target (loyalty)
+//   - 10 if my team mate is already on it (not when it is low on HP)
+//   + 0..9 noise
+// It switches when another enemy beats the current one by 20 and its 1.5 s cool-down is over, or at once when the current target is over 30 m away and the
+// other within 12 m. A switch is applied only while calm (script 1..9) and outside chases, EX bursts and entrances (a switch mid-combo breaks the move).
+// The personalities and the noise come from a hash of the fighter's address, side and the battle clock, never a wall clock or a local RNG, so every machine of
+// a lock-step battle picks the same. Log: [AISCORE] (PSPRECOMP_TAGTEAM_LOG=1).
+uint32_t ai_hash(uint32_t x) { x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16; return x; }
+bool ai_score_target() {
+    static const bool on = [] { const char* v = std::getenv("PSPRECOMP_TAGTEAM_AI_SCORE"); return !(v && v[0] == '0'); }();
+    if (!on) return false;
+    const float age = dissidia_battle_age();   // (1/60 s units)
+    uint32_t f[6]; const int n = all_fighters(f);
+    auto fighter = [&](uint32_t x) { return ok(x, 0x12D0) && g_ram[(x + 0x542u) & 0x07FFFFFFu] == 0; };
+    auto valid = [&](uint32_t x, uint32_t self) { return x && x != self && fighter(x) && side_of(x) != side_of(self) && alive(x) && rdf(x + 0x84u) > -20.0f && std::fabs(rdf(x + 0x80u)) < 1000.0f; };
+    static std::map<uint64_t, float> hit_at;   // (victim, attacker) -> battle age of the last hit
+    static std::map<uint32_t, float> next_think, cool_until;
+    static uint32_t gen = 0; if (gen != g_battle_gen) { gen = g_battle_gen; hit_at.clear(); next_think.clear(); cool_until.clear(); }
+    for (int j = 0; j < n; j++) { const uint32_t e = f[j]; if (!fighter(e)) continue; const uint32_t v = hit_victim_of(e); if (v && fighter(v) && side_of(v) != side_of(e)) hit_at[(static_cast<uint64_t>(v) << 32) | e] = age; }
+    if (age < 600.f || exb_running() || entrance_busy() || (g_chase_ctl_now && rd(g_chase_ctl_now) != 0) || g_cpair[0].a) return true;
+    auto d2 = [&](uint32_t a, uint32_t b) { const float dx = rdf(a + 0x80u) - rdf(b + 0x80u), dy = rdf(a + 0x84u) - rdf(b + 0x84u), dz = rdf(a + 0x88u) - rdf(b + 0x88u); return dx * dx + dy * dy + dz * dz; };
+    auto hp_low = [&](uint32_t t) { const int mx = static_cast<int>(rd(t + 0x10B0u)); return mx > 0 && static_cast<float>(hp_eff(t)) < 0.3f * static_cast<float>(mx); };
+    for (int i = 0; i < n; i++) {
+        const uint32_t a = f[i];
+        if (!fighter(a) || !alive(a) || pad_driven(a)) continue;
+        if (next_think.count(a) && age < next_think[a]) continue;
+        next_think[a] = age + 15.f;
+        const int sc = static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu); if (sc < 1 || sc > 9) continue;
+        const uint32_t cur = rd(a + 0x300u); if (!valid(cur, a)) continue;   // (a stale word is aim_fix's)
+        const uint32_t ph = ai_hash(a ^ (static_cast<uint32_t>(side_of(a)) << 28) ^ 0x5EEDu);
+        const float aggr = 0.7f + static_cast<float>(ph % 61u) / 100.f, retal = 0.7f + static_cast<float>((ph >> 8) % 61u) / 100.f;
+        uint32_t mate = 0; for (int j = 0; j < n; j++) { const uint32_t m = f[j]; if (m != a && fighter(m) && side_of(m) == side_of(a) && alive(m) && !is_down(m)) { mate = m; break; } }
+        const uint32_t tick = static_cast<uint32_t>(age / 15.f);
+        auto score = [&](uint32_t t) {
+            float s = 60.f / (1.f + d2(a, t) / 150.f);
+            if (rd(t + 0x300u) == a) s += 25.f;
+            if (const auto it = hit_at.find((static_cast<uint64_t>(a) << 32) | t); it != hit_at.end() && age - it->second < 180.f) s += 40.f * retal * (180.f - (age - it->second)) / 180.f;
+            const bool low = hp_low(t);
+            if (low) s += 30.f * aggr;
+            if (brv_of(t) <= 0) s += 10.f;
+            if (t == cur) s += 15.f;
+            if (!low && mate && rd(mate + 0x300u) == t) s -= 10.f;
+            return s + static_cast<float>(ai_hash(a ^ t ^ (tick * 2654435761u)) % 10u);
+        };
+        const float scur = score(cur), dcur = std::sqrt(d2(a, cur));
+        uint32_t best = 0; float sbest = -1e30f;
+        for (int j = 0; j < n; j++) { const uint32_t e = f[j]; if (e == cur || !valid(e, a)) continue; const float se = score(e); if (se > sbest) { sbest = se; best = e; } }
+        if (!best) continue;
+        const bool opportunity = dcur > 30.f && std::sqrt(d2(a, best)) < 12.f;
+        const bool cooled = !cool_until.count(a) || age >= cool_until[a];
+        if (!opportunity && !(cooled && sbest >= scur + 20.f)) continue;
+        cool_until[a] = age + 90.f;
+        if (g_log) std::fprintf(stderr, "[AISCORE] t=%.2fs %s %08X c%d: %08X (%.0f, %.1f m) -> %08X (%.0f, %.1f m)%s aggr %.2f retal %.2f\n", age / 60.0f, role_of(a), a, actor_char(a), cur, static_cast<double>(scur), static_cast<double>(dcur), best, static_cast<double>(sbest), static_cast<double>(std::sqrt(d2(a, best))), opportunity ? " (opportunity)" : "", static_cast<double>(aggr), static_cast<double>(retal));
+        const uint32_t L = rd(a + 0x5ACu);
+        if (ok(L, 0x200)) call(LOCK_SET, L, best);
+        wr(a + 0x300u, best); wr(a + 0x2FCu, best);
+    }
+    return true;
+}
 void ai_target() {
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_AI_TARGET") && std::getenv("PSPRECOMP_TAGTEAM_AI_TARGET")[0] == '0';
     auto sw = [](const char* n) { const char* v = std::getenv(n); return !(v && v[0] == '0'); };
     static const bool rHelp = sw("PSPRECOMP_TAGTEAM_AI_HELP"), rBroken = sw("PSPRECOMP_TAGTEAM_AI_BROKEN"), rSpread = sw("PSPRECOMP_TAGTEAM_AI_SPREAD"), rCloser = sw("PSPRECOMP_TAGTEAM_AI_CLOSER");
     if (off || !g_bs || !g_nextra) return;
+    if (ai_score_target()) return;
     const float age = dissidia_battle_age();
     if (age < 600.f || exb_running() || entrance_busy() || (g_chase_ctl_now && rd(g_chase_ctl_now) != 0) || g_cpair[0].a) return;
     uint32_t f[6]; const int n = all_fighters(f);
@@ -8705,7 +9082,7 @@ void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx) {
                 std::fprintf(stderr, " [%s %.2f,%.2f,%.2f hp %d brv %d sc %d]", role_of(f[i]), rdf(f[i] + 0x80u), rdf(f[i] + 0x84u), rdf(f[i] + 0x88u), hp, brv, static_cast<int16_t>(rd(f[i] + 0x180u) & 0xFFFF)); }
             std::fprintf(stderr, " hash %08X\n", h); }
     }
-    if (g_ram) { tagteam_fx_frame(g_ram, g_bs ? dissidia_battle_age() : -1.f); tagteam_layer_frame(g_bs != 0 && g_hud_on && g_win_team < 0); }
+    if (g_ram) { tagteam_fx_frame(g_ram, g_bs ? dissidia_battle_age() : -1.f); tagteam_hud_set_ram(g_ram); tagteam_layer_frame(g_bs != 0 && g_hud_on && g_win_team < 0); }
     if (g_ram) { group_end_step(); tally_post_step(); leftover_unload(); }
     if (g_ram && std::getenv("PSPRECOMP_TAGTEAM_GROUPLOG")) { static std::string last; char b[96]; const uint32_t i1 = 0x09AFDFB0u + 0x25u + 0x38u; std::snprintf(b, sizeof b, "idx %u cnt %u res %u %u %u | t0 idx %u res %u %u", g_ram[(i1 - 7u) & 0x07FFFFFFu], g_ram[(i1 - 6u) & 0x07FFFFFFu], g_ram[(i1 - 5u) & 0x07FFFFFFu], g_ram[(i1 - 4u) & 0x07FFFFFFu], g_ram[(i1 - 3u) & 0x07FFFFFFu], g_ram[(0x09AFDFB0u + 0x25u - 7u) & 0x07FFFFFFu], g_ram[(0x09AFDFB0u + 0x25u - 5u) & 0x07FFFFFFu], g_ram[(0x09AFDFB0u + 0x25u - 4u) & 0x07FFFFFFu]);
         if (last != b) { last = b; std::fprintf(stderr, "[GROUPLOG] frame %u: %s\n", g_fe_ctr, b); std::fprintf(stderr, "[GROUPLOG]   08B82480:"); for (uint32_t a = 0x08B82480u; a < 0x08B82510u; a++) std::fprintf(stderr, "%s%02X", (a & 15u) ? "" : " | ", g_ram[a & 0x07FFFFFFu]); std::fprintf(stderr, "\n"); } }
@@ -8765,7 +9142,7 @@ void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t o = rd(0x089D5EA8u); static float last_left = 0;
         if (ok(o, 0x10)) { const float v = rdf(o), left = rdf(o + 4u); if (left > 0.0f && last_left <= 0.0f) { std::fprintf(stderr, "[SLOW] t=%.2fs slow motion %.2f for %.1f flags %08X:", dissidia_battle_age() / 60.0f, v, left, rd(o + 8u)); uint32_t f[6]; const int n = g_bs ? all_fighters(f) : 0; for (int i = 0; i < n; i++) std::fprintf(stderr, " %s %d", role_of(f[i]), static_cast<int16_t>(rd(f[i] + 0x180u) & 0xFFFFu)); std::fprintf(stderr, "\n"); } last_left = left; }
     }
-    if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); }
+    if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}); }
 }
 
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
@@ -8820,7 +9197,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static float last = -1.f; static unsigned same = 0, multi = 0, runs = 0; const float st = dissidia_logic_tick_len(); runs++;
         if (g_tt_age == last) same++; else if (last >= 0.f && g_tt_age - last > st * 1.5f) multi++;
         last = g_tt_age; if (runs % 600 == 0) std::fprintf(stderr, "[STEPCHK] t=%.2fs runs %u without a step %u over several steps %u\n", g_tt_age / 60.0f, runs, same, multi); }
-    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); }   // no battle tick for a while: take the panels and strips off the screen
+    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}); }   // no battle tick for a while: take the panels and strips off the screen
     if (g_bs && !g_late_q.empty() && rd(g_bs + 72) != 0) {   // a group battle: the extras at the start are the party's second members, not clones (the party record is not filled when the setup runs, so this is decided once the battle runs)
         g_ram = rdram; g_ctx = ctx;
         if (g_planned_gen != g_battle_gen && g_roster_ok) {   // (a member plans with the host's roster: it is here before the first lock-step frame)
@@ -9545,6 +9922,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (std::getenv("PSPRECOMP_TTCAM_EXSMLOG") && !g_orig_exmgr) { if ((g_orig_exmgr = fn(0x08ACB208u))) psp_dispatch_register(0x08ACB208u, exmgr_log_hook); }
     if (std::getenv("PSPRECOMP_TTCAM_DHLOG")) { if ((g_orig_dhset = fn(0x08AE1270u))) psp_dispatch_register(0x08AE1270u, dhset_hook); if ((g_orig_dhtick = fn(0x08AE0D70u))) psp_dispatch_register(0x08AE0D70u, dhtick_hook); }
     if (!g_orig_actl) { g_orig_actl = fn(0x08B031ACu); if (g_orig_actl) psp_dispatch_register(0x08B031ACu, actl_hook); }
+    npanel::install();
     if (hudlock_on() && !g_orig_hudget) { g_orig_hudget = fn(0x089E95B0u); if (g_orig_hudget) psp_dispatch_register(0x089E95B0u, hudget_hook);
         if (!std::getenv("PSPRECOMP_TAGTEAM_HITLOG")) { g_orig_hudref = fn(0x089DEDB0u); if (g_orig_hudref) psp_dispatch_register(0x089DEDB0u, hudref_hook); } }
     if (!g_orig_accui && !std::getenv("PSPRECOMP_TAGTEAM_NOACCUI")) { g_orig_accui = fn(0x089E1FD0u); if (g_orig_accui) psp_dispatch_register(0x089E1FD0u, accui_hook); }
@@ -9577,6 +9955,12 @@ void dissidia_tagteam_install(uint8_t* rdram) {
                                    +[]() { return g_two_v_one; }, +[](bool on) { g_two_v_one = on; }});
     psp_settings_add_debug_toggle({"Tag Team 1v2", "Tag team 1 v 2 (experimental)\nWith Tag Team on: you alone fight the CPU's two fighters (no partner for you). Off: 2 v 2.\nAffects the next battle that starts.",
                                    +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }});
+    psp_settings_add_debug_toggle({"Overhead HP Bars", "Tag team: HP bars over the enemies' heads\nOn: a thin HP bar over each enemy; the one you are locked on to is brighter and shows its Bravery. Replaces the small side panels. Only on your screen. This session only.",
+                                   +[]() { return g_overhead == 1; }, +[](bool on) { g_overhead = on ? 1 : 0; }});
+    psp_settings_add_debug_toggle({"Overhead Mini Panels", "Tag team: mini status panels over the enemies' heads\nOn: a small panel (name, Bravery, HP bar and number) over each enemy, see-through; the one you are locked on to is stronger. Replaces the small side panels and the HP bars. Only on your screen. This session only.",
+                                   +[]() { return g_overhead == 2; }, +[](bool on) { g_overhead = on ? 2 : 0; }});
+    psp_settings_add_debug_toggle({"Overhead PPSSPP HUD", "Tag team: the HUD of the PPSSPP plugin\nOn: half-size panels (face, Bravery, HP) over the enemies' heads, the one you are locked on to stronger; your ally and the other enemy in small panels at the bottom. Replaces the small side panels and the other overhead styles. Only on your screen. This session only.",
+                                   +[]() { return g_overhead == 3; }, +[](bool on) { g_overhead = on ? 3 : 0; }});
     if (!std::getenv("PSPRECOMP_SOUNDHEAP_RETAIL")) psp_dispatch_register(0x088A0C10u, soundheap_hook);
     std::fprintf(stderr, "[TAGTEAM] installed (%s)\n", g_enabled ? "on" : "off, Settings > Debug > Tag Team (2v2)");
 }
