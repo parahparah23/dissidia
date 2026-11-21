@@ -1617,8 +1617,12 @@ PartyList read_party(int side) {
     if (!ok(ids - 6u, 0x10)) return p;
     const int n = g_ram[(ids - 6u) & 0x07FFFFFFu];
     if (n < 1 || n > 8) return p;
-    for (int i = 0; i < n; i++) { const uint8_t c = g_ram[(ids + static_cast<uint32_t>(i)) & 0x07FFFFFFu]; if (c == 0 || c > 34) return PartyList{}; p.ids[i] = c; }
-    p.n = n;
+    // ttx: a row retail dropped (id 0) at the END of the list (the CPU party's 5th row when its owner already registered rows of his own: retail keeps the
+    // count 5 but the 5th block is empty) ends the list instead of rejecting all of it (the CPU party then had no fighters at all: `side 1 order:` empty).
+    int m = 0;
+    for (int i = 0; i < n; i++) { const uint8_t c = g_ram[(ids + static_cast<uint32_t>(i)) & 0x07FFFFFFu]; if (c == 0) { for (int j = i + 1; j < n; j++) if (g_ram[(ids + static_cast<uint32_t>(j)) & 0x07FFFFFFu] != 0) return PartyList{}; break; } if (c > 34) return PartyList{}; p.ids[m++] = c; }
+    if (m < 1) return PartyList{};
+    p.n = m;
     return p;
 }
 // Which party list (team record 0/1) is the local human's team, from the characters on the stage: hc = the human's, oc = the other team's.
@@ -8222,10 +8226,10 @@ namespace {
 bool g_sp_assist_on = false;   // per program run, set from the setup screen (default Assists OFF, user 21 Nov)
 bool assist_off_now() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
-    const bool on = e ? e[0] != '0' : g_sp_assist_on;
+    const bool on = (e ? e[0] != '0' : g_sp_assist_on) || ffa_now();   // free-for-all: no Assist Off (user 21 Nov: "should not be an option"), retail assists
     if (psp_adhoc_in_session()) {   // online: the host's setting, as the roster brought it (PSPRECOMP_TAGTEAM_MP_ASSISTOFF=0: assists always on online, the old rule)
         static const bool mp_off_ok = [] { const char* m = std::getenv("PSPRECOMP_TAGTEAM_MP_ASSISTOFF"); return !(m && m[0] == '0'); }();
-        const bool shared_on = !mp_off_ok || !g_shared_valid || (g_shared_flags & 1u) != 0;
+        const bool shared_on = !mp_off_ok || !g_shared_valid || (g_shared_flags & 1u) != 0 || ffa_now();
         return !shared_on && g_bs && g_nextra > 0 && comms_battle() && dissidia_battle_age() / 60.0f > 2.0f;
     }
     return !on && g_bs && g_nextra > 0 && dissidia_battle_age() / 60.0f > 2.0f;
@@ -9080,8 +9084,8 @@ void ao9_extra_step(const Extra& e) {
     ao9_call(k, E, M, kind, by);
 }
 }  // namespace
-bool dissidia_tagteam_sp_assist_on() { return g_sp_assist_on; }
-void dissidia_tagteam_sp_assist_toggle() { g_sp_assist_on = !g_sp_assist_on; std::fprintf(stderr, "[TTSP] Assist: %s\n", g_sp_assist_on ? "On" : "Off"); }
+bool dissidia_tagteam_sp_assist_on() { return g_sp_assist_on || g_ffa; }   // free-for-all: always On (no Assist Off in FFA)
+void dissidia_tagteam_sp_assist_toggle() { if (g_ffa) { std::fprintf(stderr, "[TTSP] Assist: On (free-for-all has no Assist Off)\n"); return; } g_sp_assist_on = !g_sp_assist_on; std::fprintf(stderr, "[TTSP] Assist: %s\n", g_sp_assist_on ? "On" : "Off"); }
 namespace {
 FuncPtr g_orig_actl = nullptr;
 float agauge_of(uint32_t a) { const uint32_t st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0u; return ok(st, 0x40) ? rdf(st + 0x1Cu) : -1.f; }
@@ -10085,7 +10089,7 @@ bool dissidia_tagteam_comms_battle() { return comms_battle(); }
 // ---- the host's roster (see g_roster_ok) ----
 uint8_t local_rule_flags() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
-    const bool assist_on = e ? e[0] != '0' : g_sp_assist_on;
+    const bool assist_on = (e ? e[0] != '0' : g_sp_assist_on) || g_ffa;   // free-for-all: assists on for the group
     return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3
 }
 constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
@@ -10341,7 +10345,11 @@ int dissidia_tagteam_bp_row(int i, uint8_t cfg[3]) {   // the character of CPU p
     if (bp_party(pl, &h) < 0 || i < 0 || i >= h->bp_n) return 0;
     std::memcpy(cfg, h->bp_cfg[i], 3); return h->bp_regs[i];
 }
+// ttx: retail's table takes at most 5 member blocks from one machine; the CPU party's owner (a non-host member of the host's party) already registered
+// rows of his own, so the CPU party holds 5 minus his rows (seen: owner with 1 row, 5th CPU row dropped by retail, party list {30,27,21,16,0}).
+int bp_row_cap() { int own = 0; for (const NetPlayer& p : group_players()) if (!p.host && p.party >= 0) own = std::max<int>(own, __builtin_popcount(p.own_mask)); return std::max(1, 5 - own); }
 void dissidia_tagteam_bp_add(int ch) {
+    if (g_me.host && g_me.bp_n >= bp_row_cap() && g_me.bp_n < 5) { std::fprintf(stderr, "[TTBP] CPU party is full at %d row(s) (retail takes 5 blocks per machine, the owner has rows of his own)\n", g_me.bp_n); return; }
     if (!g_me.host || g_me.bp_n >= 5 || ch < 1 || ch > 0x3F || bp_party(group_players()) < 0) return;
     for (int i = 0; i < g_me.bp_n; i++) if (g_me.bp_regs[i] == ch) return;   // (a party holds a character once)
     const int r = g_me.bp_n++; g_me.bp_regs[r] = static_cast<uint8_t>(ch); g_me.bp_cfg[r][0] = 5; g_me.bp_cfg[r][1] = 0; g_me.bp_cfg[r][2] = 0;

@@ -3,7 +3,12 @@
 ## TODO (kept up to date; newest first)
 
 - **Proper PvE (humans vs a CPU party): DONE on the host (21 Nov, tree ttfa, section "Proper PvE: a CPU party the host sets up"; the old keeper is behind `PSPRECOMP_TAGTEAM_KEEPER=1`).** Open: 3 or more humans, a CPU party with more than the host's rows when a human also joined it, an Internet (relay) session, the CPU lead's own level (it keeps the owner's save level of that character; its AI strength / type do follow the row), a real device.
-- **Sephiroth invisible on the RP6** (a call-in whose textures used the texture overflow heap): the overflow heap moved from high RAM (0x0E780000) to region 2 (21 Nov); confirm on the device. An Android-emulator rig is being set up (22 Nov) to test such Android-only rendering without the device.
+- **10-player tests of the online modes (21 Nov, rig `~/dissidia/tt/net10m`, `runcase.sh TAG 3v3|ffa4|ffa3|pve|pve3v3`):**
+  - 3 v 3, 10 humans: 2 of 3 runs in sync to the same result on all 10. The third had a local GE fault on 3 machines (`[GE] Hit command limit` after a rebuild, ~2 battle fps), cause unknown.
+  - Free-for-all (4), 10 humans: 2 runs in sync, same result on all 10; the result screen takes ~3 min to appear.
+  - **Free-for-all (3) online is BROKEN**: the host spawns one extra, the members two (`ffa_now()` only carries "FFA on" = 4, `eff_mask()` uses the local `g_ffa`), so the lock-step splits at frame ~235. Not fixed (user: report only).
+  - PvE, 5 humans: retail drops the CPU party's 5th row when its owner has a row of his own, and `read_party()` then rejected the whole list (CPU party of one). Fixed 21 Nov: the list ends at a trailing 0, and the host can add at most 5 minus the owner's own rows (`bp_row_cap`, log `[TTBP] CPU party is full`); 3 runs in sync (2 PvE + 1 PvE with 3 v 3). Open: the picker hint still shows when the party is full; PvE with spectators in the room.
+- **Sephiroth invisible on the RP6** (a call-in whose textures used the texture overflow heap): the overflow heap moved from high RAM (0x0E780000) to region 2 (21 Nov). On the Android emulator (desktop GPU, rig `~/dissidia/tt/emu`, `EMU_REMOTE=192.168.2.131`) the Sephiroth call-in and its portrait render (21 Nov, ea1cc5f); still confirm on the RP6.
 - **Assist Off online, round 10 online**: an enemy hit on a running assist call (swap) was not seen online (no natural hit in 32 calls, no test aid to force one). Everything else of Assist Off online CHECKED 21 Nov (section "Assist Off online, 21 Nov").
 - **Multiplayer issues 1 and 3** (desync at a human partner's attack; 10-player end split): not reproduced in 5 clean 10-player runs after the party-read fix; keep watching with the 10-player rig (`~/dissidia/tt/net10x/rig2/run10.py`).
 - **Japanese voices: only one fighter has battle audio** (GitHub issue #119).
@@ -2085,6 +2090,7 @@ two opponents share a game side; friend / foe is per fighter: `foes(a, b)` (any 
   that shares the human's game side.
 - Lock cycle seen (`ffa4_lockb2`, L taps from a test script, `tools_dbg/overhead_shots_s.py` + BT_SCRIPT_EXTRA): foe -> extraE (retail took the
   selector to 1 itself; the steer now remembers that pick) -> extraP (`lock cycle (FFA): -> the next opponent`) -> back to the foe, again.
+- No Assist Off in free-for-all (user 21 Nov: "should not be an option"): with FFA on, assists are always On (the setup screen shows "Assists: ON", Square does not toggle, `PSPRECOMP_TAGTEAM_ASSIST=0` is ignored; online the host's roster carries assists on).
 - Settings > Debug: "Free-for-all (3)" / "Free-for-all (4)" (with Tag Team on; the next battle). Turning one on picks overhead style 1 when none is on.
 - Online (Communications Mode > Group Battle): the host's setting decides for the whole group. `local_rule_flags()` bit 2 = FFA goes out with the
   host's roster; `ffa_now()` reads it in a Communications battle (offline: the local setting). The beacon layout version is 7 (6 was taken by Proper PvE), so a build without
