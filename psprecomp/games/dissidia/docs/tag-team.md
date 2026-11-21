@@ -3,13 +3,14 @@
 ## TODO (kept up to date; newest first)
 
 - **Proper PvE (humans vs a CPU party).** Today's "keeper" (PR merged 21 Nov, section "Group Battle: a party of CPUs") is a workaround: retail refuses a party without a human, so a player of Party B carries the CPU party and fights for Party A; his own result screen and rewards follow Party B, and the CPU lead's strength / level / type are fixed (5 / Auto / Random). Wanted instead: both humans in one party and a real CPU-only party (CPU rows added from the team selector, each with its own strength / level / type), the match start allowed for it, the lobby table / party lists / round list built for the CPU party, results and rewards right for every human, all of it from the host's roster (lock-step safe).
-- **Assist Off online: check it stays in sync** (now active when the host picks it, PR #118); the longer slow motion for a human called in must also apply online.
-- **Multiplayer: call-in memory with 10 characters**: the battle heap (FIELD::MEMORY) is 6.6 MB, the rebuild leak is gone (22 Nov, section "Rebuild leftovers": 32 rebuilds, battle heap flat at 1.6-1.7 MB) and the 10 KB FUNCTION heap at 0x099B7E30 now has 34 KB; the rebuild cap (40) stays as a fallback. Still to confirm in a 4- or 10-player run (multiplayer rig).
-- **Sephiroth invisible on the RP6 (call-in whose textures used the texture overflow heap)**: the overflow heap moved from high RAM (0x0E780000) to region 2; to confirm on the device.
+- **Sephiroth invisible on the RP6** (a call-in whose textures used the texture overflow heap): the overflow heap moved from high RAM (0x0E780000) to region 2 (21 Nov); confirm on the device. An Android-emulator rig is being set up (22 Nov) to test such Android-only rendering without the device.
+- **Assist Off online, round 10 online**: an enemy hit on a running assist call (swap) was not seen online (no natural hit in 32 calls, no test aid to force one). Everything else of Assist Off online CHECKED 21 Nov (section "Assist Off online, 21 Nov").
 - **Multiplayer issues 1 and 3** (desync at a human partner's attack; 10-player end split): not reproduced in 5 clean 10-player runs after the party-read fix; keep watching with the 10-player rig (`~/dissidia/tt/net10x/rig2/run10.py`).
 - **Japanese voices: only one fighter has battle audio** (GitHub issue #119).
 - **Dark view during a second partner EX Burst** (reported by the PR #117 author, not seen on a device).
 - **Accessories: forced negative test** that a call-in never gets the original fighter's conditional boosts (code read + logs say per fighter).
+
+Done (21-22 Nov): call-in memory with 10 characters (battle heap 6.6 MB, rebuild leak fixed, FUNCTION heap 34 KB; 10-player run with 5 call-ins per side in sync, peak 2871 of 6614 KB); Assist Off online in sync (rounds 8 / 9 / refusals, human called-in slow motion online).
 
 Status (14 Nov): **2v2 plays**: four fighters fight (the partner and the enemy's second fighter are clones of the existing fighters on the CPU brain), HUD panels and reserve strips, L cycles the lock between the enemies, tag swap (SELECT, `PSPRECOMP_TAGTEAM_SWAP_BUTTON=1`, clone partners only), a settings toggle (Debug > Tag Team (2v2)) and a regression test (`tools/tagteam_test.py`). Not done: KO call-ins / round end rules, partners that are different characters, the real party roster in the reserve, portraits. Branch `tag-team`, based on `origin/main` 00b9d41. The sections below start with the original research and plan, then record each step.
 Everything below comes from reading the recompiled code (`psprecomp dump <analysis> 0xADDR`) and the existing
@@ -4358,3 +4359,12 @@ the loading timing changes the first numbers). Now: 1.65-1.70 MB from the 4th re
   from the FUNCTION heap (no other symptom in the repro and the regression); an old body's blocks still referenced from a non-structure place (e.g. a pool object pointing into
   the middle of a leftover block) would now be freed - `PSPRECOMP_TTLOCK_LEFTSCAN_OLD=1` is the switch to bisect a new crash with.
 
+## Assist Off online and the battle heap in multiplayer: verification (21 Nov, agent ttx; no code change)
+Rig copy `~/dissidia/tt/net4w` (net4t with ports 978x, process `net4wrt`, `PSPRECOMP_CLOUD=0`; `rig/case2.sh` = 4 copies, `rig/case3.sh` = 3 copies with `ROWS=cpu`), build of tree ttx. Host default Assists OFF (roster flag), `[TTSYNC]` compared with `cmpsync.py`.
+| run | setup | what was forced | result |
+|---|---|---|---|
+| `logs/w1` | 4 humans (A+B vs C+D) | `FORCECALL=0:14:34`: slot fighter calls its human partner | OK: partner moved in, 0.4 slow motion; `[ASSISTOFF]` lines identical on A-D, 122 samples, 0 differ |
+| `logs/x1`, `x2`, `x3`, `x4` | 3 humans + CPU rows (Laguna + Yuna CPU vs Lightning + Vaan human + Kain CPU) | `FORCECALL=1:14:...` (round 8, up to 16 calls), `AO9FORCE=extraP@t,extraE@t` (round 9) | round 8: the CPU partner's own assist plays the call, hand-over at +3.7 s, identical on all copies; round 9: `x2` 75.03 s CPU Yuna calls the human Laguna, `[AO9] the human is called in: slow motion 0.25 for 140 ticks` on all 3 copies; refused calls (gauge, busy, hitstun, Bravery-broken, call still out, EX Burst) the same on all copies; [TTSYNC] 0 differ in 142 / 158 / 166 / 174 samples |
+| `net10x/logs/z1` | 10 players, `KOLIST=slot0:20,slot1:40,slot0:60,slot0:80,slot1:100` + `CALLIN_DELAY=8` | 5th member of side 0 (the failing w5 point) | no `FAILED` / `alloc failed`, no `rebuild refused`, [TTSYNC] 82 samples equal on 10, 0 DESYNC lines |
+Notes: `AO9FORCE` role names (`extraP` / `extraE`) are read from each machine's own view, so pass BOTH roles at the same times on every copy. Only the `[AO8] .. fx <handle>` word differs between machines (an effect handle, local).
+Not verified: a CPU enemy hitting a running assist (round 10 swap) in a lock-step battle (no natural hit in 16 + 16 calls); a CPU slot fighter called by a human partner in round 9; 4-player run of the battle heap (the 4-/3-player rigs have at most 3 characters per side).
