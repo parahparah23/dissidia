@@ -42,6 +42,10 @@ void dissidia_tagteam_get_cpu_cfg(int row, uint8_t out[3]);
 void dissidia_tagteam_set_cpu_cfg(int row, const uint8_t in[3]);
 int dissidia_tagteam_menu_cpu_row(int party, int row, uint8_t out[3]);
 int dissidia_tagteam_local_party();
+bool dissidia_tagteam_cpu_party_on();
+int dissidia_tagteam_defect_side();
+void dissidia_tagteam_add_cpu_request(bool on);
+bool dissidia_tagteam_add_cpu_pending();
 bool dissidia_tagteam_sp_tag_on();
 bool dissidia_tagteam_sp_mode();
 int dissidia_tagteam_sp_rows(uint32_t screen, uint8_t out[5]);
@@ -78,6 +82,7 @@ uint32_t g_prev_buttons = 0;
 constexpr uint32_t BTN_UP = 0x10u, BTN_RIGHT = 0x20u, BTN_DOWN = 0x40u, BTN_LEFTK = 0x80u, BTN_R = 0x200u, BTN_OPEN = 0x1u, BTN_CIRCLE = 0x2000u, BTN_CROSS = 0x4000u;
 std::atomic<uint32_t> g_raw_pad{0};   // the pad as the filter saw it before the dialog took it
 std::atomic<bool> g_dlg_open{false};
+std::atomic<int> g_inject_cross{0};   // "Add CPU" (L on the free row) presses Cross for the screen: it opens Player Select for the new row
 std::atomic<uint32_t> g_pad_polls{0}, g_sq_stamp{0};   // pad polls; the poll at which the setup screen last ran with Square taken (the block ends a few polls after the screen stops ticking)
 std::atomic<bool> g_sp_sq_block{false};   // single player setup list: Square is ours (Assist On / Off), the screen does not see it
 int g_dlg_row = 0, g_dlg_field = 0;
@@ -213,17 +218,26 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     const int row = static_cast<int>(r32(screen + SCR_ROW));
     const uint8_t own = dissidia_tagteam_local_own_mask();
     int first = -1; for (int i = 0; i < 5 && first < 0; i++) if ((own >> i) & 1) first = i;
-    const bool switchable = left && row >= 0 && row < n && row < 5 && ((own >> row) & 1) && row != first;   // the player's own rows after his first
-    const bool cpu_row = switchable && ((dissidia_tagteam_local_cpu_mask() >> row) & 1);
+    const bool switchable = left && row >= 0 && row < n && row < 5 && ((own >> row) & 1) && (row != first || dissidia_tagteam_cpu_party_on());   // the player's own rows after his first (the first too: a CPU first row makes him the keeper of a CPU party)
+    const bool cpu_row = switchable && ((dissidia_tagteam_local_cpu_mask() >> row) & 1) && row != first;   // (the settings of a keeper's first row are not in the beacon bytes: default strength 5 / Auto / Random)
     if (g_dlg_open && !cpu_row) g_dlg_open = false;   // the row went away / is a player again
+    const bool free_row = left && n >= 0 && n < 5 && row == n && !g_dlg_open && dissidia_tagteam_cpu_party_on();   // the cursor is on the next free row: L = Add CPU
+    if (free_row && (pressed & BTN_L)) { dissidia_tagteam_add_cpu_request(true); g_inject_cross.store(3, std::memory_order_relaxed); play_se(rdram, ctx, 1); }
     bool opened_now = false;
     if (!g_dlg_open && cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_sp = false; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; dissidia_tagteam_get_cpu_cfg(row, g_dlg_cfg); g_dlg_open = true; play_se(rdram, ctx, 1); }
     if (!g_dlg_open && switchable && (pressed & BTN_SQUARE)) { dissidia_tagteam_toggle_cpu_row(row); play_se(rdram, ctx, 1); }
     const uint8_t mask = dissidia_tagteam_local_cpu_mask();
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
-    for (int i = 1; i < n && i < 5; i++) if ((mask >> i) & 1) {   // the CPU rows
+    for (int i = 0; i < n && i < 5; i++) if ((mask >> i) & 1) {   // the CPU rows (the first too, a CPU party's keeper)
         const float y = kRowY0 + kRowPitch * float(i);
         tag(139.f, y + 5.f, 160.f, y + 14.f, "CPU", a);   // after the job name (the left column's hand covers x 45..80 of the row)
+    }
+    const int dside = dissidia_tagteam_defect_side();   // this player keeps a CPU party: his player rows fight for the other party
+    if (dside >= 0) {
+        for (int i = 0; i < n && i < 5; i++) if (((own >> i) & 1) && !((mask >> i) & 1)) { const float y = kRowY0 + kRowPitch * float(i); tag(121.f, y + 5.f, 160.f, y + 14.f, dside == 0 ? "-> Party A" : "-> Party B", a); }
+        const std::string note = std::string("You keep the CPU party: CPU rows fight for Party ") + (dside == 0 ? "B" : "A") + ", Player rows for Party " + (dside == 0 ? "A" : "B");
+        const float em = 5.6f, w = g_layer.text(note, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        g_layer.text(note, true, em, 240.f - w / 2.f, 266.f, LayerColor{60, 60, 110, a});
     }
     // CPU rows' settings, read-only: this player's party on the left column (the player's own rows and the party mates' rows), the other party's on the right edge
     const int me_party = dissidia_tagteam_local_party();
@@ -242,7 +256,7 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     }
     if (n >= 1 && n < 5) {   // the next free row: it adds a character (yours; Square makes it a CPU)
         const float y = kRowY0 + kRowPitch * float(n);
-        const char* hint = "Add a character";
+        const char* hint = dissidia_tagteam_cpu_party_on() ? "Add a character   (L: Add CPU)" : "Add a character";
         const float w = g_layer.text(hint, true, 7.0f, 0, 0, LayerColor{0, 0, 0, 0}, true);
         g_layer.text(hint, true, 7.0f, (kColX0 + kColX1) / 2.f + 12.f - w / 2.f, y + 12.6f, LayerColor{92, 88, 128, 0.85f * a});
     }
@@ -258,7 +272,7 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     if (players >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR")) {
         uint8_t m = dissidia_tagteam_mode_byte();
         const bool host = dissidia_tagteam_is_host();
-        if (host && (pressed & BTN_L)) {
+        if (host && (pressed & BTN_L) && !free_row) {
             int k = 0; for (int i = 0; i < 4; i++) if (kModes[i] == m) k = i;
             m = kModes[(k + 1) % 4];
             dissidia_tagteam_set_mode_byte(m);
@@ -270,6 +284,7 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     if (g_dlg_open) dialog(rdram, ctx, opened_now ? 0u : pressed, dt, a);
     g_layer.publish();
 }
+
 
 void setup_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(SETUP_TICK)) f(rdram, ctx); return; }
@@ -289,6 +304,11 @@ void setup_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     dissidia_tagteam_gb_setup_frame(r32(screen + SCR_COLUMN) == 0u ? static_cast<int>(r32(screen + SCR_ROW)) : -1);
     { static uint32_t pc = ~0u, pr = ~0u, ps = ~0u; const uint32_t col = r32(screen + SCR_COLUMN), rw = r32(screen + SCR_ROW), M = r32(screen + SCR_M), st = (M >= 0x08800000u && M < 0x0A000000u) ? r32(M + 4u) : 0xFFFFFFFFu;
       if (col != pc || rw != pr || st != ps) { pc = col; pr = rw; ps = st; std::fprintf(stderr, "[TTGB] setup screen %08X: column %u row %u state %u\n", screen, col, rw, st); } }
+    if (dissidia_tagteam_add_cpu_pending()) {   // "Add CPU": Player Select was opened for the new row; if it closes without a row (Circle) nothing stays pending
+        static bool seen = false; static int calm = 0;
+        const uint32_t M = r32(screen + SCR_M), st = (M >= 0x08800000u && M < 0x0A000000u) ? r32(M + 4u) : 7u;
+        if (st != 7u) { seen = true; calm = 0; } else if (seen && ++calm > 20) { dissidia_tagteam_add_cpu_request(false); seen = false; calm = 0; std::fprintf(stderr, "[TTCPU] Add CPU: Player Select was closed without a character\n"); }
+    }
     draw(rdram, ctx, screen);
 }
 
@@ -481,6 +501,7 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
         else if (sr == 1) raw &= ~BTN_UP;
         else if (sr == 3) raw &= ~BTN_DOWN;
     }
+    if (int ij = g_inject_cross.load(std::memory_order_relaxed); ij > 0) { g_inject_cross.store(ij - 1, std::memory_order_relaxed); raw = (ij == 2) ? (raw | BTN_CROSS) : (raw & ~BTN_CROSS); }   // Add CPU: one Cross press (edge) for the screen
     if (g_sp_sq_block.load(std::memory_order_relaxed) && g_pad_polls.fetch_add(1, std::memory_order_relaxed) - g_sq_stamp.load(std::memory_order_relaxed) < 40u) raw &= ~BTN_SQUARE;
     else g_pad_polls.fetch_add(1, std::memory_order_relaxed);
     return g_dlg_open.load(std::memory_order_relaxed) ? 0u : raw;

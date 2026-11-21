@@ -178,6 +178,7 @@ bool g_snap_valid = false;
 // CPU rows) and a partner was human-driven on one machine only. The host sends its g_snap over the lock-step side channel; the members take it
 // before their first lock-step frame (tagteam_net.cpp waits for it), so every spawn / driver decision of the battle uses the same list.
 // The same message carries the host's battle rules (g_shared_flags): bit 0 = assists on, bit 1 = EX Burst rule "fight".
+uint32_t g_cpu_stage_gen = 0xFFFFFFFFu;   // the battle in which the CPU stage fighters were handed to the AI
 bool g_roster_ok = true;      // this machine has the battle's agreed roster (the host: its own snapshot; a member: once the host's arrived)
 uint8_t g_shared_flags = 0; bool g_shared_valid = false;
 uint8_t host_mode_byte();   // below (the host's fighters-per-side byte)
@@ -196,6 +197,8 @@ void sp_rows_seen(const uint8_t* rows, int n) {
 }
 // The row of a character that is a CPU partner (-1 = not one).
 int sp_cpu_row(int c) { for (int i = 1; i < 5; i++) if (c > 0 && g_sp.chars[i] == c && ((g_sp.cpu_mask >> i) & 1)) return i; return -1; }
+bool g_add_cpu = false; int g_add_cpu_age = 0;   // "Add CPU" (L on the free row of the setup screen): the next row this player registers is a CPU
+bool cpu_party_on() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_NOCPUPARTY") == nullptr; return on; }   // a player's first row may be a CPU (he then keeps a CPU party); PSPRECOMP_TAGTEAM_NOCPUPARTY=1 = retail's rule
 void gb_read_local(bool setup_screen = false) {   // setup_screen: the Tournament setup screen runs, the block is live. Otherwise (the beacon's periodic sync) the party is only learned once: the block is freed while the battle loads and then reads 0, which made one machine 'party A' (10-player rig, 21 Nov)
     if (!g_ram) return;
     if (!setup_screen && g_me.party >= 0 && !std::getenv("PSPRECOMP_TTGB_PARTY_OLD")) return;
@@ -214,12 +217,14 @@ void gb_read_regs(int cursor_row) {   // called while the Tournament setup scree
     for (int i = 0; i < m.n; i++) if ((i >= g_me.n || g_me.regs[i] != m.regs[i]) && i == cursor_row) {
         own |= static_cast<uint8_t>(1u << i);
         std::fprintf(stderr, "[TTCPU] row %d (char %d) is this player's own\n", i + 1, m.regs[i]);
+        if (g_add_cpu) { g_add_cpu = false; g_me.cpu_mask |= static_cast<uint8_t>(1u << i); std::fprintf(stderr, "[TTCPU] row %d (char %d) added as a CPU (Add CPU)\n", i + 1, m.regs[i]); }
     }
+    if (g_add_cpu && ++g_add_cpu_age > 900) g_add_cpu = false;   // Player Select was cancelled (about 30 s of frames)
     for (int i = 0; i < 5; i++) if (!((own >> i) & 1) || !((g_me.own_mask >> i) & 1)) { g_me.cfg[i][0] = 5; g_me.cfg[i][1] = 0; g_me.cfg[i][2] = 0; }   // a row that is new / gone starts at the defaults
     g_me.n = m.n; std::memcpy(g_me.regs, m.regs, sizeof m.regs); g_me.own_mask = own;
     g_me.cpu_mask &= own;   // only own rows can be CPUs; rows that went away lose their flag
     int first = -1; for (int i = 0; i < 5 && first < 0; i++) if ((own >> i) & 1) first = i;
-    if (first >= 0) g_me.cpu_mask &= static_cast<uint8_t>(~(1u << first));   // the player's first row is always his own fighter
+    if (first >= 0 && !cpu_party_on()) g_me.cpu_mask &= static_cast<uint8_t>(~(1u << first));   // the player's first row is always his own fighter (unless he commands a CPU party: docs "Group Battle: a party of CPUs")
 }
 // Beacon slot of a row: its rank among the player's own rows after the first (-1 = the first own row, which is never a CPU / not own).
 int cfg_slot(uint8_t own_mask, int row) { if (row < 0 || row > 4 || !((own_mask >> row) & 1)) return -1; int k = 0; for (int i = 0; i < row; i++) k += (own_mask >> i) & 1; return k - 1; }
@@ -1722,6 +1727,13 @@ std::vector<const NetPlayer*> players_sorted(const std::vector<NetPlayer>& pl) {
     std::sort(v.begin(), v.end(), [&](const NetPlayer* a, const NetPlayer* b) { if (a->party != b->party) return a->party < b->party; const int fa = first_own(a), fb = first_own(b); if (fa != fb) return fa < fb; return std::memcmp(a->mac, b->mac, 6) < 0; });
     return v;
 }
+// A player whose first own row is a CPU is the KEEPER of his party's CPUs (docs "Group Battle: a party of CPUs"). Retail wants a human in every party
+// (the Party Select refuses "Add members to both parties", and a party without rows ends the match 0-0), so a CPU party is carried by a human
+// member: a party whose players are all keepers is a CPU party, its keepers' CPU rows are its fighters and their player rows (not CPU) fight for
+// the OTHER party (a human partner of the opponents' side, driven by the keeper).
+bool np_keeper(const NetPlayer* p) { for (int i = 0; i < p->n; i++) if ((p->own_mask >> i) & 1) return ((p->cpu_mask >> i) & 1) != 0; return false; }
+bool cpu_party_of(const std::vector<const NetPlayer*>& ps, int party) { int n = 0; for (const NetPlayer* p : ps) if (p->party == party) { n++; if (!np_keeper(p)) return false; } return n > 0; }
+bool defects_from(const std::vector<const NetPlayer*>& ps, int party) { return cpu_party_on() && cpu_party_of(ps, party) && !cpu_party_of(ps, 1 - party); }   // the keepers' player rows of this CPU party fight for the other party
 int party_order(int party, TagEntry* out, int max) {
     if (party < 0 || party > 1 || max <= 0) return 0;
     std::vector<NetPlayer> tmp; const std::vector<NetPlayer>& pl = snap_or_live(tmp);
@@ -1744,12 +1756,18 @@ int party_order(int party, TagEntry* out, int max) {
                 int only = -1, cnt = 0; for (size_t k = 0; k < ps.size(); k++) if (ps[k]->party == party) { cnt++; only = static_cast<int>(k); }
                 if (cnt == 1) { e.owner = static_cast<int8_t>(only); e.local = ps[static_cast<size_t>(only)]->local; }
             }
+            if (e.owner >= 0 && !e.is_cpu && defects_from(ps, party)) continue;   // a keeper's player row: it fights for the other party
             v.push_back(e);
         }
     } else {               // in the menus: the players' rows, players in the agreed order
+        const bool dfc = defects_from(ps, party);
         for (size_t k = 0; k < ps.size(); k++) if (ps[k]->party == party)
-            for (int r = 0; r < ps[k]->n; r++) if (((ps[k]->own_mask >> r) & 1) || !ps[k]->own_mask) v.push_back(TagEntry{ps[k]->regs[r], static_cast<int8_t>(k), ((ps[k]->cpu_mask >> r) & 1) != 0, ps[k]->local, ps[k]->cfg[r][0], ps[k]->cfg[r][1], ps[k]->cfg[r][2]});
+            for (int r = 0; r < ps[k]->n; r++) if (((ps[k]->own_mask >> r) & 1) || !ps[k]->own_mask) { if (dfc && ((ps[k]->own_mask >> r) & 1) && !((ps[k]->cpu_mask >> r) & 1)) continue;
+                v.push_back(TagEntry{ps[k]->regs[r], static_cast<int8_t>(k), ((ps[k]->cpu_mask >> r) & 1) != 0, ps[k]->local, ps[k]->cfg[r][0], ps[k]->cfg[r][1], ps[k]->cfg[r][2]}); }
     }
+    if (defects_from(ps, 1 - party))   // the other party is a CPU party: its keepers' player rows join this one (after this party's own rows), driven by the keeper
+        for (size_t k = 0; k < ps.size(); k++) if (ps[k]->party == 1 - party)
+            for (int r = 0; r < ps[k]->n; r++) if (((ps[k]->own_mask >> r) & 1) && !((ps[k]->cpu_mask >> r) & 1)) v.push_back(TagEntry{ps[k]->regs[r], static_cast<int8_t>(k), false, ps[k]->local});
     int n = 0; for (const TagEntry& e : v) if (n < max) out[n++] = e;
     return n;
 }
@@ -1803,7 +1821,9 @@ void orec_begin_battle() {
 bool owner_record(uint32_t G, int ch, const uint8_t** out, int* who) {
     if (std::getenv("PSPRECOMP_TTREC_OFF") || !comms_battle() || G < REC_BASE) return false;
     const uint32_t side = (G - REC_BASE) / 4192u; if (side > 1u) return false;
-    auto it = g_orec[side].find(ch); if (it == g_orec[side].end()) return false;
+    auto it = g_orec[side].find(ch);
+    if (it == g_orec[side].end() && !std::getenv("PSPRECOMP_TAGTEAM_NOCPUPARTY")) { it = g_orec[1 - side].find(ch); if (it == g_orec[1 - side].end()) return false; }   // a keeper's player row fights for the other party (docs "Group Battle: a party of CPUs"): its record is in the keeper's party's blocks
+    else if (it == g_orec[side].end()) return false;
     *out = it->second.data(); *who = static_cast<int>(side); return true;
 }
 int party_cpus(int party, uint8_t* ids, int max) {
@@ -1820,6 +1840,7 @@ int fighters_per_side(int party) {
     if (humans >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR")) { const int c = (host_mode_byte() >> (2 * party)) & 3; return c == 1 ? 1 : 2; }
     TagEntry l[10]; const int n = party_order(party, l, 10);
     for (int i = 0; i < n; i++) if (l[i].is_cpu) return 2;
+    for (int i = 1; i < n; i++) if (l[i].owner != l[0].owner) return 2;   // two players on one party (a keeper's player row joins the other party)
     return 1;
 }
 void log_order(int side) {
@@ -9198,6 +9219,13 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         if (g_tt_age == last) same++; else if (last >= 0.f && g_tt_age - last > st * 1.5f) multi++;
         last = g_tt_age; if (runs % 600 == 0) std::fprintf(stderr, "[STEPCHK] t=%.2fs runs %u without a step %u over several steps %u\n", g_tt_age / 60.0f, runs, same, multi); }
     if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}); }   // no battle tick for a while: take the panels and strips off the screen
+    if (g_bs && comms_handover() && g_roster_ok && rd(g_bs + 72) != 0 && g_cpu_stage_gen != g_battle_gen) {   // a party of CPUs: the retail slot fighter of a side whose stage entry is a CPU row is played by the AI from the first frame (the same decision on every machine: the roster)
+        g_cpu_stage_gen = g_battle_gen; g_ram = rdram; g_ctx = ctx;
+        for (int sd = 0; sd < 2; sd++) {
+            TagEntry l[10]; const int n = party_order(sd, l, 10); const int st = stage_index(sd, l, n);
+            if (st >= 0 && l[st].is_cpu) { std::fprintf(stderr, "[TTCPUP] side %d: the fighter on the stage (char %d) is a CPU row: the AI plays slot %d from the start\n", sd, l[st].charId, sd); slot_handover(srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd)), -1); }
+        }
+    }
     if (g_bs && !g_late_q.empty() && rd(g_bs + 72) != 0) {   // a group battle: the extras at the start are the party's second members, not clones (the party record is not filled when the setup runs, so this is decided once the battle runs)
         g_ram = rdram; g_ctx = ctx;
         if (g_planned_gen != g_battle_gen && g_roster_ok) {   // (a member plans with the host's roster: it is here before the first lock-step frame)
@@ -9988,7 +10016,7 @@ uint8_t dissidia_tagteam_local_own_mask() { return g_me.own_mask; }
 void dissidia_tagteam_toggle_cpu_row(int row) {
     if (row < 0 || row >= g_me.n || row > 4 || !((g_me.own_mask >> row) & 1)) return;
     int first = -1; for (int i = 0; i < 5 && first < 0; i++) if ((g_me.own_mask >> i) & 1) first = i;
-    if (row == first) return;   // the player's first row is always his own fighter
+    if (row == first && !cpu_party_on()) return;   // the player's first row is always his own fighter
     g_me.cpu_mask ^= static_cast<uint8_t>(1u << row); mp_sync_mode();
     std::fprintf(stderr, "[TTCPU] row %d (char %d) is now %s\n", row + 1, g_me.regs[row], (g_me.cpu_mask >> row) & 1 ? "a CPU" : "the player's own");
 }
@@ -10009,6 +10037,16 @@ int dissidia_tagteam_menu_cpu_row(int party, int row, uint8_t out[3]) {
     out[0] = l[row].strength; out[1] = l[row].level; out[2] = l[row].type; return 1;
 }
 int dissidia_tagteam_local_party() { return g_me.party; }
+bool dissidia_tagteam_cpu_party_on() { return cpu_party_on(); }
+void dissidia_tagteam_add_cpu_request(bool on) { g_add_cpu = on; g_add_cpu_age = 0; }
+bool dissidia_tagteam_add_cpu_pending() { return g_add_cpu; }
+// The party this player's PLAYER rows fight for when he keeps a CPU party (his party's players are all keepers), else -1 (the setup screen's plates).
+int dissidia_tagteam_defect_side() {
+    if (!cpu_party_on() || g_me.party < 0) return -1;
+    std::vector<NetPlayer> t = group_players(); const std::vector<const NetPlayer*> ps = players_sorted(t);
+    bool me = false; for (const NetPlayer* p : ps) if (p->local && p->party == g_me.party) me = true;
+    return me && defects_from(ps, g_me.party) ? 1 - g_me.party : -1;
+}
 // ---- Single player (Battle Mode > Tag Team Battle, Quick Battle Party > Tournament): CPU rows of the player's own party (docs/tag-team.md
 // "Single player: CPU rows") ----
 // Square on a row from the second on makes that member a CPU partner; its settings are ours (the screen has no per-member

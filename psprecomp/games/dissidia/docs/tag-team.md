@@ -4230,3 +4230,49 @@ The `S` capture (the 480 x 272 render target) does not contain the game layer; u
 - online (two machines with different targets);
 - widescreen;
 - a fighter very close to the camera (the bar is not scaled with distance).
+## Group Battle: a party of CPUs ("Add CPU", PvE; 21 Nov, tree ttx; host-only, two headless copies on one host, LAN)
+**Request.** Two human players on one party fight a party made only of CPU members.
+**What retail does with a party without a human** (found first, `~/dissidia/ttx_cpu/p1`, `p2`):
+- Party Select: `FUN_08A7D500` (ovl_menu) picks the status text; its test `FUN_08A7046C(base)` is 1 only when every member has chosen a party AND both party
+  lists (`base + 280 + 12 * p`, count at +10) are not empty. Otherwise the red text "Cannot start match. Add members to both parties." (message 147 of
+  `mess_pk_multi_lobby_0`, state 4 at screen + 556) stays and the match cannot start.
+- If that test is forced to 1 (tried, hook removed again), the Tournament setup screen comes up with an empty Party B and Enter Battle ends the match at
+  once: "Round 0, 0 - 0, VICTORY" on both machines. The retail party records / table blocks / round list only know the rows that a human member of a party
+  registered (the setup screen's left column is the member's own party); nothing in the group struct (`*(0x089D8508)` nodes 5..9 are type 0xFFFF) names a CPU
+  there. So a party needs a **human member in retail's eyes**, and CPU rows cannot be injected without rewriting the table, the party lists and the round list.
+**Design: the CPU party's keeper.** The human who joins the CPU party (Party B) in the lobby carries it for retail and is its **keeper**:
+- A player whose FIRST row is a CPU is a keeper (before, the first row was always the player's own). A party whose players are all keepers is a CPU party.
+- In a CPU party the keeper's CPU rows are the party's fighters (the AI plays them, in row order, like every CPU row) and his player rows (not CPU) fight for
+  the OTHER party: human partners of that side, driven by the keeper (the existing human-extra / hand-over path: own camera slot, own pad stream).
+  `party_order()` (tagteam.cpp) takes them out of the CPU party's list and appends them to the other party's list (`defects_from`).
+- The retail slot fighter of a CPU party's side is a CPU row, so the lock-step hands that slot to the AI at the first frame
+  (`slot_handover(slot, -1)`, `[TTCPUP] side 1: the fighter on the stage (char 31) is a CPU row: the AI plays slot 1 from the start`); the keeper's machine
+  drives only his extra. Everything is decided from the host's roster (PR #118), so every machine builds the same list / drivers.
+- A keeper's player row has its record in the keeper's party blocks of the lobby table: `owner_record()` looks at both sides.
+- Env: `PSPRECOMP_TAGTEAM_NOCPUPARTY=1` = old behaviour (first row always the player's own, no keeper).
+**UX (Communications > Tag Team Battle, Tournament setup screen).**
+- "Add CPU" = **L on the free row** ("Add a character   (L: Add CPU)" in the next free row of the left column): the screen opens Player Select for the
+  row (L injects one Cross), the character picked there is registered as a CPU row. Any player does this for HIS OWN column (his party): a party A human gets CPU
+  partners, the keeper gets the CPU party. Cancelling Player Select (Circle) leaves nothing pending. Square on a row still switches it CPU <-> Player (now also the first
+  row: that is how a keeper is made / unmade), Select on a CPU row opens STRENGTH / LEVEL / TYPE (not on a keeper's first row: those settings are not in the beacon, it
+  plays at 5 / Auto / Random). The host's fighters-per-side L (3+ players) works on any other row.
+- A keeper's screen: "CPU" plates on his CPU rows, "-> Party A" on his player rows and a line "You keep the CPU party: CPU rows fight for Party B, Player rows for Party A".
+- Flow for 2 humans vs CPUs: lobby: player 1 takes Party A, player 2 Party B (retail needs one member in each); setup: player 1 registers his character; player 2 presses
+  L on his free row (CPU lead), L again for each further CPU, then Cross on a free row for his own character ("-> Party A"); both Enter Battle.
+- Without a keeper the red "Add members to both parties." stays: that is retail's rule.
+**Evidence** (`~/dissidia/ttx_cpu/{p3,r1,r2,r3}`, runner `ttx_cpu/runcpu.py`, 30 fps, `PSPRECOMP_CLOUD=0`, `PSPRECOMP_TAGTEAM_LOG=1`):
+- r3: A = Party A Lightning; B = Party B keeper: CPU Lightning, CPU 30, CPU 27, player row 24 (CPU3=1). Both log `side 0 order: *31/p0 24/p1`, `side 0 partner: 24, driven by
+  player 1`, `side 1 order: *31/cpu1 30/cpu1 27/cpu1`, `side 1 partner: CPU 30 (picked by player 1)`; the CPU party's slot is handed to the AI at t=0.1 s on both.
+- KOLIST (`slot1:25,slot1:50,slot0:75,slot1:100`, `KOLIST_NAT=1`): KO at 25 s -> the next CPU takes the slot (`handover: slot 1 -> the AI`, 26.6 s), the third CPU comes in
+  (`order entry 2 (char 27, cpu1) comes in`), the keeper's Vaan-row takes slot 0 when the human falls (`handover: slot 0 -> a player's pad`), side 1 empty at 100 s ->
+  `the battle is decided` at frame 3040 on both. `[TTSYNC]` 102 samples, 0 mismatches (r1: 60 / 0, r2: 100 / 0). The CPU fighters move and attack (positions and HP change in `[TTSYNC]`
+  with no pad input on the CPU side). The keeper's own view follows his Vaan (screenshot `p3_b1.png`).
+- Both machines reach the Tournament result (r1 `after.png`: A "VICTORY 3 - 0", B "DEFEATED 0 - 3", see below).
+- `tagteam_test.py --baseline` PASS (`~/dissidia/ttx_cpu/reg1`, single player unchanged).
+**Known limits / not verified.**
+- **The keeper's result screen says DEFEATED when his team (Party A) wins** (VICTORY when the CPU party wins): the retail booking / tally / rewards are by retail party and the keeper
+  is retail Party B. Flipping it means booking the round with the records swapped on his machine only (`group_decided`, `team_of`), not done.
+- Retail Party Select still refuses a party without a member; making a human-free party really empty needs the table / party lists / round list written by us (not attempted).
+- 3 or more humans, 5 rows, an Internet (relay) session and a keeper whose party also holds a normal player (his player rows then stay on his own side) were not run.
+- The row order inside the CPU party is the keeper's row order; the order column ("Random") was not touched.
+- Strength / level / type of the keeper's first CPU row cannot be edited (beacon bytes); the lead's brain parameters come from the default CPU record (`apply_drive`: tier 0 / 6 unless the record has them).
