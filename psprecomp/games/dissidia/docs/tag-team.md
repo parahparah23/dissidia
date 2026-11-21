@@ -3998,3 +3998,11 @@ ended up in Party A.
 - Internet / relay mode.
 - A member that joins the lock-step more than ~17 s after the host: input ring of 512 frames.
 
+
+## Sound heap back in region 1 (20 Nov, RP6 "no audio")
+
+RP6 build d8c59ce (sound heap at 0x0E840000, region 3): all character audio (voices, move/hit sounds, banter) was silent. On the host the
+same layout still keys SAS voices (PSPRECOMP_SAS_TRACE: 348 KeyOn with the heap in region 3, 313 in region 1, same battle), so the SAS
+HLE (guest_ptr masks with 0x07FFFFFF) is fine for region 3 and the failure is device-specific (cause not found). The sound heap is therefore
+in region 1 again by default (the rest of high RAM is unchanged); PSPRECOMP_SOUNDHEAP_HI=1 puts it in region 3 for diagnosis.
+Regression (--baseline) passes.
