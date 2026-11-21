@@ -4,7 +4,8 @@
 
 - **Proper PvE (humans vs a CPU party).** Today's "keeper" (PR merged 21 Nov, section "Group Battle: a party of CPUs") is a workaround: retail refuses a party without a human, so a player of Party B carries the CPU party and fights for Party A; his own result screen and rewards follow Party B, and the CPU lead's strength / level / type are fixed (5 / Auto / Random). Wanted instead: both humans in one party and a real CPU-only party (CPU rows added from the team selector, each with its own strength / level / type), the match start allowed for it, the lobby table / party lists / round list built for the CPU party, results and rewards right for every human, all of it from the host's roster (lock-step safe).
 - **Assist Off online: check it stays in sync** (now active when the host picks it, PR #118); the longer slow motion for a human called in must also apply online.
-- **Multiplayer: call-in memory with 10 characters** (a 5th call-in ran out of heap and one machine diverged; being worked on 21 Nov).
+- **Multiplayer: call-in memory with 10 characters**: the battle heap (FIELD::MEMORY) is now 6.6 MB and rebuilds are capped deterministically (21 Nov, host SP: 16 characters / 14 call-ins without a failure); still to confirm in a 4- or 10-player run. Leftover: each slot rebuild still leaks 30-70 KB in that heap, and a small 10 KB heap at 0x099B7E30 can still fail.
+- **Sephiroth invisible on the RP6 (call-in whose textures used the texture overflow heap)**: the overflow heap moved from high RAM (0x0E780000) to region 2; to confirm on the device.
 - **Multiplayer issues 1 and 3** (desync at a human partner's attack; 10-player end split): not reproduced in 5 clean 10-player runs after the party-read fix; keep watching with the 10-player rig (`~/dissidia/tt/net10x/rig2/run10.py`).
 - **Japanese voices: only one fighter has battle audio** (GitHub issue #119).
 - **Dark view during a second partner EX Burst** (reported by the PR #117 author, not seen on a device).
@@ -4307,3 +4308,24 @@ Device log `rp6logs/rp6_1121_seph.log`: enemy slot 1 called in Sephiroth (char 1
 - **Host evidence** (quick battle, KO of the CPU slot with `KOLIST cpu:15`, reserve Sephiroth): stage 12 side 1 start (10.0,0.0,8.0) -> `[TELEPORT] rebuild finish ... (10.0,0.0,8.0)` (was the body
   position (-23.8,0.0,3.1)); stage 5 start (0.0,0.0,-22.0) -> arrives at (0.0,0.0,-22.0). Window shots of the arrival were not usable (the camera follows the human, the spot is off screen).
   The extra call-in path goes through the same function (`[SAFESPOT] ref 08DCF840 ... call-in -> start spot`, both stages); no separate extra-only screenshot.
+
+## Battle heap (FIELD::MEMORY) exhaustion with many fighters (21 Nov, branch ttlock)
+10-player run w5 (KOLIST slot0:20,slot1:40,slot0:60, CALLIN_DELAY 8): at side 0's 5th call-in (frame ~2253) every machine logged `[MODELS] heap 0x08C15F80 alloc(4816) FAILED`
+and `[TAGTEAM] alloc failed`; h3 then diverged (leftover block holder changed, 75 more failures) -> TTSYNC2 / NETSYNC DESYNC.
+- **Which heap**: not the model pool (13.8 of 32 MB used), not the effect / sound heaps (`[MEMSUM]` fine), but the game's 0x275800 (2.5 MB) "FILE" / FIELD::MEMORY heap
+  (`FUN_0888204C(0x275800)`, heap object 0x08C15F80, from the main BSS heap, `used` 0x2704E0 at the first failure). Besides the loading staging it holds every
+  fighter's constructor blocks, the file manager's small records (caller 0x0884212C, ~500 B each, ~900 blocks), 40 x 11 KB HUD blocks and our spawn / rebuild
+  blocks. `[MEMSUM]` now prints `battle heap used X of Y KB` and `PSPRECOMP_BH_TRACE=1` adds `[BHTRACE]` (live blocks by allocation caller / tag team step).
+- **Why**: retail's 1v1 fills ~1.4 MB; setup with 4 fighters (`SP_PARTNER=1`) 1.95 MB, each extra +0.2 MB, and every slot rebuild leaves ~30-70 KB (`rebuild_begin` blocks
+  0884212C: 77 -> 171 blocks over 5 rebuilds). 4 fighters + 3 call-ins already overflow 2.5 MB (reproduced on the host: `ml2` / `ml4`, `SP_PARTNER=1`,
+  RESERVE 9,27,5,24,26,28,12,3,1;33,18,17,14,7,2,4, KOLIST slot0/slot1 every 4 s, CALLIN_DELAY 4: `alloc(46800) FAILED` from the 2nd call-in). The 10-player battle has 6+
+  fighters alive from the start, so it fails earlier.
+- **Fix (a)**: with tag team on, the 0x275800 request is served from region 1 (below 0x0E000000) with `PSPRECOMP_TAGTEAM_FIELDMEM_EXTRA` (default 4 MB, 0 = retail) more
+  bytes: `FIELD_MEMORY_TAGTEAM` 6614 KiB at 0x09B90000, reserved with the model pool (`reserve_field_heap`), reusing the mod budget's MODEL_FILE_HEAP machinery
+  (host block kept for every battle, heap init gets the real size). The loading staging slot stays 0x264000 (the register hook's "fit" is skipped for this heap).
+  The effect pool's total drops from 31 to 24 MB (3.9 MB retail + the extension; 1.1 MB per character: still 20 characters).
+- **Fix (b)**: deterministic fallback = a cap on slot rebuilds per battle (`PSPRECOMP_TAGTEAM_MAX_REBUILDS`, default 40; `rebuild_begin` refuses with `[TAGTEAM] rebuild refused`),
+  counted from the shared battle history only, so every machine refuses the same rebuild; 40 x ~70 KB fits the 4.6 MB of headroom. No allocation result decides anything shared.
+- **Texture overflow heap** (RP6 note: a texture above 0x0E000000 did not draw): `TEXHEAP_TAGTEAM` now goes to region 2 (0x0BAA0000, was 0x0E780000 in high RAM), hi RAM only as a fallback.
+  The model pool itself still straddles 0x0E000000 (0x0C800000-0x0E780000) and OBJDATA / sound heap are above it; not touched.
+- **Evidence** (host, SP, `ml6`): 16 distinct characters loaded, 14 call-ins, no FAILED / alloc failed line, battle heap peak 2775 of 6614 KB.

@@ -2936,8 +2936,14 @@ void leftover_scan(uint32_t A, const std::vector<Blk>& cand, LeftRefs& out) {
     }
 }
 bool g_rebuild_fresh_brain = false;   // set by reuse_parked: the rebuilt extra gets the constructor's new brain (see there)
+// Deterministic memory fallback: a slot rebuild (call-in, swap) leaves ~50 KB of the old body's blocks in the battle heap, which is sized (hooks_models.cpp,
+// FIELD_MEMORY_TAGTEAM) for far more than a battle of 10 players needs. The cap on rebuilds per battle depends on the shared battle history only (every
+// machine counts the same rebuilds), never on what an allocation returned here, so an over-long battle refuses the same rebuild on every machine.
+int g_rebuild_count = 0;
 bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     TtStep tt_step_("rebuild_begin");
+    static const int kMaxRebuilds = std::getenv("PSPRECOMP_TAGTEAM_MAX_REBUILDS") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_MAX_REBUILDS")) : 40;
+    if (g_rebuild_count >= kMaxRebuilds) { static int n = 0; if (n++ < 3) std::fprintf(stderr, "[TAGTEAM] rebuild refused: %d rebuilds this battle (cap %d, memory)\n", g_rebuild_count, kMaxRebuilds); return false; }
     if (!std::getenv("PSPRECOMP_TAGTEAM_KEEPCYC")) g_cycs.erase(A);   // the new body (and its new lock block) starts locked on its foe: the old member's lock-cycle state
     // (on the other enemy) made the controller keep forcing that target and the next L press went nowhere (19 Nov desktop: Kain after Jecht fell, lock stuck)
     const bool fresh_brain = g_rebuild_fresh_brain && !std::getenv("PSPRECOMP_TAGTEAM_REUSE_OLDBRAIN");
@@ -3128,7 +3134,7 @@ bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     g_ctx->r[29] = static_cast<int32_t>(sp0);
     j.since = dissidia_battle_age();
     if (g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: built as char %d (new lock block %08X, %d registration words to take back when ready, %d object-list links kept), waiting for its files\n", A, actor_char(A), new_lb, undone, kept);
-    g_rebuild.push_back(j); g_rebuilt.insert(A);
+    g_rebuild.push_back(j); g_rebuilt.insert(A); g_rebuild_count++;
     { int slot = -1; for (uint32_t k = 0; k < 2; k++) if (g_bs && srd(g_bs + 56u + 4u * k) == A) slot = static_cast<int>(k); if (slot >= 0) dissidia_ttnet_slot_rebuilt(slot, charId); }   // tagteam_net.cpp: who plays the slot now
     if (std::getenv("PSPRECOMP_TAGTEAM_HANGDUMP")) { hang_watch_start(); g_hang_watch = true; }
     return true;
@@ -5320,6 +5326,7 @@ void tagin_notice(float age) {
 // Everything the tag code keeps per battle, back to empty. The teardown (dtor_hook) does most of this, but only when retail destroys one of OUR fighters; a battle
 // left another way (forfeit, ...) left e.g. the extras' flags (replaced / callin / pad / driver / camslot / undo), the down list and the KO marks for the next one.
 void reset_battle_state() {
+    g_rebuild_count = 0;
     TtStep tt_step_("reset_battle_state");
     xas_reset(false);
     g_match_cache.clear(); g_comms_cache.clear(); g_sp_cache.clear(); g_rec_cpu_made = false;

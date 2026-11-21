@@ -78,6 +78,7 @@ constexpr uint32_t kFxRetail = 0x3DD000u;     // EFFECT_ALLOCATOR block (see "Ef
 constexpr uint32_t kFxMinExtension = 0x300000u, kFxMargin = 0x40000u;
 constexpr uint32_t kObjdataTagSize = 0x41000u + 0x80000u;   // the tag team OBJDATA heap (region 2, allocated after the effect pool: hh_bridge leaves room for it)   // the effect pool extension the tag team pool leaves room for at least, and the margin for the small blocks that follow
 void reserve_tex_overflow();
+void reserve_field_heap();
 // extra bytes for the pool when the budget is raised (PSPRECOMP_MODEL_POOL_EXTRA). 0x80000 ran out on 19 Oct with the
 // 3.65 MB Noctis in a battle (pool full ~110 KB short: alloc(74208)/(29736)/(16448) FAILED, Noctis invisible), so 1.5 MiB;
 // raised to 2.5 MiB on 22 Oct for the 4.21 MB Noctis (EX Burst + glyph), so no env override is needed by default.
@@ -97,6 +98,10 @@ bool g_tt_pool = false;         // g_pool_block is the tag team pool (not tied t
 bool g_pool_in_use = false;
 uint32_t g_wm_block = 0, g_wm_size = 0;      // host-heap block, allocated once and reused by every scene
 bool g_wm_in_use = false;
+// Tag team: the retail 0x275800 "FILE" heap (FUN_0888204C(0x275800); heap object 0x08C15F80, the game's FIELD::MEMORY) also holds every fighter's constructor blocks,
+// the file manager's records and the HUD objects of the battle. With 4+ fighters alive and a few call-ins it is full (`[MODELS] heap 0x08C15F80 alloc FAILED`,
+// 10-player run w5). The request is served from region 1 (below 0x0E000000) with PSPRECOMP_TAGTEAM_FIELDMEM_EXTRA more bytes (default 4 MB; 0 = retail).
+bool g_tt_field = false;
 FuncPtr g_orig_alloc = nullptr, g_orig_register = nullptr, g_orig_free = nullptr, g_orig_heap_init = nullptr;
 
 // FUN_0888204C(size): block from the main BSS heap. The model file heap (always exactly 0x270800) comes
@@ -177,7 +182,7 @@ void prescan_mods_for_budget() {
 
 void alloc_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_trace && static_cast<uint32_t>(ctx->r[4]) >= 0x100000u) std::fprintf(stderr, "[MODELS] alloc(%u) in_use=%d\n", (uint32_t)ctx->r[4], (int)g_wm_in_use);
-    if (static_cast<uint32_t>(ctx->r[4]) == kRetailFile && g_staging != kRetailStaging && !g_wm_in_use) {
+    if (static_cast<uint32_t>(ctx->r[4]) == kRetailFile && (g_staging != kRetailStaging || g_tt_field) && !g_wm_in_use) {
         uint32_t total = wm_total_for(g_staging);
         if (g_wm_block == 0) {   // budget raised after the pool was requested (no prescan hit): reserve the file heap now
             g_wm_block = psp_kmem_bump_alloc_named(rd256(total), "MODEL_FILE_HEAP");
@@ -204,6 +209,7 @@ void alloc_hook(uint8_t* rdram, recomp_context* ctx) {
             g_tt_pool = true;
             std::fprintf(stderr, "[MODELS] tag team model pool %u B at 0x%08X in high RAM (retail %u B)\n", g_pool_size, g_pool_block, kRetailPool);
             reserve_tex_overflow();
+            reserve_field_heap();
         } else {
             std::fprintf(stderr, "[MODELS] high RAM has no room for a %u B tag team model pool: region 1/2 as before\n", size);
         }
@@ -289,7 +295,7 @@ void register_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t end = *reinterpret_cast<const uint32_t*>(rdram + ((heap + 4u) & 0x07FFFFFFu));
         const uint32_t slot = static_cast<uint32_t>(ctx->r[7]);
         if (g_trace) std::fprintf(stderr, "[MODELS] register slot id 0x%X heap 0x%08X end 0x%08X size %u\n", (uint32_t)ctx->r[5], heap, end, slot);
-        if (slot >= kRetailStaging && end > heap && end - heap <= 0x02000000u && end - heap > slot + (kRetailFile - kRetailStaging)) {
+        if (!(g_tt_field && heap == g_wm_block) && slot >= kRetailStaging && end > heap && end - heap <= 0x02000000u && end - heap > slot + (kRetailFile - kRetailStaging)) {
             const uint32_t fit = end - heap - (kRetailFile - kRetailStaging);
             std::fprintf(stderr, "[MODELS] slot 0x%X: heap 0x%08X holds %u B, staging slot raised from %u B\n", (uint32_t)ctx->r[5], heap, fit, slot);
             ctx->r[7] = static_cast<int32_t>(fit);
@@ -324,9 +330,21 @@ const uint32_t kOverflowSize = [] { const char* e = std::getenv("PSPRECOMP_TEXHE
 uint32_t g_ov_block = 0, g_ov_heap = 0;
 FuncPtr g_orig_heap_free = nullptr;
 bool in_overflow(uint32_t p) { return g_ov_heap && p >= g_ov_heap && p < g_ov_heap + kOverflowSize; }
+uint32_t battle_heap() { return g_tt_field ? g_wm_block : 0x08C15F80u; }
+void reserve_field_heap() {
+    if (g_wm_block || !g_tt_pool_extra || g_staging != kRetailStaging) return;
+    const char* e = std::getenv("PSPRECOMP_TAGTEAM_FIELDMEM_EXTRA");
+    const uint32_t extra = e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0x400000u;
+    if (!extra) return;
+    const uint32_t size = rd256(kRetailFile + extra);
+    if ((g_wm_block = psp_kmem_bump_alloc_named(size, "FIELD_MEMORY_TAGTEAM"))) { g_wm_size = size; g_tt_field = true; std::fprintf(stderr, "[MODELS] tag team battle heap (FIELD::MEMORY) %u B at 0x%08X (retail %u B)\n", size, g_wm_block, kRetailFile); }
+    else std::fprintf(stderr, "[MODELS] no room for the %u B tag team battle heap: retail size\n", size);
+}
 void reserve_tex_overflow() {
     if (g_ov_block || !g_tt_pool_extra) return;
-    g_ov_block = alloc_hi_or_r2(rd256(kOverflowSize), "TEXHEAP_TAGTEAM");
+    // region 2 first (not the pool's high RAM): the RP6 did not draw a texture that sat at >= 0x0E000000 (Sephiroth invisible, 21 Nov); hi RAM only as a fallback
+    g_ov_block = psp_kmem_bump_alloc_named_r2(rd256(kOverflowSize), "TEXHEAP_TAGTEAM");
+    if (!g_ov_block) g_ov_block = alloc_hi_or_r2(rd256(kOverflowSize), "TEXHEAP_TAGTEAM");
     if (!g_ov_block) std::fprintf(stderr, "[MODELS] no room for the %u B tag team texture overflow heap\n", kOverflowSize);
 }
 
@@ -482,6 +500,11 @@ void dissidia_heapcheck_frame(const uint8_t* rdram) {
     for (auto& e : g_hc) hc_verify(rdram, e.first, "frame check");
 }
 namespace {
+// PSPRECOMP_BH_TRACE=1: every live block of the battle heap (FIELD::MEMORY) with its allocation's caller / tag team step, summed in [MEMSUM] lines
+struct BhInfo { uint32_t size, ra; const char* step; uint64_t frame; };
+std::map<uint32_t, BhInfo> g_bh;
+uint32_t battle_heap();
+bool bh_trace() { static const bool on = std::getenv("PSPRECOMP_BH_TRACE") != nullptr; return on; }
 void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t heap = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
     g_alloc_in_heap = heap; g_alloc_in_size = size;
@@ -504,6 +527,7 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, "\n");
     }
     g_orig_heap_alloc(rdram, ctx);
+    if (heap == battle_heap() && ctx->r[2] != 0 && bh_trace()) g_bh[static_cast<uint32_t>(ctx->r[2])] = BhInfo{size, hc_ra, g_tt_step, g_hc_frame};
     if (kHeapCheck && hc_ram(heap)) { hc_record(heap, hc_kind, 0, size, hc_ra, static_cast<uint32_t>(ctx->r[2])); hc_verify(rdram, heap, "after an allocation"); }
     if (fileheap_watch() && heap == fileheap_watch() && size >= 0x20000u) {
         std::fprintf(stderr, "[FILEHEAP] alloc heap %08X size 0x%X -> %08X stack:", heap, size, static_cast<uint32_t>(ctx->r[2]));
@@ -547,6 +571,7 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
 // debug (PSPRECOMP_FILEHEAP_LOG=<hex heap object>): allocations / frees on that heap, and frees of pointers inside its range on ANY heap
 uint32_t fileheap_watch() { static const uint32_t h = std::getenv("PSPRECOMP_FILEHEAP_LOG") ? static_cast<uint32_t>(std::strtoul(std::getenv("PSPRECOMP_FILEHEAP_LOG"), nullptr, 16)) : 0u; return h; }
 void heap_free_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (static_cast<uint32_t>(ctx->r[4]) == battle_heap() && bh_trace()) g_bh.erase(static_cast<uint32_t>(ctx->r[5]));
     if (const uint32_t w = fileheap_watch()) { const uint32_t hp = static_cast<uint32_t>(ctx->r[4]), p = static_cast<uint32_t>(ctx->r[5]); if (hp == w && (p == 0x08F05700u || p == 0x08F05710u || p == 0x08F05740u)) { static int n = 0; if (n++ < 600) std::fprintf(stderr, "[FILEHEAP] free heap %08X ptr %08X ra %08X\n", hp, p, static_cast<uint32_t>(ctx->r[31])); } }
     if (static_cast<uint32_t>(ctx->r[4]) == kVramHeap && in_overflow(static_cast<uint32_t>(ctx->r[5]))) ctx->r[4] = static_cast<int32_t>(g_ov_heap);
     const uint32_t fheap = static_cast<uint32_t>(ctx->r[4]), fptr = static_cast<uint32_t>(ctx->r[5]);
@@ -854,6 +879,17 @@ void dissidia_models_mem_summary(const uint8_t* rdram, const char* tag) {
     uint32_t st, sf, sl; fx_pool_free(rdram, &st, &sf, &sl, 0x09B4CF80u);   // the sound manager's handle heap (same allocator)
     std::fprintf(stderr, "[MEMSUM] %s: model pool used %u of %u KB, effect pool free %u KB (largest %u KB) of %u KB, texture overflow used %u of %u KB, sound heap free %u KB (largest %u KB) of %u KB\n",
                  tag ? tag : "", pu >> 10, g_pool_size >> 10, free_b >> 10, largest >> 10, total >> 10, tu >> 10, g_ov_heap ? kOverflowSize >> 10 : 0u, sf >> 10, sl >> 10, st >> 10);
+    { uint32_t be = 0, bu = 0; const uint32_t bh = battle_heap(); heap_used(bh, &be, &bu); if (be) std::fprintf(stderr, "[MEMSUM] %s: battle heap (FIELD::MEMORY 0x%08X) used %u of %u KB\n", tag ? tag : "", bh, bu >> 10, (be - bh) >> 10); }
+    if (bh_trace()) {
+        std::map<std::pair<uint32_t, std::string>, std::pair<uint32_t, uint32_t>> by; uint32_t tot = 0;
+        for (auto& e : g_bh) { auto& v = by[{e.second.ra, e.second.step}]; v.first++; v.second += e.second.size; tot += e.second.size; }
+        std::vector<std::pair<uint32_t, std::pair<uint32_t, std::string>>> v; std::map<std::pair<uint32_t, std::string>, std::pair<uint32_t, uint32_t>>::iterator it;
+        for (it = by.begin(); it != by.end(); ++it) v.push_back({it->second.second, {it->first.first, it->first.second}});
+        std::sort(v.rbegin(), v.rend());
+        std::fprintf(stderr, "[BHTRACE] %s: %zu live blocks traced, %u B; top callers:", tag ? tag : "", g_bh.size(), tot);
+        for (size_t i = 0; i < v.size() && i < 8; i++) std::fprintf(stderr, " %08X/%s=%uB x%u", v[i].second.first, v[i].second.second.c_str(), v[i].first, by[{v[i].second.first, v[i].second.second}].first);
+        std::fprintf(stderr, "\n");
+    }
     if (hh_log()) { hh_dump(rdram, kFxHeap, tag); hh_dump(rdram, kSndHeap, tag); }
 }
 constexpr uint32_t dissidia_model_budget_retail() { return kRetailStaging; }
