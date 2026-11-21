@@ -3823,3 +3823,24 @@ with the lock cycled onto the enemy partner (Lightning, extraE) the camera did n
 - Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lkcam/reg1`): RESULT: PASS.
 - **Not verified:** on a device; multiplayer (two machines / a human extra's own lock); a forfeit followed by a new battle (the user ruled the forfeit
   out; the hook keeps no state across battles apart from a log map); a pre-XAS build run for comparison.
+## Small panel / big panel follow the fighter drawn in them (20 Nov, tree tthud; host-only, headless)
+User (RP6, `rp6logs/rp6_1120_yuna_break.log`, screenshot `bs_yuna/1_0128.36_extraE_28_break_1.png`): "Yuna broke but it showed BREAK on Bartz". The lock was on the enemy partner Yuna, so the big
+right panel showed Yuna (retail BREAK, correct) and the small panel showed the slot fighter Bartz, with the red BREAK flash.
+- **Cause**: `hud_update` took `break_flash` from `g_xbreak_show[extra]` for the extra's small panel, then (HUDLOCK: the extra is on the big panel) replaced name / portrait / HP / BRV / gauges by the
+  slot fighter's but left the flash of the extra. Fix: the flash is read for the fighter actually drawn (`flash_of(S)` in that block). `PSPRECOMP_TAGTEAM_SMALLFLASH_OLD=1`: old.
+- **Opposite direction (same family, found while testing)**: a SLOT fighter broken while an extra is on the big panel (lock on the extra) showed the retail BREAK on the extra's number
+  (steady word + burst). Now: (a) `breakshot_poll` notes a slot break that happens off its panel in `g_xbreak_show` -> flash on the slot fighter's small panel (`[HUDBREAK] slot fighter .. broke off its big panel`;
+  `_NOSLOTFLASH=1` off); (b) the break-word hooks that only guarded extras' handler copies (`brkword_foreign_extra` -> brkshow / brkhide / brkst mutes, `sidebrk_hook`) now also cover the slot fighter's own
+  handler (`g_slot_hdl`) when it is not the side's panel fighter; its end is kept off too (`g_brkdrop_slot`); an "off" from the previous owner is not let through while the panel fighter is itself broken
+  (`fighter_broken`). `_NOSLOTBREAKGUARD=1`: old.
+- **Swap during a break**: the steady BREAK word is panel state, not fighter state, so when HUDLOCK swaps who is on the big panel it stayed (Terra broke on the panel, lock to Lightning: BREAK over her number).
+  `steady_break_sync` (called from `hudref_hook` on a panel change) sets the steady BREAK to the new panel fighter's state (`FUN_08889FB8(side, 0, on)` through the original, `[HUDBREAK] ... steady BREAK on|off`);
+  `_NOSTEADYSYNC=1` off.
+- **Test aids**: `XHSTATE` now also marks the extra broken (`g_xbroken`, flash) like a real hit break (`_XHSTATE_NOMARK=1`: old); `XHSTATE=slotC:<s>:3` breaks the slot fighter's own handler.
+- **Recipe / evidence** (`~/dissidia/tt/th`, `shoot.sh NAME XHSTATE FROM TO SCRIPT [ENV]`, `ENEMY2_CHAR=11` so the two enemies differ (Lightning slot, Terra extra), window shots every 0.5 s, `mont.py`; `lock1.txt` = one L press -> lock on extraE ~19.4-20.4 s,
+  `lock3.txt` = L at +4.7 / +5.5 s more): `A_old` (OLD flag) vs `G2`: extraE broken at 24 s while on the big panel - old: small panel (Lightning) shows the BREAK flash, new: only the big panel; `D4` (guards off) vs `D3`:
+  slotC broken at 26 s with extraE on the big panel - old: BREAK steady word on Terra's number, new: Terra's number untouched, small panel Lightning flashes BREAK and shows BRV falling; `C2`: extraE broken, lock back to the slot
+  at 25.1 s (word off on the big panel, small panel flashes Terra), forth again 25.9 s (word on); `final_montage.png`. Unlocked break (`B_new`) and slot break on its own panel (`E_new`) behave as before.
+  Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/th/reg1`).
+- **Not verified**: the RP6 itself; the human's own side (the same code, but its big panel never follows a lock); the multiplayer view-only panels (`comms_handover`); the swap exactly at the frame of a retail
+  break burst (the swap shots show the fading word for a frame); swaps in the first 0.1 s of a break; a real hit break (XHSTATE writes the handler state, the host runs did not get a natural extra break in the window).

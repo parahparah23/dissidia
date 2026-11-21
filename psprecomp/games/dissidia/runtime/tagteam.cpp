@@ -1850,7 +1850,8 @@ void hud_update() {
         f.hp_max = std::max(static_cast<int>(rd(e.actor + 0x10B0u)), std::max(f.hp, 1));
         { const uint32_t st = rd(e.actor + 0x52Cu); f.brv = ok(st, 0x40) && !is_down(e.actor) ? static_cast<int>(rdh(st + 0x14u)) : -1; }
         hud_gauges(f, e.actor);
-        { const auto bs2 = g_xbreak_show.find(e.actor); if (bs2 != g_xbreak_show.end()) { const float t = (dissidia_battle_age() - bs2->second) / 90.f; if (t >= 0.f && t < 1.f) f.break_flash = t; } }
+        auto flash_of = [](uint32_t a) { const auto bs2 = g_xbreak_show.find(a); if (bs2 != g_xbreak_show.end()) { const float t = (dissidia_battle_age() - bs2->second) / 90.f; if (t >= 0.f && t < 1.f) return t; } return -1.f; };
+        f.break_flash = flash_of(e.actor);   // (the fighter DRAWN in this small panel owns its flash: below, the slot fighter it shows while the extra is on the big panel)
         static const bool hudlock = hudlock_on();
         if (hudlock && g_bs) for (uint32_t k = 0; k < 2; k++) {   // this extra is on the big panel: the small one shows the slot fighter it replaced there
             const uint32_t S = srd(g_bs + 56u + 4u * k);
@@ -1859,6 +1860,7 @@ void hud_update() {
                 const uint32_t st = rd(S + 0x52Cu); f.hp = ok(st, 0x40) ? std::max(0, hp_eff(S)) : 0; f.hp_max = std::max(static_cast<int>(rd(S + 0x10B0u)), std::max(f.hp, 1));
                 f.brv = ok(st, 0x40) ? static_cast<int>(rdh(st + 0x14u)) : -1;
                 hud_gauges(f, S);
+                if (!std::getenv("PSPRECOMP_TAGTEAM_SMALLFLASH_OLD")) f.break_flash = flash_of(S);   // the extra's break shows on the big panel (retail), only the slot fighter's own break belongs to this small panel (user, 20 Nov: "Yuna broke but it showed BREAK on Bartz")
             }
         }
         fs.push_back(f);
@@ -5886,6 +5888,7 @@ int panel_ch(uint32_t side) { return 7 - static_cast<int>(rd(0x08AE7B90u + 32u *
 void panel_set_silent(uint32_t side, int32_t v) { if (const uint32_t g = panel_group(side)) wr(g + 4u, static_cast<uint32_t>(v)); }
 void panel_send(uint32_t side, int32_t amount) { if (!amount) return; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); g_ctx->f[12] = 0.0f; call(0x08AE3B54u, static_cast<uint32_t>(panel_ch(side)), static_cast<uint32_t>(amount), static_cast<uint32_t>(amount), static_cast<uint32_t>(amount)); g_ctx->r[29] = static_cast<int32_t>(sp0); }
 uint32_t hud_panel_fighter(uint32_t side);
+void steady_break_sync(uint32_t side, uint32_t from, uint32_t to);
 void hudref_hook(uint8_t* rdram, recomp_context* ctx) {
     TtStep tt_step_("hudref_hook");
     g_ram = rdram; g_ctx = ctx; g_hud = static_cast<uint32_t>(ctx->r[4]);
@@ -5978,6 +5981,7 @@ void hudref_hook(uint8_t* rdram, recomp_context* ctx) {
                 emin[sd] = emax[sd] = real - shown2 + e; t0[sd] = age2;
             }
         }
+        if (lastP[sd] && lastP[sd] != P) steady_break_sync(side, lastP[sd], P);
         lastP[sd] = P;
         if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HUDLOCKLOG")) { static int n[2] = {}; if ((n[sd]++ % 15) == 0) std::fprintf(stderr, "[HUDPANEL] t=%.2fs side %u %s shown %d real %d\n", dissidia_battle_age() / 60.0f, side, role_of(P), static_cast<int32_t>(rd(pg + 4u)), real); }
     }
@@ -6234,12 +6238,23 @@ void sideflag_hook(uint8_t* rdram, recomp_context* ctx) {
 // stops the effect at sub+88. An extra's handler copy holds the SLOT fighter's element (a copied pointer): its break showed "BREAK" over the player's number. Both calls
 // are skipped for an extra's copy unless that extra is the side's panel fighter (the lock-on panel) at the start; an end is let through when its start was.
 FuncPtr g_orig_brkshow = nullptr, g_orig_brkhide = nullptr; std::set<uint32_t> g_brkshow_x;   // extras whose break word was let onto a panel
+std::set<uint32_t> g_brkdrop_slot;   // slot fighters whose break word start was kept off the big panel (an extra was on it)
+extern std::map<uint32_t, uint32_t> g_slot_hdl;
+// a fighter that is in a break right now: an extra marked broken (from its break to its refill), a slot fighter whose damage handler is in state 3 / 4
+bool fighter_broken(uint32_t a) {
+    if (g_xbroken.count(a)) return true;
+    if (const auto it = g_slot_hdl.find(a); it != g_slot_hdl.end() && ok(it->second, 0x310) && rd(it->second + 16u) == a) { const uint32_t st = rd(it->second + 8u); return st == 3u || st == 4u; }
+    return false;
+}
 uint32_t brkword_foreign_extra(uint32_t sub) {   // the extra owning handler copy sub-680 if it is not its side's panel fighter, else 0
     static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; g_brkshow_x.clear(); }
     if (!g_bs || !g_nextra || sub < 680u) return 0;
     const uint32_t h = sub - 680u; uint32_t x = 0;
     for (const auto& kv : g_extra_hdl) if (kv.second == h) x = kv.first;
-    if (!x) return 0;
+    if (!x) {   // a SLOT fighter's own handler: its break word belongs to the big panel only while it is the panel's fighter (an extra on the lock-on panel: the slot fighter shows on the small panel)
+        for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (!ok(S, 0x12D0)) continue; const auto it = g_slot_hdl.find(S); if (it != g_slot_hdl.end() && it->second == h) x = S; }
+        if (!x || std::getenv("PSPRECOMP_TAGTEAM_NOSLOTBREAKGUARD")) return 0;
+    }
     uint32_t P = 0; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && side_of(S) == side_of(x)) P = hud_panel_fighter(k); }
     return x != P ? x : 0u;
 }
@@ -6250,9 +6265,10 @@ void brkshow_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!any) {
         if (const uint32_t x = brkword_foreign_extra(sub)) {
             if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs \"BREAK\" word of %s's break kept off the big panel\n", dissidia_battle_age() / 60.0f, role_of(x));
-            g_brkshow_x.erase(x); ctx->r[2] = 0; return;
+            g_brkshow_x.erase(x); if (!g_extra_hdl.count(x)) g_brkdrop_slot.insert(x); ctx->r[2] = 0; return;
         }
         for (const auto& kv : g_extra_hdl) if (kv.second + 680u == sub) g_brkshow_x.insert(kv.first);
+        for (const auto& kv : g_slot_hdl) if (kv.second + 680u == sub) g_brkdrop_slot.erase(kv.first);
     }
     g_orig_brkshow(rdram, ctx);
 }
@@ -6264,6 +6280,7 @@ void brkhide_hook(uint8_t* rdram, recomp_context* ctx) {
         static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; g_brkshow_x.clear(); }
         uint32_t x = 0; for (const auto& kv : g_extra_hdl) if (kv.second + 680u == sub) x = kv.first;
         if (x) { if (!g_brkshow_x.count(x)) { ctx->r[2] = 0; return; } g_brkshow_x.erase(x); }
+        else for (const auto& kv : g_slot_hdl) if (kv.second + 680u == sub && g_brkdrop_slot.erase(kv.first)) { ctx->r[2] = 0; return; }   // a slot fighter's break word that was kept off the big panel: its end is kept off too
     }
     g_orig_brkhide(rdram, ctx);
 }
@@ -6293,6 +6310,8 @@ void breakshot_poll() {
         const bool extra = g_extra_hdl.count(a) != 0;
         const char* kind = (st == 3u || (st == 4u && pr != 3u)) ? "break" : (extra && st == 1u) ? "brv0" : nullptr;
         if (kind) tagteam_breakshot_event(age, g_battle_gen, role_of(a), actor_char(a), kind);
+        if (kind && !extra && std::strcmp(kind, "break") == 0 && hud_panel_fighter(srd(g_bs + 56u) == a ? 0u : 1u) != a && !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTFLASH")) {   // a slot fighter broken while an extra is on its big panel: its own small panel flashes
+            g_xbreak_show[a] = dissidia_battle_age(); if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs slot fighter %s broke off its big panel: flash on its small panel\n", dissidia_battle_age() / 60.0f, role_of(a)); }
     }
     tagteam_breakshot_frame(age);
 }
@@ -6357,9 +6376,10 @@ void sidebrk_hook(uint8_t* rdram, recomp_context* ctx) {
     if (kind == 0u && side < 2u && g_bs && g_nextra && !any) {
         const uint32_t h = static_cast<uint32_t>(ctx->r[16]), owner = ok(h, 0x20) ? rd(h + 16u) : 0u;
         bool extra = false; for (int i = 0; i < g_nextra; i++) if (owner && g_extra[i].actor == owner) extra = true;
+        if (!extra && owner && !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTBREAKGUARD")) for (uint32_t k = 0; k < 2; k++) if (srd(g_bs + 56u + 4u * k) == owner) extra = true;   // a slot fighter: its steady BREAK is the big panel's only while it is the panel's fighter
         if (extra) {
             uint32_t P = 0; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && side_of(S) == side) P = hud_panel_fighter(k); }
-            if (owner != P && !(on == 0u && g_sidebrk_by[side] == owner)) {
+            if (owner != P && !(on == 0u && g_sidebrk_by[side] == owner && !(ok(P, 0x12D0) && fighter_broken(P)))) {
                 if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: steady BREAK %s on the big panel (%s) dropped: it is %s's break\n", dissidia_battle_age() / 60.0f, side, on ? "on" : "off", ok(P, 0x12D0) ? role_of(P) : "-", role_of(owner));
                 ctx->r[2] = 0; return;
             }
@@ -6367,6 +6387,16 @@ void sidebrk_hook(uint8_t* rdram, recomp_context* ctx) {
         } else g_sidebrk_by[side] = 0u;
     }
     g_orig_sidebrk(rdram, ctx);
+}
+// The big panel's steady "BREAK" (it replaces the BRV number) belongs to the fighter the panel shows: when the lock-on swaps who is on it (hudref_hook), the word
+// follows: off when the fighter that comes on is not broken, on when it is (host, 20 Nov: Terra broke on the panel, the lock went to Lightning: BREAK stayed over her number).
+void steady_break_sync(uint32_t side, uint32_t from, uint32_t to) {
+    if (!g_orig_sidebrk || side > 1 || !ok(from, 0x12D0) || !ok(to, 0x12D0) || std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") || std::getenv("PSPRECOMP_TAGTEAM_NOSTEADYSYNC")) return;
+    const bool b0 = fighter_broken(from), b1 = fighter_broken(to); if (b0 == b1) return;
+    const recomp_context saved = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(side); g_ctx->r[5] = 0; g_ctx->r[6] = b1 ? 1 : 0;
+    g_orig_sidebrk(g_ram, g_ctx); *g_ctx = saved;
+    g_sidebrk_by[side] = b1 ? to : 0u;
+    if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: panel %s -> %s, steady BREAK %s\n", dissidia_battle_age() / 60.0f, side, role_of(from), role_of(to), b1 ? "on" : "off");
 }
 void hudch1_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
@@ -8388,8 +8418,13 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 for (uint32_t g : {36u, 120u}) { std::fprintf(stderr, "[XHGRP] t=%.2fs group %u:", t, g); for (uint32_t o = 0; o < 84u; o += 4) std::fprintf(stderr, " %08X", rd(g_hud + g + o)); std::fprintf(stderr, "\n"); } } }
         if (!done && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_XHSTATE"), "%15[^:]:%f:%u", who, &at, &v) == 3 && dissidia_battle_age() / 60.0f >= at) {
             done = true;
-            for (const auto& kv : g_extra_hdl) if (ok(kv.first, 0x12D0) && ok(kv.second, 0x40) && std::strcmp(role_of(kv.first), std::strcmp(who, "partner") == 0 ? "extraP" : "extraE") == 0) {
-                wr(kv.second + 8u, v); xbrv_set(kv.first, 0); std::fprintf(stderr, "[XHSTATE] t=%.2fs %s handler %08X state -> %u, BRV 0\n", dissidia_battle_age() / 60.0f, role_of(kv.first), kv.second, v); }
+            if (std::strncmp(who, "slot", 4) == 0) {   // "slotC" / "slotH": the slot fighter's own damage handler (host test aid for a slot break while an extra is on its big panel)
+                for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (!ok(S, 0x12D0) || std::strcmp(role_of(S), who) != 0) continue;
+                    uint32_t h = 0; for (const auto& pr : g_hstate_pairs) if (pr.first == S) h = pr.second; if (!h) if (auto it = g_slot_hdl.find(S); it != g_slot_hdl.end()) h = it->second;
+                    if (ok(h, 0x40)) { wr(h + 8u, v); xbrv_set(S, 0); std::fprintf(stderr, "[XHSTATE] t=%.2fs %s handler %08X state -> %u, BRV 0\n", dissidia_battle_age() / 60.0f, role_of(S), h, v); } else std::fprintf(stderr, "[XHSTATE] %s: no handler known\n", who); }
+            }
+            for (const auto& kv : g_extra_hdl) if (std::strncmp(who, "slot", 4) != 0 && ok(kv.first, 0x12D0) && ok(kv.second, 0x40) && std::strcmp(role_of(kv.first), std::strcmp(who, "partner") == 0 ? "extraP" : "extraE") == 0) {
+                wr(kv.second + 8u, v); xbrv_set(kv.first, 0); if (v == 3u && !std::getenv("PSPRECOMP_TAGTEAM_XHSTATE_NOMARK")) { g_xbroken.insert(kv.first); g_xbrv_last[kv.first] = 0; g_xbreak_t0[kv.first] = dissidia_battle_age(); g_xbreak_show[kv.first] = dissidia_battle_age(); }   /* marked broken like a real hit break (flash, big-panel filters) */ std::fprintf(stderr, "[XHSTATE] t=%.2fs %s handler %08X state -> %u, BRV 0\n", dissidia_battle_age() / 60.0f, role_of(kv.first), kv.second, v); }
         }
     }
     if (g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_E2NEAR") && dissidia_battle_age() / 60.0f > static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_E2NEAR")))) {   // debug: keep enemy2 within 2 m of the human
