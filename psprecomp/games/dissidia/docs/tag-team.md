@@ -4131,3 +4131,22 @@ RP6 report: "accessories are not working correctly, it's just applying the acces
   (`PSPRECOMP_TAGTEAM_NOSAVEREC`, a save whose first record is not character 1, a member with level 0 in the save) makes the record from the SIDE record: then the first member's accessories
   ARE used (`character record for char N made from the side record of char M` in the log); worth grepping the RP6 log for that line. (c) CPU party rows (player / CPU toggle) use
   retail's CPU builder, so their accessories are the builder's, not the save's. (d) Multiplayer owner records and the summonstone were not run for this audit.
+
+## Accessory icon rows follow the fighter on each panel; conditional accessories are per fighter (21 Nov, tree tthud; host-only)
+RP6 report: the top icon rows never changed after a call-in / lock swap. Cause found: the rows are built ONCE per battle. Retail HUD module (obj; update `FUN_089E1FD0(obj)` per frame,
+init `FUN_089E1EC0`): per side a block at `obj + 68 + 104 * side` (+0 active, `+4 + 8 * i` = {icon type, fade float} for 10 slots, +92 side, +96 flag), filled by `FUN_089E2304(block, side, flag)`
+from the fighter `FUN_089E95B0(side)` returns: record copy `actor + 0x30C`, the 10 accessory ids of the current set, each mapped by `FUN_088B29D8(id)` -> icon type (byte +19). Lit / dim
+(`FUN_089E2418`, per frame) = fade of slot i up / down by bit i of the word at `FUN_08835778(fighter) + 1512` for the CURRENT `FUN_089E95B0(side)`, so lit states already followed the panel fighter;
+only the icon types were stale (the old fighter's).
+- **Fix** (`accui_hook` on `FUN_089E1FD0`, off with `PSPRECOMP_TAGTEAM_NOACCUI=1`): per side the panel fighter (`hud_panel_fighter` = slot fighter, or the extra the human is locked on to) is compared, every
+  frame, by a key of (actor, record copy, ability block pointer, its 10 ids at ability block +812 stride 68); on a change retail's own `FUN_089E2304` is called for that side's block (guest state only,
+  deterministic, lock-step safe: same inputs on every machine). Covers call-in / mate takeover (slot rebuild), lock swap to the enemy partner and back, new extra.
+- **Conditional accessories are per fighter (code).** Each fighter's tick (`FUN_08831360`) calls `FUN_0883F050(actor + 0x310, actor)`; `FUN_0883F69C` evaluates the 10 slots' conditions for that actor (and its
+  target) against the ability block's own table of ids (block +812, stride 68, built from the actor's own record), sets bit i of block +1512 and `FUN_0883F050` scales the block's values (block +1508: 100 base,
+  x1.2 per lit boost). No side-record read in that function. The block is built from `actor + 0x30C` (see the audit above).
+- **Evidence** (`tagteam_acc_test.py`, `PSPRECOMP_TAGTEAM_ACCUILOG=1`: `[ACCUI]` rebuild lines + periodic `lit mask (+1508 scale) tbl:` per panel fighter; runs `~/dissidia/tt/ttu2`, `ttu3`): slot Jecht table
+  `0 1 2 218 64 65 77 79 62 204` icon types `-1 -1 -1 -1 7 7 8 9 10 -1`; call-in char 15 `204 218 0` all -1; char 6 `1 8 0 2 204 78 79 218 64 77` types `-1 x5 8 9 -1 7 8`, own ability block (distinct pointer),
+  mask 0x40 (+1508 120) for Jecht, mask 0x60 / 0x240 (+1508 144) for char 6 (bits 5, 6 = its own 78 / 79, not Jecht's slots 5 / 6); enemy: slotC row `-1 x6 2 2 7 9`, on lock swap to extraE (ids `3 1 78 78 97 47 79 83 83 63`) the row
+  becomes `-1 -1 8 8 8 3 9 6 6 10` at the swap and back when the lock ends (6 swaps in the run). Window shots `~/dissidia/tt/ttu3s` (`AGESHOTS_WIN`) show the top rows changing (montage `~/dissidia/tt/ttu3_top.png`). Regression `tagteam_test.py --baseline` PASS (`ttu_reg1`).
+- **Not verified**: nothing on a device; no forced-condition negative test (the original fighter's boost not applying to the call-in is shown by distinct blocks / masks / scales and the code reading only its own block, not by forcing a condition);
+  that each boost's numeric effect on damage is per fighter beyond the block scale (+1508) was not measured; multiplayer not run; the fade restarts from 0 after a rebuild (icons fade in again).

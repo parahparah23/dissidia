@@ -6198,6 +6198,54 @@ void hudget_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_nextra && side < 2) { const uint32_t p = hud_panel_fighter(side); if (p) ctx->r[2] = static_cast<int32_t>(p);
         static uint32_t last[2] = {}; if (g_log && p != last[side]) { std::fprintf(stderr, "[HUDLOCK] t=%.2fs side %u panel -> %s %08X (human target %08X)\n", dissidia_battle_age() / 60.0f, side, ok(p, 0x12D0) ? role_of(p) : "?", p, rd(srd(g_bs + 56u + 4u * rd(g_bs + 84u)) + 0x2FCu)); last[side] = p; } }
 }
+// Accessory icon rows (top of the HUD). Retail builds them once at battle start: module init FUN_089E1EC0 -> per side FUN_089E2304(block, side, flag) reads
+// the accessory ids of the fighter FUN_089E95B0(side) returns (record copy actor +0x30C, set at +16 + 0xC6 * set + 162, 10 halfwords), maps each through
+// FUN_088B29D8 and stores its icon type at block + 4 + 8 * i (+ 92 side, + 96 flag; blocks at obj + 68 + 104 * side). The per-frame FUN_089E2418 (called from the module
+// update FUN_089E1FD0(obj)) fades slot i up / down by bit i of the word at FUN_08835778(fighter) + 1512 for the CURRENT FUN_089E95B0(side) fighter. So the lit / dim
+// states already follow the panel fighter; only the icons (ids) were stale. Here the block is rebuilt (the same retail function) whenever the fighter shown on a
+// side's panel (slot fighter, or the extra the human is locked on to) or its record copy changes: a slot rebuild (call-in, mate takeover), a lock swap, a new extra.
+FuncPtr g_orig_accui = nullptr;
+void accui_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const uint32_t obj = static_cast<uint32_t>(ctx->r[4]);
+    static uint32_t key[2] = {}, gen = 0;
+    static const bool lg = std::getenv("PSPRECOMP_TAGTEAM_ACCUILOG") != nullptr;
+    if (gen != g_battle_gen) { gen = g_battle_gen; key[0] = key[1] = 0; }
+    if (g_bs && ok(obj, 0x200) && (rd(obj) & 0xFFu) == 1u) for (uint32_t sd = 0; sd < 2; sd++) {
+        uint32_t P = call(0x089E95B0u, sd);
+        if (g_nextra) if (const uint32_t p = hud_panel_fighter(sd)) P = p;
+        if (!ok(P, 0x12D0)) continue;
+        const uint32_t rec = rd(P + 0x30Cu);
+        if (!rec) continue;   // not initialised yet
+        const uint32_t ab0 = call(0x08835778u, P);   // the ability block: its table of accessory ids (+812, stride 68) is what the conditions are evaluated from
+        uint32_t k = P * 31u ^ rec * 17u ^ ab0; if (ok(ab0, 0x700)) for (uint32_t i = 0; i < 10; i++) k = k * 16777619u ^ rd(ab0 + 812u + 68u * i);
+        if (!k) k = 1;
+        if (k == key[sd]) continue;
+        const uint32_t blk = obj + 68u + 104u * sd;
+        uint32_t flag = rd(blk + 96u); if (!flag) flag = call(0x0887E0CCu, rd(0x089D6998u), 0);
+        const bool first = key[sd] == 0; key[sd] = k;
+        if (!flag) continue;
+        const uint32_t sp0 = static_cast<uint32_t>(ctx->r[29]); ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u);
+        const uint32_t rc = call(0x089E2304u, blk, sd, flag);
+        ctx->r[29] = static_cast<int32_t>(sp0);
+        if (g_log && lg) {
+            const uint32_t ab = call(0x08835778u, P);
+            std::fprintf(stderr, "[ACCUI] t=%.2fs side %u panel %s %08X%s rebuilt rc=%d icon types:", dissidia_battle_age() / 60.0f, sd, role_of(P), P, first ? " (first)" : "", static_cast<int32_t>(rc));
+            for (uint32_t i = 0; i < 10; i++) std::fprintf(stderr, " %d", static_cast<int32_t>(rd(blk + 4u + 8u * i)));
+            std::fprintf(stderr, " | own ability-block table ids (abil %08X +812):", ab); for (uint32_t i = 0; i < 10 && ok(ab, 0x700); i++) std::fprintf(stderr, " %d", static_cast<int32_t>(rd(ab + 812u + 68u * i)));
+            std::fprintf(stderr, "\n");
+        }
+    }
+    if (g_log && lg && g_bs && ok(obj, 0x200)) { static uint32_t n = 0; if ((n++ % 90) == 0) for (uint32_t sd = 0; sd < 2; sd++) {
+        uint32_t P = call(0x089E95B0u, sd); if (g_nextra) if (const uint32_t p = hud_panel_fighter(sd)) P = p;
+        const uint32_t ab = ok(P, 0x12D0) ? call(0x08835778u, P) : 0; const uint32_t blk = obj + 68u + 104u * sd;
+        std::fprintf(stderr, "[ACCUI] t=%.2fs side %u %s %08X abil %08X lit mask %08X (+1508 %d +1516 %08X) tbl:", dissidia_battle_age() / 60.0f, sd, ok(P, 0x12D0) ? role_of(P) : "?", P, ab, ok(ab, 0x700) ? rd(ab + 1512u) : 0u, ok(ab, 0x700) ? static_cast<int32_t>(rd(ab + 1508u)) : 0, ok(ab, 0x700) ? rd(ab + 1516u) : 0u);
+        for (uint32_t i = 0; i < 10 && ok(ab, 0x700); i++) std::fprintf(stderr, " %d", static_cast<int32_t>(rd(ab + 812u + 68u * i)));
+        std::fprintf(stderr, " fades:");
+        for (uint32_t i = 0; i < 10; i++) { float f; const uint32_t w = rd(blk + 4u + 8u * i + 4u); std::memcpy(&f, &w, 4); std::fprintf(stderr, " %.1f", f); }
+        std::fprintf(stderr, "\n"); } }
+    g_orig_accui(rdram, ctx);
+}
 // ---- Round 5/6: the EX Burst chance of a CPU extra (the "EX prompt": red square-with-arrows in the screen centre, everybody at 0.1 speed) ----
 // An HP hit landed in EX Mode sets the attacker's chance flag (actor +0x5B2 bit 0x10). The per-frame EX manager FUN_08ACB208 (EX controller actor +0x784; +4 its
 // state: 1 entering EX Mode, 3 EX Mode, 5 chance, 7 EX Burst) goes 3 -> 5 while that flag is set; in state 5 it sets slow-motion channel 2 to 0.1 (FUN_08A62020, ra
@@ -9499,6 +9547,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_actl) { g_orig_actl = fn(0x08B031ACu); if (g_orig_actl) psp_dispatch_register(0x08B031ACu, actl_hook); }
     if (hudlock_on() && !g_orig_hudget) { g_orig_hudget = fn(0x089E95B0u); if (g_orig_hudget) psp_dispatch_register(0x089E95B0u, hudget_hook);
         if (!std::getenv("PSPRECOMP_TAGTEAM_HITLOG")) { g_orig_hudref = fn(0x089DEDB0u); if (g_orig_hudref) psp_dispatch_register(0x089DEDB0u, hudref_hook); } }
+    if (!g_orig_accui && !std::getenv("PSPRECOMP_TAGTEAM_NOACCUI")) { g_orig_accui = fn(0x089E1FD0u); if (g_orig_accui) psp_dispatch_register(0x089E1FD0u, accui_hook); }
     if (!g_orig_chase) { g_orig_chase = fn(0x08AB6348u); if (g_orig_chase) psp_dispatch_register(0x08AB6348u, chase_hook); }
     if (!g_orig_exbstart) { g_orig_exbstart = fn(EXB_START); if (g_orig_exbstart) psp_dispatch_register(EXB_START, exbstart_hook); }
     if (!g_orig_portrait) { g_orig_portrait = fn(0x08B21588u); if (g_orig_portrait) psp_dispatch_register(0x08B21588u, portrait_hook); }
