@@ -4033,3 +4033,17 @@ Report: "I forfeited a match and started again and Kuja did not have banter audi
   after the start, so a second retail line that would play later is not heard (not verified that retail ever plays it).
 
 - **Assists OFF is the default** (21 Nov, user): the setup screen starts on "Assists: OFF" (Square toggles it, per program run); online the host's choice is sent (PR #118), so a session also starts with Assist Off unless the host turns assists on or a player sets PSPRECOMP_TAGTEAM_MP_ASSISTOFF=0.
+## Steady BREAK on the big panel follows the panel fighter's current state (21 Nov, tree tthud; host-only, window shots; the RP6 case was NOT reproduced)
+RP6 report `rp6logs/rp6_1121_exdeath_break.{jpg,log}`: Exdeath (slotC) on the big right panel with a number and a faint red "BREAK" behind it, Jecht (extraE) on the small panel. Log reading
+(corrected by the coordinator: ~199 s, not 586 s): 175.44 slotC broke while extraE was on the panel (every on / word / burst kept off the panel), 187.21 its break ended (the "off" dropped twice, correct
+for a panel that never got the "on"), 198.98 the slot was rebuilt for the mate (Jecht takes slotC) and `side 1 panel -> slotC`. No `[HUDBREAK] ... on` line of an extra's BRV-0 state reached the panel in
+that log (the "on" is dropped with a log line when it is foreign), so the reported "on from the BRV-0 state of an extra's copy" was not found in the log either.
+- **Host checks (none showed BREAK)**: XHSTATE slotC state 3 with the lock on extraE (break 21 -> 33.8 s, lock back at 34.2 s, `th/v4`, crops `/tmp/v4m.png`); extraE's BRV-0 states 0 -> 1 -> 2 -> 0 with the lock
+  swapped back mid-state (`th/v7`, `/tmp/v7m.png`: the extraE panel only fades its number during state 2, after the swap the slot number is plain). Natural matrix attacks were not timed to the lock (the harness
+  windows moved between runs: 17.7 / 23.0 / 34.2 s), so a swap exactly at the state 1 entry and a REAL slot break (not XHSTATE) with a later swap were not run.
+- **Change (safety net, `steady_break_reconcile`, `PSPRECOMP_TAGTEAM_NOBRKRECON=1` off)**: the steady mode byte of the side's number group (`hud+36+84*side+35`) is compared every hud update with
+  `fighter_broken(panel fighter)` (the handler's CURRENT state: extra marked broken, or slot handler state 3 / 4), not with remembered on / off events. A mismatch that holds for 15 frames is forced
+  through the original `FUN_08889FB8(side, 0, want)`; `[HUDBREAK] ... steady BREAK was on but the panel fighter X is not broken: forced off`. It never fired in the runs above (no stale state was
+  produced). The break WORD element (handler+680 +72, the faint "BREAK" of the screenshot) is NOT covered by it: the screenshot's faint word behind a rolling number may be the word element's fade, not the steady mode.
+- **Not verified**: that this fixes the RP6 case (unreproduced); the word element; the mate-takeover rebuild path at 198.98 (slot handler replaced: `g_slot_hdl` may hold the old handler for the rebuilt slot,
+  so `fighter_broken(slotC)` reads the OLD handler -- candidate cause, not tested); the human's side.

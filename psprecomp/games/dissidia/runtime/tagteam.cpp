@@ -6019,6 +6019,7 @@ void panel_set_silent(uint32_t side, int32_t v) { if (const uint32_t g = panel_g
 void panel_send(uint32_t side, int32_t amount) { if (!amount) return; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); g_ctx->f[12] = 0.0f; call(0x08AE3B54u, static_cast<uint32_t>(panel_ch(side)), static_cast<uint32_t>(amount), static_cast<uint32_t>(amount), static_cast<uint32_t>(amount)); g_ctx->r[29] = static_cast<int32_t>(sp0); }
 uint32_t hud_panel_fighter(uint32_t side);
 void steady_break_sync(uint32_t side, uint32_t from, uint32_t to);
+void steady_break_reconcile(uint32_t side, uint32_t sd, uint32_t P, uint32_t pg);
 void hudref_hook(uint8_t* rdram, recomp_context* ctx) {
     TtStep tt_step_("hudref_hook");
     g_ram = rdram; g_ctx = ctx; g_hud = static_cast<uint32_t>(ctx->r[4]);
@@ -6112,6 +6113,7 @@ void hudref_hook(uint8_t* rdram, recomp_context* ctx) {
             }
         }
         if (lastP[sd] && lastP[sd] != P) steady_break_sync(side, lastP[sd], P);
+        steady_break_reconcile(side, sd, P, pg);
         lastP[sd] = P;
         if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HUDLOCKLOG")) { static int n[2] = {}; if ((n[sd]++ % 15) == 0) std::fprintf(stderr, "[HUDPANEL] t=%.2fs side %u %s shown %d real %d\n", dissidia_battle_age() / 60.0f, side, role_of(P), static_cast<int32_t>(rd(pg + 4u)), real); }
     }
@@ -6663,6 +6665,22 @@ void steady_break_sync(uint32_t side, uint32_t from, uint32_t to) {
     g_orig_sidebrk(g_ram, g_ctx); *g_ctx = saved;
     g_sidebrk_by[side] = b1 ? to : 0u;
     if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: panel %s -> %s, steady BREAK %s\n", dissidia_battle_age() / 60.0f, side, role_of(from), role_of(to), b1 ? "on" : "off");
+}
+// The big panel's steady BREAK must follow the panel fighter's CURRENT handler state, not remembered on/off events (RP6 21 Nov, Exdeath: the slot fighter's break ended while an extra
+// was on the panel, its "off" was dropped, then BREAK showed on his number after the swap back; an extra's BRV-0 state 1/2 on a panel that is not its own). Every hud update the
+// side's steady byte (number group +35) is compared with fighter_broken(panel fighter); a mismatch that stays for 15 frames is forced to the wanted value. _NOBRKRECON=1: off.
+void steady_break_reconcile(uint32_t side, uint32_t sd, uint32_t P, uint32_t pg) {
+    static int bad[2] = {}; static uint32_t gen = ~0u;
+    if (gen != g_battle_gen) { gen = g_battle_gen; bad[0] = bad[1] = 0; }
+    if (!g_orig_sidebrk || side > 1 || !ok(P, 0x12D0) || !pg || std::getenv("PSPRECOMP_TAGTEAM_PANELBREAK_ANY") || std::getenv("PSPRECOMP_TAGTEAM_NOBRKRECON")) return;
+    const uint32_t want = fighter_broken(P) ? 1u : 0u, cur = (rd(g_hud + 36u + 84u * side + 32u) >> 24) & 0xFFu ? 1u : 0u; (void)pg;
+    if (want == cur) { bad[sd] = 0; return; }
+    if (++bad[sd] < 15) return;
+    bad[sd] = 0;
+    const recomp_context saved = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(side); g_ctx->r[5] = 0; g_ctx->r[6] = static_cast<int32_t>(want);
+    g_orig_sidebrk(g_ram, g_ctx); *g_ctx = saved;
+    g_sidebrk_by[side] = want ? P : 0u;
+    if (g_log) std::fprintf(stderr, "[HUDBREAK] t=%.2fs side %u: steady BREAK was %s but the panel fighter %s is %sbroken: forced %s\n", dissidia_battle_age() / 60.0f, side, cur ? "on" : "off", role_of(P), want ? "" : "not ", want ? "on" : "off");
 }
 void hudch1_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
