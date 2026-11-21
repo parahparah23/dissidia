@@ -397,14 +397,15 @@ void overhead_bar(const TagHudOverhead& o) {
         g_layer.opacity = 1.f;
         return;
     }
-    const float w = o.target ? 36.f : 26.f, a = o.target ? 1.f : 0.6f;
+    // Every enemy gets the same full bar and its bravery (user: "every enemy should have it"); the lock target's is a little brighter and drawn last.
+    const float w = 36.f, a = o.target ? 1.f : 0.55f;   // the other enemies more see-through (user: "the sub target should be more transparent")
     if (x < -w || x > 480.f + w || y < 0.f || y > 272.f) return;
     const float x0 = x - w * 0.5f;
     g_layer.band(x0 - 1.f, y - 1.f, x0 + w + 1.f, y + 4.2f, [&](float, float) { return LayerColor{14, 16, 40, 0.7f * a}; });
     hp_bar(x0, y, w, static_cast<float>(o.hp) / static_cast<float>(std::max(1, o.hp_max)), false, a);
-    if (o.target && o.brv >= 0) {
+    if (o.brv >= 0) {
         const std::string b = std::to_string(o.brv);
-        shadow_text(b, true, 7.f, x - text_w(b, true, 7.f) * 0.5f, y - 2.f, LayerColor{255, 236, 170, a});
+        shadow_text(b, true, 7.f, x - text_w(b, true, 7.f) * 0.5f, y - 2.f, o.target ? LayerColor{255, 236, 170, a} : LayerColor{235, 225, 200, a});
     }
 }
 }  // namespace
@@ -433,7 +434,12 @@ void tagteam_layer_frame(bool in_battle) {
             if (g_overhead_style != 0) break;   // the overhead styles replace the side panels
             const int s = f.side != 0;
             const bool g = f.ex >= 0.f || f.assist >= 0.f;   // with the gauges a panel is 31 high (rows 34 apart) and its EX tube sits outside it
+            // Smaller and a little see-through (user, 22 Nov: "the side HUD is too big and distracting"): the stack is zoomed to kSideZoom about the
+            // panels' outer bottom corner (above the retail big panel), so it keeps its place at the screen edge.
+            constexpr float kSideZoom = 0.68f;
+            g_layer.set_zoom(kSideZoom, s == 0 ? 0.f : 480.f, 173.f); g_layer.opacity = 0.85f;
             panel(f, s == 0 ? (g ? 9.f : 4.f) : 480.f - (g ? 9.f : 4.f) - 112.f, 142.f - (g ? 34.f : 27.f) * row[s]++, tnow);
+            g_layer.set_zoom(1.f, 0.f, 0.f); g_layer.opacity = 1.f;
         }
         for (const TagHudReserve& r : g_reserves) reserve(r);
         if (hpdmg_mode() > 0 && !g_hits.empty()) {   // fighters on the retail big panels (bottom corners, number beside the BRV): ours sits next to the retail pulse

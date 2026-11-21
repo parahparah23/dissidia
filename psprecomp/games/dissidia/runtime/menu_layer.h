@@ -35,20 +35,30 @@ public:
 
     void blend(int x, int y, float r, float g, float b, float a);   // pixel space, straight alpha "over"
     float opacity = 1.f;   // multiplies every element drawn from now on (a faded group: the overhead mini panels)
+    // Zoom about a design-unit point: everything drawn from now on is scaled by k around (ox, oy) (a smaller group: the tag team side panels).
+    // Measured widths stay in unzoomed design units, so a layout written for k = 1 shrinks as a whole. set_zoom(1, 0, 0) turns it off.
+    void set_zoom(float k, float ox, float oy) { zk_ = k > 0.f ? k : 1.f; zx_ = ox; zy_ = oy; }
+    float PX(float x) const { return (zx_ + (x - zx_) * zk_) * float(s_); }   // design unit -> pixel
+    float PY(float y) const { return (zy_ + (y - zy_) * zk_) * float(s_); }
+    float IX(float p) const { return zx_ + (p / float(s_) - zx_) / zk_; }     // pixel -> design unit
+    float IY(float p) const { return zy_ + (p / float(s_) - zy_) / zk_; }
+    float S() const { return float(s_) * zk_; }                              // pixels per design unit
 private:
     int s_ = 2, w_ = 0, h_ = 0;
+    float zk_ = 1.f, zx_ = 0.f, zy_ = 0.f;
     std::vector<float> px_;   // r, g, b (0..255, not premultiplied), a (0..1)
     std::vector<GeLayerCopy> copies_;
 };
 
 template <class F> void MenuLayer::band(float x0, float y0, float x1, float y1, F color_at) {
-    const int ix0 = std::max(0, int(x0 * s_)), ix1 = std::min(w_, int(x1 * s_ + 0.999f));
-    const int iy0 = std::max(0, int(y0 * s_)), iy1 = std::min(h_, int(y1 * s_ + 0.999f));
+    const float px0 = PX(x0), px1 = PX(x1), py0 = PY(y0), py1 = PY(y1);
+    const int ix0 = std::max(0, int(px0)), ix1 = std::min(w_, int(px1 + 0.999f));
+    const int iy0 = std::max(0, int(py0)), iy1 = std::min(h_, int(py1 + 0.999f));
     for (int y = iy0; y < iy1; ++y) {
-        const float top = std::min(1.f, std::max(0.f, (y + 1) - y0 * s_)), bot = std::min(1.f, std::max(0.f, y1 * s_ - y));
+        const float top = std::min(1.f, std::max(0.f, (y + 1) - py0)), bot = std::min(1.f, std::max(0.f, py1 - y));
         const float cov = std::min(top, bot);
         for (int x = ix0; x < ix1; ++x) {
-            const LayerColor c = color_at((x + 0.5f) / float(s_), (y + 0.5f) / float(s_));
+            const LayerColor c = color_at(IX(x + 0.5f), IY(y + 0.5f));
             blend(x, y, c.r, c.g, c.b, c.a * cov);
         }
     }
