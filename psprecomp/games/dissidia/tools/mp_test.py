@@ -101,7 +101,7 @@ def wait(pred, timeout, what):
     raise RuntimeError('timeout: ' + what)
 
 
-def walk(a, b):
+def walk(a, b, slack=0.0):   # slack: extra seconds at the lobby steps that go through the network (--slack, for runs with PSPRECOMP_NET_LAG_MS)
     both = (a, b)
     for c in both:
         wait(lambda: 'Debug socket listening' in c.text(), 90, 'debug socket ' + c.side)
@@ -126,9 +126,9 @@ def walk(a, b):
     b.press('down', 'down', 'cross'); time.sleep(6)        # B: Search for a Room
     b.press('cross'); time.sleep(5)                        # B: request entry
     a.press('up', 'cross'); time.sleep(2)                  # A: Start Group Battle -> YES
-    a.press('cross'); time.sleep(8)
-    a.press('cross'); b.press('right', 'cross')            # Party A / Party B
-    time.sleep(12)
+    a.press('cross'); time.sleep(8 + slack)
+    a.press('cross'); time.sleep(slack); b.press('right', 'cross')   # Party A / Party B
+    time.sleep(12 + slack)
     a.press('cross'); time.sleep(5)                        # A: Tournament
     for c in both:
         c.press('cross', gap=2.0)                          # the 1st slot -> Player Select
@@ -192,6 +192,7 @@ def main(argv):
     ap.add_argument('--env-b', default='')
     ap.add_argument('--out', default=os.path.join(os.getcwd(), 'mp_test_out'))
     ap.add_argument('--rstick', action='store_true', help='also turn both views with the right stick while moving')
+    ap.add_argument('--slack', type=float, default=0.0, help='extra seconds at the lobby steps (lag runs: the party screen comes later)')
     ap.add_argument('--keep', action='store_true', help='leave both copies running afterwards')
     ap.add_argument('--expect-desync', action='store_true', help='exit 0 only when a desync was reported (the perturbation test)')
     a = ap.parse_args(argv)
@@ -204,7 +205,7 @@ def main(argv):
         A.start()
         B.start()
         t0 = time.time()
-        walk(A, B)
+        walk(A, B, a.slack)
         print('[mp_test] in battle after %.0f s' % (time.time() - t0), file=sys.stderr)
         exercise(A, B, a.secs, RSTICK_MOVES + MOVES if a.rstick else MOVES)
         time.sleep(11)   # one more desync summary
