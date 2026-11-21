@@ -43,6 +43,8 @@
 #include <vector>
 
 extern FuncPtr ovl_battle_lookup(uint32_t vaddr);
+FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);    // xdelta_mods.cpp (the loaded overlay at a battle-overlay address)
+FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);
 int dissidia_test_action(uint8_t* rdram, recomp_context* ctx, uint32_t actor, int id);   // roster.cpp (debug: start an action by id)
 void psp_dump_func_ring(const char* tag);   // runtime/src/psp_dispatch.cpp
 extern uint32_t g_alloc_in_heap, g_alloc_in_size;   // hooks_models.cpp (debug: the heap allocation in progress)
@@ -1912,6 +1914,21 @@ int hp_eff(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); if (!ok(st, 0x40)) 
 // removed (fall / swap / park / call-in) until the burst is over, even at 0 HP. Battle state only: the same on every machine.
 bool exb_in(uint32_t a) { const uint32_t c = rd(0x08A405E0u); return a && ok(c, 0x300) && rd(c + 0x278u) != 0 && (rd(c + 0x26Cu) == a || rd(c + 0x270u) == a) && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBDEFER"); }
 bool exb_running() { const uint32_t c = rd(0x08A405E0u); return ok(c, 0x300) && rd(c + 0x278u) != 0 && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBDEFER"); }
+// The EX Burst rule of the tag battle: "freeze" (default: the fighters outside the burst are held under the stage until it ends, as
+// retail hides them) or "fight" (they play on, on the stage). A battle-wide rule: in a lock-step battle every machine must use the
+// same one (the host's), or the simulations part. Read once per program run: PSPRECOMP_TAGTEAM_EXBURST=freeze|fight.
+// View only: this machine's player is outside the running burst under the keep-fighting rule (set by the frame's view choice). The
+// burst's full-screen presentation (screen fader #0, the white flash) is then not drawn on this screen.
+bool g_view_outside_exb = false;
+bool exb_rule_fight() { static const bool f = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_EXBURST"); return e && !std::strcmp(e, "fight"); }(); return f; }
+// Keep-fighting rule, during a burst: x and y are on opposite sides of it (one fights in it, the other outside it). The fighters outside
+// then aim only at each other (aim_fix treats one in the burst as no target), so they do not chase the burst pair across the stage.
+bool exb_apart(uint32_t x, uint32_t y) {
+    if (!exb_rule_fight()) return false;
+    const uint32_t c = rd(0x08A405E0u); if (!ok(c, 0x300) || rd(c + 0x278u) == 0) return false;
+    const uint32_t p0 = rd(c + 0x26Cu), p1 = rd(c + 0x270u); if (!ok(p0, 0x12D0) || !ok(p1, 0x12D0)) return false;
+    return (x == p0 || x == p1) != (y == p0 || y == p1);
+}
 bool alive(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); return !is_down(a) && !ko_script(a) && ok(st, 0x40) && hp_eff(a) > 0; }
 
 // A natural lethal hit does not necessarily write 0 into the live HP word: the retail KO is the fall script (1200..1299, 1210 = knocked out) that
@@ -6129,6 +6146,14 @@ template <int I> void calllog_hook(uint8_t* rdram, recomp_context* ctx) {
 FuncPtr g_orig_script_play = nullptr;
 void falllog_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]), id = static_cast<uint32_t>(ctx->r[5]);
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_EXBPARKLOG")) { g_ram = rdram; if (exb_running()) { static int n = 0; if (n++ < 60) std::fprintf(stderr, "[EXBPARK] t=%.2fs START_ACTION %s id %u ra %08X\n", dissidia_battle_age() / 60.0f, role_of(a0 - 304u), id, static_cast<uint32_t>(ctx->r[31])); } }
+    if (id == 101u && g_bs && exb_rule_fight()) {   // keep-fighting rule: the burst's park (script 101, a sink under the stage) is refused for the fighters outside it
+        g_ram = rdram; const uint32_t c = rd(0x08A405E0u), A = a0 - 304u;
+        if (ok(c, 0x300) && rd(c + 0x278u) != 0 && ok(rd(c + 0x26Cu), 0x12D0) && A != rd(c + 0x26Cu) && A != rd(c + 0x270u) && actor_char(A) >= 0) {
+            static uint32_t n = 0; if (g_log && n++ < 8) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst (keep fighting): park script 101 refused for %s\n", dissidia_battle_age() / 60.0f, role_of(A));
+            ctx->r[2] = 0; return;
+        }
+    }
     if (id >= 1200 && id < 1300 && g_bs && is_slot_fighter(a0 - 304u)) {
         const uint32_t A = a0 - 304u, st = rd(A + 0x52Cu);
         std::fprintf(stderr, "[FALLLOG] t=%.2fs script %u on %08X (char %d, slot %d, hp %d dmg %d, +380 %08X, bs+72 %u) ra %08X\n", dissidia_battle_age() / 60.0f, id, A, actor_char(A), A == srd(g_bs + 56u) ? 0 : 1, ok(st, 0x40) ? static_cast<int>(rd(st + 0xCu)) : -1, ok(st, 0x40) ? static_cast<int>(rd(st + 0x8u)) : -1, rd(A + 0x380u), rd(g_bs + 72u), static_cast<uint32_t>(ctx->r[31]));
@@ -6139,9 +6164,134 @@ void falllog_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     g_orig_script_play(rdram, ctx);
 }
+// The burst's park comes through FUN_0882FAC4 (called from FUN_08934054 every frame of the burst for the fighters outside it; found
+// with PSPRECOMP_MEM_WATCH on an outsider's script word +0x180). Under the keep-fighting rule it is refused for them.
+// The park's second half: FUN_08934054 then calls FUN_08834900(actor, f12 = 0), a virtual call on the actor's +0x3A4 object (vtable +48).
+// It took the fighter off the ground (+0x380 bit 0x02000000 cleared 0.03 s later while standing): with the script refused but this left
+// in, an outsider lost its floor and fell through the stage at its next jump or launch. Refused too, for the park's own call only
+// (return address 0x089340C4) and the fighters outside the burst.
+// The floor during a burst. A fighter's ground query (FUN_0883B470(actor, ..) -> FUN_088976E4(world 0x09AEF8D8, ..)) first asks
+// FUN_0889740C(world): "collision off" (1) when the world byte +260 is not 1 and the stage object *(0x089D6AC8) field +0x4D0 is not -1.
+// The burst sets that field, so every query answers ground -100 (the "100 m under the stage" the parked fighters sink to) and the
+// stage is never searched. Under the keep-fighting rule the fighters outside the burst still need the stage: while FUN_0883B470 runs
+// for one of them, FUN_0889740C answers 0 (search the stage). The burst pair keeps the burst's answer.
+FuncPtr g_orig_move = nullptr, g_orig_colloff = nullptr; uint32_t g_move_actor = 0;
+void move_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t prev = g_move_actor; g_move_actor = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_move(rdram, ctx);
+    g_move_actor = prev;
+}
+void colloff_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_orig_colloff(rdram, ctx);
+    if (ctx->r[2] != 1 || !g_move_actor || !g_bs) return;
+    g_ram = rdram; const uint32_t c = rd(0x08A405E0u), A = g_move_actor;
+    if (ok(c, 0x300) && rd(c + 0x278u) != 0 && ok(rd(c + 0x26Cu), 0x12D0) && A != rd(c + 0x26Cu) && A != rd(c + 0x270u) && ok(A, 0x12D0) && actor_char(A) >= 0) {
+        ctx->r[2] = 0;
+        static uint32_t m = 0; if (g_log && m++ < 4) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst (keep fighting): stage floor kept for %s\n", dissidia_battle_age() / 60.0f, role_of(A));
+    }
+}
+FuncPtr g_orig_park2 = nullptr;
+void park2_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (g_bs && exb_rule_fight() && static_cast<uint32_t>(ctx->r[31]) == 0x089340C4u) {
+        g_ram = rdram; const uint32_t c = rd(0x08A405E0u), A = static_cast<uint32_t>(ctx->r[4]);
+        if (ok(c, 0x300) && rd(c + 0x278u) != 0 && ok(rd(c + 0x26Cu), 0x12D0) && A != rd(c + 0x26Cu) && A != rd(c + 0x270u) && actor_char(A) >= 0) {
+            static uint32_t m = 0; if (g_log && m++ < 8) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst (keep fighting): park call FUN_08834900 refused for %s\n", dissidia_battle_age() / 60.0f, role_of(A));
+            return;
+        }
+    }
+    g_orig_park2(rdram, ctx);
+}
+FuncPtr g_orig_action2 = nullptr;
+void action2_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]), a1 = static_cast<uint32_t>(ctx->r[5]);
+    if (g_bs) {
+        g_ram = rdram; const uint32_t c = rd(0x08A405E0u);
+        if (ok(c, 0x300) && rd(c + 0x278u) != 0 && ok(rd(c + 0x26Cu), 0x12D0)) {
+            static uint32_t n = 0; if (std::getenv("PSPRECOMP_TAGTEAM_EXBPARKLOG") && n++ < 40) std::fprintf(stderr, "[EXBPARK] FUN_0882FAC4 a0 %08X a1 %08X a2 %08X ra %08X\n", a0, a1, static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[31]));
+            const uint32_t A = a0 - 304u;
+            const uint32_t ra = static_cast<uint32_t>(ctx->r[31]);   // only the burst's own park calls (script 101 is also a normal move for some characters)
+            if ((a1 & 0xFFFFu) == 101u && (ra == 0x089340B8u || ra == 0x08A5BC38u) && A != rd(c + 0x26Cu) && A != rd(c + 0x270u) && actor_char(A) >= 0) {
+                static uint32_t m = 0; if (g_log && m++ < 8) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst (keep fighting): park script 101 refused for %s\n", dissidia_battle_age() / 60.0f, role_of(A));
+                ctx->r[2] = 0; return;
+            }
+        }
+    }
+    g_orig_action2(rdram, ctx);
+}
+// Debug: PSPRECOMP_TAGTEAM_FXPROBE=<hex>,<hex>,...: count calls of these functions per 0.5 s of battle age (log [FXPROBE]);
+// PSPRECOMP_TAGTEAM_FXSKIP=<hex>,...: during an EX Burst, skip those calls (draw functions only: a test of which one draws what).
+constexpr int kFxProbeMax = 32;
+uint32_t g_fxp_addr[kFxProbeMax]; FuncPtr g_fxp_orig[kFxProbeMax]; uint32_t g_fxp_n[kFxProbeMax]; bool g_fxp_skip[kFxProbeMax]; int g_fxp_count = 0;
+void fxprobe_flush() {
+    static int slot = -1; const int s = static_cast<int>(dissidia_battle_age() / 30.0f);
+    if (s == slot) return; slot = s;
+    std::string line; for (int i = 0; i < g_fxp_count; i++) if (g_fxp_n[i]) { char b[48]; std::snprintf(b, sizeof b, " %08X:%u", g_fxp_addr[i], g_fxp_n[i]); line += b; g_fxp_n[i] = 0; }
+    if (!line.empty()) std::fprintf(stderr, "[FXPROBE] t=%.1fs%s%s\n", dissidia_battle_age() / 60.0f, exb_running() ? " (burst)" : "", line.c_str());
+}
+template <int I> void fxprobe_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_fxp_n[I]++; if (g_bs) fxprobe_flush();
+#if !defined(__ANDROID__)
+    static const uint32_t a0lo = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_FXPROBE_A0"); return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16)) : 0u; }();
+    static const uint32_t a0hi = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_FXPROBE_A0"); const char* d = e ? std::strchr(e, '-') : nullptr; return d ? static_cast<uint32_t>(std::strtoul(d + 1, nullptr, 16)) : 0xFFFFFFFFu; }();   // "<lo>-<hi>": only calls with a0 in it
+    if (g_bs && (exb_running() || std::getenv("PSPRECOMP_TAGTEAM_FXPROBE_BTANY")) && std::getenv("PSPRECOMP_TAGTEAM_FXPROBE_BT") && static_cast<uint32_t>(ctx->r[4]) >= a0lo && static_cast<uint32_t>(ctx->r[4]) <= a0hi) {   // debug: the host call chain (generated FUN_ frames) of the first calls during a burst
+        static int left = 6; if (left > 0) { left--; void* bt[16]; const int nb = backtrace(bt, 16); char** sy = backtrace_symbols(bt, nb);
+            std::fprintf(stderr, "[FXPROBE] %08X a0 %08X ra %08X host stack:", g_fxp_addr[I], static_cast<uint32_t>(ctx->r[4]), static_cast<uint32_t>(ctx->r[31]));
+            for (int k = 1; k < nb && sy; k++) { const char* p = std::strstr(sy[k], "FUN_"); if (p) std::fprintf(stderr, " %.12s", p); } std::fprintf(stderr, "\n"); std::free(sy); } }
+#endif
+    if (g_fxp_skip[I] && g_bs && exb_running()) return;
+    g_fxp_orig[I](rdram, ctx);
+}
+template <int... I> void fxprobe_table(std::integer_sequence<int, I...>, FuncPtr* out) { ((out[I] = fxprobe_hook<I>), ...); }
+void fxprobe_install() {
+    const char* e = std::getenv("PSPRECOMP_TAGTEAM_FXPROBE"); if (!e) return;
+    static FuncPtr hooks[kFxProbeMax]; fxprobe_table(std::make_integer_sequence<int, kFxProbeMax>{}, hooks);
+    const char* skip = std::getenv("PSPRECOMP_TAGTEAM_FXSKIP"); const std::string sk = skip ? skip : "";
+    for (const char* q = e; *q && g_fxp_count < kFxProbeMax;) {
+        char* end = nullptr; const uint32_t a = static_cast<uint32_t>(std::strtoul(q, &end, 16)); if (end == q) break;
+        const FuncPtr o = fn(a);
+        if (o) { const int i = g_fxp_count++; g_fxp_addr[i] = a; g_fxp_orig[i] = o; char hx[12]; std::snprintf(hx, sizeof hx, "%08X", a);
+            g_fxp_skip[i] = sk.find(hx) != std::string::npos || sk.find(std::string(hx).substr(2)) != std::string::npos; psp_dispatch_register(a, hooks[i]);
+            std::fprintf(stderr, "[FXPROBE] hooked %08X%s\n", a, g_fxp_skip[i] ? " (skipped during bursts)" : ""); }
+        q = *end ? end + 1 : end;
+    }
+}
+// The burst's screen presentation, not drawn for a player outside it (keep-fighting rule). Both are draws only: the fader keys and
+// the flash flag still advance / clear as on every other machine.
+//  - FUN_088741C0(fader, key): draws a screen fader's full-screen colour (called by the fader's draw methods 08874118 / 0887414C /
+//    08874180). Fader #0 (0x09B47B50, FUN_08873CE0(0, 1, 0)) is the one EX Bursts program (event 0x051B: fade to white / black).
+//  - FUN_08A3E268: the burst controller's draw task; with controller +0x280 set it draws a solid white full-screen sprite (event
+//    0x012B) and clears the flag. Cleared here first, so the task draws the rest as usual.
+constexpr uint32_t FADER0 = 0x09B47B50u;
+FuncPtr g_orig_fader_draw = nullptr, g_orig_exb_draw = nullptr;
+void fader_draw_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (g_view_outside_exb && static_cast<uint32_t>(ctx->r[4]) == FADER0) return;
+    g_orig_fader_draw(rdram, ctx);
+}
+void exb_draw_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t ovl = rd(0x089DD4C0u);   // a battle-overlay address: the menu / extra overlays map other code there
+    if (ovl != 1) { const FuncPtr f = ovl == 2 ? dissidia_ovl_menu_lookup(0x08A3E268u) : ovl == 3 ? dissidia_ovl_extra_lookup(0x08A3E268u) : nullptr; if (f) f(rdram, ctx); return; }
+    if (g_view_outside_exb) { g_ram = rdram; const uint32_t c = rd(0x08A405E0u); if (ok(c, 0x300) && rd(c + 0x280u)) wr(c + 0x280u, 0u); }
+    g_orig_exb_draw(rdram, ctx);
+}
+// Debug: PSPRECOMP_TAGTEAM_GROUNDLOG=1: FUN_08838300(actor)'s float result (f0) for the slot-0 fighter, every 15th call, with its y and +0x380.
+FuncPtr g_orig_gq = nullptr;
+void gq_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t a = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_gq(rdram, ctx);
+    g_ram = rdram;
+    if (g_bs && a == srd(g_bs + 56u)) { static int n = 0; const float ag = dissidia_battle_age() / 60.0f; if (ag > 9.0f && ag < 25.0f && n++ % 15 == 0) std::fprintf(stderr, "[GROUND] t=%.2fs%s %s f0 %.3f y %.3f fl %08X script %d\n", dissidia_battle_age() / 60.0f, exb_running() ? " (burst)" : "", role_of(a), ctx->f[0], rdf(a + 0x84u), rd(a + 0x380u), static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu)); }
+}
 void calllog_install() {
     static bool done = false; if (done) return; done = true;
-    if (std::getenv("PSPRECOMP_TAGTEAM_FALLLOG") && !g_orig_script_play) { g_orig_script_play = fn(START_ACTION); if (g_orig_script_play) psp_dispatch_register(START_ACTION, falllog_hook); }
+    fxprobe_install();
+    if (std::getenv("PSPRECOMP_TAGTEAM_GROUNDLOG") && !g_orig_gq) { g_orig_gq = fn(0x08838300u); if (g_orig_gq) psp_dispatch_register(0x08838300u, gq_hook); }
+    if (exb_rule_fight() && !g_orig_fader_draw) { g_orig_fader_draw = fn(0x088741C0u); if (g_orig_fader_draw) psp_dispatch_register(0x088741C0u, fader_draw_hook); }
+    if (exb_rule_fight() && !g_orig_exb_draw) { g_orig_exb_draw = fn(0x08A3E268u); if (g_orig_exb_draw) psp_dispatch_register(0x08A3E268u, exb_draw_hook); }
+    if (exb_rule_fight() && !g_orig_move) { g_orig_move = fn(0x0883B470u); g_orig_colloff = fn(0x0889740Cu); if (g_orig_move && g_orig_colloff) { psp_dispatch_register(0x0883B470u, move_hook); psp_dispatch_register(0x0889740Cu, colloff_hook); } }
+    if (exb_rule_fight() && !g_orig_park2) { g_orig_park2 = fn(0x08834900u); if (g_orig_park2) psp_dispatch_register(0x08834900u, park2_hook); }
+    if (exb_rule_fight() && !g_orig_action2) { g_orig_action2 = fn(0x0882FAC4u); if (g_orig_action2) psp_dispatch_register(0x0882FAC4u, action2_hook); }
+    if ((std::getenv("PSPRECOMP_TAGTEAM_FALLLOG") || exb_rule_fight()) && !g_orig_script_play) { g_orig_script_play = fn(START_ACTION); if (g_orig_script_play) psp_dispatch_register(START_ACTION, falllog_hook); }
     const char* e = std::getenv("PSPRECOMP_TAGTEAM_CALLLOG"); if (!e) return;
     static const FuncPtr hooks[8] = {calllog_hook<0>, calllog_hook<1>, calllog_hook<2>, calllog_hook<3>, calllog_hook<4>, calllog_hook<5>, calllog_hook<6>, calllog_hook<7>};
     int i = 0; const char* q = e;
@@ -7043,7 +7193,7 @@ void aim_fix() {
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOAIMFIX") != nullptr, lg = g_log && std::getenv("PSPRECOMP_TAGTEAM_AIMLOG") != nullptr;
     if (off || !g_bs || !g_nextra) return;
     uint32_t f[6]; const int n = all_fighters(f);
-    auto valid = [&](uint32_t x, uint32_t self) { return x && x != self && ok(x, 0x12D0) && g_ram[(x + 0x542u) & 0x07FFFFFFu] == 0 && side_of(x) != side_of(self) && alive(x) && rdf(x + 0x84u) > -20.0f && std::fabs(rdf(x + 0x80u)) < 1000.0f; };
+    auto valid = [&](uint32_t x, uint32_t self) { return x && x != self && ok(x, 0x12D0) && g_ram[(x + 0x542u) & 0x07FFFFFFu] == 0 && side_of(x) != side_of(self) && alive(x) && rdf(x + 0x84u) > -20.0f && std::fabs(rdf(x + 0x80u)) < 1000.0f && !exb_apart(x, self); };
     static std::map<uint32_t, std::array<uint32_t, 4>> last;
     for (int i = 0; i < n; i++) {
         const uint32_t a = f[i];
@@ -7052,6 +7202,10 @@ void aim_fix() {
             static const bool nofill_p = std::getenv("PSPRECOMP_TAGTEAM_NOTGTFILL") != nullptr;
             const uint32_t Lp = rd(a + 0x5ACu), ltp = ok(Lp, 0x200) ? call(LOCK_GET, Lp) : 0u;
             if (!nofill_p && !rd(a + 0x2FCu) && valid(ltp, a)) { wr(a + 0x2FCu, ltp); if (g_log) { static int c = 0; if (c++ < 100) std::fprintf(stderr, "[TGTFILL] t=%.2fs player %s %08X: target word was 0 under lock %08X\n", dissidia_battle_age() / 60.0f, role_of(a), a, ltp); } }
+            // keep-fighting rule: a player outside the burst locked on a fighter inside it is moved to the enemy outside it (battle state, so the same on every machine)
+            if (ltp && ok(Lp, 0x200) && exb_apart(ltp, a)) { uint32_t to = 0; for (int j = 0; j < n; j++) if (valid(f[j], a)) to = f[j];
+                if (to) { call(LOCK_SET, Lp, to); wr(a + 0x2FCu, to); if (rd(a + 0x300u) == ltp) wr(a + 0x300u, to);
+                    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst (keep fighting): player %s lock moved from %08X (in the burst) to %08X\n", dissidia_battle_age() / 60.0f, role_of(a), ltp, to); } }
             continue;
         }
         const uint32_t L = rd(a + 0x5ACu), foe = rd(a + 0x300u), tgt = rd(a + 0x2FCu), lt = ok(L, 0x200) ? call(LOCK_GET, L) : 0u;
@@ -8177,8 +8331,39 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             static const bool slotcam = std::getenv("PSPRECOMP_TTLOCK_VIEW_SLOTCAM") != nullptr;
             for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && !is_down(g_extra[i].actor) && alive(g_extra[i].actor) && dissidia_ttnet_local_drives(2 + i, f)) { if (slotcam && g_extra[i].camslot >= 0) want = g_extra[i].camslot; else want_actor = g_extra[i].actor; }
         } else if (shown == -3) want = -3;
+        if (g_bs) {   // during an EX Burst: a fighter in it sees the burst (the game's choice: its attacker's camera slot); one outside it sees
+            // the burst too under the freeze rule (it is held anyway), and keeps its own camera under the keep-fighting rule (view only)
+            g_ram = rdram;
+            const uint32_t c = rd(0x08A405E0u);
+            if (ok(c, 0x300) && rd(c + 0x278u) != 0) {
+                uint32_t me = 0; const uint32_t hs = rd(g_bs + 84u) & 1u;
+                if (comms_battle() && dissidia_ttnet_running()) { const uint32_t f = dissidia_ttnet_frame();
+                    for (uint32_t k = 0; k < 2; k++) if (dissidia_ttnet_local_drives(static_cast<int>(k), f)) me = srd(g_bs + 56u + 4u * k);
+                    for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && dissidia_ttnet_local_drives(2 + i, f)) me = g_extra[i].actor; }
+                else me = srd(g_bs + 56u + 4u * hs);
+                const bool inside = me && (me == rd(c + 0x26Cu) || me == rd(c + 0x270u));
+                want = -1; want_actor = 0;
+                if (!inside && exb_rule_fight() && ok(me, 0x12D0)) { const uint32_t mgr = dissidia_camera_manager(), lb = rd(me + ACT_LOCKBLK);
+                    for (int s = 0; s < 8 && mgr; s++) if (lb && rd(mgr + 0x6D0u + 4u * static_cast<uint32_t>(s)) == lb) want = s;
+                    g_view_outside_exb = !std::getenv("PSPRECOMP_TAGTEAM_NOEXBFXHIDE"); }   // (=1: show the burst presentation anyway, an A/B test aid)
+                else g_view_outside_exb = false;
+            } else g_view_outside_exb = false;
+        }
         if (want_actor != shown_actor) { shown_actor = want_actor; dissidia_camera_set_view_follow(want_actor); std::fprintf(stderr, "[TTLOCK] view: %s%08X\n", want_actor ? "chase camera on the extra this machine drives, " : "chase camera off, ", want_actor); }
         if (want != shown) { shown = want; dissidia_camera_set_view_slot(want < 0 ? -1 : want); if (want > -3) std::fprintf(stderr, "[TTLOCK] view: camera slot %d (%s)\n", want, want < 0 ? "the game's own" : "the fighter this machine drives"); }
+    }
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_EXBCAMLOG")) {   // debug: during an EX Burst, the camera slot the game shows and every slot's lock block / eye / look-at (every 0.5 s)
+        g_ram = rdram;
+        const uint32_t mgr = dissidia_camera_manager(), c = rd(0x08A405E0u);
+        static uint32_t n = 0;
+        if (ok(mgr, 0x900) && ok(c, 0x300) && rd(c + 0x278u) != 0 && n++ % 30 == 0) {
+            std::fprintf(stderr, "[EXBCAM] t=%.2fs attacker %08X victim %08X shown slot %u:", dissidia_battle_age() / 60.0f, rd(c + 0x26Cu), rd(c + 0x270u), rd(mgr + 0x8B8u));
+            for (uint32_t s = 0; s < 8; s++) { const uint32_t lb = rd(mgr + 0x6D0u + 4u * s); if (!lb) continue; const uint32_t p = mgr + 0x110u + 0x30u * s;
+                std::fprintf(stderr, " [%u lb %08X f125 %u eye %.1f,%.1f,%.1f at %.1f,%.1f,%.1f]", s, lb, ok(lb, 0x200) ? g_ram[(lb + 0x125u) & 0x07FFFFFFu] : 255u, rdf(p), rdf(p + 4u), rdf(p + 8u), rdf(p + 0x10u), rdf(p + 0x14u), rdf(p + 0x18u)); }
+            uint32_t f[8]; const int nf = all_fighters(f);
+            for (int i = 0; i < nf; i++) std::fprintf(stderr, " {%s %08X at %.1f,%.1f,%.1f}", role_of(f[i]), f[i], rdf(f[i] + 0x80u), rdf(f[i] + 0x84u), rdf(f[i] + 0x88u));
+            std::fprintf(stderr, "\n");
+        }
     }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_STEPCHK")) {   // debug: does this step run exactly once per battle frame (tag clock step)? counts runs with no / several steps
         static float last = -1.f; static unsigned same = 0, multi = 0, runs = 0; const float st = dissidia_logic_tick_len(); runs++;
@@ -8451,41 +8636,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static std::map<uint32_t, std::array<float, 3>> good, held; static std::map<uint32_t, int> gated; static bool was = false;
         const uint32_t c = rd(0x08A405E0u); const bool on = ok(c, 0x300) && rd(c + 0x278u) != 0;
         uint32_t f[8]; const int nf = all_fighters(f);
-        if (!on) {
-            if (was) {
-                const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
-                for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; auto it = good.find(a); if (it == good.end() || (rdf(a + 0x84u) > -20.0f && !held.count(a)) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;   // (held: parked in this burst; the burst's end can lift one just above -20 (-18.98 seen), it stayed there)
-                    wrf(vec, it->second[0]); wrf(vec + 4, it->second[1]); wrf(vec + 8, it->second[2]); wrf(vec + 12, 1.0f); tp_vec("held spot", a, vec); call(PLACE, a, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
-                    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: %s back from under the stage to %.1f,%.1f,%.1f\n", dissidia_battle_age() / 60.0f, role_of(a), it->second[0], it->second[1], it->second[2]); }
-                g_ctx->r[29] = static_cast<int32_t>(sp0);
-            }
-            for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; const float y = rdf(a + 0x84u), x = rdf(a + 0x80u); if (y > -20.0f && x < 1000.0f) good[a] = {x, y, rdf(a + 0x88u)}; }
-            for (const auto& kv : gated) if (ok(kv.first, 0x12D0)) wr(kv.first + 0x380u, rd(kv.first + 0x380u) & ~2u);   // their AI back on
-            static int exb_slot_wait = 0;   // (the burst camera is put back by the manager's own step of that block, mode 2 -> 1 the frame after the burst: the block stays in its slot until then)
-            if (g_exb_slot_lb && ok(g_exb_slot_lb, 0x200) && rd(g_exb_slot_lb + 0x108u) == 2u && exb_slot_wait++ < 60) {}
-            else if (g_exb_slot_lb) { exb_slot_wait = 0; if (rd(g_exb_slot_addr) == g_exb_slot_lb) wr(g_exb_slot_addr, 0u); if (ok(g_exb_slot_lb, 0x200)) g_ram[(g_exb_slot_lb + 0x125u) & 0x07FFFFFFu] = 0;
-                for (const auto& kv : g_exb_shown) if (ok(kv.first, 0x200)) g_ram[(kv.first + 0x125u) & 0x07FFFFFFu] = kv.second;
-                if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: the extra burster's lock block %08X taken out of its camera slot\n", dissidia_battle_age() / 60.0f, g_exb_slot_lb);
-                g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); }
-            for (const auto& kv : g_exb_fc) if (ok(kv.first, 0x200) && rd(kv.first + 0xFCu) == 0u) wr(kv.first + 0xFCu, kv.second);   // (the lock words the burst camera needed cleared)
-            g_exb_fc.clear();
-            gated.clear(); held.clear(); g_exb_frozen.clear();
-        } else if (!std::getenv("PSPRECOMP_TAGTEAM_NOEXBHOLD")) {
-            // while it runs the fighters outside it do nothing: their AI is gated (+0x380 bit 2), their pad input dropped and they are held where the
-            // burst put them. The two in it are never touched (the burst has inputs for both): the controller's +0x26C / +0x270 (attacker, victim),
-            // set by the start for a player's and a CPU's burst alike (the victim is the start's own pick, not always the foe it was called with).
-            // (+0xD8 / +0xDC, used before, are a per-character record of the controller that only matched some characters.) Without them: the
-            // ones the game left on the stage (it parks the others 100 m under it, one by one over the first frames).
-            // Every input here is battle state (no local player, no clock): on every machine of a lock-step battle the same fighters are held.
-            uint32_t p0 = rd(c + 0x26Cu), p1 = rd(c + 0x270u);   // attacker / victim, written by the start (FUN_08A3EB70) for every burst, 0 after it
-            const bool known = ok(p0, 0x12D0) && ok(p1, 0x12D0);
-            auto inside = [&](uint32_t a) { return known ? (a == p0 || a == p1) : rdf(a + 0x84u) > -20.0f; };
-            if (!known) { p0 = p1 = 0; int k = 0; for (int i = 0; i < nf; i++) if (inside(f[i])) { if (k == 0) p0 = f[i]; else p1 = f[i]; k++; } }
-            for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; if (inside(a)) continue;
-                if (!gated.count(a)) { const bool was_gated = (rd(a + 0x380u) & 2u) != 0; if (!was_gated) { wr(a + 0x380u, rd(a + 0x380u) | 2u); gated[a] = 1; } else gated[a] = 0; }
-                if (rdf(a + 0x84u) < -20.0f) { if (!held.count(a)) held[a] = {rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)};
-                    const auto& h = held[a]; wrf(a + 0x80u, h[0]); wrf(a + 0x84u, h[1]); wrf(a + 0x88u, h[2]); } }
-            for (auto it = gated.begin(); it != gated.end();) { if (it->second == 0) it = gated.erase(it); else ++it; }   // (only the ones gated here are let go)
+        auto exb_camera = [&](uint32_t p0, uint32_t p1, bool known) {
             // The burst camera: the camera manager's step for a lock block (FUN_08B3C7xx, ra 08B3C8A0) puts the block of a fighter whose burst flag (actor
             // +0x191 bit 0, FUN_088378D8) is set into mode 2 (the scripted burst camera, mode saved at +272) only while the block's word +0xFC (252) is 0.
             // The tag code's targeting leaves +0xFC on a third fighter (the "other enemy" lock of the enemy slot fighter / the human's cycle; seen: our parked
@@ -8511,6 +8662,66 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                             for (int q = 0; q < 8; q++) { const uint32_t ob = rd(mgr + 0x6D0u + 4u * static_cast<uint32_t>(q)); if (ok(ob, 0x200) && ob != lb && g_ram[(ob + 0x125u) & 0x07FFFFFFu]) { g_exb_shown[ob] = g_ram[(ob + 0x125u) & 0x07FFFFFFu]; g_ram[(ob + 0x125u) & 0x07FFFFFFu] = 0; } }
                             g_ram[(lb + 0x125u) & 0x07FFFFFFu] = 1;
                             if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst by the extra %s %08X: its lock block %08X put into camera slot %d (%d camera words from %08X), shown byte moved to it\n", dissidia_battle_age() / 60.0f, role_of(p0), p0, lb, k, copied, lbS); } } } }
+        };
+        if (!on) {
+            if (was) {
+                const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
+                for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; auto it = good.find(a); if (it == good.end() || (rdf(a + 0x84u) > -20.0f && !held.count(a)) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;   // (held: parked in this burst; the burst's end can lift one just above -20 (-18.98 seen), it stayed there)
+                    wrf(vec, it->second[0]); wrf(vec + 4, it->second[1]); wrf(vec + 8, it->second[2]); wrf(vec + 12, 1.0f); tp_vec("held spot", a, vec); call(PLACE, a, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+                    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: %s back from under the stage to %.1f,%.1f,%.1f\n", dissidia_battle_age() / 60.0f, role_of(a), it->second[0], it->second[1], it->second[2]); }
+                g_ctx->r[29] = static_cast<int32_t>(sp0);
+            }
+            for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; const float y = rdf(a + 0x84u), x = rdf(a + 0x80u); if (y > -20.0f && x < 1000.0f) good[a] = {x, y, rdf(a + 0x88u)}; }
+            for (const auto& kv : gated) if (ok(kv.first, 0x12D0)) wr(kv.first + 0x380u, rd(kv.first + 0x380u) & ~2u);   // their AI back on
+            static int exb_slot_wait = 0;   // (the burst camera is put back by the manager's own step of that block, mode 2 -> 1 the frame after the burst: the block stays in its slot until then)
+            if (g_exb_slot_lb && ok(g_exb_slot_lb, 0x200) && rd(g_exb_slot_lb + 0x108u) == 2u && exb_slot_wait++ < 60) {}
+            else if (g_exb_slot_lb) { exb_slot_wait = 0; if (rd(g_exb_slot_addr) == g_exb_slot_lb) wr(g_exb_slot_addr, 0u); if (ok(g_exb_slot_lb, 0x200)) g_ram[(g_exb_slot_lb + 0x125u) & 0x07FFFFFFu] = 0;
+                for (const auto& kv : g_exb_shown) if (ok(kv.first, 0x200)) g_ram[(kv.first + 0x125u) & 0x07FFFFFFu] = kv.second;
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: the extra burster's lock block %08X taken out of its camera slot\n", dissidia_battle_age() / 60.0f, g_exb_slot_lb);
+                g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); }
+            for (const auto& kv : g_exb_fc) if (ok(kv.first, 0x200) && rd(kv.first + 0xFCu) == 0u) wr(kv.first + 0xFCu, kv.second);   // (the lock words the burst camera needed cleared)
+            g_exb_fc.clear();
+            gated.clear(); held.clear(); g_exb_frozen.clear();
+        } else if (exb_rule_fight()) {
+            // "Keep fighting" (PSPRECOMP_TAGTEAM_EXBURST=fight): the fighters outside the burst are not held. The game still parks them
+            // 100 m under the stage at the start (retail has nobody else to show), so each one found there is put back on its last spot on
+            // the stage and plays on; the end-of-burst restore above then has nothing to do for them.
+            const uint32_t p0 = rd(c + 0x26Cu), p1 = rd(c + 0x270u);
+            const bool known = ok(p0, 0x12D0) && ok(p1, 0x12D0);
+            const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
+            exb_camera(p0, p1, known);   // (the burst camera fixes, as under the freeze rule)
+            // (the floor of the fighters outside the burst: colloff_hook keeps the stage collision for them)
+            if (const char* ta = std::getenv("PSPRECOMP_TAGTEAM_EXBTESTACT")) {   // test aid: "<who>:<s>:<script>" starts that script on that fighter once, during a burst (e.g. s0:13:600, a launch)
+                static bool done = false; char who[8] = {}; float at = 0; int id = 0;
+                if (!done && std::sscanf(ta, "%7[a-z0-9]:%f:%d", who, &at, &id) == 3 && dissidia_battle_age() / 60.0f >= at) { done = true; const uint32_t a = exb_fighter(who);
+                    if (ok(a, 0x12D0)) { g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, a + 304u, static_cast<uint32_t>(id), 0); std::fprintf(stderr, "[TAGTEAM] t=%.2fs test: script %d started on %s\n", dissidia_battle_age() / 60.0f, id, role_of(a)); } } }
+            for (int i = 0; i < nf; i++) { const uint32_t a = f[i];
+                // the park is the outsider's script 101 (a scripted sink under the stage, started by the burst): back to idle (script 1) and onto the stage
+                const bool parked = (rd(a + 0x180u) & 0xFFFFu) == 101u;
+                if (!known || a == p0 || a == p1 || (!parked && rdf(a + 0x84u) > -20.0f) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;
+                auto it = good.find(a); if (it == good.end()) continue;
+                if (parked) { g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, a + 304u, 1, 0); }
+                wrf(vec, it->second[0]); wrf(vec + 4, it->second[1]); wrf(vec + 8, it->second[2]); wrf(vec + 12, 1.0f); tp_vec("burst: kept on stage", a, vec); call(PLACE, a, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst (keep fighting): %s put back on the stage at %.1f,%.1f,%.1f\n", dissidia_battle_age() / 60.0f, role_of(a), it->second[0], it->second[1], it->second[2]); }
+            g_ctx->r[29] = static_cast<int32_t>(sp0);
+            g_exb_frozen.clear();
+        } else if (!std::getenv("PSPRECOMP_TAGTEAM_NOEXBHOLD")) {
+            // while it runs the fighters outside it do nothing: their AI is gated (+0x380 bit 2), their pad input dropped and they are held where the
+            // burst put them. The two in it are never touched (the burst has inputs for both): the controller's +0x26C / +0x270 (attacker, victim),
+            // set by the start for a player's and a CPU's burst alike (the victim is the start's own pick, not always the foe it was called with).
+            // (+0xD8 / +0xDC, used before, are a per-character record of the controller that only matched some characters.) Without them: the
+            // ones the game left on the stage (it parks the others 100 m under it, one by one over the first frames).
+            // Every input here is battle state (no local player, no clock): on every machine of a lock-step battle the same fighters are held.
+            uint32_t p0 = rd(c + 0x26Cu), p1 = rd(c + 0x270u);   // attacker / victim, written by the start (FUN_08A3EB70) for every burst, 0 after it
+            const bool known = ok(p0, 0x12D0) && ok(p1, 0x12D0);
+            auto inside = [&](uint32_t a) { return known ? (a == p0 || a == p1) : rdf(a + 0x84u) > -20.0f; };
+            if (!known) { p0 = p1 = 0; int k = 0; for (int i = 0; i < nf; i++) if (inside(f[i])) { if (k == 0) p0 = f[i]; else p1 = f[i]; k++; } }
+            for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; if (inside(a)) continue;
+                if (!gated.count(a)) { const bool was_gated = (rd(a + 0x380u) & 2u) != 0; if (!was_gated) { wr(a + 0x380u, rd(a + 0x380u) | 2u); gated[a] = 1; } else gated[a] = 0; }
+                if (rdf(a + 0x84u) < -20.0f) { if (!held.count(a)) held[a] = {rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)};
+                    const auto& h = held[a]; wrf(a + 0x80u, h[0]); wrf(a + 0x84u, h[1]); wrf(a + 0x88u, h[2]); } }
+            for (auto it = gated.begin(); it != gated.end();) { if (it->second == 0) it = gated.erase(it); else ++it; }   // (only the ones gated here are let go)
+            exb_camera(p0, p1, known);
             if (g_log && std::getenv("PSPRECOMP_TAGTEAM_EXBCAM")) {   // debug: the camera manager and every fighter every 10 frames of a burst
                 static int k = 0; if (k++ % 10 == 0) { const uint32_t mgr = dissidia_camera_manager();
                     std::fprintf(stderr, "[EXBCAM] t=%.2fs mgr %08X eye %.2f,%.2f,%.2f at %.2f,%.2f,%.2f +8B4 %08X +8B8 %u slots %08X %08X %08X %08X %08X:", dissidia_battle_age() / 60.0f, mgr, rdf(mgr + 0x40u), rdf(mgr + 0x44u), rdf(mgr + 0x48u), rdf(mgr + 0x50u), rdf(mgr + 0x54u), rdf(mgr + 0x58u), rd(mgr + 0x8B4u), rd(mgr + 0x8B8u), rd(mgr + 0x6D0u), rd(mgr + 0x6D4u), rd(mgr + 0x6D8u), rd(mgr + 0x6DCu), rd(mgr + 0x6E0u));

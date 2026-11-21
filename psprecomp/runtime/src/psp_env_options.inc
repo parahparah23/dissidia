@@ -183,6 +183,7 @@ const EnvOpt k_env_opts[] = {
     {"MODEL_BUDGET", EC_DATA, 'c', "0x300000|0x600000|0xC00000", "Memory the battle model staging area may use, in bytes. Raise it for mods with big models."},
     {"MODEL_POOL_EXTRA", EC_DATA, 'c', "0|0x80000|0x200000", "Extra bytes for the model pool when the budget is raised."},
     {"EFFECT_POOL_EXTRA", EC_DATA, 'c', "0|0x100000|0x400000", "Extra bytes for the effect pool; 0 is the retail size. Fixes effects that fail to load."},
+    {"TAGTEAM_EXBURST", EC_DATA, 'c', "freeze|fight", "Tag Team Battle: during an EX Burst the other fighters freeze (default) or keep fighting on the stage. Online every player must pick the same (not sent yet)."},
     {"INDEX_EXTENDED", EC_DATA, 'k', "", "Allow the package index to grow past the retail size for mods. Off: the retail limit."},
     {"INDEX_RELOCATE", EC_DATA, 'e', "", "Always move the package index into extended memory, even when it fits (test aid)."},
     {"MODS_TRACE", EC_DATA, 'e', "", "Log which mod files replace which game files."},
