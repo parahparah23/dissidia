@@ -16,6 +16,7 @@ struct TagHudFighter {
     float ex = -1.f;            // EX gauge 0..1 (status +0x18 / 10000); < 0: not shown
     float assist = -1.f;        // assist gauge 0..1 (status +0x1C / 10000, two levels of 0.5); < 0: not shown
     bool ex_mode = false;       // in EX Mode (actor +0x5B2 bit 2)
+    uint32_t id = 0;            // the actor this panel shows (HP hit indicator / trail key)
     bool has_assist = true;     // the fighter has an assist (actor +0x1108); without one retail never fills the gauge: drawn dim
 };
 struct TagHudReserve {
@@ -39,3 +40,11 @@ void tagteam_layer_frame(bool in_battle);
 // 2 = advanced job. Shown for `secs` seconds (wall clock), newest last; tagteam_hud_clear() removes them all (a new battle, the teardown).
 void tagteam_hud_notice(const std::string& text, int kind, float secs = 4.0f);
 void tagteam_hud_clear();
+
+// HP damage indicator (presentation only): one call per HP hit on any fighter. side = the victim's / attacker's HUD side (0 = the human's team, left).
+// pos = the victim's world position (for the optional floating number, PSPRECOMP_TAGTEAM_HPDMG=2), may be null.
+struct TagHudHit { uint32_t victim = 0, attacker = 0; int vside = 0, aside = 0, dmg = 0, hp_before = 0, hp_after = 0, hp_max = 1; bool ko = false; std::string vname, aname; float pos[3] = {0, 0, 0}; bool have_pos = false; };
+void tagteam_hud_hp_hit(const TagHudHit& h);
+// Which actor each big (retail) panel shows, by HUD side (0 = left); 0 = unknown. Called every tick with the fighters.
+void tagteam_hud_big_panels(uint32_t left_actor, uint32_t right_actor);
+bool tagteam_fx_project(const float p[3], float& sx, float& sy);   // tagteam_fx.cpp

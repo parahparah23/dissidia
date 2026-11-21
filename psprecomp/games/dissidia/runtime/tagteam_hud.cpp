@@ -33,6 +33,15 @@ std::vector<TagHudReserve> g_reserves;
 std::string g_banner;
 struct Notice { std::string text; int kind; double until, start; };   // wall-clock seconds
 std::vector<Notice> g_notices;
+
+// ---- HP damage indicator (PSPRECOMP_TAGTEAM_HPDMG: 0 off, 1 panel number + trail + feed (default), 2 + a floating number at the fighter;
+// PSPRECOMP_TAGTEAM_HPFEED=0 hides the feed line). Presentation only (wall clock, nothing in the simulation reads it). ----
+struct HitRec { TagHudHit h; double t0; };
+std::vector<HitRec> g_hits;
+uint32_t g_big[2] = {0, 0};
+int hpdmg_mode() { static const int m = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_HPDMG"); return e ? std::atoi(e) : 1; }(); return m; }
+bool hpfeed_on() { static const bool b = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_HPFEED"); return !(e && std::atoi(e) == 0); }(); return b; }
+constexpr double kNumLife = 1.2, kFeedLife = 2.3, kTrailLife = 1.0;
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 // ---- the characters' face strips (128 x 32 GIM; the picture is the top 26 rows) ----
@@ -126,6 +135,86 @@ void assist_chevrons(float x, float y, float w, float frac, bool right, bool has
     }
 }
 
+
+// "-1234": pops in (scale 1.25 -> 1.0 in 0.15 s), holds 0.6 s, drifts up and fades (0.4 s). White with a red-orange edge (the retail HP numbers' look).
+// anchor x: the number's near edge (left edge, or right edge when `right`); y: baseline at rest.
+void dmg_number(const TagHudHit& h, double age, float ax, float y, bool right, float em0, float rise_px) {
+    const float t = static_cast<float>(age);
+    const float pop = t < 0.15f ? 1.25f - 0.25f * (t / 0.15f) : 1.f;
+    const float fin = std::min(1.f, t / 0.05f), fout = t > 0.75f ? std::max(0.f, 1.f - (t - 0.75f) / 0.4f) : 1.f, a = fin * fout;
+    if (a <= 0.01f) return;
+    const float dy = -rise_px * (t > 0.75f ? (t - 0.75f) / 0.4f : 0.f) - 1.5f * std::min(1.f, t / 0.15f);
+    const float em = em0 * pop;
+    const std::string s = "-" + std::to_string(h.dmg);
+    const float w = text_w(s, true, em), x = right ? ax - w : ax, by = y + dy;
+    const LayerColor edge = h.ko ? LayerColor{255, 60, 40, 0.95f * a} : LayerColor{255, 110, 40, 0.9f * a};
+    for (const auto& o : {std::pair<float, float>{0.8f, 0.f}, {-0.8f, 0.f}, {0.f, 0.8f}, {0.f, -0.8f}, {0.6f, 0.6f}, {-0.6f, 0.6f}, {0.6f, -0.6f}, {-0.6f, -0.6f}})
+        g_layer.text(s, true, em, x + o.first, by + o.second, edge);
+    g_layer.text(s, true, em, x, by, h.ko ? LayerColor{255, 236, 200, a} : LayerColor{255, 255, 255, a});
+}
+// the hits of one victim that are still showing a number, oldest first; k = index for stacking
+void hit_numbers_at(uint32_t victim, double tnow, float ax, float y, bool right, float em, float rise) {
+    if (!victim || hpdmg_mode() <= 0) return;
+    int k = 0;
+    for (const HitRec& r : g_hits) if (r.h.victim == victim && tnow - r.t0 < kNumLife) { dmg_number(r.h, tnow - r.t0, ax, y - 7.f * k, right, em, rise); k++; }
+}
+// the lost chunk as a lighter trail on a panel's HP bar: waits 0.35 s, then shrinks away (retail's delayed bar)
+void hp_trail(uint32_t victim, double tnow, float x, float y, float w, float cur_frac, bool right, float a) {
+    if (!victim || hpdmg_mode() <= 0) return;
+    const HitRec* last = nullptr; int from = 0;
+    for (const HitRec& r : g_hits) if (r.h.victim == victim && tnow - r.t0 < kTrailLife) { if (!last) from = r.h.hp_before; from = std::max(from, r.h.hp_before); last = &r; }
+    if (!last) return;
+    const float age = static_cast<float>(tnow - last->t0), p = std::clamp((age - 0.35f) / 0.55f, 0.f, 1.f), e = p * p * (3.f - 2.f * p);
+    const float hi = std::clamp((float(from) + (float(last->h.hp_after) - float(from)) * e) / float(std::max(1, last->h.hp_max)), 0.f, 1.f), lo = std::clamp(cur_frac, 0.f, 1.f);
+    if (hi <= lo) return;
+    const float x0 = right ? x + w * (1.f - hi) : x + w * lo, x1 = right ? x + w * (1.f - lo) : x + w * hi;
+    const float fa = a * (age < 0.9f ? 1.f : (1.f - (age - 0.9f) / 0.1f));
+    g_layer.band(x0, y, x1, y + 3.2f, [&](float, float yy) { return LayerColor{255.f, 236.f - 30.f * (yy - y) / 3.2f, 205.f, 0.95f * fa}; });
+}
+// a short red wash over a panel at the moment of the hit
+void hit_wash(uint32_t victim, double tnow, float x0, float y0, float x1, float y1, float a) {
+    if (!victim || hpdmg_mode() <= 0) return;
+    for (const HitRec& r : g_hits) if (r.h.victim == victim && tnow - r.t0 < 0.3) {
+        const float k = 1.f - static_cast<float>(tnow - r.t0) / 0.3f;
+        g_layer.band(x0, y0, x1, y1, [&](float, float) { return LayerColor{255, 70, 50, 0.3f * k * a}; });
+    }
+}
+// the feed: the newest hits as small lines "ATT > VICTIM  -1234" (side coloured names), top centre, 3 lines at most, 2.3 s each
+void hit_feed(double tnow) {
+    if (hpdmg_mode() <= 0 || !hpfeed_on()) return;
+    std::vector<const HitRec*> live;
+    for (const HitRec& r : g_hits) if (tnow - r.t0 < kFeedLife) live.push_back(&r);
+    if (live.size() > 3) live.erase(live.begin(), live.end() - 3);
+    const float em = 7.4f, cx = 240.f; float y = 20.f + 8.f * (static_cast<int>(live.size()) - 1);
+    // newest at the bottom, older lines above, top centre under the retail top bar
+    for (size_t i = live.size(); i-- > 0; y -= 8.f) {
+        const HitRec& r = *live[i]; const float age = static_cast<float>(tnow - r.t0);
+        const float a = std::min(std::min(1.f, age / 0.12f), std::clamp((static_cast<float>(kFeedLife) - age) / 0.5f, 0.f, 1.f));
+        if (a <= 0.01f) continue;
+        const LayerColor ca = r.h.aside == 0 ? kEdgeL : kEdgeR, cv = r.h.vside == 0 ? kEdgeL : kEdgeR;
+        const std::string an = r.h.aname, vn = r.h.vname, arrow = " > ", num = "  -" + std::to_string(r.h.dmg), ko = r.h.ko ? "  KO" : "";
+        const float wa = an.empty() ? 0.f : text_w(an, true, em) + text_w(arrow, true, em), wv = text_w(vn, true, em), wn = text_w(num, true, em), wk = ko.empty() ? 0.f : text_w(ko, true, em);
+        const float tw = wa + wv + wn + wk, x0 = cx - tw / 2.f + (1.f - a) * 6.f;
+        g_layer.band(x0 - 8.f, y - 6.2f, x0 + tw + 8.f, y + 2.0f, [&](float x, float) { const float d = std::fabs(x - (x0 + tw / 2.f)) / (tw / 2.f + 8.f); return LayerColor{14, 16, 40, 0.55f * a * (1.f - std::pow(d, 3.f))}; });
+        float x = x0;
+        if (!an.empty()) { shadow_text(an, true, em, x, y, LayerColor{ca.r, ca.g, ca.b, a}); x += text_w(an, true, em); shadow_text(arrow, true, em, x, y, LayerColor{190, 195, 215, a}); x += text_w(arrow, true, em); }
+        shadow_text(vn, true, em, x, y, LayerColor{cv.r, cv.g, cv.b, a}); x += wv;
+        shadow_text(num, true, em, x, y, LayerColor{255, 214, 150, a}); x += wn;
+        if (!ko.empty()) shadow_text(ko, true, em, x, y, LayerColor{255, 90, 80, a});
+    }
+}
+// the optional floating number at the fighter in the 3D view (HPDMG=2)
+void hit_floating(double tnow) {
+    if (hpdmg_mode() < 2) return;
+    for (const HitRec& r : g_hits) {
+        const double age = tnow - r.t0; if (age >= 1.1 || !r.h.have_pos) continue;
+        const float p[3] = {r.h.pos[0], r.h.pos[1] + 2.1f, r.h.pos[2]}; float sx, sy; if (!tagteam_fx_project(p, sx, sy)) continue;
+        if (sx < 10.f || sx > 470.f || sy < 8.f || sy > 262.f) continue;
+        TagHudHit h = r.h; const float w = text_w("-" + std::to_string(h.dmg), true, 8.f);
+        dmg_number(h, age, sx - w / 2.f, sy - static_cast<float>(age) * 14.f, false, 8.f, 0.f);
+    }
+}
+
 // one compact panel: 112 x 24 design units (31 with the gauges), plus the EX tube at its outer edge
 void panel(const TagHudFighter& f, float x, float y, double tnow) {
     const bool right = f.side != 0, ko = f.hp <= 0, gauges = f.ex >= 0.f || f.assist >= 0.f;
@@ -151,6 +240,10 @@ void panel(const TagHudFighter& f, float x, float y, double tnow) {
     // half-length assist chevrons (native layout: our side: assist at the left, HP number at the right of the box; the enemy's panel mirrored); without them it ends the bar row.
     const float bx0 = x + 2.f, bw0 = w - 4.f;
     hp_bar(bx0, y + 18.6f, bw0, ko ? 0.f : float(f.hp) / float(std::max(1, f.hp_max)), right, a);
+    hp_trail(f.id, tnow, bx0, y + 18.6f, bw0, ko ? 0.f : float(f.hp) / float(std::max(1, f.hp_max)), right, a);
+    hit_wash(f.id, tnow, x, y, x + w, y + H, a);
+    // the damage number beside the panel's inner edge (the EX tube sits at the outer one), level with the HP bar
+    hit_numbers_at(f.id, tnow, right ? x - 5.f : x + w + 5.f, y + 12.f, right, 10.f, 7.f);
     const std::string hp = ko ? "0" : std::to_string(std::max(0, f.hp));
     const float hw = text_w(hp, true, 6.2f);
     if (!gauges) shadow_text(hp, true, 6.2f, right ? bx0 : x + w - 2.f - hw, y + 23.f, LayerColor{230, 238, 255, a});
@@ -250,14 +343,20 @@ void tagteam_hud_notice(const std::string& text, int kind, float secs) {
     g_notices.push_back({text, kind, t + secs, t});
     if (g_notices.size() > 6) g_notices.erase(g_notices.begin());
 }
-void tagteam_hud_clear() { g_notices.clear(); g_banner.clear(); }
+void tagteam_hud_hp_hit(const TagHudHit& h) {
+    if (hpdmg_mode() <= 0 || h.dmg <= 0) return;
+    g_hits.push_back({h, now_s()});
+    if (g_hits.size() > 24) g_hits.erase(g_hits.begin());
+}
+void tagteam_hud_big_panels(uint32_t l, uint32_t r) { g_big[0] = l; g_big[1] = r; }
+void tagteam_hud_clear() { g_hits.clear(); g_notices.clear(); g_banner.clear(); }
 
 void tagteam_hud_set_banner(const std::string& t) { g_banner = t; }
 
 void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vector<TagHudReserve>& reserves) {
     g_fighters = fighters; g_reserves = reserves;
 }
-void tagteam_hud_hide() { g_fighters.clear(); g_reserves.clear(); g_banner.clear(); g_notices.clear(); }
+void tagteam_hud_hide() { g_hits.clear(); g_fighters.clear(); g_reserves.clear(); g_banner.clear(); g_notices.clear(); }
 
 bool tagteam_fx_draw(dissidia::MenuLayer& layer);   // tagteam_fx.cpp
 
@@ -266,7 +365,8 @@ void tagteam_layer_frame(bool in_battle) {
     if (!in_battle) { tagteam_hud_hide(); }
     const double tnow = now_s();
     g_notices.erase(std::remove_if(g_notices.begin(), g_notices.end(), [&](const Notice& n) { return n.until <= tnow; }), g_notices.end());
-    const bool any = !g_fighters.empty() || !g_reserves.empty() || !g_banner.empty() || !g_notices.empty();
+    g_hits.erase(std::remove_if(g_hits.begin(), g_hits.end(), [&](const HitRec& r) { return tnow - r.t0 >= kFeedLife + 0.1; }), g_hits.end());
+    const bool any = !g_fighters.empty() || !g_hits.empty() || !g_reserves.empty() || !g_banner.empty() || !g_notices.empty();
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
     if (any) {
         int row[2] = {0, 0};
@@ -276,6 +376,13 @@ void tagteam_layer_frame(bool in_battle) {
             panel(f, s == 0 ? (g ? 9.f : 4.f) : 480.f - (g ? 9.f : 4.f) - 112.f, 142.f - (g ? 34.f : 27.f) * row[s]++, tnow);
         }
         for (const TagHudReserve& r : g_reserves) reserve(r);
+        if (hpdmg_mode() > 0 && !g_hits.empty()) {   // fighters on the retail big panels (bottom corners, number beside the BRV): ours sits next to the retail pulse
+            for (int s = 0; s < 2; s++) {
+                bool small = false; for (const TagHudFighter& f : g_fighters) if (f.id == g_big[s]) small = true;
+                if (!small) hit_numbers_at(g_big[s], tnow, s == 0 ? 148.f : 332.f, 243.f, s != 0, 11.f, 8.f);
+            }
+            hit_floating(tnow); hit_feed(tnow);
+        }
         if (!g_banner.empty()) banner(g_banner);
         { float yd = 70.f, yj = 0.f;   // falls under the join banner, job powers along the top edge
           for (const Notice& n : g_notices) { if (n.kind == 0) { notice(n, yd, tnow); yd += 13.f; } else { notice(n, yj, tnow); yj += 19.f; } } }

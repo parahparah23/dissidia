@@ -1854,7 +1854,7 @@ void hud_update() {
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
         if (e.replaced) continue;   // the fallen one a called-in member took the place of
-        TagHudFighter f;
+        TagHudFighter f; f.id = e.actor;
         f.code = code_for_char(g_label_char.count(e.actor) ? g_label_char[e.actor] : actor_char(e.actor));
         f.name = char_label(g_label_char.count(e.actor) ? g_label_char[e.actor] : actor_char(e.actor), true); f.side = static_cast<int>(e.side == g_extra[0].side ? e.side : e.side);
         { const uint32_t st = rd(e.actor + 0x52Cu); f.hp = (ok(st, 0x40) && !is_down(e.actor)) ? std::max(0, hp_eff(e.actor)) : 0; }   // live HP (the status object word the retail HUD reads); +0x10B0 is the maximum
@@ -1867,7 +1867,7 @@ void hud_update() {
         if (hudlock && g_bs) for (uint32_t k = 0; k < 2; k++) {   // this extra is on the big panel: the small one shows the slot fighter it replaced there
             const uint32_t S = srd(g_bs + 56u + 4u * k);
             if (ok(S, 0x12D0) && side_of(S) == side_of(e.actor) && hud_panel_fighter(k) == e.actor) {
-                f.name = char_label(g_label_char.count(S) ? g_label_char[S] : actor_char(S), true); f.code = code_for_char(g_label_char.count(S) ? g_label_char[S] : actor_char(S));
+                f.id = S; f.name = char_label(g_label_char.count(S) ? g_label_char[S] : actor_char(S), true); f.code = code_for_char(g_label_char.count(S) ? g_label_char[S] : actor_char(S));
                 const uint32_t st = rd(S + 0x52Cu); f.hp = ok(st, 0x40) ? std::max(0, hp_eff(S)) : 0; f.hp_max = std::max(static_cast<int>(rd(S + 0x10B0u)), std::max(f.hp, 1));
                 f.brv = ok(st, 0x40) ? static_cast<int>(rdh(st + 0x14u)) : -1;
                 hud_gauges(f, S);
@@ -1879,6 +1879,7 @@ void hud_update() {
     // sides in the HUD: the human's team on the left (side value of the human's slot), the other on the right
     const uint32_t hum_side = g_bs ? rd(g_bs + 84u) : 0u;
     for (TagHudFighter& f : fs) f.side = (static_cast<uint32_t>(f.side) == hum_side) ? 0 : 1;
+    if (g_bs) tagteam_hud_big_panels(hud_panel_fighter(hum_side & 1u), hud_panel_fighter(1u - (hum_side & 1u)));
     tagteam_hud_set_banner(dissidia_battle_age() < g_banner_until ? g_banner_text : std::string());
     {   // members already called in are not in reserve any more
         std::vector<TagHudReserve> shown = g_reserve;
@@ -3868,6 +3869,25 @@ void ledger_step() {   // every battle frame, before the KO handling (a KO is se
 int panel_shown(uint32_t side);   // below (hudref): the BRV number a side's panel shows, -1 = no HUD yet
 uint32_t hud_panel_fighter(uint32_t side);
 extern uint32_t g_xstep_att, g_xstep_vic;   // defined below (the extra whose damage step is running, and the fighter its hit registered on)
+// HP damage indicator (tagteam_hud.cpp, PSPRECOMP_TAGTEAM_HPDMG): one event per HP hit on any fighter: who hit, who took it, how much, the HP before / after.
+// Presentation only: reads state, writes nothing the simulation uses.
+void hp_hit_indicator(uint32_t victim, uint32_t att, int hp_before, bool ko_hold) {
+    static const bool off = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_HPDMG"); return e && std::atoi(e) == 0; }();
+    if (off || !g_bs || !ok(victim, 0x12D0)) return;
+    const int after = hp_eff(victim); int dmg = hp_before - std::max(0, after);
+    if (ko_hold) dmg = hp_before;   // the lethal hit held back for the tag flow: the full damage
+    if (dmg <= 0) return;
+    const uint32_t hs = rd(g_bs + 84u) & 1u;
+    auto nm = [](uint32_t x) { if (!ok(x, 0x12D0)) return std::string(); std::string s = char_label(g_label_char.count(x) ? g_label_char[x] : actor_char(x), true); for (char& ch : s) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch))); return s; };
+    TagHudHit h; h.victim = victim; h.attacker = ok(att, 0x12D0) && att != victim ? att : 0u;
+    h.vside = side_of(victim) == hs ? 0 : 1; h.aside = h.attacker ? (side_of(att) == hs ? 0 : 1) : 1 - h.vside;
+    h.dmg = dmg; h.hp_before = hp_before; h.hp_after = ko_hold ? 0 : std::max(0, after);
+    const uint32_t st = rd(victim + 0x52Cu); h.hp_max = std::max(static_cast<int>(rd(victim + 0x10B0u)), std::max(hp_before, 1)); (void)st;
+    h.ko = ko_hold || after <= 0; h.vname = nm(victim); h.aname = h.attacker ? nm(att) : std::string();
+    h.pos[0] = rdf(victim + 0x80u); h.pos[1] = rdf(victim + 0x84u); h.pos[2] = rdf(victim + 0x88u); h.have_pos = true;
+    tagteam_hud_hp_hit(h);
+    if (g_log) std::fprintf(stderr, "[HPDMG] t=%.2fs %s %s > %s %s: -%d (HP %d -> %d of %d)%s\n", dissidia_battle_age() / 60.0f, h.attacker ? role_of(att) : "?", h.aname.c_str(), role_of(victim), h.vname.c_str(), dmg, hp_before, h.hp_after, h.hp_max, h.ko ? " KO" : "");
+}
 void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     // The HP damage step FUN_08AEFF40(?, msg): msg+0 = the victim (always the attacker's slot opponent), *(msg+4) = the attacker. An HP attack that hit an extra was booked on the slot fighter (the HUD and the rules saw the main enemy lose HP; enough
@@ -3895,6 +3915,7 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     // A lethal HP hit on a slot fighter whose side still has somebody to come in: retail latches the KO inside this step (round finish, which no swap can
     // undo). For the step the fighter's HP (+0xC) is raised so the hit cannot be lethal (the damage numbers stay right); afterwards the damage taken is
     // capped at HP - 1 for retail and the fighter is KO'd for the tag flow (g_ko_mark -> ko_oneround swaps / rebuilds / calls in). PSPRECOMP_TAGTEAM_NOKOHOLD=1 off.
+    const int dmg_hp0 = ok(a, 0x12D0) ? hp_eff(a) : 0;   // HP damage indicator: the victim's live HP before the step
     bool hold = false;
     if (g_oneround && g_tagin && g_bs && g_nextra && ok(st, 0x40) && (a == srd(g_bs + 56u) || a == srd(g_bs + 60u)) && !std::getenv("PSPRECOMP_TAGTEAM_NOKOHOLD")) {
         bool mate = false;
@@ -3922,6 +3943,7 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
         }
     }
     if (real) { wr(m, slotv); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs HP damage by %s %08X goes to the fighter it hit: %s %08X (not %s %08X), damage taken %d -> %d\n", dissidia_battle_age() / 60.0f, role_of(ratt), ratt, role_of(real), real, role_of(slotv), slotv, pd0, ok(st, 0x40) ? static_cast<int>(rd(st + 0x8u)) : -1); }
+    hp_hit_indicator(a, ratt, dmg_hp0, hold && g_ko_mark.count(a) != 0);
     static int n = 0;
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HPSTEPLOG") && n++ < 400) std::fprintf(stderr, "[HPSTEP] t=%.2fs r4 %08X msg %08X actor %s %08X (handler %08X h+16 %s %08X) r6 %08X r7 %08X r8 %08X: hp %d -> %d pend %d -> %d\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[4]), m, ok(a, 0x12D0) ? role_of(a) : "?", a, h, ok(h, 0x40) && ok(rd(h), 0x12D0) ? role_of(rd(h)) : "-", ok(h, 0x40) ? rd(h) : 0u, static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]), static_cast<uint32_t>(ctx->r[8]), hp0, ok(st, 0x40) ? static_cast<int>(rd(st + 0xCu)) : -1, pd0, ok(st, 0x40) ? static_cast<int>(rd(st + 0x8u)) : -1);
 }

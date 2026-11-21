@@ -99,6 +99,7 @@ void draw_entrance(const float pos[3], float age) {
 }
 
 }  // namespace
+bool tagteam_fx_project(const float p[3], float& sx, float& sy) { return project(p, sx, sy); }
 
 // tagteam.cpp: the entrance of a member (warp-in from now, the pose at pose_at, the end at until; battle ages in 60ths)
 void tagteam_fx_entrance(uint32_t actor, float now, float pose_at, float until) {

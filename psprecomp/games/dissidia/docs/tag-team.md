@@ -3940,3 +3940,26 @@ the retail portraits' data are in the pool too (`0CD5CE40`...), so region 3 as s
   is rewritten (the sprite is never freed). Log `[TAGTEAM] portrait pixels A -> B`. `PSPRECOMP_TAGTEAM_PORTHI=1` = off, `=2` = move from all of region 3 (host test: `0CF5CAA0 -> 0BD2F000`, Cecil's icon draws, regression PASS).
   Not verified: that this fixes the RP6 (the host never showed the failure, so the workaround was only checked not to break the host).
 - **If it still fails on the device**: run with `PSPRECOMP_TAGTEAM_PORTHI=2` and with `PSPRECOMP_TAGTEAM_NOHIRAM=1`, and send the log (`[TAGTEAM] portrait pixels` line, `PSPRECOMP_TEX_WHITE=1` / `TEX_DUMP=<addr>`).
+## HP damage indicator: every HP hit, who took it (20 Nov, tree ttfa; host-only, window shots, nothing seen on a device)
+User: "There is no HP damage indicator ... show ALL HP damage and who took it." Retail's pulse (`FUN_089E358C`) stays as is; hits by / on partners had none.
+- **Event**: `hp_hit_indicator` (tagteam.cpp, called at the end of `hpstep_hook`) books one `TagHudHit` per HP hit on any fighter (slot fighters, extras, assists'
+  hits via `g_xstep_att`): victim, attacker, HUD sides, damage = live HP before - after the step (`hp_eff`; a lethal hit held back for the tag flow shows the full
+  damage and KO), HP max, names, world position. Log `[HPDMG] t=.. ATTROLE NAME > VICTROLE NAME: -N (HP a -> b of max) [KO]`. Presentation only (wall-clock animation,
+  nothing in the simulation reads it), so lock-step safe. `TagHudFighter::id` (the actor a small panel shows) and `tagteam_hud_big_panels` (the fighters on the two
+  retail big panels, `hud_panel_fighter`) tell the HUD where a victim is drawn.
+- **Panel number** (tagteam_hud.cpp `dmg_number`): "-N", white with a red-orange edge (gold-white / red for a KO), pops in 1.25 -> 1.0 in 0.15 s, holds 0.6 s, drifts up 7-8
+  units and fades in 0.4 s. Small panel: beside its inner edge, level with the name. Big panel (no small panel shows the victim): in the 480x272 layer at (148, 243) left /
+  (332, 243) right-aligned, next to the BRV number and the retail pulse. Several hits on one fighter stack upward. A 0.3 s red wash flashes over a small panel.
+- **HP trail**: on a small panel's bar the lost chunk is a lighter segment that waits 0.35 s then shrinks away over 0.55 s (retail-style delayed bar; the big panels'
+  bars are retail's own and are not touched).
+- **Feed**: top centre (y 20.., under the retail top bar, above the join banner), at most 3 lines, 2.3 s each: `ATT > VICTIM  -N [KO]`, names coloured by side (blue = the
+  human's team, red = the other), newest at the bottom.
+- **Switches**: `PSPRECOMP_TAGTEAM_HPDMG=0` off, `=1` default (panel number + trail + feed), `=2` also a floating number at the fighter (projected world position + 2.1 m,
+  `tagteam_fx_project`); `PSPRECOMP_TAGTEAM_HPFEED=0` hides only the feed. Uses the layer's 480x272 design space like the other HUD pieces (HUD scale / layouts follow it).
+- **Verified (host, 480x272 window shots every 0.1 s, `/tmp/ttfa/p*s`, montages `/tmp/ttfa/p*_m*.png`)**: partner's HP hit on the enemy partner (p4, `_ENEMY2_CHAR=11
+  _HPMATRIX=10089 _HPM_NODOWN=1 _HPM_SWEEP=3`, 19.07 s: "-3000" beside the enemy partner's small panel, bar trail, feed "TERRA > TERRA -3000"); the human's HP hit on the
+  enemy partner (p2, `_HPM_AI=1 _HPM_PAIRS=1`, 57.83 s: "-3000" on its small panel, feed "SQUALL > TERRA"); the enemy partner's HP hit on the human (p8, `_HPM_SWEEP=7`, 23.07 s:
+  "-3004" next to the human's big number, beside the retail pulse; then a second hit "-751" stacked, feed with two lines). Regression `tagteam_test.py --baseline`: PASS (/tmp/ttfa/reg).
+- **Not verified**: the enemy partner's HP hit ON OUR PARTNER (the harness booked that attempt on the human; one earlier run logged `extraE > extraP -3000` but its panels
+  were not drawn, harness g_down state); `HPDMG=2` floating number; `=0` / `HPFEED=0` (trivial code); wide / tall HUD layouts and phone sizes; KO rendering in shots (logged
+  `KO` only); anything on a device.
