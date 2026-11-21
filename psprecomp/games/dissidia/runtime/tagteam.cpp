@@ -6903,9 +6903,9 @@ constexpr uint32_t kSoundHeapSize = 0x237000u + 0x280000u;
 // 12-character stress run of 20 Nov had 0.8 MB left after 6 characters with the size above) and region 1 keeps that space for the effect pool.
 // PSPRECOMP_TAGTEAM_NOHIRAM=1 or PSPRECOMP_SOUNDHEAP_LOW=1: region 1 as before.
 constexpr uint32_t kSoundHeapHiSize = 0x237000u + 0xA00000u;
-// 20 Nov RP6: with the heap in region 3 ALL character audio (voices, moves, hits, banter) was silent -> region 1 is the default again;
-// PSPRECOMP_SOUNDHEAP_HI=1 (and high RAM on) puts it in region 3 for diagnosis.
-bool soundheap_hi() { static const bool on = std::getenv("PSPRECOMP_SOUNDHEAP_HI") && !std::getenv("PSPRECOMP_TAGTEAM_NOHIRAM") && !std::getenv("PSPRECOMP_SOUNDHEAP_LOW"); return on; }
+// 20 Nov RP6: the silent character audio blamed on the heap in region 3 was the Japanese-voice bug (issue #119; English plays fine),
+// so the heap is in region 3 again by default. PSPRECOMP_SOUNDHEAP_LOW=1 (or NOHIRAM=1) keeps it in region 1.
+bool soundheap_hi() { static const bool on = !std::getenv("PSPRECOMP_TAGTEAM_NOHIRAM") && !std::getenv("PSPRECOMP_SOUNDHEAP_LOW"); return on; }
 bool g_soundheap_done = false;
 void soundheap_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;

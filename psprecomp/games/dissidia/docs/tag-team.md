@@ -4006,3 +4006,5 @@ same layout still keys SAS voices (PSPRECOMP_SAS_TRACE: 348 KeyOn with the heap 
 HLE (guest_ptr masks with 0x07FFFFFF) is fine for region 3 and the failure is device-specific (cause not found). The sound heap is therefore
 in region 1 again by default (the rest of high RAM is unchanged); PSPRECOMP_SOUNDHEAP_HI=1 puts it in region 3 for diagnosis.
 Regression (--baseline) passes.
+
+- **Sound heap back in high RAM** (20 Nov, late): the silent battle audio blamed on the sound heap in region 3 was the Japanese-voice bug (issue #119; English plays fine). The heap is in region 3 again by default (~10 MB of room for voice banks); `PSPRECOMP_SOUNDHEAP_LOW=1` keeps it in region 1.
