@@ -1,5 +1,15 @@
 # Tag team battles (2 v 2): research notes and plan
 
+## TODO (kept up to date; newest first)
+
+- **Proper PvE (humans vs a CPU party).** Today's "keeper" (PR merged 21 Nov, section "Group Battle: a party of CPUs") is a workaround: retail refuses a party without a human, so a player of Party B carries the CPU party and fights for Party A; his own result screen and rewards follow Party B, and the CPU lead's strength / level / type are fixed (5 / Auto / Random). Wanted instead: both humans in one party and a real CPU-only party (CPU rows added from the team selector, each with its own strength / level / type), the match start allowed for it, the lobby table / party lists / round list built for the CPU party, results and rewards right for every human, all of it from the host's roster (lock-step safe).
+- **Assist Off online: check it stays in sync** (now active when the host picks it, PR #118); the longer slow motion for a human called in must also apply online.
+- **Multiplayer: call-in memory with 10 characters** (a 5th call-in ran out of heap and one machine diverged; being worked on 21 Nov).
+- **Multiplayer issues 1 and 3** (desync at a human partner's attack; 10-player end split): not reproduced in 5 clean 10-player runs after the party-read fix; keep watching with the 10-player rig (`~/dissidia/tt/net10x/rig2/run10.py`).
+- **Japanese voices: only one fighter has battle audio** (GitHub issue #119).
+- **Dark view during a second partner EX Burst** (reported by the PR #117 author, not seen on a device).
+- **Accessories: forced negative test** that a call-in never gets the original fighter's conditional boosts (code read + logs say per fighter).
+
 Status (14 Nov): **2v2 plays**: four fighters fight (the partner and the enemy's second fighter are clones of the existing fighters on the CPU brain), HUD panels and reserve strips, L cycles the lock between the enemies, tag swap (SELECT, `PSPRECOMP_TAGTEAM_SWAP_BUTTON=1`, clone partners only), a settings toggle (Debug > Tag Team (2v2)) and a regression test (`tools/tagteam_test.py`). Not done: KO call-ins / round end rules, partners that are different characters, the real party roster in the reserve, portraits. Branch `tag-team`, based on `origin/main` 00b9d41. The sections below start with the original research and plan, then record each step.
 Everything below comes from reading the recompiled code (`psprecomp dump <analysis> 0xADDR`) and the existing
 runtime hooks. "Confirmed" = read in the code; "inferred" = a guess to check in a run.
