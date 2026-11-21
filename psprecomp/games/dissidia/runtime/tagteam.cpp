@@ -8145,7 +8145,12 @@ bool ao9_call(uint32_t k, uint32_t E, uint32_t M, uint32_t kind, const char* by)
     appear_fx_start(k, M, E);
     if (!std::getenv("PSPRECOMP_TTCAM_NOCALLFX")) {   // slow motion (channel 6, 0.4) + the ASSIST banner of the side, as ao call 4 (released by callfx_step)
         const uint32_t sm = rd(0x08A62280u); const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u);
-        if (ok(sm, 0x40)) { g_ctx->f[12] = 0.4f; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + 66.f; g_callfx_gen = g_battle_gen; }
+        // A human called in needs time to see where it landed and act (user, 20 Nov): slower and longer than a retail call's 0.4 for 66 ticks.
+        // PSPRECOMP_TTCAM_AO9HUMANSLOW=<speed>:<ticks> (default 0.25:140); a CPU called in keeps the retail values.
+        float spd = 0.4f, len = 66.f;
+        if (human) { spd = 0.25f; len = 140.f; if (const char* e = std::getenv("PSPRECOMP_TTCAM_AO9HUMANSLOW")) { float a = 0, b = 0; if (std::sscanf(e, "%f:%f", &a, &b) == 2 && a > 0.f && b > 0.f) { spd = a; len = b; } } }
+        if (ok(sm, 0x40)) { g_ctx->f[12] = spd; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + len; g_callfx_gen = g_battle_gen; }
+        if (human && g_log) std::fprintf(stderr, "[AO9] t=%.2fs side %u: the human is called in: slow motion %.2f for %.0f ticks\n", dissidia_battle_age() / 60.0f, k, static_cast<double>(spd), static_cast<double>(len));
         g_ctx->f[12] = 5.0f; call(0x0888A154u, k, 0u);
         g_ctx->r[29] = static_cast<int32_t>(sp1);
         std::fprintf(stderr, "[AO9] t=%.2fs call effects: slow motion + the ASSIST banner of side %u\n", age, k);
