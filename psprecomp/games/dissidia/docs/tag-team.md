@@ -4047,3 +4047,42 @@ that log (the "on" is dropped with a log line when it is foreign), so the report
   produced). The break WORD element (handler+680 +72, the faint "BREAK" of the screenshot) is NOT covered by it: the screenshot's faint word behind a rolling number may be the word element's fade, not the steady mode.
 - **Not verified**: that this fixes the RP6 case (unreproduced); the word element; the mate-takeover rebuild path at 198.98 (slot handler replaced: `g_slot_hdl` may hold the old handler for the rebuilt slot,
   so `fighter_broken(slotC)` reads the OLD handler -- candidate cause, not tested); the human's side.
+## 10-player rig: a state-driven lobby walk, the party flip at battle load, and what did / did not reproduce (21 Nov, agent ttx; host 4 + desktop 6, no commits)
+**Rig.** `~/dissidia/tt/net10x/rig2/run10.py TAG [SECS]` (library `rig2/lib.py`; instances h1..h4 here, d1..d6 on the desktop, runtime copy `bin/net10xrt` on both, desktop
+built from `~/dissidia/ttx_src` with `~/dissidia/build_ttx_desk.sh`; own relay `adhoc_relay --port 27710 --max-room 16 --max-clients 64`, env `N10_RELAY_PORT`;
+a fresh relay room per run, `N10_ROOM=n10x_<epoch>`, because the killed instances of the previous run stay in a room for a while and fake "9 peers").
+`MP_ENV="PSPRECOMP_TAGTEAM=1 PSPRECOMP_TAGTEAM_LOG=1 PSPRECOMP_TTLOCK_LOG=1 PSPRECOMP_TTLOCK_LOG2=1 PSPRECOMP_TAGTEAM_HITFLAGS=1" [POST=300] python3 rig2/run10.py w9 700`
+boots 10 instances (boot.py), walks to the battle, drives pads for SECS (and, with `POST=N`, stops the pads at the first decision and watches N s without input,
+one montage per minute). Analysis: `rig2/an10.py TAG` ([TTSYNC] equal?), `rig2/cmp2.py TAG` (first differing [TTSYNC2] field, machine-local words masked),
+`rig2/hf.py TAG` ([HITFLAGS2] records equal on all machines?). Every phase checks the machines' own state and repairs only those that are not there yet:
+- room: the host's "Start Group Battle" screenshot must show 10 names (pixel test); joiners that are not in re-press;
+- start: host `up`+`Cross` -> screenshot dimmed (dialog) -> `Cross` (YES) until a joiner's screen changed;
+- parties: pressed, then verified on the Tournament screen; Tournament pressed again until the host logs `[TTGB]`;
+- rows: new log line `[TTGB] setup screen <addr>: column C row R state S` (setup tick; state 7 = list, 5 = Player Select / YES dialog) and the `own XX` field of
+  `[TTCPU] group:`. **Rows are registered ONE AT A TIME per party, in ascending cursor-row order**, and the next one starts only when every member of the party reports
+  the same rows: the retail row exchange overwrites a member's column with the sender's, so two simultaneous registrations lose rows on the machine that registered
+  second (that was the "own row empty / Enter Battle refused" failure of the 20 Nov attempt: d1 / h4 / d4..d6 kept `[30 28]` / `[28]` while the host saw all 5);
+  a member never re-presses a state it cannot see change (a Cross at the list reopens Player Select and registers again, a different character), it waits
+  up to 40 s for its row, and backs out with Circle only after 25 s in state 5;
+- Enter Battle: Down until `[TTGB]` row 5, then Cross; all ten log `[TTLOCK] battle` (repeat Cross on laggards).
+Reliability: 7 of 7 walks from boot to battle with this script (w4-w10), ~3.5 min boot-to-battle (boot 1.5 min, 10 registrations x ~11 s). Not run: more than 7 times.
+**Fix 1: the party read at battle load (tagteam.cpp `gb_read_local`).** `mp_sync_mode` re-read the party word `[[0x089D7F3C] + 0x18]` on every sync, also while the battle loads;
+the group block is freed then and reads 0, so one machine per run (w4: d4, w7: d6, 2 of 4 runs of the old code) turned itself into "party 0" at the `[TTCPU] battle setup`
+snapshot (`[me party 0 ..]` with the party B rows, 6 members in party A). Now the party / host is read only while the setup screen runs (`dissidia_tagteam_gb_setup_frame`)
+or while still unknown (-1). `PSPRECOMP_TTGB_PARTY_OLD=1` = the old behaviour. Verified: new build w5, w6, w8, w9: every machine keeps its party (5 + 5).
+**Issue 1 (desync at a human extra's attack, flag 0x400): NOT reproduced.** Clean 10-player runs, flags as in the task: w6 (natural battle, decision at frame 10260),
+w8 (20 680 frames), w9 (KO list, decision 7400): `[TTSYNC]` equal on all ten machines at 343 / 692 / ~250 pre-decision samples, `[HITFLAGS2]` records (42 / 158 / 96 hits)
+identical on all ten machines, no `module step` flag lists differing. w7 (OLD party code, d6 flipped to party 0): also equal (420 samples, 96 hits). So the flipped party
+alone did not split the simulation, and the clean2 failure (h1 + d4 vs eight others) is NOT explained by it with certainty; it is a candidate (the attacker's driver d4 was the
+machine that flipped in the w4 run of the same rig), unproven. The only logged difference in every run is `[NETSYNC] DESYNC .. 1 of 65 fields differ, fighter0.blockD00`
+(one block hash, frames 2300-8300, no [TTSYNC] consequence), not investigated.
+**A real, reproducible desync with the KO list + `CALLIN_DELAY=8` (w5, KOs at 20 / 40 / 60 s): the 5th member of side 0 comes in (frame ~2253, "order entry 4 (char 26)"):**
+every machine logs `[MODELS] heap .. alloc(4816) FAILED` / `[TAGTEAM] alloc failed` while `load_character(26)` runs (heap nearly full with 9-10 characters), h3 additionally
+logs `after load_character(26): leftover block .. holder changed` and 75 further alloc failures; `[TTSYNC2]` first differs at 2253 (h3's camera-slot eye / look-at at its
+default values), positions at 2280, `[NETSYNC] DESYNC 2254`. No [HITFLAGS2] differs before it. So with 10 players a call-in that exhausts the guest heap
+diverges per machine (heap layout = machine history). The same KO count with 60 s spacing (w9) and natural battles (w6) did not hit it. Not fixed (needs the heap budget, PR #118 roster).
+**Issue 3 (after the decision, 5 / 5 split): NOT reproduced with this build.** w6: all ten went through the result screens (pads pressing) back to the Tournament setup screen
+within 80 s of the stand-down; w9 (POST=360, no input after the decision): all ten log the stand-down at frame 7400, all ten sit on the Tournament round result
+(5 DEFEATED "1 - 4", 5 VICTORY "4 - 1") for 6 minutes without any machine on a "Hold: Cancel wireless" wait; one Cross on each machine -> all ten back at the setup screen
+(replayable). w10 (old party code, KO list, decision at frame 3600): same, all ten on the round result (0-4 / 4-0), [TTSYNC] 120 samples + 66 hit records equal. The 20 Nov 5 / 5 split was
+not seen in any of 4 decided runs (w6, w9, w10 + one earlier); its cause is NOT known. Candidates only (unproven): the party flip, or a simulation that had already desynced (issue 1 / the call-in heap above).

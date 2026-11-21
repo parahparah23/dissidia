@@ -287,6 +287,8 @@ void setup_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     if (!dissidia_tagteam_group_on()) return;
     dissidia_tagteam_gb_setup_frame(r32(screen + SCR_COLUMN) == 0u ? static_cast<int>(r32(screen + SCR_ROW)) : -1);
+    { static uint32_t pc = ~0u, pr = ~0u, ps = ~0u; const uint32_t col = r32(screen + SCR_COLUMN), rw = r32(screen + SCR_ROW), M = r32(screen + SCR_M), st = (M >= 0x08800000u && M < 0x0A000000u) ? r32(M + 4u) : 0xFFFFFFFFu;
+      if (col != pc || rw != pr || st != ps) { pc = col; pr = rw; ps = st; std::fprintf(stderr, "[TTGB] setup screen %08X: column %u row %u state %u\n", screen, col, rw, st); } }
     draw(rdram, ctx, screen);
 }
 

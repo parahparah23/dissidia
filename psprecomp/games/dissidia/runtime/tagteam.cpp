@@ -194,8 +194,9 @@ void sp_rows_seen(const uint8_t* rows, int n) {
 }
 // The row of a character that is a CPU partner (-1 = not one).
 int sp_cpu_row(int c) { for (int i = 1; i < 5; i++) if (c > 0 && g_sp.chars[i] == c && ((g_sp.cpu_mask >> i) & 1)) return i; return -1; }
-void gb_read_local() {
+void gb_read_local(bool setup_screen = false) {   // setup_screen: the Tournament setup screen runs, the block is live. Otherwise (the beacon's periodic sync) the party is only learned once: the block is freed while the battle loads and then reads 0, which made one machine 'party A' (10-player rig, 21 Nov)
     if (!g_ram) return;
+    if (!setup_screen && g_me.party >= 0 && !std::getenv("PSPRECOMP_TTGB_PARTY_OLD")) return;
     const uint32_t blk = rd(GB_LOCAL_PTR);
     const uint32_t party = (blk >= 0x08800000u && blk < 0x0A000000u) ? rd(blk + 0x18u) : 0xFFFFFFFFu;
     if (party <= 1u) { g_me.party = static_cast<int>(party); g_me.host = rd(GB_MEMBER) == 0u; }   // the block goes away when the battle loads: keep the last values (reset when the group ends)
@@ -277,7 +278,7 @@ void mp_sync_mode() {
     g_group_mode = on;
     if (g_log && on) {   // the group's tag data whenever it changes
         static std::string last; std::string now; char b[96];
-        for (const NetPlayer& p : group_players()) { std::snprintf(b, sizeof b, " [%s%s party %d mode %02X #%u:", p.local ? "me" : "peer", p.host ? " host" : "", p.party, p.mode, p.serial); now += b;
+        for (const NetPlayer& p : group_players()) { std::snprintf(b, sizeof b, " [%s%s party %d mode %02X #%u own %02X:", p.local ? "me" : "peer", p.host ? " host" : "", p.party, p.mode, p.serial, p.own_mask); now += b;
             for (int i = 0; i < p.n; i++) { std::snprintf(b, sizeof b, " %d%s", p.regs[i], (p.cpu_mask >> i) & 1 ? "c" : ""); now += b; if ((p.cpu_mask >> i) & 1) { std::snprintf(b, sizeof b, "(S%u L%u T%u)", p.cfg[i][0], p.cfg[i][1], p.cfg[i][2]); now += b; } } now += "]"; }
         if (now != last) { last = now; std::fprintf(stderr, "[TTCPU] group:%s\n", now.c_str()); }
     }
@@ -9467,7 +9468,7 @@ int tagteam_fighters_per_side(int party) { return fighters_per_side(party); }
 // tagteam_menu.cpp (the Tournament setup screen)
 bool dissidia_tagteam_sp_tag_on() { return (g_enabled || g_menu_mode) && !psp_adhoc_in_session(); }   // single player tag mode (the Tournament screen)
 bool dissidia_tagteam_group_on() { return g_group_mode || ((g_enabled || g_menu_mode) && psp_adhoc_in_session()); }
-void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(); gb_read_regs(cursor_row); }   // the setup screen runs: no battle, its snapshot is over
+void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); }   // the setup screen runs: no battle, its snapshot is over
 int dissidia_tagteam_local_regs(uint8_t out[5]) { std::memcpy(out, g_me.regs, 5); return g_me.n; }
 uint8_t dissidia_tagteam_local_cpu_mask() { return g_me.cpu_mask; }
 uint8_t dissidia_tagteam_local_own_mask() { return g_me.own_mask; }

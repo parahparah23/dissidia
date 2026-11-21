@@ -507,7 +507,12 @@ void handle_pdp(const Mac& src, const uint8_t* body, size_t len) {
         if (s.port != dport) continue;
         size_t used = 0;
         for (auto& m : s.q) used += m.data.size();
-        if (used + (len - 10) > (size_t)std::max(s.bufsize, 0x4000)) break;  // drop when full
+        static const size_t kBufMul = std::getenv("PSPRECOMP_ADHOC_PDP_BUF") ? (size_t)std::max(1, std::atoi(std::getenv("PSPRECOMP_ADHOC_PDP_BUF"))) : 1;   // diagnosis: multiply the receive buffer
+        if (used + (len - 10) > (size_t)std::max(s.bufsize, 0x4000) * kBufMul) {   // drop when full
+            static int dropped = 0; dropped++;
+            if (dropped <= 20 || dropped % 200 == 0) std::fprintf(stderr, "[NET] PDP port %u receive queue full (%zu bytes queued, buffer %d): a %zu byte message from the peer was dropped (%d dropped)\n", (unsigned)dport, used, s.bufsize, len - 10, dropped);
+            break;
+        }
         s.q.push_back({src, sport, std::vector<uint8_t>(body + 10, body + len)});
         break;
     }
