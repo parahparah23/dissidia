@@ -120,9 +120,11 @@ void play_se(uint8_t* rdram, recomp_context* ctx, int id) {
 }
 
 // The fighters-per-side choices the host cycles through (byte 6 of the tag bytes: bits 0-1 Party A, bits 2-3 Party B).
-constexpr uint8_t kModes[4] = {2 | (2 << 2), 2 | (1 << 2), 1 | (2 << 2), 1 | (1 << 2)};
+constexpr int kModeCount = 5;
+constexpr uint8_t kModes[kModeCount] = {2 | (2 << 2), 2 | (1 << 2), 1 | (2 << 2), 1 | (1 << 2), 3 | (3 << 2)};   // the last: 3 v 3
 std::string mode_label(uint8_t m) {
-    const int a = (m & 3) == 1 ? 1 : 2, b = ((m >> 2) & 3) == 1 ? 1 : 2;
+    auto per = [](int c) { return c == 1 ? 1 : c == 3 ? 3 : 2; };
+    const int a = per(m & 3), b = per((m >> 2) & 3);
     return std::to_string(a) + " vs " + std::to_string(b);
 }
 
@@ -347,8 +349,8 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
         uint8_t m = dissidia_tagteam_mode_byte();
         const bool host = dissidia_tagteam_is_host();
         if (host && (pressed & BTN_L) && !free_row && !(bpp >= 0 && ord)) {
-            int k = 0; for (int i = 0; i < 4; i++) if (kModes[i] == m) k = i;
-            m = kModes[(k + 1) % 4];
+            int k = 0; for (int i = 0; i < kModeCount; i++) if (kModes[i] == m) k = i;
+            m = kModes[(k + 1) % kModeCount];
             dissidia_tagteam_set_mode_byte(m);
             play_se(rdram, ctx, 1);
         }

@@ -161,7 +161,7 @@ bool g_menu_mode = false;   // Battle Mode > Tag Team Battle was chosen (menu_se
 bool g_log = false;
 uint8_t* g_ram = nullptr;
 uint32_t rd(uint32_t a);   // below
-constexpr uint8_t kTagNetVersion = 7;   // 7: the host's rules carry free-for-all (roster flags bit 2; a version-6 build would ignore it and split); 6: + the host's CPU party (bytes 24-39, docs "Proper PvE"); 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
+constexpr uint8_t kTagNetVersion = 8;   // 8: + 3 v 3 (roster flags bit 3); 7: the host's rules carry free-for-all (roster flags bit 2; a version-6 build would ignore it and split); 6: + the host's CPU party (bytes 24-39, docs "Proper PvE"); 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
 constexpr int kTagNetLen = 40;
 bool g_group_mode = false;
 // The local player's Group Battle data (found by diffing two machines and a party swap, 16 Nov):
@@ -325,8 +325,11 @@ bool g_two_v_one = false;   // Settings > Debug > Tag Team 2v1: only the partner
 bool g_one_v_two = false;   // Settings > Debug > Tag Team 1v2: only the enemy's second fighter is added (you alone against two); both 2v1 and 1v2 on = 2v2
 int g_ffa_mask_of(int ffa) { return ffa == 3 ? 1 : 3; }
 int eff_mask_base() { return (g_two_v_one == g_one_v_two) ? g_mask : (g_two_v_one ? (g_mask & 2) : (g_mask & 1)); }
+int g_three = 0;   // 3 v 3: two extras per side instead of one (PSPRECOMP_TAGTEAM_3V3=1, Settings > Debug > 3 vs 3)
 int g_ffa = 0;   // free-for-all: 0 off, 3 or 4 fighters (see foes() below)
 bool comms_battle();
+int three_now();   // 3 v 3 (below)
+int late_per_side();
 int ffa_now();   // the battle's FFA: offline this machine's setting; in a Communications battle the host's (its roster flags, bit 2)
 int eff_mask() { return g_ffa ? g_ffa_mask_of(g_ffa) : eff_mask_base(); }   // FFA 3: the CPU side's extra only; FFA 4: both extras
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
@@ -1226,7 +1229,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     // Slot 0 is side 0 and slot 1 side 1 in the setup, whoever the human is; the CPU brain settings are the CPU slot's.
     const uint32_t cpu_side = human_plan == 0 ? 1 : 0, hum_side = human_plan;
     g_bs = bs;
-    if ((eff_mask() & 1) && g_late) { g_late_q.push_back({cpu_side, hum, cpu_side, g_enemy2_char ? static_cast<uint32_t>(100 + g_enemy2_char) : cpu_side, cpu}); g_bs = bs; }
+    if ((eff_mask() & 1) && g_late) { for (int k = 0; k < late_per_side(); k++) g_late_q.push_back({cpu_side, hum, cpu_side, g_enemy2_char ? static_cast<uint32_t>(100 + g_enemy2_char) : cpu_side, cpu}); g_bs = bs; }
     else if (eff_mask() & 1) {   // the enemy team's second fighter: a copy of the CPU fighter, foe = the human
         Extra& e = g_extra[g_nextra];
         e.actor = spawn_fighter(bs, cpu_side, hum, cpu_side, cpu_side, cpu); e.side = cpu_side; e.foe = hum; e.slot_actor = cpu; e.started = false;
@@ -1236,7 +1239,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t P = rd(0x089D6A10u);
         Snap sb, sp, sg;
         if (g_log) { sb = take(bs, 0x2800); if (ok(P, 0x400)) sp = take(P, 0x400); sg = take(0x089D6000u, 0x1000); }
-        if (g_late) { g_late_q.push_back({hum_side, cpu, cpu_side, std::getenv("PSPRECOMP_TAGTEAM_PARTNER_CPU_CHAR") ? cpu_side : (g_partner_char ? static_cast<uint32_t>(100 + g_partner_char) : hum_side), hum}); g_bs = bs; goto after_partner; }
+        if (g_late) { for (int k = 0; k < late_per_side(); k++) g_late_q.push_back({hum_side, cpu, cpu_side, std::getenv("PSPRECOMP_TAGTEAM_PARTNER_CPU_CHAR") ? cpu_side : (g_partner_char ? static_cast<uint32_t>(100 + g_partner_char) : hum_side), hum}); g_bs = bs; goto after_partner; }
         Extra& e = g_extra[g_nextra];
         e.actor = spawn_fighter(bs, hum_side, cpu, cpu_side, std::getenv("PSPRECOMP_TAGTEAM_PARTNER_CPU_CHAR") ? cpu_side : hum_side, hum);
         if (g_log) { diff("bs", sb); if (!sp.w.empty()) diff("P", sp); diff("glob", sg); } e.side = hum_side; e.foe = cpu; e.slot_actor = hum; e.started = false;
@@ -1762,6 +1765,10 @@ bool make_sp_cpu_record(uint32_t G, int charId) {
 // the player of that party who registered it.
 bool comms_battle() { return g_snap_valid && psp_adhoc_in_session(); }
 int ffa_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 4u) ? 4 : 0; return g_ffa; }
+int three_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 8u) ? 1 : 0; return g_three; }
+// Extras queued per side at the battle setup: 2 in 3 v 3. Online a member has not got the host's rules yet when the battle is set up, so two are
+// queued there and the plan (once the host's roster is in) drops the second one of a side that fields fewer than three (fighters_per_side).
+int late_per_side() { return (three_now() || comms_battle()) ? 2 : 1; }   // 3 v 3: offline the setting, online the host's (roster flags bit 3)
 const std::vector<NetPlayer>& snap_or_live(std::vector<NetPlayer>& tmp) { if (g_snap_valid) return g_snap; tmp = group_players(); return tmp; }
 int humans_in_party(int party) { std::vector<NetPlayer> t; int n = 0; for (const NetPlayer& p : snap_or_live(t)) if (p.party == party) n++; return n; }
 // The players in a fixed order every machine agrees on: by party, then own character (unique in a party: Player Select greys taken ones).
@@ -1947,7 +1954,8 @@ uint8_t host_mode_byte() { std::vector<NetPlayer> t; for (const NetPlayer& p : s
 // Three or more: the host's choice (default 2 v 2).
 int fighters_per_side(int party) {
     std::vector<NetPlayer> t; const int humans = static_cast<int>(snap_or_live(t).size());
-    if (humans >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR")) { const int c = (host_mode_byte() >> (2 * party)) & 3; return c == 1 ? 1 : 2; }
+    if (humans >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR")) { const int c = (host_mode_byte() >> (2 * party)) & 3; return c == 1 ? 1 : c == 3 ? 3 : 2; }
+    if (three_now()) return 3;   // two players: the host's 3 v 3 rule (roster flags bit 3)
     TagEntry l[10]; const int n = party_order(party, l, 10);
     for (int i = 0; i < n; i++) if (l[i].is_cpu) return 2;
     for (int i = 1; i < n; i++) if (l[i].owner != l[0].owner) return 2;   // two players on one party (a keeper's player row joins the other party)
@@ -2011,7 +2019,10 @@ int comms_partner_char(int side, int* driver) {
     // when his fighter falls. The first row after the one on the stage that is a CPU or another player's is the partner.
     int pi = -1;
     if (st >= 0) order_mark(side, st);
-    if (st >= 0) for (int i = st + 1; i < n && pi < 0; i++) if (l[i].is_cpu || l[i].owner < 0 || l[i].owner != l[st].owner) pi = i;
+    // 3 v 3: called again for the second partner; rows already fielded are skipped, and so are the rows of every player already on the stage
+    bool owner_on[16] = {};
+    for (int i = 0; i < n; i++) if (((g_order_used[side] >> i) & 1) && !l[i].is_cpu && l[i].owner >= 0 && l[i].owner < 16) owner_on[l[i].owner] = true;
+    if (st >= 0) for (int i = st + 1; i < n && pi < 0; i++) if (!((g_order_used[side] >> i) & 1) && (l[i].is_cpu || l[i].owner < 0 || l[i].owner >= 16 || !owner_on[l[i].owner])) pi = i;
     if (pi < 0) { std::fprintf(stderr, "[TTCPU] side %d: no entry after the one on the stage that another player or a CPU plays, no partner\n", side); return 0; }
     const TagEntry& e = l[pi];
     if (!info_for_char(e.charId)) { std::fprintf(stderr, "[TTCPU] side %d: no character record for %d, no partner\n", side, e.charId); return 0; }
@@ -2218,8 +2229,9 @@ int ffa_others(uint32_t owner, uint32_t foe, uint32_t* out) {
     for (int i = 0; i < n; i++) if (f[i] != owner && f[i] != foe && ok(f[i], 0x12D0) && g_ram[(f[i] + 0x542u) & 0x07FFFFFFu] == 0 && foes(f[i], owner) && alive(f[i])) out[m++] = f[i];
     return m;
 }
+bool many_foes() { return ffa_now() || three_now(); }   // more than two opponents possible (FFA, 3 v 3): the lock cycle walks a list
 uint32_t other_enemy(uint32_t owner, uint32_t foe) {
-    if (ffa_now()) {   // FFA: the cycle's current pick when it is still standing, else the first of the others
+    if (many_foes()) {   // FFA / 3 v 3: the cycle's current pick when it is still standing, else the first of the others
         uint32_t o[6]; const int m = ffa_others(owner, foe, o); if (!m) return 0;
         const uint32_t t = cyc_of(owner).cyc == 1 ? cyc_of(owner).target : 0u;
         for (int i = 0; i < m; i++) if (o[i] == t) return t;
@@ -2311,10 +2323,10 @@ void lock_mode_hook(uint8_t* rdram, recomp_context* ctx) {
             int& cyc = cyc_of(owner).cyc; uint32_t& g_cyc_target = cyc_of(owner).target;   // 0: locked on the foe, 1: on the other enemy, 2: on the EX core (the retail selector is reset by the press itself, so the state is kept here)
             const uint32_t other = other_enemy(owner, slot_enemy(owner));
             const bool core = call(0x08B40A50u, h1, L) != 0;   // retail's third candidate: the EX core, when one is out
-            if (ffa_now() && cyc == 1) {   // FFA: on to the next opponent in the list before the EX core
+            if (many_foes() && cyc == 1) {   // FFA / 3 v 3: on to the next opponent in the list before the EX core
                 uint32_t o[6]; const int m = ffa_others(owner, slot_enemy(owner), o); int at = -1;
                 for (int i = 0; i < m; i++) if (o[i] == g_cyc_target) at = i;
-                if (at >= 0 && at + 1 < m) { g_cyc_target = o[at + 1]; wr(h1 + 28u, 1); if (g_log) std::fprintf(stderr, "[TAGTEAM] lock cycle (FFA): -> the next opponent %08X (%d of %d)\n", g_cyc_target, at + 2, m); ctx->r[2] = 1; return; }
+                if (at >= 0 && at + 1 < m) { g_cyc_target = o[at + 1]; wr(h1 + 28u, 1); if (g_log) std::fprintf(stderr, "[TAGTEAM] lock cycle (FFA / 3v3): -> the next opponent %08X (%d of %d)\n", g_cyc_target, at + 2, m); ctx->r[2] = 1; return; }
             }
             if (cyc == 0 && other) {
                 cyc = 1; g_cyc_target = other; wr(h1 + 28u, 1);           // cycle to the other enemy instead of releasing the lock
@@ -9456,8 +9468,13 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             const uint32_t hs = rd(g_bs + 84u) & 1u, hum = srd(g_bs + 56u + 4u * hs), cpu = srd(g_bs + 56u + 4u * (1u - hs));
             static const bool no_real = std::getenv("PSPRECOMP_TAGTEAM_NOREAL") != nullptr;
             std::vector<Late> keep;
+            int per_side_seen[2] = {0, 0};
             for (Late& l : g_late_q) {
                 const int team = (l.slot_actor == hum) ? 0 : 1;
+                if (l.side < 2 && !l.callin && ++per_side_seen[l.side] >= 2 && (comms_battle() ? fighters_per_side(static_cast<int>(l.side)) < 3 : !three_now())) {
+                    if (g_log) std::fprintf(stderr, "[TAGTEAM] side %u: a second partner was queued, but the side fields fewer than three: dropped\n", l.side);
+                    continue;
+                }
                 // Communications Mode: the side's first CPU pick (comms_partner_char), never "the next member" of the record (that may be a player)
                 int drv = -1;
                 // Single player (user rule, 17 Nov): the human's partners are only what he set up as CPU rows; a Battle Mode party has no CPU rows, so his
@@ -10069,7 +10086,7 @@ bool dissidia_tagteam_comms_battle() { return comms_battle(); }
 uint8_t local_rule_flags() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
     const bool assist_on = e ? e[0] != '0' : g_sp_assist_on;
-    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u));   // bit 2: free-for-all
+    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3
 }
 constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
 bool dissidia_tagteam_roster_host() { return comms_battle() && g_me.host; }
@@ -10117,7 +10134,7 @@ bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the
     std::fprintf(stderr, "[TTCPU] roster from the host (%d player(s)%s): %s%s\n", cnt, found_me ? "" : ", this machine is NOT in it", mine == host ? "the same as this machine's" : "DIFFERS from this machine's, the host's is used:", mine == host ? "" : host.c_str());
     if (mine != host) std::fprintf(stderr, "[TTCPU]   this machine had:%s\n", mine.c_str());
     g_snap = v; g_roster_ok = true; g_shared_flags = d[3]; g_shared_valid = true;
-    std::fprintf(stderr, "[TTCPU] host's rules: assists %s, EX Burst rule %s, free-for-all %s\n", (d[3] & 1) ? "on" : "off", (d[3] & 2) ? "fight" : "freeze", (d[3] & 4) ? "on" : "off");
+    std::fprintf(stderr, "[TTCPU] host's rules: assists %s, EX Burst rule %s, free-for-all %s, 3 v 3 %s\n", (d[3] & 1) ? "on" : "off", (d[3] & 2) ? "fight" : "freeze", (d[3] & 4) ? "on" : "off", (d[3] & 8) ? "on" : "off");
     return true;
 }
 bool dissidia_tagteam_decided() { return g_decided; }
@@ -10129,6 +10146,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_enabled = e && e[0] && e[0] != '0';
     g_log = std::getenv("PSPRECOMP_TAGTEAM_LOG") != nullptr;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_EXTRAS")) g_mask = std::atoi(m);
+    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_3V3")) { g_three = (m[0] == '1') ? 1 : 0; if (g_three && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) g_overhead = 1; }
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_FFA")) { g_ffa = std::atoi(m) == 3 ? 3 : (std::atoi(m) == 4 ? 4 : 0); if (g_ffa && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) g_overhead = 1; }
     g_one_v_two = std::getenv("PSPRECOMP_TAGTEAM_1V2") && std::getenv("PSPRECOMP_TAGTEAM_1V2")[0] == '1';
     g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
@@ -10211,6 +10229,8 @@ void dissidia_tagteam_install(uint8_t* rdram) {
                                    +[]() { return g_two_v_one; }, +[](bool on) { g_two_v_one = on; }});
     psp_settings_add_debug_toggle({"Tag Team 1v2", "Tag team 1 v 2 (experimental)\nWith Tag Team on: you alone fight the CPU's two fighters (no partner for you). Off: 2 v 2.\nAffects the next battle that starts.",
                                    +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }});
+    psp_settings_add_debug_toggle({"Tag Team 3v3", "Tag team 3 v 3 (experimental)\nWith Tag Team on: two partners per side instead of one, three fighters on each team. L cycles the lock through every enemy. A fallen fighter's place is taken by a team mate still standing; a team with nobody left loses. Online the host's setting decides.\nAffects the next battle that starts.",
+                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on && g_overhead == 0) g_overhead = 1; }});
     psp_settings_add_debug_toggle({"Free-for-all (3)", "Tag team free-for-all, 3 fighters (experimental)\nWith Tag Team on: you, the CPU and a second CPU fighter, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
                                    +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on && g_overhead == 0) g_overhead = 1; }});
     psp_settings_add_debug_toggle({"Free-for-all (4)", "Tag team free-for-all, 4 fighters (experimental)\nWith Tag Team on: you and three CPU fighters, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",

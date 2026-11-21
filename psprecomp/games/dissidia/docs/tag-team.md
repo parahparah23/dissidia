@@ -2104,6 +2104,29 @@ two opponents share a game side; friend / foe is per fighter: `foes(a, b)` (any 
 - Not yet: two real PCs / the relay, 3 or 4 human players (only 2 players + CPU clone partners were tested online), the result screen's tally
   for 3 / 4 fighters, FFA with the CPU rows of a party (Add CPU).
 
+## 3 v 3 (22 Nov, branch tagteam-3v3; offline vs CPU + online with 2 players, host-only)
+User: "make the 3v3". Each side gets two extras instead of one, so three fighters per team.
+- Switch: `PSPRECOMP_TAGTEAM_3V3=1` or Settings > Debug > "Tag Team 3v3" (with Tag Team on; the next battle). Turning it on picks overhead
+  style 1 when no overhead style is on.
+- Setup: `late_per_side()` entries per side go into the late spawn queue (2 in 3 v 3). The extras spawn after the intro like the 2v2 one.
+- Lock-on: `many_foes()` (FFA or 3 v 3) lets the L cycle walk foe -> enemy extra 1 -> enemy extra 2 -> foe, as in FFA.
+- KO rules: unchanged from 2v2. A fallen slot fighter is swapped with a living team mate; a team with nobody left loses.
+- Online (Communications Mode > Group Battle): the host's setting decides. `local_rule_flags()` bit 3 = 3 v 3; `three_now()` reads it in a
+  Communications battle. `kTagNetVersion` is 8. A member has not got the host's rules when its battle is set up, so in a Communications battle
+  two entries are always queued per side, and once the roster is in, the plan drops a side's second entry when that side fields fewer than three
+  (`[TAGTEAM] side N: a second partner was queued, but the side fields fewer than three: dropped`).
+  - `fighters_per_side()`: with 3+ humans the host's selector can pick "3 v 3" (mode value 3 per party; `kModes` has a fifth entry); with two
+    humans it is 3 when the host's 3 v 3 rule is on.
+  - `comms_partner_char()` is called once per queued entry. It skips rows already fielded (`g_order_used`) and the rows of every player already on
+    the stage, so a side's second partner is the next party row not yet in the fight.
+- Seen offline (`~/dissidia/t3d`, clones, KOLIST cpu:25,cpu:40,cpu:55 with KOLIST_NAT): 4 extras start, hits land on the fighter hit, swap to
+  partner 1, then partner 2, then "side 1 has nobody left: decided", then the results screen.
+- Seen online (`~/dissidia/play2`, two windows on one PC, LAN, clones, 3 v 3 on the host only): B logged "host's rules: ... 3 v 3 on", 4 extras
+  started on both, lock cycle foe -> extra -> extra -> foe, NETSYNC 2681 frames compared, 0 mismatched (90 s of play). The same rig with 3 v 3
+  off: the second entry dropped on both sides on both copies, one extra per side, 0 mismatched.
+- Not yet: 3 v 3 with real party members online (3+ humans, the selector's "3 v 3", CPU rows), the human side's KO chain, two real PCs / relay,
+  3 v 3 in single player without clones (the existing 2v2 rule applies: a side without party members may get no partners).
+
 ## Score-based CPU targeting, the PPSSPP plugin's (21 Nov; host-only, headless)
 User: "check whether the AI would respond like ours" (the plugin's v0.39 scoring). It did not: `ai_target()` used the rule list above, checked once per 4 s.
 `ai_score_target()` (tagteam.cpp) now runs first and is the default; `PSPRECOMP_TAGTEAM_AI_SCORE=0` = the rule list. Every ~0.25 s (15 battle-clock units) each
