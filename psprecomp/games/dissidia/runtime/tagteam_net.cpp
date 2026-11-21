@@ -190,7 +190,7 @@ void roster_step() {
         }
     }
     if (!host || (g_roster_calls++ % 6) != 0) return;
-    uint8_t out[5 + 33 * 16]; const int len = dissidia_tagteam_roster_pack(out, sizeof out);
+    uint8_t out[5 + 54 * 16]; const int len = dissidia_tagteam_roster_pack(out, sizeof out);
     if (len <= 0) return;
     uint8_t macs[16][6]; const int k = psp_adhoc_group_macs(macs, nullptr, 16);
     for (int i = 0; i < k && i < 16; i++) { Mac m; std::memcpy(m.data(), macs[i], 6); if (std::find(g_roster_acked.begin(), g_roster_acked.end(), m) == g_roster_acked.end()) psp_adhoc_side_send(macs[i], CH_ROSTER, out, len); }

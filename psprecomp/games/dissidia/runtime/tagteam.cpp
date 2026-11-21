@@ -160,8 +160,8 @@ bool g_menu_mode = false;   // Battle Mode > Tag Team Battle was chosen (menu_se
 bool g_log = false;
 uint8_t* g_ram = nullptr;
 uint32_t rd(uint32_t a);   // below
-constexpr uint8_t kTagNetVersion = 5;   // 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
-constexpr int kTagNetLen = 24;
+constexpr uint8_t kTagNetVersion = 6;   // 6: + the host's CPU party (bytes 24-39, docs "Proper PvE"); 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
+constexpr int kTagNetLen = 40;
 bool g_group_mode = false;
 // The local player's Group Battle data (found by diffing two machines and a party swap, 16 Nov):
 constexpr uint32_t GB_LOCAL_PTR = 0x089D7F3Cu;   // EBOOT: the local player's group block; +0x18 = the party joined (0 = A, 1 = B)
@@ -169,7 +169,9 @@ constexpr uint32_t GB_MEMBER = 0x089D7F44u;      // EBOOT: 0 on the room's host,
 constexpr uint32_t GB_REGS = 0x09B6F2B4u;        // the characters this player registered on the Tournament setup screen (5 words, the left
                                                  // column's rows, 0 = empty; zeroed when the screen opens, a row is written on its YES)
 struct NetPlayer { int party = -1; bool host = false, local = false; uint8_t mode = 0, serial = 0, cpu_mask = 0, own_mask = 0; int n = 0; uint8_t regs[5] = {}; uint8_t mac[6] = {};
-    uint8_t cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}}; };   // cfg[row] = {STRENGTH 1-9, LEVEL 0 = Auto / 1-100, TYPE 0 = Random / 1-8} of a CPU row. mac: the player's ad-hoc MAC (who drives a fighter in the lock-step, tagteam_net.cpp)
+    uint8_t cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}};
+    // The CPU party (docs "Proper PvE"): only the host's counts. Up to 5 CPU rows for the party OPPOSITE the host's (no human of it needed): characters and settings, bytes 24-39 of the beacon.
+    int bp_n = 0; uint8_t bp_regs[5] = {}; uint8_t bp_cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}}; };   // cfg[row] = {STRENGTH 1-9, LEVEL 0 = Auto / 1-100, TYPE 0 = Random / 1-8} of a CPU row. mac: the player's ad-hoc MAC (who drives a fighter in the lock-step, tagteam_net.cpp)
 NetPlayer g_me;              // this player (party / host read every sync, regs while the setup screen runs)
 uint8_t g_mode_pick = 0;     // the host's fighters-per-side choice (encoded as byte 6); 0 = default
 std::vector<NetPlayer> g_snap;   // the group as it was when this battle was set up (every spawn decision of the battle uses it)
@@ -199,7 +201,7 @@ void sp_rows_seen(const uint8_t* rows, int n) {
 // The row of a character that is a CPU partner (-1 = not one).
 int sp_cpu_row(int c) { for (int i = 1; i < 5; i++) if (c > 0 && g_sp.chars[i] == c && ((g_sp.cpu_mask >> i) & 1)) return i; return -1; }
 bool g_add_cpu = false; int g_add_cpu_age = 0;   // "Add CPU" (L on the free row of the setup screen): the next row this player registers is a CPU
-bool cpu_party_on() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_NOCPUPARTY") == nullptr; return on; }   // a player's first row may be a CPU (he then keeps a CPU party); PSPRECOMP_TAGTEAM_NOCPUPARTY=1 = retail's rule
+bool cpu_party_on() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_KEEPER") != nullptr && std::getenv("PSPRECOMP_TAGTEAM_NOCPUPARTY") == nullptr; return on; }   // the old "keeper" workaround (docs "Group Battle: a party of CPUs"): a player's first row may be a CPU (he then keeps a CPU party). Off by default since the proper CPU party (docs "Proper PvE"); PSPRECOMP_TAGTEAM_KEEPER=1 turns it on
 void gb_read_local(bool setup_screen = false) {   // setup_screen: the Tournament setup screen runs, the block is live. Otherwise (the beacon's periodic sync) the party is only learned once: the block is freed while the battle loads and then reads 0, which made one machine 'party A' (10-player rig, 21 Nov)
     if (!g_ram) return;
     if (!setup_screen && g_me.party >= 0 && !std::getenv("PSPRECOMP_TTGB_PARTY_OLD")) return;
@@ -242,12 +244,20 @@ bool parse_player(const uint8_t* d, int len, NetPlayer& p) {
         if ((a & 15) <= 8) p.cfg[r][2] = a & 15;
         if (b <= 100) p.cfg[r][1] = b;
     }
+    p.bp_n = std::min<int>(d[24], 5);
+    for (int r = 0; r < 5; r++) {   // the host's CPU party: character per row, settings (strength << 4 | type, level)
+        p.bp_regs[r] = r < p.bp_n ? d[25 + r] : 0; p.bp_cfg[r][0] = 5; p.bp_cfg[r][1] = 0; p.bp_cfg[r][2] = 0;
+        const uint8_t a = d[30 + 2 * r], b = d[31 + 2 * r];
+        if ((a >> 4) >= 1 && (a >> 4) <= 9) p.bp_cfg[r][0] = a >> 4;
+        if ((a & 15) <= 8) p.bp_cfg[r][2] = a & 15;
+        if (b <= 100) p.bp_cfg[r][1] = b;
+    }
     return true;
 }
 // Every player of the group (this one first, then the others as the network layer lists them), from the beacon bytes.
 std::vector<NetPlayer> group_players() {
     std::vector<NetPlayer> v; NetPlayer me = g_me; me.local = true; psp_adhoc_local_mac(me.mac); v.push_back(me);
-    uint8_t d[16][24]; int lens[16] = {}; uint8_t macs[16][6] = {};
+    uint8_t d[16][40]; int lens[16] = {}; uint8_t macs[16][6] = {};
     const int n = psp_adhoc_group_game_data(d, lens, 16, macs);
     for (int i = 0; i < n && i < 16; i++) { NetPlayer p; if (parse_player(d[i], lens[i], p)) { std::memcpy(p.mac, macs[i], 6); v.push_back(p); } }
     return v;
@@ -257,14 +267,16 @@ void mp_sync_mode() {
     orec_test_level();
     const bool local = g_enabled || g_menu_mode;
     gb_read_local();
-    uint8_t d[24];
-    uint8_t d0[16][24]; int lens[16] = {};
+    uint8_t d[40];
+    uint8_t d0[16][40]; int lens[16] = {};
     const int n = psp_adhoc_group_game_data(d0, lens, 16);
-    if (n == 0 && !psp_adhoc_in_session()) { g_me.n = 0; std::memset(g_me.regs, 0, sizeof g_me.regs); g_me.cpu_mask = 0; g_me.own_mask = 0; g_mode_pick = 0; g_me.party = -1; g_me.host = false; }   // out of the group: nothing carries over to the next room
-    static uint8_t last_key[32] = {}; static uint8_t serial = 0;
-    uint8_t key[32] = {static_cast<uint8_t>(g_me.party & 0xFF), static_cast<uint8_t>(g_me.host), g_me.host ? g_mode_pick : static_cast<uint8_t>(0), static_cast<uint8_t>(g_me.n)};
+    if (n == 0 && !psp_adhoc_in_session()) { g_me.n = 0; std::memset(g_me.regs, 0, sizeof g_me.regs); g_me.cpu_mask = 0; g_me.own_mask = 0; g_me.bp_n = 0; g_mode_pick = 0; g_me.party = -1; g_me.host = false; }   // out of the group: nothing carries over to the next room
+    static uint8_t last_key[64] = {}; static uint8_t serial = 0;
+    uint8_t key[64] = {static_cast<uint8_t>(g_me.party & 0xFF), static_cast<uint8_t>(g_me.host), g_me.host ? g_mode_pick : static_cast<uint8_t>(0), static_cast<uint8_t>(g_me.n)};
     std::memcpy(key + 4, g_me.regs, 5); key[9] = g_me.cpu_mask; key[10] = g_me.own_mask;
     for (int r = 0; r < 5; r++) { key[11 + r] = static_cast<uint8_t>(((g_me.cpu_mask >> r) & 1) ? g_me.cfg[r][0] : 0); key[16 + r] = static_cast<uint8_t>(((g_me.cpu_mask >> r) & 1) ? g_me.cfg[r][1] : 0); key[21 + r] = static_cast<uint8_t>(((g_me.cpu_mask >> r) & 1) ? g_me.cfg[r][2] : 0); }
+    key[26] = static_cast<uint8_t>(g_me.host ? g_me.bp_n : 0); std::memcpy(key + 27, g_me.bp_regs, 5);
+    for (int r = 0; r < 5; r++) { key[32 + r] = g_me.bp_cfg[r][0]; key[37 + r] = g_me.bp_cfg[r][1]; key[42 + r] = g_me.bp_cfg[r][2]; }
     if (std::memcmp(key, last_key, sizeof key) != 0) { std::memcpy(last_key, key, sizeof key); serial++; }
     g_me.serial = serial; g_me.mode = key[2];
     std::memset(d, 0, sizeof d);
@@ -272,6 +284,7 @@ void mp_sync_mode() {
     d[4] = g_me.party >= 0 ? static_cast<uint8_t>(g_me.party) : 0xFF; d[5] = g_me.host ? 1 : 0; d[6] = key[2]; d[7] = serial;
     d[8] = static_cast<uint8_t>(g_me.n); std::memcpy(d + 9, g_me.regs, 5); d[14] = g_me.cpu_mask; d[15] = g_me.own_mask;
     for (int r = 0; r < 5; r++) { const int k = cfg_slot(g_me.own_mask, r); if (k < 0 || k > 3) continue; d[16 + 2 * k] = static_cast<uint8_t>((g_me.cfg[r][0] << 4) | g_me.cfg[r][2]); d[17 + 2 * k] = g_me.cfg[r][1]; }
+    if (g_me.host) { d[24] = static_cast<uint8_t>(g_me.bp_n); for (int r = 0; r < g_me.bp_n && r < 5; r++) { d[25 + r] = g_me.bp_regs[r]; d[30 + 2 * r] = static_cast<uint8_t>((g_me.bp_cfg[r][0] << 4) | g_me.bp_cfg[r][2]); d[31 + 2 * r] = g_me.bp_cfg[r][1]; } }
     psp_adhoc_set_game_data(d, kTagNetLen);
     bool any = local, all_know = true;
     for (int i = 0; i < n && i < 16; i++) {
@@ -1759,12 +1772,77 @@ std::vector<const NetPlayer*> players_sorted(const std::vector<NetPlayer>& pl) {
 bool np_keeper(const NetPlayer* p) { for (int i = 0; i < p->n; i++) if ((p->own_mask >> i) & 1) return ((p->cpu_mask >> i) & 1) != 0; return false; }
 bool cpu_party_of(const std::vector<const NetPlayer*>& ps, int party) { int n = 0; for (const NetPlayer* p : ps) if (p->party == party) { n++; if (!np_keeper(p)) return false; } return n > 0; }
 bool defects_from(const std::vector<const NetPlayer*>& ps, int party) { return cpu_party_on() && cpu_party_of(ps, party) && !cpu_party_of(ps, 1 - party); }   // the keepers' player rows of this CPU party fight for the other party
+
+// ---- Proper PvE: a party of CPUs the room host sets up (docs/tag-team.md "Proper PvE") ----
+// When every human of the group chose the same party, the OTHER party is a CPU party: the host adds its rows on the Tournament setup screen (Add CPU,
+// one row each with its own STRENGTH / LEVEL / TYPE; bytes 24-39 of his beacon, NetPlayer::bp_*). Retail needs a human member for the party's data, so
+// the rows are written into retail's own party data on EVERY machine from the host's list, the same bytes everywhere:
+//   - the setup screen's row table R (0x09B6E056 + 58 * party + 6 * row = {owner, character, 0, level, 0, 0}): the CPU party's rows, owner = the human
+//     (a party member that does not own the lead row of the host's party) whose machine plays the CPU party's lock-step slot;
+//   - that owner's machine builds the rows' table blocks (FUN_088F6D80 = retail's SetMember) just before retail's Enter Battle step FUN_08AB78E8
+//     publishes the owners (FUN_088F6FFC) and the host sends the table;
+//   - Party Select's "both parties need a member" test (FUN_08A7046C) accepts the empty CPU party.
+// Retail then builds the party records, the group struct, the round list and the booking from the table as for human rows. PSPRECOMP_TAGTEAM_NOBP=1: off.
+bool bp_on() { static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOBP") != nullptr; return !off; }
+constexpr uint32_t kRowsBase = 0x09B6E056u;   // the setup screen's rows: 58 bytes per party, 5 rows of 6 bytes
+uint32_t rrow(int party, int row) { return kRowsBase + 58u * static_cast<uint32_t>(party) + 6u * static_cast<uint32_t>(row); }
+// The CPU party of a roster: the party opposite the host's when none of the players chose it (-1 = none). *host = the room host.
+int bp_party(const std::vector<NetPlayer>& pl, const NetPlayer** host = nullptr) {
+    if (!bp_on() || pl.size() < 2) return -1;
+    const NetPlayer* h = nullptr; for (const NetPlayer& p : pl) if (p.host && p.party >= 0) h = &p;
+    if (!h) return -1;
+    for (const NetPlayer& p : pl) if (p.party >= 0 && p.party != h->party) return -1;
+    if (host) *host = h;
+    return 1 - h->party;
+}
+// The retail id (room slot: 0 = host) of the human who plays the CPU party's lock-step slot: the lowest owner of a row of the host's party that does not
+// own its lead row; 255 = not decided yet (nobody else registered).
+int bp_owner_id(int hp) {
+    if (!g_ram) return 255;
+    const uint8_t* r0 = g_ram + (rrow(hp, 0) & 0x07FFFFFFu);
+    const int lead = (r0[1] > 0 && r0[1] <= 0x3F) ? r0[0] : -1;
+    int best = 255;
+    for (int k = 0; k < 5; k++) { const uint8_t* e = g_ram + (rrow(hp, k) & 0x07FFFFFFu); if (e[1] > 0 && e[1] <= 0x3F && e[0] != lead && e[0] < 16) best = std::min<int>(best, e[0]); }
+    return lead >= 0 ? best : 255;
+}
+int g_bp_inj_cp = -1, g_bp_inj_n = 0;
+// Every setup-screen frame, every machine: the host's CPU rows in the row table (and out again when they go away).
+void bp_inject_rows() {
+    if (!g_ram) return;
+    const std::vector<NetPlayer> pl = group_players(); const NetPlayer* h = nullptr; const int cp = bp_party(pl, &h);
+    int n = cp >= 0 ? h->bp_n : 0; const int oid = n > 0 ? bp_owner_id(h->party) : 255;
+    if (oid == 255) n = 0;
+    if (g_bp_inj_cp >= 0 && (cp != g_bp_inj_cp || n < g_bp_inj_n))   // rows that went away (or another party): back to empty
+        for (int k = (cp == g_bp_inj_cp ? n : 0); k < g_bp_inj_n; k++) { uint8_t* e = g_ram + (rrow(g_bp_inj_cp, k) & 0x07FFFFFFu); e[0] = e[1] = e[2] = 0xFF; e[3] = e[4] = e[5] = 0; }
+    for (int k = 0; k < n; k++) {
+        uint8_t* e = g_ram + (rrow(cp, k) & 0x07FFFFFFu);
+        const uint8_t want[6] = {static_cast<uint8_t>(oid), h->bp_regs[k], 0, 100, 0, 0};
+        if (std::memcmp(e, want, 6) != 0) { if (n != g_bp_inj_n || cp != g_bp_inj_cp) std::fprintf(stderr, "[TTBP] row table: party %d row %d = char %d (owner %d)\n", cp, k, want[1], oid); std::memcpy(e, want, 6); }
+    }
+    if (n != g_bp_inj_n || (n ? cp : -1) != g_bp_inj_cp) std::fprintf(stderr, "[TTBP] CPU party %d: %d row(s) in the setup screen's row table (owner id %d)\n", cp, n, oid);
+    g_bp_inj_cp = n ? cp : -1; g_bp_inj_n = n;
+}
 int party_order(int party, TagEntry* out, int max) {
     if (party < 0 || party > 1 || max <= 0) return 0;
     std::vector<NetPlayer> tmp; const std::vector<NetPlayer>& pl = snap_or_live(tmp);
     const std::vector<const NetPlayer*> ps = players_sorted(pl);
     std::vector<TagEntry> v;
-    if (g_bs && g_ram) {   // in a battle: the game's record, each member matched to the row that registered it
+    const NetPlayer* bph = nullptr; const int cpp = bp_party(pl, &bph);
+    if (cpp == party && bph && bph->bp_n > 0) {   // the CPU party (docs "Proper PvE"): the host's CPU rows; the human of the host's party that plays its lock-step slot owns them (AI-driven: is_cpu)
+        int lead = -1;
+        if (g_bs && g_ram) { const PartyList l = read_party(bph->party); for (size_t k = 0; k < ps.size() && lead < 0 && l.n > 0; k++) if (ps[k]->party == bph->party) for (int r = 0; r < ps[k]->n; r++) if (ps[k]->regs[r] == l.ids[0] && ((ps[k]->own_mask >> r) & 1)) lead = static_cast<int>(k); }
+        for (size_t k = 0; k < ps.size() && lead < 0; k++) if (ps[k]->party == bph->party) lead = static_cast<int>(k);
+        int pick = -1; for (size_t k = 0; k < ps.size() && pick < 0; k++) if (ps[k]->party == bph->party && static_cast<int>(k) != lead) pick = static_cast<int>(k);
+        if (pick < 0) pick = lead;
+        const bool loc = pick >= 0 && ps[static_cast<size_t>(pick)]->local;
+        std::vector<uint8_t> used(5, 0);
+        auto take = [&](int c) { for (int r = 0; r < bph->bp_n; r++) if (!used[static_cast<size_t>(r)] && bph->bp_regs[r] == c) { used[static_cast<size_t>(r)] = 1; return r; } return -1; };
+        if (g_bs && g_ram) {
+            const PartyList l = read_party(party);
+            for (int i = 0; i < l.n; i++) { const int r = take(l.ids[i]); TagEntry e{l.ids[i], static_cast<int8_t>(pick), true, loc}; if (r >= 0) { e.strength = bph->bp_cfg[r][0]; e.level = bph->bp_cfg[r][1]; e.type = bph->bp_cfg[r][2]; } v.push_back(e); }
+        } else
+            for (int r = 0; r < bph->bp_n; r++) v.push_back(TagEntry{bph->bp_regs[r], static_cast<int8_t>(pick), true, loc, bph->bp_cfg[r][0], bph->bp_cfg[r][1], bph->bp_cfg[r][2]});
+    } else if (g_bs && g_ram) {   // in a battle: the game's record, each member matched to the row that registered it
         const PartyList l = read_party(party);
         std::vector<uint8_t> used(ps.size(), 0);   // rows already matched, per player (bit per row)
         for (int i = 0; i < l.n; i++) {
@@ -1847,7 +1925,7 @@ bool owner_record(uint32_t G, int ch, const uint8_t** out, int* who) {
     if (std::getenv("PSPRECOMP_TTREC_OFF") || !comms_battle() || G < REC_BASE) return false;
     const uint32_t side = (G - REC_BASE) / 4192u; if (side > 1u) return false;
     auto it = g_orec[side].find(ch);
-    if (it == g_orec[side].end() && !std::getenv("PSPRECOMP_TAGTEAM_NOCPUPARTY")) { it = g_orec[1 - side].find(ch); if (it == g_orec[1 - side].end()) return false; }   // a keeper's player row fights for the other party (docs "Group Battle: a party of CPUs"): its record is in the keeper's party's blocks
+    if (it == g_orec[side].end() && cpu_party_on()) { it = g_orec[1 - side].find(ch); if (it == g_orec[1 - side].end()) return false; }   // a keeper's player row fights for the other party (docs "Group Battle: a party of CPUs"): its record is in the keeper's party's blocks
     else if (it == g_orec[side].end()) return false;
     *out = it->second.data(); *who = static_cast<int>(side); return true;
 }
@@ -2795,6 +2873,18 @@ void apply_drive(uint32_t A, int drive) {
         for (uint32_t sd = 0; sd < 2; sd++) { const uint32_t cr = REC_BASE + 4192u * sd, t = rdh(cr + 3892u); if (t != 0 && t < 3) { p0 = rdh(cr + 3894u); p1 = rdh(cr + 3896u); break; } }
         if (auto it = g_sp_cache.find(actor_char(A)); it != g_sp_cache.end() && it->second.size() >= 3898u) {   // single player: a CPU member in the human's slot keeps his own record's brain parameters
             p0 = static_cast<uint32_t>(it->second[3894] | (it->second[3895] << 8)); p1 = static_cast<uint32_t>(it->second[3896] | (it->second[3897] << 8)); }
+        if (comms_battle() && !std::getenv("PSPRECOMP_TAGTEAM_NOCOMMSCPU")) {   // a CPU row of a Communications party (also the lead the retail slot starts with, and a CPU party's): its row's strength / type decide the brain
+            const uint32_t sd = side_of(A); const int ch = actor_char(A);
+            if (sd < 2u && ch > 0 && ch <= 0x3F) {
+                TagEntry l[10]; const int n = party_order(static_cast<int>(sd), l, 10); bool cpu_row = false; for (int i = 0; i < n; i++) if (l[i].charId == ch && l[i].is_cpu) cpu_row = true;
+                const int key = static_cast<int>(sd) * 64 + ch;
+                if (cpu_row && !g_rec_scratch) g_rec_scratch = psp_kmem_bump_alloc_named(0x1100u, "TAGTEAM_CHAR_RECORD");
+                if (cpu_row && !g_comms_cache.count(key)) make_comms_cpu_record(REC_BASE + 4192u * sd, ch);   // (the scratch record is only the vehicle: the fighter on the stage keeps the record the setup gave it)
+                if (auto it = g_comms_cache.find(key); cpu_row && it != g_comms_cache.end() && it->second.size() >= 3898u) {
+                    p0 = static_cast<uint32_t>(it->second[3894] | (it->second[3895] << 8)); p1 = static_cast<uint32_t>(it->second[3896] | (it->second[3897] << 8));
+                    std::fprintf(stderr, "[TTBP] %08X (char %d, side %u): AI brain parameters %u %u from its CPU row's settings\n", A, ch, sd, p0, p1); }
+            }
+        }
         call(CPU_MODE, A, 0);
         if (ok(brain, 0x40)) { call(BRAIN_MODE, brain, p0); call(BRAIN_LEVEL, brain, p1); }
         g_ctx->r[29] = static_cast<int32_t>(sp0);
@@ -9914,7 +10004,7 @@ uint8_t local_rule_flags() {
     const bool assist_on = e ? e[0] != '0' : g_sp_assist_on;
     return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u));
 }
-constexpr int kRosterRec = 33;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3
+constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
 bool dissidia_tagteam_roster_host() { return comms_battle() && g_me.host; }
 bool dissidia_tagteam_roster_ready() { return g_roster_ok || !comms_battle(); }
 int dissidia_tagteam_roster_pack(uint8_t* out, int max) {   // 'T' 'R' 1 flags count, then the players
@@ -9928,6 +10018,8 @@ int dissidia_tagteam_roster_pack(uint8_t* out, int max) {   // 'T' 'R' 1 flags c
         std::memcpy(q, p.mac, 6); q[6] = p.party >= 0 ? static_cast<uint8_t>(p.party) : 0xFF; q[7] = p.host ? 1 : 0; q[8] = p.mode; q[9] = p.serial;
         q[10] = static_cast<uint8_t>(p.n); std::memcpy(q + 11, p.regs, 5); q[16] = p.cpu_mask; q[17] = p.own_mask;
         for (int r = 0; r < 5; r++) for (int k = 0; k < 3; k++) q[18 + 3 * r + k] = p.cfg[r][k];
+        q[33] = static_cast<uint8_t>(p.bp_n); std::memcpy(q + 34, p.bp_regs, 5);
+        for (int r = 0; r < 5; r++) for (int k = 0; k < 3; k++) q[39 + 3 * r + k] = p.bp_cfg[r][k];
     }
     return 5 + kRosterRec * cnt;
 }
@@ -9949,6 +10041,8 @@ bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the
         NetPlayer p; std::memcpy(p.mac, q, 6); p.party = q[6] <= 1 ? q[6] : -1; p.host = (q[7] & 1) != 0; p.mode = q[8]; p.serial = q[9];
         p.n = std::min<int>(q[10], 5); std::memcpy(p.regs, q + 11, 5); p.cpu_mask = q[16]; p.own_mask = q[17];
         for (int r = 0; r < 5; r++) for (int k = 0; k < 3; k++) p.cfg[r][k] = q[18 + 3 * r + k];
+        p.bp_n = std::min<int>(q[33], 5); std::memcpy(p.bp_regs, q + 34, 5);
+        for (int r = 0; r < 5; r++) for (int k = 0; k < 3; k++) p.bp_cfg[r][k] = q[39 + 3 * r + k];
         p.local = std::memcmp(p.mac, me, 6) == 0; found_me |= p.local;
         v.push_back(p);
     }
@@ -10074,7 +10168,7 @@ int tagteam_fighters_per_side(int party) { return fighters_per_side(party); }
 // tagteam_menu.cpp (the Tournament setup screen)
 bool dissidia_tagteam_sp_tag_on() { return (g_enabled || g_menu_mode) && !psp_adhoc_in_session(); }   // single player tag mode (the Tournament screen)
 bool dissidia_tagteam_group_on() { return g_group_mode || ((g_enabled || g_menu_mode) && psp_adhoc_in_session()); }
-void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); }   // the setup screen runs: no battle, its snapshot is over
+void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); bp_inject_rows(); }   // the setup screen runs: no battle, its snapshot is over
 int dissidia_tagteam_local_regs(uint8_t out[5]) { std::memcpy(out, g_me.regs, 5); return g_me.n; }
 uint8_t dissidia_tagteam_local_cpu_mask() { return g_me.cpu_mask; }
 uint8_t dissidia_tagteam_local_own_mask() { return g_me.own_mask; }
@@ -10144,3 +10238,60 @@ int dissidia_tagteam_group_size() { return static_cast<int>(group_players().size
 bool dissidia_tagteam_is_host() { return g_me.host; }
 uint8_t dissidia_tagteam_mode_byte() { if (g_me.host) return g_mode_pick; return host_mode_byte(); }
 void dissidia_tagteam_set_mode_byte(uint8_t m) { if (g_me.host) { g_mode_pick = m; mp_sync_mode(); std::fprintf(stderr, "[TTCPU] host: fighters per side A %d, B %d\n", m & 3, (m >> 2) & 3); } }
+
+// ---- Proper PvE: the host's CPU party (docs "Proper PvE"); the setup screen's side is in tagteam_menu.cpp ----
+// The CPU party of the group as it is now (0 / 1) or -1; the host's rows.
+int dissidia_tagteam_bp_party() { return bp_party(group_players()); }
+bool dissidia_tagteam_bp_can_edit() { return g_me.host && bp_party(group_players()) >= 0; }
+int dissidia_tagteam_bp_count() { const std::vector<NetPlayer> pl = group_players(); const NetPlayer* h = nullptr; return bp_party(pl, &h) >= 0 ? h->bp_n : 0; }
+int dissidia_tagteam_bp_row(int i, uint8_t cfg[3]) {   // the character of CPU party row i (0 = none), its settings
+    const std::vector<NetPlayer> pl = group_players(); const NetPlayer* h = nullptr;
+    if (bp_party(pl, &h) < 0 || i < 0 || i >= h->bp_n) return 0;
+    std::memcpy(cfg, h->bp_cfg[i], 3); return h->bp_regs[i];
+}
+void dissidia_tagteam_bp_add(int ch) {
+    if (!g_me.host || g_me.bp_n >= 5 || ch < 1 || ch > 0x3F || bp_party(group_players()) < 0) return;
+    for (int i = 0; i < g_me.bp_n; i++) if (g_me.bp_regs[i] == ch) return;   // (a party holds a character once)
+    const int r = g_me.bp_n++; g_me.bp_regs[r] = static_cast<uint8_t>(ch); g_me.bp_cfg[r][0] = 5; g_me.bp_cfg[r][1] = 0; g_me.bp_cfg[r][2] = 0;
+    mp_sync_mode(); std::fprintf(stderr, "[TTBP] CPU party row %d: char %d added (%d row(s))\n", r + 1, ch, g_me.bp_n);
+}
+void dissidia_tagteam_bp_remove(int row) {
+    if (!g_me.host || row < 0 || row >= g_me.bp_n) return;
+    for (int i = row; i + 1 < g_me.bp_n; i++) { g_me.bp_regs[i] = g_me.bp_regs[i + 1]; std::memcpy(g_me.bp_cfg[i], g_me.bp_cfg[i + 1], 3); }
+    g_me.bp_n--; g_me.bp_regs[g_me.bp_n] = 0; mp_sync_mode(); std::fprintf(stderr, "[TTBP] CPU party row %d removed (%d row(s) left)\n", row + 1, g_me.bp_n);
+}
+void dissidia_tagteam_bp_set_cfg(int row, const uint8_t in[3]) {
+    if (!g_me.host || row < 0 || row >= g_me.bp_n) return;
+    g_me.bp_cfg[row][0] = static_cast<uint8_t>(std::clamp<int>(in[0], 1, 9)); g_me.bp_cfg[row][1] = std::min<uint8_t>(in[1], 100); g_me.bp_cfg[row][2] = std::min<uint8_t>(in[2], 8);
+    mp_sync_mode(); std::fprintf(stderr, "[TTBP] CPU party row %d (char %d) settings: strength %u, level %u (0 = Auto), type %u (0 = Random)\n", row + 1, g_me.bp_regs[row], g_me.bp_cfg[row][0], g_me.bp_cfg[row][1], g_me.bp_cfg[row][2]);
+}
+// The characters the picker offers (not already in the CPU party): ids, in roster order.
+int dissidia_tagteam_bp_pick_list(uint8_t out[64]) {
+    int n = 0;
+    for (int c = 1; c <= 33; c++) {
+        if (!info_for_char(c)) continue;
+        bool owned = false; for (uint32_t i = 0; i < 48 && !owned; i++) { const uint32_t r = kRecSave + i * kRecStride; owned = g_ram[r & 0x07FFFFFFu] == c && g_ram[(r + 1) & 0x07FFFFFFu] != 0; }
+        if (!owned) continue;   // the table block of a row is built from a save record (the owner's machine builds it): only characters with a record
+        bool used = false; for (int i = 0; i < g_me.bp_n; i++) used |= g_me.bp_regs[i] == c; if (!used) out[n++] = static_cast<uint8_t>(c); }
+    return n;
+}
+std::string dissidia_tagteam_char_name(int id) { return char_label(id, true); }
+// Enter Battle on the setup screen: not before the CPU party has a row and its owner is known.
+bool dissidia_tagteam_bp_enter_blocked() {
+    const std::vector<NetPlayer> pl = group_players(); const NetPlayer* h = nullptr; const int cp = bp_party(pl, &h);
+    if (cp < 0) return false;
+    return h->bp_n == 0 || bp_owner_id(h->party) == 255;
+}
+// Party Select's ready test (FUN_08A7046C): the CPU party may be empty.
+int dissidia_tagteam_bp_party_for_select() { return bp_party(group_players()); }
+// Just before retail's Enter Battle step (FUN_08AB78E8 publishes the owners and the host sends the table): the machine of the CPU party's owner builds the
+// party's table blocks, like retail does for the rows its own player registered.
+void dissidia_tagteam_bp_finalize(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const std::vector<NetPlayer> pl = group_players(); const NetPlayer* h = nullptr; const int cp = bp_party(pl, &h);
+    if (cp < 0 || h->bp_n == 0) return;
+    const int oid = bp_owner_id(h->party), me = static_cast<int>(rd(GB_MEMBER));
+    std::fprintf(stderr, "[TTBP] Enter Battle step: CPU party %d, %d row(s), owner id %d, this machine is id %d\n", cp, h->bp_n, oid, me);
+    if (oid != me) return;
+    for (int k = 0; k < h->bp_n; k++) { call(0x088F6D80u, static_cast<uint32_t>(cp), static_cast<uint32_t>(k), h->bp_regs[k], 0); std::fprintf(stderr, "[TTBP] table block party %d row %d = char %d built here\n", cp, k, h->bp_regs[k]); }
+}

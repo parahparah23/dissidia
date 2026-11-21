@@ -45,6 +45,18 @@ int dissidia_tagteam_local_party();
 bool dissidia_tagteam_cpu_party_on();
 int dissidia_tagteam_defect_side();
 void dissidia_tagteam_add_cpu_request(bool on);
+int dissidia_tagteam_bp_party();
+bool dissidia_tagteam_bp_can_edit();
+int dissidia_tagteam_bp_count();
+int dissidia_tagteam_bp_row(int i, uint8_t cfg[3]);
+void dissidia_tagteam_bp_add(int ch);
+void dissidia_tagteam_bp_remove(int row);
+void dissidia_tagteam_bp_set_cfg(int row, const uint8_t in[3]);
+int dissidia_tagteam_bp_pick_list(uint8_t out[64]);
+std::string dissidia_tagteam_char_name(int id);
+bool dissidia_tagteam_bp_enter_blocked();
+int dissidia_tagteam_bp_party_for_select();
+void dissidia_tagteam_bp_finalize(uint8_t* rdram, recomp_context* ctx);
 bool dissidia_tagteam_add_cpu_pending();
 bool dissidia_tagteam_sp_tag_on();
 bool dissidia_tagteam_sp_mode();
@@ -60,6 +72,7 @@ namespace {
 
 using dissidia::LayerColor;
 constexpr uint32_t OVL_BASE = 0x089DD4C0u;
+constexpr uint32_t READY_TEST = 0x08A7046Cu, ENTER_STEP = 0x08AB78E8u;   // ovl_menu: Party Select's 'both parties have a member' test (a0 = the screen; list p at +280 + 12 p, count at +10), Enter Battle's table step
 constexpr uint32_t SETUP_TICK = 0x08AA8F9Cu;   // ovl_menu: Tournament setup screen update (a0 = the screen)
 // The single player Tournament screen (Quick Battle > Party): its per-frame function and the round dialog's update. screen + 0x7CFC = M: +4 the state, +1444 the round
 // the dialog is open on (0 = 1st), +1488 the dialog's cursor row (0 STAGE, 1 STRENGTH, 2 LEVEL, 3 TYPE, 4 RULES, 5 JUDGEMENT).
@@ -73,7 +86,7 @@ constexpr float kRowY0 = 120.f, kRowPitch = 20.f, kColX0 = 2.f, kColX1 = 164.f;
 // for the round dialog work). screen + 0x7CFC = M (seen = the screen itself): M + 4 the state (2 = the list), M + 1444 the cursor row (0..4 = 1st..5th, 5 = Enter Battle).
 
 uint8_t* g_ram = nullptr;
-FuncPtr g_orig_tick = nullptr, g_play_se = nullptr, g_orig_sp_tick = nullptr, g_orig_sp_dlg = nullptr;
+FuncPtr g_orig_ready = nullptr, g_orig_enter = nullptr, g_orig_tick = nullptr, g_play_se = nullptr, g_orig_sp_tick = nullptr, g_orig_sp_dlg = nullptr;
 bool g_dlg_sp = false;   // the CPU settings dialog edits a single player CPU row (else a Communications row)
 dissidia::MenuLayer g_layer;
 uint32_t g_prev_buttons = 0;
@@ -86,6 +99,11 @@ std::atomic<int> g_inject_cross{0};   // "Add CPU" (L on the free row) presses C
 std::atomic<uint32_t> g_pad_polls{0}, g_sq_stamp{0};   // pad polls; the poll at which the setup screen last ran with Square taken (the block ends a few polls after the screen stops ticking)
 std::atomic<bool> g_sp_sq_block{false};   // single player setup list: Square is ours (Assist On / Off), the screen does not see it
 int g_dlg_row = 0, g_dlg_field = 0;
+bool g_dlg_bp = false;   // the CPU settings dialog edits a row of the host's CPU party (docs "Proper PvE")
+int g_dlg_mode = 0;      // 0 = the CPU settings dialog, 1 = the CPU party's character picker
+uint8_t g_pick_list[64] = {}; int g_pick_n = 0, g_pick_sel = 0;
+std::atomic<int> g_enter_block{0};   // 1 = Start is ours (blocked), 2 = Cross too (the cursor is on Enter Battle): the CPU party has no row yet
+std::atomic<uint32_t> g_enter_stamp{0};
 uint8_t g_dlg_cfg[3] = {5, 0, 0};
 float g_dlg_hold = 0.f;
 std::chrono::steady_clock::time_point g_last{};
@@ -167,7 +185,7 @@ void change_field(int f, int dir, bool big) {
     if (f == 0) c[0] = static_cast<uint8_t>(std::clamp(int(c[0]) + dir, 1, 9));
     else if (f == 1) c[1] = static_cast<uint8_t>(std::clamp(int(c[1]) + dir * (big ? 10 : 1), 0, 100));
     else c[2] = static_cast<uint8_t>((int(c[2]) + dir + 9) % 9);
-    if (g_dlg_sp) dissidia_tagteam_sp_set_cfg(g_dlg_row, c); else dissidia_tagteam_set_cpu_cfg(g_dlg_row, c);
+    if (g_dlg_sp) dissidia_tagteam_sp_set_cfg(g_dlg_row, c); else if (g_dlg_bp) dissidia_tagteam_bp_set_cfg(g_dlg_row, c); else dissidia_tagteam_set_cpu_cfg(g_dlg_row, c);
 }
 // The dialog: a dark blue panel in the style of the screen's plates, three rows "NAME  < value >", the selected row lit.
 void dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float dt, float a) {
@@ -202,6 +220,35 @@ void dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float dt, flo
     g_layer.text(hint, true, 5.6f, (x0 + x1) / 2.f - hw / 2.f, y1 - 5.f, LayerColor{200, 205, 240, a});
 }
 
+// The CPU party's character picker (host, setup screen: L on the order column): a list of the roster, Up / Down (L / R: a page), Cross adds, Circle closes.
+void picker(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a) {
+    if (pressed & BTN_CIRCLE) { g_dlg_open = false; play_se(rdram, ctx, 1); return; }
+    if (g_pick_n <= 0) { g_dlg_open = false; return; }
+    if (pressed & BTN_CROSS) { dissidia_tagteam_bp_add(g_pick_list[g_pick_sel]); g_dlg_open = false; play_se(rdram, ctx, 1); return; }
+    if (pressed & BTN_UP) { g_pick_sel = (g_pick_sel + g_pick_n - 1) % g_pick_n; play_se(rdram, ctx, 1); }
+    if (pressed & BTN_DOWN) { g_pick_sel = (g_pick_sel + 1) % g_pick_n; play_se(rdram, ctx, 1); }
+    if (pressed & BTN_L) { g_pick_sel = std::max(0, g_pick_sel - 7); play_se(rdram, ctx, 1); }
+    if (pressed & BTN_R) { g_pick_sel = std::min(g_pick_n - 1, g_pick_sel + 7); play_se(rdram, ctx, 1); }
+    const float x0 = 150.f, x1 = 330.f, y0 = 44.f, y1 = 236.f;
+    g_layer.band(x0, y0, x1, y1, [&](float x, float y) {
+        const float edge = std::min({x - x0, x1 - x, y - y0, y1 - y, 2.f}) / 2.f;
+        const float t = (y - y0) / (y1 - y0);
+        return LayerColor{26 + 20 * (1 - t), 28 + 20 * (1 - t), 78 + 40 * (1 - t), 0.95f * a * std::max(0.f, edge)};
+    });
+    const char* title = "ADD CPU OPPONENT";
+    const float tw = g_layer.text(title, true, 8.2f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+    g_layer.text(title, true, 8.2f, (x0 + x1) / 2.f - tw / 2.f, y0 + 13.f, LayerColor{255, 255, 255, a});
+    const int vis = 8; const int top = std::clamp(g_pick_sel - vis / 2, 0, std::max(0, g_pick_n - vis));
+    for (int i = 0; i < vis && top + i < g_pick_n; i++) {
+        const int k = top + i; const float ry = y0 + 22.f + 20.f * float(i);
+        if (k == g_pick_sel) g_layer.band(x0 + 8.f, ry, x1 - 8.f, ry + 18.f, [&](float, float y) { return LayerColor{120, 150, 230, 0.55f * a * (1.f - 0.4f * (y - ry) / 18.f)}; });
+        g_layer.text(dissidia_tagteam_char_name(g_pick_list[k]), true, 7.6f, x0 + 16.f, ry + 13.f, LayerColor{235, 238, 255, a});
+    }
+    const char* hint = "Up/Down  L/R: page  Cross: add  Circle: close";
+    const float hw = g_layer.text(hint, true, 5.6f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+    g_layer.text(hint, true, 5.6f, (x0 + x1) / 2.f - hw / 2.f, y1 - 5.f, LayerColor{200, 205, 240, a});
+}
+
 void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     const auto now = std::chrono::steady_clock::now();
     const float dt = std::min(0.1f, std::chrono::duration<float>(now - g_last).count());
@@ -220,11 +267,25 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     int first = -1; for (int i = 0; i < 5 && first < 0; i++) if ((own >> i) & 1) first = i;
     const bool switchable = left && row >= 0 && row < n && row < 5 && ((own >> row) & 1) && (row != first || dissidia_tagteam_cpu_party_on());   // the player's own rows after his first (the first too: a CPU first row makes him the keeper of a CPU party)
     const bool cpu_row = switchable && ((dissidia_tagteam_local_cpu_mask() >> row) & 1) && row != first;   // (the settings of a keeper's first row are not in the beacon bytes: default strength 5 / Auto / Random)
-    if (g_dlg_open && !cpu_row) g_dlg_open = false;   // the row went away / is a player again
-    const bool free_row = left && n >= 0 && n < 5 && row == n && !g_dlg_open && dissidia_tagteam_cpu_party_on();   // the cursor is on the next free row: L = Add CPU
+    if (g_dlg_open && !g_dlg_bp && g_dlg_mode == 0 && !cpu_row) g_dlg_open = false;   // the row went away / is a player again
+    const bool free_row = left && n >= 1 && n < 5 && row == n && !g_dlg_open;   // the cursor is on the next free row: L = Add CPU
     if (free_row && (pressed & BTN_L)) { dissidia_tagteam_add_cpu_request(true); g_inject_cross.store(3, std::memory_order_relaxed); play_se(rdram, ctx, 1); }
     bool opened_now = false;
-    if (!g_dlg_open && cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_sp = false; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; dissidia_tagteam_get_cpu_cfg(row, g_dlg_cfg); g_dlg_open = true; play_se(rdram, ctx, 1); }
+    // The host's CPU party (docs "Proper PvE"): when every human chose one party the other is a CPU party. Its rows are the order column's (1st..5th): L adds one (picker),
+    // Select opens a row's STRENGTH / LEVEL / TYPE, Square takes it out. Everyone sees the rows (plates at the right edge); only the host edits.
+    const int bpp = dissidia_tagteam_bp_party();
+    const bool bp_host = bpp >= 0 && dissidia_tagteam_is_host();
+    const int bpn = bpp >= 0 ? dissidia_tagteam_bp_count() : 0;
+    const bool ord = bpp >= 0 && r32(screen + SCR_COLUMN) == 1u && row >= 0 && row < 5;
+    if (g_dlg_open && (g_dlg_bp || g_dlg_mode == 1) && !(bp_host && ord)) { g_dlg_open = false; g_dlg_bp = false; g_dlg_mode = 0; }
+    if (bp_host && ord && !g_dlg_open) {
+        if ((pressed & BTN_L) && bpn < 5) { g_pick_n = dissidia_tagteam_bp_pick_list(g_pick_list); g_pick_sel = 0; g_dlg_mode = 1; g_dlg_bp = false; g_dlg_open = true; opened_now = true; play_se(rdram, ctx, 1); }
+        else if ((pressed & BTN_SQUARE) && row < bpn) { dissidia_tagteam_bp_remove(row); play_se(rdram, ctx, 1); }
+        else if ((pressed & BTN_OPEN) && row < bpn) { opened_now = true; g_dlg_mode = 0; g_dlg_bp = true; g_dlg_sp = false; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; uint8_t cf[3] = {5, 0, 0}; dissidia_tagteam_bp_row(row, cf); std::memcpy(g_dlg_cfg, cf, 3); g_dlg_open = true; play_se(rdram, ctx, 1); }
+    }
+    const bool enter_blocked = bpp >= 0 && dissidia_tagteam_bp_enter_blocked();
+    g_enter_block.store(enter_blocked ? (r32(screen + SCR_COLUMN) == 1u && row == 5 ? 2 : 1) : 0, std::memory_order_relaxed); g_enter_stamp.store(g_pad_polls.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    if (!g_dlg_open && cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_sp = false; g_dlg_bp = false; g_dlg_mode = 0; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; dissidia_tagteam_get_cpu_cfg(row, g_dlg_cfg); g_dlg_open = true; play_se(rdram, ctx, 1); }
     if (!g_dlg_open && switchable && (pressed & BTN_SQUARE)) { dissidia_tagteam_toggle_cpu_row(row); play_se(rdram, ctx, 1); }
     const uint8_t mask = dissidia_tagteam_local_cpu_mask();
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
@@ -256,12 +317,25 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     }
     if (n >= 1 && n < 5) {   // the next free row: it adds a character (yours; Square makes it a CPU)
         const float y = kRowY0 + kRowPitch * float(n);
-        const char* hint = dissidia_tagteam_cpu_party_on() ? "Add a character   (L: Add CPU)" : "Add a character";
+        const char* hint = "Add a character   (L: Add CPU)";
         const float w = g_layer.text(hint, true, 7.0f, 0, 0, LayerColor{0, 0, 0, 0}, true);
         g_layer.text(hint, true, 7.0f, (kColX0 + kColX1) / 2.f + 12.f - w / 2.f, y + 12.6f, LayerColor{92, 88, 128, 0.85f * a});
     }
     // The button bar, right to left from the screen's own R hint: Square (on a switchable row), then the host's choice.
     float right = 318.f;
+    if (bpp >= 0) {   // the CPU party's hints
+        const std::string pname = std::string("Party ") + (bpp == 0 ? "A" : "B");
+        if (bp_host && ord && !g_dlg_open) {
+            if (row < bpn) { right = bar_text(right, "Select: CPU Settings", a) - 8.f; right = bar_text(right, "Remove", a); right = key(right - 3.f, "", true, a) - 8.f; }
+            else if (bpn < 5) { right = bar_text(right, "Add CPU opponent", a); right = key(right - 3.f, "L", false, a) - 8.f; }
+        }
+        std::string note = pname + " is a CPU party (" + std::to_string(bpn) + (bpn == 1 ? " opponent" : " opponents") + ")";
+        if (bp_host) note += bpn < 5 ? ":  move to the 1st-5th rows, L adds an opponent" : "";
+        else note += ": the host sets it up";
+        if (enter_blocked) note = bp_host ? "Add at least one CPU opponent (cursor on a 1st-5th row, L) before Enter Battle" : "Waiting for the host to add the CPU opponents";
+        const float em = 5.6f, w = g_layer.text(note, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        g_layer.text(note, true, em, 240.f - w / 2.f, 266.f, enter_blocked ? LayerColor{150, 40, 40, a} : LayerColor{60, 60, 110, a});
+    }
     if (cpu_row && !g_dlg_open) right = bar_text(right, "Select: CPU Settings", a) - 8.f;
     if (switchable) {
         right = bar_text(right, (mask >> row) & 1 ? "Player" : "CPU", a);
@@ -272,7 +346,7 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
     if (players >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR")) {
         uint8_t m = dissidia_tagteam_mode_byte();
         const bool host = dissidia_tagteam_is_host();
-        if (host && (pressed & BTN_L) && !free_row) {
+        if (host && (pressed & BTN_L) && !free_row && !(bpp >= 0 && ord)) {
             int k = 0; for (int i = 0; i < 4; i++) if (kModes[i] == m) k = i;
             m = kModes[(k + 1) % 4];
             dissidia_tagteam_set_mode_byte(m);
@@ -281,10 +355,34 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
         right = bar_text(right, "Tag Team " + mode_label(m ? m : kModes[0]), a);
         if (host) key(right - 3.f, "L", false, a);
     }
-    if (g_dlg_open) dialog(rdram, ctx, opened_now ? 0u : pressed, dt, a);
+    if (g_dlg_open) { if (g_dlg_mode == 1) picker(rdram, ctx, opened_now ? 0u : pressed, a); else dialog(rdram, ctx, opened_now ? 0u : pressed, dt, a); }
     g_layer.publish();
 }
 
+
+// Party Select's test FUN_08A7046C(screen): 1 when every member chose a party and both party lists (screen + 280 + 12 p, count at +10) are not empty. In a group whose humans all chose
+// one party the other is the host's CPU party: it may be empty (the test is run again with a stand-in entry in that list, then the list is put back).
+void ready_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(READY_TEST)) f(rdram, ctx); return; }
+    const uint32_t base = static_cast<uint32_t>(ctx->r[4]);
+    g_orig_ready(rdram, ctx);
+    if (ctx->r[2] != 0 || !dissidia_tagteam_group_on()) return;
+    uint16_t c0, c1; std::memcpy(&c0, g_ram + ((base + 290u) & 0x07FFFFFFu), 2); std::memcpy(&c1, g_ram + ((base + 302u) & 0x07FFFFFFu), 2);
+    if ((c0 == 0) == (c1 == 0) || std::max<int>(c0, c1) < 2) return;   // the humans (two or more) all chose one party: the other is the CPU party
+    const int cp = c0 == 0 ? 0 : 1;
+    const uint32_t list = base + 280u + 12u * static_cast<uint32_t>(cp);
+    uint16_t cnt, id0; std::memcpy(&cnt, g_ram + ((list + 10u) & 0x07FFFFFFu), 2); std::memcpy(&id0, g_ram + (list & 0x07FFFFFFu), 2);
+    const uint16_t one = 1, stand = 0x7FFE;
+    std::memcpy(g_ram + ((list + 10u) & 0x07FFFFFFu), &one, 2); std::memcpy(g_ram + (list & 0x07FFFFFFu), &stand, 2);
+    ctx->r[4] = base; g_orig_ready(rdram, ctx);
+    std::memcpy(g_ram + ((list + 10u) & 0x07FFFFFFu), &cnt, 2); std::memcpy(g_ram + (list & 0x07FFFFFFu), &id0, 2);
+    static bool logged = false; if (ctx->r[2] != 0 && !logged) { logged = true; std::fprintf(stderr, "[TTBP] Party Select: the CPU party (Party %c) may be empty, the match can start\n", cp ? 'B' : 'A'); }
+}
+void enter_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(ENTER_STEP)) f(rdram, ctx); return; }
+    if (dissidia_tagteam_group_on()) dissidia_tagteam_bp_finalize(rdram, ctx);
+    g_orig_enter(rdram, ctx);
+}
 
 void setup_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(SETUP_TICK)) f(rdram, ctx); return; }
@@ -504,7 +602,11 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
     if (int ij = g_inject_cross.load(std::memory_order_relaxed); ij > 0) { g_inject_cross.store(ij - 1, std::memory_order_relaxed); raw = (ij == 2) ? (raw | BTN_CROSS) : (raw & ~BTN_CROSS); }   // Add CPU: one Cross press (edge) for the screen
     if (g_sp_sq_block.load(std::memory_order_relaxed) && g_pad_polls.fetch_add(1, std::memory_order_relaxed) - g_sq_stamp.load(std::memory_order_relaxed) < 40u) raw &= ~BTN_SQUARE;
     else g_pad_polls.fetch_add(1, std::memory_order_relaxed);
-    return g_dlg_open.load(std::memory_order_relaxed) ? 0u : raw;
+    if (const int eb = g_enter_block.load(std::memory_order_relaxed); eb && g_pad_polls.load(std::memory_order_relaxed) - g_enter_stamp.load(std::memory_order_relaxed) < 40u) { raw &= ~0x8u; if (eb == 2) raw &= ~BTN_CROSS; }   // the CPU party has no opponent yet: Start (and Cross on Enter Battle) do nothing
+    static std::atomic<int> hold{0};   // a button that closed a dialog stays down for a few polls: the screen under it must not see it
+    if (g_dlg_open.load(std::memory_order_relaxed)) { hold.store(12, std::memory_order_relaxed); return 0u; }
+    if (const int h = hold.load(std::memory_order_relaxed); h > 0) { hold.store(h - 1, std::memory_order_relaxed); return 0u; }
+    return raw;
 }
 
 void dissidia_tagteam_menu_install(uint8_t* rdram) {
@@ -514,6 +616,10 @@ void dissidia_tagteam_menu_install(uint8_t* rdram) {
     g_play_se = psp_dispatch_probe_lookup(PLAY_SE);
     if (!g_orig_tick) { std::fprintf(stderr, "[TTCPU] setup screen hook not installed\n"); return; }
     psp_dispatch_register(SETUP_TICK, setup_tick_hook);
+    // Proper PvE (docs/tag-team.md): Party Select accepts an empty CPU party; Enter Battle's table step builds the CPU party's blocks on its owner's machine
+    g_orig_ready = ovl_menu_lookup(READY_TEST); g_orig_enter = ovl_menu_lookup(ENTER_STEP);
+    if (g_orig_ready) psp_dispatch_register(READY_TEST, ready_hook);
+    if (g_orig_enter) psp_dispatch_register(ENTER_STEP, enter_hook);
     // single player Tournament screen: the round dialog of matchups 2.. (tag mode) and the CPU rows (docs/tag-team.md "Single player: CPU rows"), one tick hook
     g_orig_sp_tick = ovl_menu_lookup(SP_TICK); g_orig_sp_dlg = ovl_menu_lookup(SP_DLG);
     if (g_orig_sp_tick) psp_dispatch_register(SP_TICK, sp_tick_hook);
