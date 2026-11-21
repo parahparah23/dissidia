@@ -175,7 +175,12 @@ uint32_t psp_kmem_bump_alloc_named(uint32_t size, const char* name);
 /// big contiguous block can still come from it later.
 uint32_t psp_kmem_bump_alloc_named_r2(uint32_t size, const char* name);
 
-/// Bytes still unallocated in one region (1 or 2; 0 for an unconfigured region).
+/// Bump-allocate from the high region (region 3, guest PSP_HI_RAM_BASE..PSP_HI_RAM_END, above the 64 MB RAM;
+/// see psp_memory.h). Page-aligned, never returned by the partition allocator: a game opts in per block.
+/// Code that range-checks pointers into such a block must use psp_guest_ok(). Returns 0 when it does not fit.
+uint32_t psp_kmem_bump_alloc_hi(uint32_t size, const char* name);
+
+/// Bytes still unallocated in one region (1, 2 or 3 = high region; 0 for an unconfigured region).
 uint32_t psp_kmem_free_region(int region);
 
 /// True when allocating `sizes[0..n)` in order (each rounded up to 256 B, the

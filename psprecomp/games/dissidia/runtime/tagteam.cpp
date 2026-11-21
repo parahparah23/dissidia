@@ -5,6 +5,7 @@
 //   PSPRECOMP_TAGTEAM=1        turn the spike on
 //   PSPRECOMP_TAGTEAM_EXTRAS=n 1 = the enemy's second fighter, 2 = the human's partner, 3 = both (default)
 //   PSPRECOMP_TAGTEAM_LOG=1    log what the hook does
+#include "psp_memory.h"
 #include "psp_game_module.h"
 #include "psp_runtime.h"
 #include "recomp.h"
@@ -316,7 +317,7 @@ void wr(uint32_t a, uint32_t v) {
     std::memcpy(g_ram + (a & 0x07FFFFFFu), &v, 4);
 }
 void wrf(uint32_t a, float f) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &f, 4); }
-bool ok(uint32_t a, uint32_t n) { return a >= 0x08800000u && a + n <= 0x0C000000u; }
+bool ok(uint32_t a, uint32_t n) { return psp_guest_user_ok(a, n); }
 
 FuncPtr fn(uint32_t addr) { return addr >= 0x089DD4C0u ? ovl_battle_lookup(addr) : psp_dispatch_probe_lookup(addr); }
 
@@ -604,7 +605,7 @@ void integrity_scan(const char* tag) {
     for (const uint32_t o : file_objects(mgr)) {
         const uint32_t id = ok(rd(o), 8) ? rdh(rd(o)) : 0u;
         for (uint32_t off = 8; off < 0xE4u; off += 4) {
-            const uint32_t b = rd(o + off); if (b < 0x08900000u || b >= 0x0C000000u || (b & 15u) || !ok(b - 0x10u, 0x10)) continue;
+            const uint32_t b = rd(o + off); if (b < 0x08900000u || !psp_guest_ok(b) || (b & 15u) || !ok(b - 0x10u, 0x10)) continue;
             const uint32_t csz = rd(b - 8u); if (csz < 0x20u || csz > 0x1000000u) continue;
             const uint32_t sz = csz - 0x10u; if (!ok(b, sz)) continue;
             uint64_t h = 1469598103934665603ull; for (uint32_t k = 0; k < sz; k += 4) { h ^= rd(b + k); h *= 1099511628211ull; }
@@ -2095,7 +2096,7 @@ void hud_probe(const char* tag) {
 //   - pointers to anything else (shared resources, list neighbours, registrations, targets) left where they are: they belong to the
 //     ADDRESS (identity), not to the character,
 //   - the human brain and the lock block left in place whole (the pad and the camera slot belong to the address).
-bool isptr(uint32_t w) { return (w & 3u) == 0 && w >= 0x08800000u && w < 0x0C000000u; }
+bool isptr(uint32_t w) { return (w & 3u) == 0 && psp_guest_user_ok(w); }
 struct BlkPair { Blk h, p; bool keep; };
 std::vector<BlkPair> g_pairs;
 uint32_t trans(uint32_t v) {
@@ -2543,7 +2544,7 @@ recomp_context* g_hang_ctx = nullptr;
 void hang_handler(int) {
     psp_dump_func_ring("HANGDUMP");   // the last guest functions the game thread entered (recorded with PSPRECOMP_FUNC_TRACE=1)
     std::fprintf(stderr, "[HANGDUMP] last heap allocation: heap %08X size %X\n", g_alloc_in_heap, g_alloc_in_size);
-    if (g_ram && g_alloc_in_heap >= 0x08000000u && g_alloc_in_heap < 0x0C000000u) { const uint32_t h = g_alloc_in_heap; std::fprintf(stderr, "[HANGDUMP] heap %08X: end %08X used %08X align %08X hint %08X chain:", h, rd(h + 4u), rd(h + 8u), rd(h + 12u), rd(h + 16u));
+    if (g_ram && psp_guest_ok(g_alloc_in_heap)) { const uint32_t h = g_alloc_in_heap; std::fprintf(stderr, "[HANGDUMP] heap %08X: end %08X used %08X align %08X hint %08X chain:", h, rd(h + 4u), rd(h + 8u), rd(h + 12u), rd(h + 16u));
         uint32_t p = h + 20u, prev = 0; int n = 0; for (; n < 100000 && p != rd(h + 4u); n++) { const uint32_t nx = rd(p), sz = rd(p + 8u);
             if ((n && rd(p + 4u) != prev) || nx <= p || (nx != rd(h + 4u) && nx - p < sz)) std::fprintf(stderr, " [#%d %08X+%X prev %08X (want %08X) next %08X]", n, p, sz, rd(p + 4u), prev, nx);
             if (nx <= p) break; prev = p; p = nx; }
@@ -2726,14 +2727,17 @@ void dangle_check(const char* tag) {   // later: does the holder still point at 
     }
 }
 struct LeftRefs { std::vector<std::pair<uint32_t, uint32_t>> rng; std::map<uint32_t, uint32_t> holder; };   // candidate [lo, hi) -> first outside holder word address
-// One pass over guest RAM (0x08800000 .. 0x0C000000): every word that points into one of the candidate blocks and lives outside the candidates themselves, their heap
+// One pass over guest RAM (0x08800000 .. 0x0C000000, and high RAM's used part): every word that points into one of the candidate blocks and lives outside the candidates themselves, their heap
 // headers and the actor A is a live reference (a fighter of the same character, a global, a registry, a world object ...).
 void leftover_scan(uint32_t A, const std::vector<Blk>& cand, LeftRefs& out) {
     std::vector<std::pair<uint32_t, uint32_t>> r; for (const Blk& b : cand) r.push_back({b.addr, b.addr + (b.size ? b.size : 16u)});
     std::sort(r.begin(), r.end()); out.rng = r;
     auto in_cand = [&](uint32_t a) { for (const auto& q : r) if (a + 0x10u >= q.first && a < ((q.second + 15u) & ~15u) + 0x10u) return true; return false; };   // block + its own header + the next chunk's header
-    constexpr uint32_t lo0 = 0x08800000u, hi0 = 0x0C000000u; const uint32_t lo = r.front().first, hi = r.back().second;
-    for (uint32_t a = lo0; a < hi0; a += 4) {
+    const uint32_t lo = r.front().first, hi = r.back().second;
+    // (and the used part of high RAM, region 3: the model pool, OBJDATA heap, texture overflow and sound heap can live there and point at a block)
+    const uint32_t hi_used = PSP_HI_RAM_END - psp_kmem_free_region(3);
+    const std::pair<uint32_t, uint32_t> span[2] = {{0x08800000u, 0x0C000000u}, {PSP_HI_RAM_BASE, hi_used}};
+    for (const auto& sp : span) for (uint32_t a = sp.first; a < sp.second; a += 4) {
         const uint32_t v = rd(a); if (v < lo || v >= hi) continue;
         auto it = std::upper_bound(r.begin(), r.end(), std::make_pair(v, 0xFFFFFFFFu)); if (it == r.begin()) continue; --it;
         if (v < it->first || v >= it->second) continue;
@@ -3388,7 +3392,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 for (uint32_t o = 0; o < 0x12D0u && B; o += 4) {
                     const uint32_t x = rd(A + o), y = rd(B + o);
                     if (x == y) continue;
-                    const bool px = x >= 0x08800000u && x < 0x0C000000u, py = y >= 0x08800000u && y < 0x0C000000u;
+                    const bool px = psp_guest_user_ok(x), py = psp_guest_user_ok(y);
                     if (px && py) continue;   // two different pointers: expected
                     std::fprintf(stderr, "[HPDIFF] %s +%04X slot %08X clone %08X\n", pr == 0 ? "H/P" : "C/E", o, x, y);
                 }
@@ -6652,12 +6656,18 @@ void portrait_show(uint32_t side, int c) {   // side's big-panel portrait shows 
 // loaded for a tag battle did not fit (their main bank's allocation failed: the partners had no combat voices, the call-ins no call line). The
 // heap is made from runtime memory (outside the PSP's 24 MB) with room for four more fighters. PSPRECOMP_SOUNDHEAP_RETAIL=1 keeps retail's.
 constexpr uint32_t kSoundHeapSize = 0x237000u + 0x280000u;
+// High RAM (psp_kmem_bump_alloc_hi, guest 0x0C800000+): there the heap gets room for ~16 more characters (~0.6 MB of voice banks each; the
+// 12-character stress run of 20 Nov had 0.8 MB left after 6 characters with the size above) and region 1 keeps that space for the effect pool.
+// PSPRECOMP_TAGTEAM_NOHIRAM=1 or PSPRECOMP_SOUNDHEAP_LOW=1: region 1 as before.
+constexpr uint32_t kSoundHeapHiSize = 0x237000u + 0xA00000u;
+bool soundheap_hi() { static const bool on = !std::getenv("PSPRECOMP_TAGTEAM_NOHIRAM") && !std::getenv("PSPRECOMP_SOUNDHEAP_LOW"); return on; }
 bool g_soundheap_done = false;
 void soundheap_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
-    const uint32_t size = kSoundHeapSize;
+    uint32_t size = kSoundHeapSize, base = 0;
     g_soundheap_done = true;
-    const uint32_t base = psp_kmem_bump_alloc_named(size, "SOUND_HEAP");
+    if (soundheap_hi() && (base = psp_kmem_bump_alloc_hi(kSoundHeapHiSize, "SOUND_HEAP"))) size = kSoundHeapHiSize;
+    if (!base) base = psp_kmem_bump_alloc_named(size, "SOUND_HEAP");
     if (!base) { std::fprintf(stderr, "[TAGTEAM] sound heap: no runtime memory, the retail one is used\n"); if (FuncPtr f = psp_dispatch_probe_lookup(0x088A0C10u)) { (void)f; } ctx->r[2] = 0; return; }
     wr(0x089D6C78u, base);
     call(0x08867310u, 0x09B4CF80u, base, size, 0x40u);
@@ -8063,7 +8073,7 @@ void dissidia_tagteam_after_free(uint8_t* rdram, recomp_context* ctx, uint32_t h
 // hooks_models.cpp: what the sound heap (soundheap_hook) will still take from the host heap, so the model pool and the effect pool
 // extension leave room for it in region 1.
 int dissidia_tagteam_loading_char() { return g_loading_char; }
-uint32_t dissidia_tagteam_soundheap_pending() { return (g_soundheap_done || std::getenv("PSPRECOMP_SOUNDHEAP_RETAIL")) ? 0u : kSoundHeapSize; }
+uint32_t dissidia_tagteam_soundheap_pending() { return (g_soundheap_done || std::getenv("PSPRECOMP_SOUNDHEAP_RETAIL") || soundheap_hi()) ? 0u : kSoundHeapSize; }   // (high RAM: none of region 1)
 void dissidia_tagteam_presweep(uint8_t*, recomp_context*) {}   // (kept for hooks_models; the sweep runs on the frame after the teardown, see dissidia_tagteam_frame_end)
 void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx) {
     TtStep tt_step_("frame_end");

@@ -37,6 +37,7 @@
 // lowered 1 MiB at a time (never below retail), so a too-big mod degrades to a warning instead of a failed
 // allocation. All blocks come from the same bump allocator, so the effect allocator, the pool and the file heap
 // cannot overlap; psp_kmem_log_layout() prints them ([MEM] lines) and flags any overlap.
+#include "psp_memory.h"
 #include "psp_game_module.h"
 #include "hle/psp_hle.h"
 #include "recomp.h"
@@ -86,6 +87,10 @@ bool g_reserved = false;                      // pool + file heap reserved toget
 uint32_t g_staging = kRetailStaging;
 uint32_t g_pool_block = 0, g_pool_size = 0;
 uint32_t g_tt_pool_extra = 0;   // tag team: extra pool bytes (dissidia_model_pool_request_extra)
+// High RAM (psp_kmem_bump_alloc_hi, guest 0x0C800000+): the tag team's model pool, OBJDATA heap and texture overflow heap live there
+// instead of regions 1/2. PSPRECOMP_TAGTEAM_NOHIRAM=1 = the old layout.
+bool hiram_on() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_NOHIRAM") == nullptr; return on; }
+uint32_t alloc_hi_or_r2(uint32_t size, const char* name) { const uint32_t a = hiram_on() ? psp_kmem_bump_alloc_hi(size, name) : 0u; return a ? a : psp_kmem_bump_alloc_named_r2(size, name); }
 uint32_t g_od_block = 0, g_od_size = 0; bool g_od_done = false;   // tag team: the OBJDATA heap (0x41000, the characters' D_ data) served from the host heap with more room
 FuncPtr g_orig_small_alloc = nullptr;
 bool g_tt_pool = false;         // g_pool_block is the tag team pool (not tied to the budget reservation)
@@ -187,6 +192,22 @@ void alloc_hook(uint8_t* rdram, recomp_context* ctx) {
         }
         if (g_wm_block != 0) { g_wm_in_use = true; if (g_trace) std::fprintf(stderr, "[MODELS]   -> host block\n"); ctx->r[2] = static_cast<int32_t>(g_wm_block); return; }
     }
+    if (static_cast<uint32_t>(ctx->r[4]) == kRetailPool && !g_pool_in_use && g_tt_pool_extra && g_pool_block == 0 && !g_reserved && hiram_on()) {
+        // High RAM (guest 0x0C800000+, psp_memory.h): the tag team pool goes there, at full size, and region 1 keeps all of its
+        // room for the effect allocator's extension. PSPRECOMP_TAGTEAM_HIPOOL = pool bytes on top of retail (default 24 MiB, ~10
+        // extra characters resident without unloading).
+        const char* hp = std::getenv("PSPRECOMP_TAGTEAM_HIPOOL");
+        const uint32_t extra = std::max<uint32_t>(g_tt_pool_extra, hp ? static_cast<uint32_t>(std::strtoul(hp, nullptr, 0)) : 0x1800000u);
+        const uint32_t size = rd256(kRetailPool + extra);
+        if ((g_pool_block = psp_kmem_bump_alloc_hi(size, "MODEL_POOL_TAGTEAM"))) {
+            g_pool_size = kRetailPool + extra;
+            g_tt_pool = true;
+            std::fprintf(stderr, "[MODELS] tag team model pool %u B at 0x%08X in high RAM (retail %u B)\n", g_pool_size, g_pool_block, kRetailPool);
+            reserve_tex_overflow();
+        } else {
+            std::fprintf(stderr, "[MODELS] high RAM has no room for a %u B tag team model pool: region 1/2 as before\n", size);
+        }
+    }
     if (static_cast<uint32_t>(ctx->r[4]) == kRetailPool && !g_pool_in_use && g_tt_pool_extra && g_pool_block == 0 && !g_reserved) {
         // Region 1 must keep, behind the pool: the sound heap (if still to come), the effect allocator with the extension it gets
         // (kFxMinExtension at least; the extension must be contiguous with the retail block, so both have to come from region 1) and
@@ -225,7 +246,7 @@ void small_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_tt_pool_extra && !g_od_done && static_cast<uint32_t>(ctx->r[4]) == 0x41000u) {
         g_od_done = true;
         const uint32_t size = kObjdataTagSize;
-        g_od_block = psp_kmem_bump_alloc_named_r2(rd256(size), "OBJDATA_TAGTEAM");   // region 2 (the game heap code works there: sp5c run, 17 Nov), region 1 is for the pool and the effect pool
+        g_od_block = alloc_hi_or_r2(rd256(size), "OBJDATA_TAGTEAM");   // region 2 (the game heap code works there: sp5c run, 17 Nov), region 1 is for the pool and the effect pool
         if (g_od_block) { g_od_size = size; std::fprintf(stderr, "[MODELS] tag team OBJDATA heap %u B at 0x%08X (retail %u B)\n", size, g_od_block, 0x41000u); ctx->r[2] = static_cast<int32_t>(g_od_block); return; }
     }
     g_orig_small_alloc(rdram, ctx);
@@ -264,7 +285,7 @@ void register_hook(uint8_t* rdram, recomp_context* ctx) {
     if (static_cast<uint32_t>(ctx->r[7]) == kRetailStaging && g_staging != kRetailStaging)
         ctx->r[7] = static_cast<int32_t>(g_staging);
     const uint32_t heap = static_cast<uint32_t>(ctx->r[6]);
-    if (heap >= 0x08800000u && heap < 0x0C000000u) {
+    if (psp_guest_user_ok(heap)) {
         const uint32_t end = *reinterpret_cast<const uint32_t*>(rdram + ((heap + 4u) & 0x07FFFFFFu));
         const uint32_t slot = static_cast<uint32_t>(ctx->r[7]);
         if (g_trace) std::fprintf(stderr, "[MODELS] register slot id 0x%X heap 0x%08X end 0x%08X size %u\n", (uint32_t)ctx->r[5], heap, end, slot);
@@ -305,7 +326,7 @@ FuncPtr g_orig_heap_free = nullptr;
 bool in_overflow(uint32_t p) { return g_ov_heap && p >= g_ov_heap && p < g_ov_heap + kOverflowSize; }
 void reserve_tex_overflow() {
     if (g_ov_block || !g_tt_pool_extra) return;
-    g_ov_block = psp_kmem_bump_alloc_named_r2(rd256(kOverflowSize), "TEXHEAP_TAGTEAM");
+    g_ov_block = alloc_hi_or_r2(rd256(kOverflowSize), "TEXHEAP_TAGTEAM");
     if (!g_ov_block) std::fprintf(stderr, "[MODELS] no room for the %u B tag team texture overflow heap\n", kOverflowSize);
 }
 
@@ -329,7 +350,7 @@ const char* g_tt_step = "";   // tagteam.cpp: the tag team operation in progress
 uint64_t g_hc_frame = 0;      // frames seen by dissidia_heapcheck_frame
 namespace {
 inline uint32_t hw(const uint8_t* r, uint32_t a) { return *reinterpret_cast<const uint32_t*>(r + (a & 0x07FFFFFCu)); }
-inline bool hc_ram(uint32_t a) { return a >= 0x08800000u && a < 0x0BF00000u; }
+inline bool hc_ram(uint32_t a) { return psp_guest_user_ok(a); }   // high RAM too (tag team pools)
 // would FUN_0885C6CC(heap, size, align, .., topdown) corrupt the chain? (an exact replay of its top / hint placement decisions)
 bool topdown_would_break(const uint8_t* r, uint32_t h, uint32_t size, int32_t align_arg) {
     if (!hc_ram(h)) return false;
@@ -513,7 +534,7 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
         static int n = 0;
         if (n++ < 100) {
             uint32_t used = 0, end = 0;
-            if (heap >= 0x08000000u && heap < 0x0C000000u) {
+            if (psp_guest_ok(heap)) {
                 const uint32_t* h = reinterpret_cast<const uint32_t*>(rdram + (heap & 0x07FFFFFFu));
                 end = h[1]; used = h[2];
             }
@@ -593,7 +614,7 @@ void hh_bridge(uint8_t* rdram, uint32_t heap, uint32_t gap_hdr, uint32_t ext, ui
 void fx_heap_init_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t heap = static_cast<uint32_t>(ctx->r[4]), base = static_cast<uint32_t>(ctx->r[5]);
     const uint32_t size = static_cast<uint32_t>(ctx->r[6]);
-    if (heap == kSndHeap && static_cast<uint32_t>(ctx->r[7]) == 0x40u && !g_gap_blk[1]) {
+    if (heap == kSndHeap && static_cast<uint32_t>(ctx->r[7]) == 0x40u && !g_gap_blk[1] && base < PSP_HI_RAM_BASE) {   // (a high-RAM sound heap needs no bridge)
         if (const uint32_t want = bridge_want(heap)) if (const uint32_t ext = psp_kmem_bump_alloc_named_r2(want, "SOUND_HEAP (region 2 part)")) {
             ctx->r[6] = static_cast<int32_t>(size - 64u);
             g_orig_fx_heap_init(rdram, ctx);
@@ -684,7 +705,7 @@ void hh_free_hook(uint8_t* rdram, recomp_context* ctx) {
 // FUN_088A0DFC(system, index): refcount - 1, freed at 0. PSPRECOMP_SNDREG_LOG=1 (or PSPRECOMP_HHEAP_LOG): every call with the table's occupancy.
 bool sndreg_log() { static const bool v = std::getenv("PSPRECOMP_SNDREG_LOG") || std::getenv("PSPRECOMP_HHEAP_LOG"); return v; }
 FuncPtr g_orig_sndreg = nullptr, g_orig_sndunreg = nullptr;
-std::string guest_str(const uint8_t* rdram, uint32_t a, size_t n = 40) { std::string r; if (a < 0x08000000u || a >= 0x0C000000u) return r; for (size_t i = 0; i < n; i++) { const char c = static_cast<char>(rdram[(a + i) & 0x07FFFFFFu]); if (!c) break; r += (c >= 32 && c < 127) ? c : '?'; } return r; }
+std::string guest_str(const uint8_t* rdram, uint32_t a, size_t n = 40) { std::string r; if (!psp_guest_ok(a)) return r; for (size_t i = 0; i < n; i++) { const char c = static_cast<char>(rdram[(a + i) & 0x07FFFFFFu]); if (!c) break; r += (c >= 32 && c < 127) ? c : '?'; } return r; }
 int sndreg_used(uint8_t* rdram, uint32_t sys) { int u = 0; for (uint32_t i = 0; i < 32; i++) if (MEM_W(rdram, sys + 48u * i) != -1) u++; return u; }
 void sndreg_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t sys = static_cast<uint32_t>(ctx->r[4]), req = static_cast<uint32_t>(ctx->r[5]);

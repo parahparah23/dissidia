@@ -35,6 +35,7 @@
 // PSPRECOMP_FPS_SCOPE=battle|all, PSPRECOMP_FPS_LOG=1 (logic rate, dt, step and how often body poses change, every
 // 5 s, plus each switch), PSPRECOMP_FX60=0 (leave the effect components below as they are, for A/B checks).
 
+#include "psp_memory.h"
 #include "psp_game_module.h"
 #include "psp_runtime.h"
 #include "psp_settings.h"
@@ -180,7 +181,7 @@ uint32_t r32(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu)
 float rdf(uint32_t a) { float f; std::memcpy(&f, g_ram + (a & 0x07FFFFFFu), 4); return f; }
 void w32(uint32_t a, uint32_t v) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &v, 4); }
 void wrf(uint32_t a, float f) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &f, 4); }
-bool ok(uint32_t a) { return a >= 0x08800000u && a < 0x0BFFFF00u; }
+bool ok(uint32_t a) { return psp_guest_user_ok(a, 0x100u); }   // high RAM too (tag team pools)
 uint32_t overlay_id() { return r32(OVL_BASE); }
 
 int64_t now_ms() {

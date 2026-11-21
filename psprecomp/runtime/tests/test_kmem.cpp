@@ -73,6 +73,24 @@ int main() {
     CHECK(psp_kmem_free_total() == 0, "nothing left after reserve_remaining");
     CHECK(psp_kmem_bump_alloc(0x100) == 0, "OOM at 0x0B000000 without a second region");
 #endif
+    // high region (region 3): only psp_kmem_bump_alloc_hi hands it out, above VRAM and its mirrors, inside the mask
+    {
+        const uint32_t free_lo = psp_kmem_free_total();
+        CHECK(psp_kmem_free_region(3) == PSP_HI_RAM_END - PSP_HI_RAM_BASE, "region 3 starts empty (56 MiB)");
+        const uint32_t h1 = psp_kmem_bump_alloc_hi(0x1800100u, "hi pool");
+        CHECK(h1 == PSP_HI_RAM_BASE, "first high block at 0x0C800000");
+        CHECK(((h1 - PSP_RAM_BASE) & PSP_ADDR_MASK) >= 0x04800000u, "high block maps above VRAM and its mirrors");
+        const uint32_t h2 = psp_kmem_bump_alloc_hi(0x100u, "hi small");
+        CHECK(h2 == h1 + 0x1801000u, "high blocks are page-aligned and contiguous");
+        CHECK(psp_kmem_free_total() == free_lo, "regions 1/2 untouched by high allocations");
+        CHECK(psp_kmem_bump_alloc_hi(0x08000000u, "too big") == 0, "a request larger than region 3 fails");
+        CHECK(psp_kmem_bump_alloc_hi(0, "zero") == 0, "zero-size high alloc fails");
+        CHECK(psp_guest_ok(h1, 0x1800100u) && psp_guest_ok(0x0BFFFFFCu, 4) && !psp_guest_ok(0x0BFFFFFCu, 8),
+              "psp_guest_ok: high block ok, RAM end exact");
+        CHECK(!psp_guest_ok(0x0C000000u) && !psp_guest_ok(0x0C7FFFFFu) && psp_guest_ok(0x0FFFFFFFu) && !psp_guest_ok(0x10000000u),
+              "psp_guest_ok: the VRAM alias gap and the mask end are rejected");
+        CHECK(!psp_guest_user_ok(0x08400000u) && psp_guest_user_ok(0x08800000u), "psp_guest_user_ok: kernel area rejected");
+    }
     psp_kmem_log_layout("test");
 
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }

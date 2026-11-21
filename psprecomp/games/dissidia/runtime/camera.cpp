@@ -34,6 +34,7 @@
 // PSPRECOMP_CAM_PIVOT=0 orbits the game's look-at point instead of the fighter (the old way);
 // PSPRECOMP_CAM_LOG=1 is the GE-level log; PSPRECOMP_CAMX_LOG=<n> logs n updates of this module.
 
+#include "psp_memory.h"
 #include "psp_game_module.h"
 #include "psp_runtime.h"
 #include "recomp.h"
@@ -135,7 +136,7 @@ int64_t now_ms() { return static_cast<int64_t>(now_s() * 1000.0); }
 float rdf(uint32_t a) { float f; std::memcpy(&f, g_ram + (a & 0x07FFFFFFu), 4); return f; }
 void wrf(uint32_t a, float f) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &f, 4); }
 
-bool ram_ok(uint32_t a, uint32_t n) { return a >= 0x08800000u && a + n <= 0x0C000000u; }
+bool ram_ok(uint32_t a, uint32_t n) { return psp_guest_user_ok(a, n); }
 bool rdvec(uint32_t a, float* v) {
     if (!ram_ok(a, 12)) return false;
     for (int i = 0; i < 3; i++) { v[i] = rdf(a + 4 * i); if (!std::isfinite(v[i]) || std::fabs(v[i]) > 2000.f) return false; }

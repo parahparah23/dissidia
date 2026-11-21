@@ -161,10 +161,10 @@ static void hle_sceKernelSignalSema(
                     rdram, static_cast<uint32_t>(uid) + 0U);
                 deref4 = psp_mem_read<uint32_t>(
                     rdram, static_cast<uint32_t>(uid) + 4U);
-                if (deref0 >= 0x08000000U && deref0 < 0x0C000000U) {
+                if (psp_guest_ok(deref0)) {
                     deref0_0 = psp_mem_read<uint32_t>(rdram, deref0 + 0U);
                     deref0_4 = psp_mem_read<uint32_t>(rdram, deref0 + 4U);
-                    if (deref0_0 >= 0x08000000U && deref0_0 < 0x0C000000U) {
+                    if (psp_guest_ok(deref0_0)) {
                         deref0_0_0 = psp_mem_read<uint32_t>(rdram, deref0_0 + 0U);
                         deref0_0_4 = psp_mem_read<uint32_t>(rdram, deref0_0 + 4U);
                     }

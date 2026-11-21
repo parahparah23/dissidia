@@ -17,6 +17,7 @@
 // splices into asset paths (obj/p_<code>_1p.gmo, menu/.../p_<code>_1p.gim, voice_p_<code>...).
 // Using an existing code ("fiv100") makes the slot an alias of that character's files.
 
+#include "psp_memory.h"
 #include "roster_max.h"
 #include "psp_platform.h"
 #include "psp_game_module.h"
@@ -784,7 +785,7 @@ void grid_table_hook(uint8_t* rdram, recomp_context* ctx) {
         const int32_t keep = ctx->r[2];
         game(rdram, ctx);
         const uint32_t got = static_cast<uint32_t>(ctx->r[2]);
-        if (got >= 0x08800000u && got < 0x0C000000u) src_addr = got;
+        if (psp_guest_user_ok(got)) src_addr = got;
         ctx->r[2] = keep;
     }
     const uint8_t* src = rdram + (src_addr & 0x07FFFFFFu);
@@ -857,7 +858,7 @@ FuncPtr g_orig_loadreq = nullptr;
 void loadreq_log(uint8_t* rdram, recomp_context* ctx) {
     uint32_t p = static_cast<uint32_t>(ctx->r[7]);
     char txt[97]; int n = 0;
-    if (p >= 0x08000000u && p < 0x0C000000u) for (; n < 96; n++) { char c = static_cast<char>(rdram[(p & 0x07FFFFFFu) + n]); if (c < 32 || c > 126) break; txt[n] = c; }
+    if (psp_guest_ok(p)) for (; n < 96; n++) { char c = static_cast<char>(rdram[(p & 0x07FFFFFFu) + n]); if (c < 32 || c > 126) break; txt[n] = c; }
     txt[n] = 0;
     std::fprintf(stderr, "[ROSTER] loadreq a1=%X a2=%X ra=%08X path=%s\n", (uint32_t)ctx->r[5], (uint32_t)ctx->r[6], (uint32_t)ctx->r[31], txt);
     g_orig_loadreq(rdram, ctx);
@@ -970,7 +971,7 @@ void learn_all_own(uint8_t* rdram, uint8_t* rec, const Entry& e) {
     if (!kExtrasKnowAllAbilities) return;
     auto rd = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x07FFFFFFu), 4); return v; };
     const uint32_t blk = rd(kAbltBlockPtr), recs = rd(kAbltRecsPtr);
-    if (blk < 0x08000000u || blk >= 0x0C000000u || recs < 0x08000000u || recs >= 0x0C000000u) return;
+    if (!psp_guest_ok(blk) || !psp_guest_ok(recs)) return;
     const uint32_t n = rd(blk + 8u);
     if (n == 0 || n > 0x1000u) return;
     uint8_t* learned = rec + kRecAbil + kAbilLearned;
@@ -996,7 +997,7 @@ void saverec_hook(uint8_t* rdram, recomp_context* ctx) {
     ctx->r[5] = e->like;
     g_orig_saverec(rdram, ctx);
     const uint32_t src = static_cast<uint32_t>(ctx->r[2]);
-    if (src < 0x08000000u || src >= 0x0C000000u) return;
+    if (!psp_guest_ok(src)) return;
     const uint32_t slot = static_cast<uint32_t>(e->charId - kFirstNew);
     const uint32_t block = saverec_block();
     const uint32_t dst = (block ? block : static_cast<uint32_t>(DISSIDIA_SAVEREC)) + kSaveRec * slot;
@@ -1076,7 +1077,7 @@ uint64_t fnv1a64(const uint8_t* p, size_t n) {
     return h;
 }
 uint32_t g32(const uint8_t* rdram, uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & 0x07FFFFFFu), 4); return v; }
-bool guest_ok(uint32_t a, uint32_t n) { return a >= 0x08000000u && a < 0x0C000000u && n <= 0x0C000000u - a; }   // as the savedata HLE (sd_ram_ok)
+bool guest_ok(uint32_t a, uint32_t n) { return psp_guest_ok(a, n); }   // as the savedata HLE (sd_ram_ok)
 std::string guest_cstr(const uint8_t* rdram, uint32_t a, size_t max) {
     std::string s;
     for (size_t i = 0; i < max && guest_ok(a + static_cast<uint32_t>(i), 1); i++) {
@@ -1346,7 +1347,7 @@ void wc_log(const char* what, recomp_context* ctx, uint8_t* rdram) {
     uint32_t d = (uint32_t)ctx->r[4], a1 = (uint32_t)ctx->r[5], n = (uint32_t)ctx->r[6];
     if (g_wc_addr >= d && g_wc_addr < d + n) {
         uint32_t w = 0;
-        if (a1 >= 0x08000000u && a1 < 0x0C000000u) std::memcpy(&w, rdram + (a1 & 0x07FFFFFFu), 4);
+        if (psp_guest_ok(a1)) std::memcpy(&w, rdram + (a1 & 0x07FFFFFFu), 4);
         std::fprintf(stderr, "[ROSTER] WC %s dst=%08X src/val=%08X n=%u src[0]=%08X\n", what, d, a1, n, w);
         psp_dump_func_ring("WC");
     }
@@ -1936,7 +1937,7 @@ template <int N> void trace_fn(uint8_t* rdram, recomp_context* ctx) {
                  (uint32_t)ctx->r[4], (uint32_t)ctx->r[5], (uint32_t)ctx->r[6], (uint32_t)ctx->r[7], (uint32_t)ctx->r[8], (uint32_t)ctx->r[9], (uint32_t)ctx->r[31]);
     for (int reg : {4, 5, 6, 7, 8, 9}) {
         uint32_t p = (uint32_t)ctx->r[reg];
-        if (p < 0x08000000u || p >= 0x0C000000u) continue;
+        if (!psp_guest_ok(p)) continue;
         std::fprintf(stderr, "[RTRACE]   r%d:", reg);
         for (int k = 0; k < trace_words(); k++) { uint32_t w; std::memcpy(&w, rdram + (p & 0x07FFFFFFu) + 4 * k, 4); std::fprintf(stderr, " %08X", w); }
         std::fprintf(stderr, "\n");
@@ -1958,9 +1959,9 @@ template <int N> void trace_fn(uint8_t* rdram, recomp_context* ctx) {
     if (post) {
         std::fprintf(stderr, "[RTRACE]   ret %08X v0=%08X v1=%08X\n", g_trace_addr[N], (uint32_t)ctx->r[2], (uint32_t)ctx->r[3]);
         uint32_t first = 0;      // an out parameter usually starts with a pointer to the record: dump that too
-        if (a0 >= 0x08000000u && a0 < 0x0C000000u) std::memcpy(&first, rdram + (a0 & 0x07FFFFFFu), 4);
+        if (psp_guest_ok(a0)) std::memcpy(&first, rdram + (a0 & 0x07FFFFFFu), 4);
         for (uint32_t p : {a0, static_cast<uint32_t>(ctx->r[2]), first}) {
-            if (p < 0x08000000u || p >= 0x0C000000u) continue;
+            if (!psp_guest_ok(p)) continue;
             std::fprintf(stderr, "[RTRACE]   post @%08X:", p);
             for (int k = 0; k < trace_words(); k++) { uint32_t w; std::memcpy(&w, rdram + (p & 0x07FFFFFFu) + 4 * k, 4); std::fprintf(stderr, " %08X", w); }
             std::fprintf(stderr, "\n");
@@ -2019,10 +2020,10 @@ void dash_move_hook(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
     g_dash_batt(rdram, ctx);
-    if (actor < 0x08000000u || actor >= 0x0C000000u - 0x300u || out < 0x08000000u || out >= 0x0C000000u - 16u) return;
+    if (!psp_guest_ok(actor, 0x300u) || !psp_guest_ok(out, 16u)) return;
     uint32_t info;
     std::memcpy(&info, rdram + ((actor + ACTOR_INFO) & 0x07FFFFFFu), 4);
-    if (info < 0x08000000u || info >= 0x0C000000u - 8u) return;
+    if (!psp_guest_ok(info, 8u)) return;
     const float f = dash_factor(static_cast<int8_t>(rdram[(info + 6u) & 0x07FFFFFFu]));
     if (f == 1.0f) return;
     float v[3];
@@ -3105,7 +3106,7 @@ constexpr uint32_t PLAY_FX = 0x088A9DE8u;               // EBOOT FUN_088A9DE8(fx
 
 FuncPtr g_orig_can_hit = nullptr, g_orig_bone_post = nullptr, g_play_fx = nullptr;
 
-inline bool ex_ok(uint32_t a, uint32_t n) { return a >= 0x08000000u && a < 0x0C000000u && n <= 0x0C000000u - a; }
+inline bool ex_ok(uint32_t a, uint32_t n) { return psp_guest_ok(a, n); }
 inline uint8_t* ex_p(uint8_t* r, uint32_t a) { return r + (a & 0x07FFFFFFu); }
 inline uint32_t ex_r32(uint8_t* r, uint32_t a) { uint32_t v; std::memcpy(&v, ex_p(r, a), 4); return v; }
 inline uint16_t ex_r16(uint8_t* r, uint32_t a) { uint16_t v; std::memcpy(&v, ex_p(r, a), 2); return v; }
@@ -4994,7 +4995,7 @@ void txt_get_hook(uint8_t* rdram, recomp_context* ctx) {
     if (battle_ovl(rdram) && txtlog_new(g_txt_seen, table, rec, ra)) {
         std::string txt;
         const uint32_t sp = static_cast<uint32_t>(ctx->r[2]);
-        if (sp >= 0x08000000u && sp < 0x0C000000u)
+        if (psp_guest_ok(sp))
             for (uint32_t k = 0; k < 40; k++) {
                 const uint16_t ch = guest_rd<uint16_t>(rdram, sp + 2u * k);
                 if (!ch) break;
@@ -5008,7 +5009,7 @@ void ablt_find_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_ablt_find(rdram, ctx);
     if (battle_ovl(rdram) && txtlog_new(g_ablt_seen, id, ra, 0)) {
         const uint32_t r = static_cast<uint32_t>(ctx->r[2]);
-        const bool ok = r >= 0x08000000u && r < 0x0C000000u;
+        const bool ok = psp_guest_ok(r);
         std::fprintf(stderr, "[TEXTLOG] ablt %04X from %08X -> name text %u, command %03X\n", id, ra,
                      ok ? guest_rd<uint16_t>(rdram, r + 2u) : 0xFFFFu, ok ? guest_rd<uint16_t>(rdram, r + 0xCu) : 0xFFFFu);
     }
@@ -5023,7 +5024,7 @@ void txt_off_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_txt_off(rdram, ctx);
     if (!battle_ovl(rdram) || !txtlog_new(g_txtoff_seen, entry, rec, 0)) return;
     const uint32_t off = static_cast<uint32_t>(ctx->r[2]);
-    if (entry < 0x08000000u || entry >= 0x0C000000u || off > 0x400000u) return;
+    if (!psp_guest_ok(entry) || off > 0x400000u) return;
     const bool off4 = guest_rd<uint32_t>(rdram, entry) == 0x3446464Fu;   // "OFF4"
     const uint32_t at = entry + off + (off4 ? 4u : 2u);
     std::string txt;
@@ -5684,7 +5685,7 @@ void load_retail_moves() {
 }
 uint8_t* ablt_record(uint8_t* rdram, uint16_t id) {             // the loaded 'ablt' record of an ability id, or null
     const uint32_t blk = rd32(rdram, kAbltBlockPtr), recs = rd32(rdram, kAbltRecsPtr);
-    if (blk < 0x08000000u || blk >= 0x0C000000u || recs < 0x08000000u || recs >= 0x0C000000u) return nullptr;
+    if (!psp_guest_ok(blk) || !psp_guest_ok(recs)) return nullptr;
     const uint32_t n = rd32(rdram, blk + 8u);
     for (uint32_t r = 0; r < n && r < 0x1000u; r++) {
         uint8_t* a = rdram + ((recs + kAbltRecBytes * r) & 0x07FFFFFFu);
@@ -5705,7 +5706,7 @@ void retail_moves_placeholders(uint8_t* rdram) {
     if (need.empty()) return;
     uint32_t blk = rd32(rdram, kAbltBlockPtr);
     const uint32_t recs0 = rd32(rdram, kAbltRecsPtr);
-    if (blk < 0x08000000u || blk >= 0x0C000000u || recs0 != blk + 0x10u) {
+    if (!psp_guest_ok(blk) || recs0 != blk + 0x10u) {
         std::fprintf(stderr, "[ROSTER] placeholders: table at %08X, records at %08X: not where expected\n", blk, recs0);
         return;
     }
@@ -5757,7 +5758,7 @@ void retail_moves_hide(uint8_t* rdram) {                        // after the tab
     }
 }
 void retail_moves_teach(uint8_t* rdram, uint32_t rec, int charId) {
-    if (rec < 0x08000000u || rec >= 0x0C000000u) return;
+    if (!psp_guest_ok(rec)) return;
     uint8_t* learned = rdram + ((rec + kRecAbil + kAbilLearned) & 0x07FFFFFFu);
     for (const RetailMoves& m : g_retail_moves) {
         if (!m.on || m.charId != charId) continue;
@@ -5834,7 +5835,7 @@ bool dissidia_ablt_ensure(uint8_t* rdram, uint16_t id, uint16_t copy, uint16_t c
     }
     const uint8_t* src = ablt_record(rdram, copy);
     uint32_t blk = rd32(rdram, kAbltBlockPtr);
-    if (!src || src[kAbltOwnerByte] != owner || blk < 0x08000000u || blk >= 0x0C000000u) return false;
+    if (!src || src[kAbltOwnerByte] != owner || !psp_guest_ok(blk)) return false;
     uint8_t rec[kAbltRecBytes];
     std::memcpy(rec, src, kAbltRecBytes);
     rec[0] = id & 0xFFu; rec[1] = id >> 8;

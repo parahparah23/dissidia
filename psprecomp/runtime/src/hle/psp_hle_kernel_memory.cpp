@@ -324,7 +324,31 @@ uint32_t psp_kmem_bump_alloc_named_r2(uint32_t size, const char* name) {
     return kmem_alloc(size, name);
 }
 
-uint32_t psp_kmem_free_region(int region) { return region == 1 ? kmem_free_r1() : region == 2 ? kmem_free_r2() : 0u; }
+// ---- High region (region 3): guest addresses above the 64 MB RAM ----
+// Guest memory is rdram + (addr & PSP_ADDR_MASK) over a 128 MB mapping (psp_memory.h). RAM uses offsets
+// 0x00000000-0x03FFFFFF (guest 0x08000000-0x0BFFFFFF); of the upper half only VRAM (2 MB at offset 0x04000000,
+// mirrors at most up to 0x04800000) is ever touched. So guest 0x0C800000-0x0FFFFFFF (offsets
+// 0x04800000-0x07FFFFFF, 56 MB) is mapped, unused, and addressable by the recompiled code without any change.
+// It is handed out ONLY through psp_kmem_bump_alloc_hi (never by kmem_alloc / sceKernelAllocPartitionMemory),
+// so a game opts in per block; every guest-pointer range check that can see such a block must use
+// psp_guest_ok / psp_guest_addr_ok (psp_memory.h) instead of a hard-coded `< 0x0C000000`.
+static_assert(PSP_HI_RAM_BASE >= PSP_RAM_BASE + PSP_VRAM_BASE + 0x00800000U,
+              "region 3 must start above VRAM and its mirrors (offset 0x04800000)");
+static_assert(PSP_HI_RAM_END - 1 <= PSP_RAM_BASE + PSP_ADDR_MASK, "region 3 must fit the 0x07FFFFFF address mask");
+static uint32_t g_heap3_pos = PSP_HI_RAM_BASE;
+
+uint32_t psp_kmem_bump_alloc_hi(uint32_t size, const char* name) {
+    const uint32_t aligned = (size + 0xFFFu) & ~0xFFFu;   // page-aligned: the region is touched on demand
+    if (size == 0 || g_heap3_pos + aligned > PSP_HI_RAM_END || g_heap3_pos + aligned < g_heap3_pos) return 0;
+    const uint32_t addr = g_heap3_pos;
+    g_heap3_pos += aligned;
+    g_kmem_log.push_back({std::string(name ? name : "") + " [hi]", addr, aligned});
+    return addr;
+}
+
+uint32_t psp_kmem_free_region(int region) {
+    return region == 1 ? kmem_free_r1() : region == 2 ? kmem_free_r2() : region == 3 ? PSP_HI_RAM_END - g_heap3_pos : 0u;
+}
 
 // Claims what is left of region 1 only (Patapon's dlmalloc-override arena);
 // region 2, when configured, stays available to later allocations.
@@ -359,6 +383,10 @@ void psp_kmem_log_layout(const char* tag) {
         std::fprintf(stderr, "[MEM]   region 2 0x%08X-0x%08X (%u KiB), used %u KiB, free %u KiB\n",
                      g_heap2_base, g_heap2_end, (g_heap2_end - g_heap2_base) >> 10,
                      (g_heap2_pos - g_heap2_base) >> 10, kmem_free_r2() >> 10);
+    if (g_heap3_pos != PSP_HI_RAM_BASE)
+        std::fprintf(stderr, "[MEM]   region 3 (hi) 0x%08X-0x%08X (%u KiB), used %u KiB, free %u KiB\n",
+                     PSP_HI_RAM_BASE, PSP_HI_RAM_END, (PSP_HI_RAM_END - PSP_HI_RAM_BASE) >> 10,
+                     (g_heap3_pos - PSP_HI_RAM_BASE) >> 10, (PSP_HI_RAM_END - g_heap3_pos) >> 10);
     for (const auto& b : g_kmem_log)
         std::fprintf(stderr, "[MEM]   0x%08X-0x%08X %8u KiB  %s\n", b.addr, b.addr + b.size, b.size >> 10, b.name.c_str());
     for (size_t i = 0; i < g_kmem_log.size(); i++)
