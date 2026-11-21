@@ -53,6 +53,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <array>
 #include <map>
 #include <string>
 #include <vector>
@@ -265,13 +266,38 @@ void small_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
 // heap stay unused). Matched by the heap object's address, which is the same in every run (deterministic boot); a different address = no change.
 constexpr uint32_t kSmallMgrHeap = 0x09971160u, kSmallMgrSize = 0x4000u, kSmallMgrExtra = 0x8000u;
 uint32_t g_smallmgr_block = 0;
+// The 10 KB object heap at 0x099B7E30 (FUN_0885C40C(block, 0x26E0, name 0x089CBA28) from FUN_088BD8xx at boot, made again at every battle's loading screen over
+// the same block; allocs of 8-296 B, one group per fighter: 12 at a battle's setup, more in a rebuild, freed again when the body goes) holds ~0x300 B per living
+// fighter plus the transients of a rebuild: with 6+ fighters alive from the start (the 10-player battle) it ran full (`heap 0x099B7E30 alloc(24..64) FAILED, used
+// 0x2680`, 21 Nov w5 logs) and the fighter's parts were not made. Same treatment as the manager heap: a host block 4x the size (the 10 KB stay unused), the same
+// block for every re-initialisation. PSPRECOMP_TAGTEAM_SMALLOBJ_EXTRA=<bytes> (0 = retail).
+constexpr uint32_t kSmallObjHeap = 0x099B7E30u, kSmallObjSize = 0x26E0u;
+uint32_t g_smallobj_block = 0, g_smallobj_size = 0;
+// The battle overlay keeps a copy of that heap in two temporary heaps ("FUNCTION_TMP", FUN_0885C40C(block, size - 0x30, ...) at ra 08AF5E60 / 08AF4F5C, blocks
+// taken from "FIELD::MEMORY_TMP" = a 0x6B800 block of the loading screen's FIELD heap, name 0x089CA730, whose 0x64000 font heap leaves 0x7800 for them): with the
+// bigger heap the copies (0x86B0) do not fit (`heap 0x09B90080 alloc(34480) FAILED`, 21 Nov) and a failed copy is a null heap. The TMP block grows by two copies' extra.
+constexpr uint32_t kFieldTmpSize = 0x6B800u, kFieldTmpName = 0x089CA730u;
+uint32_t field_tmp_extra() { return g_smallobj_block ? ((2u * (g_smallobj_size - kSmallObjSize) + 0xFFFu) & ~0xFFFu) : 0u; }
 void hc_heap_made(const uint8_t* rdram, const recomp_context* ctx);   // below
 void heap_init_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (std::getenv("PSPRECOMP_HEAPINIT_LOG")) std::fprintf(stderr, "[HEAPINIT] block %08X size %X name %08X align %X ra %08X\n", static_cast<uint32_t>(ctx->r[4]), static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]), static_cast<uint32_t>(ctx->r[31]));
     if (g_tt_pool_extra && !g_smallmgr_block && static_cast<uint32_t>(ctx->r[5]) == kSmallMgrSize) {
         const uint32_t a = static_cast<uint32_t>(ctx->r[7]) ? static_cast<uint32_t>(ctx->r[7]) : 1u, obj = (static_cast<uint32_t>(ctx->r[4]) + a - 1u) & ~(a - 1u);
         if (obj == kSmallMgrHeap && (g_smallmgr_block = psp_kmem_bump_alloc_named_r2(rd256(kSmallMgrSize + kSmallMgrExtra), "SMALLMGR_TAGTEAM"))) {
             std::fprintf(stderr, "[MODELS] tag team: the 16 KB manager heap at 0x%08X is made over a %u B host block at 0x%08X\n", obj, kSmallMgrSize + kSmallMgrExtra, g_smallmgr_block);
             ctx->r[4] = static_cast<int32_t>(g_smallmgr_block); ctx->r[5] = static_cast<int32_t>(kSmallMgrSize + kSmallMgrExtra);
+        }
+    }
+    if (g_smallobj_block && static_cast<uint32_t>(ctx->r[5]) == kFieldTmpSize && static_cast<uint32_t>(ctx->r[6]) == kFieldTmpName) ctx->r[5] = static_cast<int32_t>(kFieldTmpSize + field_tmp_extra());
+    if (g_tt_pool_extra && static_cast<uint32_t>(ctx->r[5]) == kSmallObjSize) {
+        static const uint32_t extra = std::getenv("PSPRECOMP_TAGTEAM_SMALLOBJ_EXTRA") ? static_cast<uint32_t>(std::strtoul(std::getenv("PSPRECOMP_TAGTEAM_SMALLOBJ_EXTRA"), nullptr, 0)) : 0x6000u;
+        const uint32_t a = static_cast<uint32_t>(ctx->r[7]) ? static_cast<uint32_t>(ctx->r[7]) : 1u, obj = (static_cast<uint32_t>(ctx->r[4]) + a - 1u) & ~(a - 1u);
+        if (obj == kSmallObjHeap && extra) {
+            if (!g_smallobj_block && (g_smallobj_block = psp_kmem_bump_alloc_named_r2(rd256(kSmallObjSize + extra), "SMALLOBJ_TAGTEAM"))) {
+                g_smallobj_size = kSmallObjSize + extra;
+                std::fprintf(stderr, "[MODELS] tag team: the 10 KB object heap at 0x%08X is made over a %u B host block at 0x%08X\n", obj, g_smallobj_size, g_smallobj_block);
+            }
+            if (g_smallobj_block) { ctx->r[4] = static_cast<int32_t>(g_smallobj_block); ctx->r[5] = static_cast<int32_t>(g_smallobj_size); }
         }
     }
     hc_heap_made(rdram, ctx);   // PSPRECOMP_HEAPCHECK: the heap's name for the check's reports
@@ -504,8 +530,10 @@ namespace {
 struct BhInfo { uint32_t size, ra; const char* step; uint64_t frame; };
 std::map<uint32_t, BhInfo> g_bh;
 uint32_t battle_heap();
+uint32_t smallheap_log() { static const uint32_t h = std::getenv("PSPRECOMP_SMALLHEAP_LOG") ? static_cast<uint32_t>(std::strtoul(std::getenv("PSPRECOMP_SMALLHEAP_LOG"), nullptr, 16)) : 0u; return h; }   // debug: every alloc / free of that heap object
 bool bh_trace() { static const bool on = std::getenv("PSPRECOMP_BH_TRACE") != nullptr; return on; }
 void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (g_smallobj_block && static_cast<uint32_t>(ctx->r[4]) == battle_heap() && static_cast<uint32_t>(ctx->r[5]) == kFieldTmpSize) ctx->r[5] = static_cast<int32_t>(kFieldTmpSize + field_tmp_extra());   // (see kFieldTmpSize)
     const uint32_t heap = static_cast<uint32_t>(ctx->r[4]), size = static_cast<uint32_t>(ctx->r[5]);
     g_alloc_in_heap = heap; g_alloc_in_size = size;
     if (size >= 0x40000u) dissidia_tagteam_presweep(rdram, ctx);   // tagteam.cpp: the tag battle's leftovers leave the battle heap before the next loading screen's first big block
@@ -527,6 +555,7 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, "\n");
     }
     g_orig_heap_alloc(rdram, ctx);
+    if (smallheap_log() && heap == smallheap_log()) std::fprintf(stderr, "[SMALLHEAP] alloc %u -> %08X ra %08X step '%s' frame %llu used 0x%X\n", size, static_cast<uint32_t>(ctx->r[2]), hc_ra, g_tt_step, static_cast<unsigned long long>(g_hc_frame), hw(rdram, heap + 8u));
     if (heap == battle_heap() && ctx->r[2] != 0 && bh_trace()) g_bh[static_cast<uint32_t>(ctx->r[2])] = BhInfo{size, hc_ra, g_tt_step, g_hc_frame};
     if (kHeapCheck && hc_ram(heap)) { hc_record(heap, hc_kind, 0, size, hc_ra, static_cast<uint32_t>(ctx->r[2])); hc_verify(rdram, heap, "after an allocation"); }
     if (fileheap_watch() && heap == fileheap_watch() && size >= 0x20000u) {
@@ -571,6 +600,7 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
 // debug (PSPRECOMP_FILEHEAP_LOG=<hex heap object>): allocations / frees on that heap, and frees of pointers inside its range on ANY heap
 uint32_t fileheap_watch() { static const uint32_t h = std::getenv("PSPRECOMP_FILEHEAP_LOG") ? static_cast<uint32_t>(std::strtoul(std::getenv("PSPRECOMP_FILEHEAP_LOG"), nullptr, 16)) : 0u; return h; }
 void heap_free_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (smallheap_log() && static_cast<uint32_t>(ctx->r[4]) == smallheap_log()) std::fprintf(stderr, "[SMALLHEAP] free %08X ra %08X step '%s' frame %llu\n", static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[31]), g_tt_step, static_cast<unsigned long long>(g_hc_frame));
     if (static_cast<uint32_t>(ctx->r[4]) == battle_heap() && bh_trace()) g_bh.erase(static_cast<uint32_t>(ctx->r[5]));
     if (const uint32_t w = fileheap_watch()) { const uint32_t hp = static_cast<uint32_t>(ctx->r[4]), p = static_cast<uint32_t>(ctx->r[5]); if (hp == w && (p == 0x08F05700u || p == 0x08F05710u || p == 0x08F05740u)) { static int n = 0; if (n++ < 600) std::fprintf(stderr, "[FILEHEAP] free heap %08X ptr %08X ra %08X\n", hp, p, static_cast<uint32_t>(ctx->r[31])); } }
     if (static_cast<uint32_t>(ctx->r[4]) == kVramHeap && in_overflow(static_cast<uint32_t>(ctx->r[5]))) ctx->r[4] = static_cast<int32_t>(g_ov_heap);
@@ -873,6 +903,9 @@ uint32_t dissidia_model_pool_free(const uint8_t* rdram) { if (!g_pool_block) ret
 void dissidia_fx_pool_free(const uint8_t* rdram, uint32_t* total, uint32_t* free_b, uint32_t* largest) { fx_pool_free(rdram, total, free_b, largest); }
 void dissidia_snd_heap_free(const uint8_t* rdram, uint32_t* total, uint32_t* free_b, uint32_t* largest) { fx_pool_free(rdram, total, free_b, largest, kSndHeap); }
 bool dissidia_hheap_locked(const uint8_t* rdram, uint32_t heap, uint32_t id) { const uint32_t b = hh_block(rdram, heap, id); return !b || MEM_W(const_cast<uint8_t*>(rdram), b + 8u) != 0; }
+void dissidia_bh_blocks(std::vector<std::array<uint32_t, 5>>& out) {   // tagteam.cpp diagnostics: every traced live battle-heap block {addr, size, ra, step hash, frame}
+    for (auto& e : g_bh) { uint32_t h = 0; for (const char* c = e.second.step; c && *c; c++) h = h * 31u + static_cast<uint8_t>(*c); out.push_back({e.first, e.second.size, e.second.ra, h, static_cast<uint32_t>(e.second.frame)}); }
+}
 void dissidia_models_mem_summary(const uint8_t* rdram, const char* tag) {
     auto heap_used = [&](uint32_t heap, uint32_t* end, uint32_t* used) { *end = *used = 0; if (!heap) return; const uint32_t* h = reinterpret_cast<const uint32_t*>(rdram + (heap & 0x07FFFFFFu)); *end = h[1]; *used = h[2]; };
     uint32_t pe, pu, te, tu, total, free_b, largest; heap_used(g_pool_block, &pe, &pu); heap_used(g_ov_heap, &te, &tu); fx_pool_free(rdram, &total, &free_b, &largest);
@@ -880,6 +913,7 @@ void dissidia_models_mem_summary(const uint8_t* rdram, const char* tag) {
     std::fprintf(stderr, "[MEMSUM] %s: model pool used %u of %u KB, effect pool free %u KB (largest %u KB) of %u KB, texture overflow used %u of %u KB, sound heap free %u KB (largest %u KB) of %u KB\n",
                  tag ? tag : "", pu >> 10, g_pool_size >> 10, free_b >> 10, largest >> 10, total >> 10, tu >> 10, g_ov_heap ? kOverflowSize >> 10 : 0u, sf >> 10, sl >> 10, st >> 10);
     { uint32_t be = 0, bu = 0; const uint32_t bh = battle_heap(); heap_used(bh, &be, &bu); if (be) std::fprintf(stderr, "[MEMSUM] %s: battle heap (FIELD::MEMORY 0x%08X) used %u of %u KB\n", tag ? tag : "", bh, bu >> 10, (be - bh) >> 10); }
+    { uint32_t se = 0, su = 0; const uint32_t sh = g_smallobj_block ? g_smallobj_block : kSmallObjHeap; heap_used(sh, &se, &su); if (se > sh && se - sh < 0x100000u) std::fprintf(stderr, "[MEMSUM] %s: small object heap (0x%08X) used %u of %u B\n", tag ? tag : "", sh, su, se - sh); }
     if (bh_trace()) {
         std::map<std::pair<uint32_t, std::string>, std::pair<uint32_t, uint32_t>> by; uint32_t tot = 0;
         for (auto& e : g_bh) { auto& v = by[{e.second.ra, e.second.step}]; v.first++; v.second += e.second.size; tot += e.second.size; }

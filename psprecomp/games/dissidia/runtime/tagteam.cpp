@@ -56,6 +56,7 @@ extern const char* g_tt_step;   // hooks_models.cpp: the tag team operation in p
 struct TtStep { const char* was; explicit TtStep(const char* s) : was(g_tt_step) { g_tt_step = s; } ~TtStep() { g_tt_step = was; } };
 void dissidia_model_pool_request_extra(uint32_t bytes);   // hooks_models.cpp: a bigger model pool for the extra characters
 void dissidia_models_mem_summary(const uint8_t* rdram, const char* tag);
+void dissidia_bh_blocks(std::vector<std::array<uint32_t, 5>>& out);
 uint32_t dissidia_fx_fail_count();
 void dissidia_fx_pool_free(const uint8_t* rdram, uint32_t* total, uint32_t* free_b, uint32_t* largest);
 uint32_t dissidia_model_pool_free(const uint8_t* rdram);
@@ -2924,6 +2925,22 @@ void leftover_scan(uint32_t A, const std::vector<Blk>& cand, LeftRefs& out) {
     std::sort(r.begin(), r.end()); out.rng = r;
     auto in_cand = [&](uint32_t a) { for (const auto& q : r) if (a + 0x10u >= q.first && a < ((q.second + 15u) & ~15u) + 0x10u) return true; return false; };   // block + its own header + the next chunk's header
     const uint32_t lo = r.front().first, hi = r.back().second;
+    // What counts as a holder (deterministic): a word equal to the block's start (an allocation's return value) anywhere except in the battle heap's free gaps (stale
+    // words of freed blocks), and a word pointing INTO the block only from a place that holds structures: the statics (EBOOT / overlay data, below the retail FIELD
+    // heap), a small (<= 16 KB: records, HUD objects) live block of the battle heap, or a fighter's actor / owned block. Every other word of the 56 MB (staging buffers, the old FIELD region, the pools' raw
+    // file data, free gaps) is noise: 63 of 63 "references" in the 21 Nov SP repro were unaligned or random-data words pointing into the middle of a 6-27 KB block, none
+    // at a block start, and the noise differs between the machines of a lock-step battle (stale loading data) - so the same rebuild kept the block on one machine and
+    // freed it on another. PSPRECOMP_TTLOCK_LEFTSCAN_OLD=1: every word counts (old behaviour).
+    static const bool scan_old = std::getenv("PSPRECOMP_TTLOCK_LEFTSCAN_OLD") != nullptr;
+    constexpr uint32_t kStaticsEnd = 0x08C15F80u;
+    std::vector<std::pair<uint32_t, uint32_t>> chunks;   // live chunks of the battle heap [start, end)
+    { const uint32_t w = rd(0x089D4958u), heap = ok(w, 0x10) ? rd(w + 8u) : 0u;
+      if (ok(heap, 0x20)) { const uint32_t end = rd(heap + 4u); uint32_t p = heap + 20u; for (int n = 0; p != end && n < 100000; n++) { chunks.push_back({p, p + rd(p + 8u)}); const uint32_t nx = rd(p); if (nx <= p) break; p = nx; } } }
+    std::vector<std::pair<uint32_t, uint32_t>> structs;   // the fighters' own blocks
+    for (auto& kv : g_owned) { if (kv.first == A) continue; structs.push_back({kv.first, kv.first + 0x12D0u}); for (const Blk& b : kv.second) if (b.size && b.size <= 0x4000u) structs.push_back({b.addr, b.addr + b.size}); }
+    auto in_ranges = [](const std::vector<std::pair<uint32_t, uint32_t>>& v, uint32_t a) { for (const auto& q : v) if (a >= q.first && a < q.second) return true; return false; };
+    auto in_chunks = [&](uint32_t a, uint32_t maxsz) { auto it = std::upper_bound(chunks.begin(), chunks.end(), std::make_pair(a, 0xFFFFFFFFu)); if (it == chunks.begin()) return false; --it; return a >= it->first && a < it->second && it->second - it->first <= maxsz; };
+    const uint32_t bh_lo = chunks.empty() ? 0u : chunks.front().first, bh_hi = chunks.empty() ? 0u : chunks.back().second;
     // (and the used part of high RAM, region 3: the model pool, OBJDATA heap, texture overflow and sound heap can live there and point at a block)
     const uint32_t hi_used = PSP_HI_RAM_END - psp_kmem_free_region(3);
     const std::pair<uint32_t, uint32_t> span[2] = {{0x08800000u, 0x0C000000u}, {PSP_HI_RAM_BASE, hi_used}};
@@ -2932,6 +2949,11 @@ void leftover_scan(uint32_t A, const std::vector<Blk>& cand, LeftRefs& out) {
         auto it = std::upper_bound(r.begin(), r.end(), std::make_pair(v, 0xFFFFFFFFu)); if (it == r.begin()) continue; --it;
         if (v < it->first || v >= it->second) continue;
         if ((a >= A && a < A + 0x12D0u) || in_cand(a)) continue;
+        if (!scan_old) {
+            const bool in_bh = a >= bh_lo && a < bh_hi;
+            if (in_bh && !in_chunks(a, 0xFFFFFFFFu)) continue;   // a free gap of the battle heap: stale
+            if (v != it->first && !(a < kStaticsEnd || (in_bh && in_chunks(a, 0x4000u)) || in_ranges(structs, a))) continue;
+        }
         out.holder.emplace(it->first, a);
     }
 }
@@ -2940,8 +2962,21 @@ bool g_rebuild_fresh_brain = false;   // set by reuse_parked: the rebuilt extra 
 // FIELD_MEMORY_TAGTEAM) for far more than a battle of 10 players needs. The cap on rebuilds per battle depends on the shared battle history only (every
 // machine counts the same rebuilds), never on what an allocation returned here, so an over-long battle refuses the same rebuild on every machine.
 int g_rebuild_count = 0;
+void bh_orphans(const char* tag) {   // debug (PSPRECOMP_BH_REPORT=<rebuild counts, e.g. 4,24> with PSPRECOMP_BH_TRACE): the battle heap's live blocks no fighter's constructor list owns, each with its first holder word
+    std::vector<std::array<uint32_t, 5>> v; dissidia_bh_blocks(v); std::set<uint32_t> own;
+    for (auto& kv : g_owned) for (const Blk& b : kv.second) own.insert(b.addr);
+    const uint32_t w = rd(0x089D4958u), heap = ok(w, 0x10) ? rd(w + 8u) : 0u; std::map<uint32_t, uint32_t> sz;   // live heap chain (user address -> chunk size)
+    if (ok(heap, 0x20)) { const uint32_t end = rd(heap + 4u); uint32_t p = heap + 20u; for (int n = 0; p != end && n < 100000; n++) { sz[p + 0x10u] = rd(p + 8u); const uint32_t nx = rd(p); if (nx <= p) break; p = nx; } }
+    std::map<uint32_t, std::array<uint32_t, 5>> info; for (auto& b : v) info[b[0]] = b;
+    std::vector<Blk> cand; for (auto& kv : sz) if (!own.count(kv.first) && kv.second > 0x10u) cand.push_back({kv.first, kv.second - 0x10u});
+    LeftRefs lr; if (!cand.empty()) leftover_scan(0, cand, lr);
+    std::fprintf(stderr, "[BHORPHAN] %s: %zu unowned blocks of %zu\n", tag, cand.size(), sz.size());
+    for (const Blk& b : cand) { auto it = info.find(b.addr); auto h = lr.holder.find(b.addr);
+        std::fprintf(stderr, "[BHORPHAN]   %08X+%X ra %08X step %08X frame %u holder %08X\n", b.addr, b.size, it != info.end() ? it->second[2] : 0u, it != info.end() ? it->second[3] : 0u, it != info.end() ? it->second[4] : 0u, h != lr.holder.end() ? h->second : 0u); }
+}
 bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     TtStep tt_step_("rebuild_begin");
+    { static const char* e = std::getenv("PSPRECOMP_BH_REPORT"); if (e) { char t[16]; std::snprintf(t, sizeof t, ",%d,", g_rebuild_count); if (std::strstr((std::string(",") + e + ",").c_str(), t)) bh_orphans(t); } }
     static const int kMaxRebuilds = std::getenv("PSPRECOMP_TAGTEAM_MAX_REBUILDS") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_MAX_REBUILDS")) : 40;
     if (g_rebuild_count >= kMaxRebuilds) { static int n = 0; if (n++ < 3) std::fprintf(stderr, "[TAGTEAM] rebuild refused: %d rebuilds this battle (cap %d, memory)\n", g_rebuild_count, kMaxRebuilds); return false; }
     if (!std::getenv("PSPRECOMP_TAGTEAM_KEEPCYC")) g_cycs.erase(A);   // the new body (and its new lock block) starts locked on its foe: the old member's lock-cycle state

@@ -4,7 +4,7 @@
 
 - **Proper PvE (humans vs a CPU party).** Today's "keeper" (PR merged 21 Nov, section "Group Battle: a party of CPUs") is a workaround: retail refuses a party without a human, so a player of Party B carries the CPU party and fights for Party A; his own result screen and rewards follow Party B, and the CPU lead's strength / level / type are fixed (5 / Auto / Random). Wanted instead: both humans in one party and a real CPU-only party (CPU rows added from the team selector, each with its own strength / level / type), the match start allowed for it, the lobby table / party lists / round list built for the CPU party, results and rewards right for every human, all of it from the host's roster (lock-step safe).
 - **Assist Off online: check it stays in sync** (now active when the host picks it, PR #118); the longer slow motion for a human called in must also apply online.
-- **Multiplayer: call-in memory with 10 characters**: the battle heap (FIELD::MEMORY) is now 6.6 MB and rebuilds are capped deterministically (21 Nov, host SP: 16 characters / 14 call-ins without a failure); still to confirm in a 4- or 10-player run. Leftover: each slot rebuild still leaks 30-70 KB in that heap, and a small 10 KB heap at 0x099B7E30 can still fail.
+- **Multiplayer: call-in memory with 10 characters**: the battle heap (FIELD::MEMORY) is 6.6 MB, the rebuild leak is gone (22 Nov, section "Rebuild leftovers": 32 rebuilds, battle heap flat at 1.6-1.7 MB) and the 10 KB FUNCTION heap at 0x099B7E30 now has 34 KB; the rebuild cap (40) stays as a fallback. Still to confirm in a 4- or 10-player run (multiplayer rig).
 - **Sephiroth invisible on the RP6 (call-in whose textures used the texture overflow heap)**: the overflow heap moved from high RAM (0x0E780000) to region 2; to confirm on the device.
 - **Multiplayer issues 1 and 3** (desync at a human partner's attack; 10-player end split): not reproduced in 5 clean 10-player runs after the party-read fix; keep watching with the 10-player rig (`~/dissidia/tt/net10x/rig2/run10.py`).
 - **Japanese voices: only one fighter has battle audio** (GitHub issue #119).
@@ -4329,3 +4329,32 @@ and `[TAGTEAM] alloc failed`; h3 then diverged (leftover block holder changed, 7
 - **Texture overflow heap** (RP6 note: a texture above 0x0E000000 did not draw): `TEXHEAP_TAGTEAM` now goes to region 2 (0x0BAA0000, was 0x0E780000 in high RAM), hi RAM only as a fallback.
   The model pool itself still straddles 0x0E000000 (0x0C800000-0x0E780000) and OBJDATA / sound heap are above it; not touched.
 - **Evidence** (host, SP, `ml6`): 16 distinct characters loaded, 14 call-ins, no FAILED / alloc failed line, battle heap peak 2775 of 6614 KB.
+
+### Rebuild leftovers: the battle heap stays flat; the 10 KB FUNCTION heap (22 Nov, branch ttlock)
+Repro (host, SP): `party_battle_walk`, `SP_PARTNER=1`, `KOLIST_NAT=1`, RESERVE `9,27,5,24,26,28,12,3,1;33,18,17,14,7,2,4`, KOLIST slot0 / slot1 alternating every 4 s, `CALLIN_DELAY=4`
+(32 rebuilds, 16 distinct characters). Before: `[MEMSUM] battle heap used` 1.9 MB after the setup -> 3.5 MB after 32 rebuilds (about 50 KB per rebuild; one run was flat by accident,
+the loading timing changes the first numbers). Now: 1.65-1.70 MB from the 4th rebuild to the 32nd, no `FAILED`, no `[HEAPCHECK]` break.
+- **What was left behind**: per character that a rebuild made, four blocks from the file manager's allocator (caller 0x0884212C, unowned = not in any fighter's constructor list, tag
+  step `rebuild_begin`): 27648 B + 6160 B + 5168 B + 2800 B (+ a few small ones), ~42 KB, and nothing freed them. They WERE candidates of the destructor-leftover free in
+  `rebuild_begin` (`g_leak_watch`), but `leftover_scan` found a "holder" for every one (63 of 63 `[TTLOCK] ... is referenced from ...: not freed` in the repro): words of
+  the 56 MB it scanned that point into the MIDDLE of the block (none at a block start, most unaligned), sitting in raw data (the old FIELD region at 0x08C15F80, staging /
+  loading heap, the effect / model pools, the stale gaps of the heap itself). Pure noise, and noise that differs between machines of a lock-step battle (stale loading data), so
+  the same rebuild could keep a block on one machine and free it on another.
+- **Fix**: `leftover_scan` now counts a word as a holder only when it equals the block's start (an allocation's return value; anywhere except the battle heap's free gaps) or, for a
+  pointer into the middle of the block, only from structure-bearing memory: the statics (below 0x08C15F80), a live battle-heap block of at most 16 KB (records, HUD objects) or a
+  fighter's actor / owned block (`g_owned`, at most 16 KB). A block something still points at is still kept (`[TTLOCK] ... not freed`), the freeing is a function of the shared
+  state. `PSPRECOMP_TTLOCK_LEFTSCAN_OLD=1` = the old scan. What stays in the heap after 24 rebuilds besides the loading staging / setup blocks (24 x 11 KB HUD blocks): a few
+  file-manager records of 16-1264 B (untraced step, about 0.5 KB per rebuild) - the departed character's records the retail file manager keeps.
+- **Tools**: `PSPRECOMP_BH_TRACE=1` + `PSPRECOMP_BH_REPORT=4,24` (rebuild counts) prints `[BHORPHAN]`: every live battle-heap block no fighter's list owns with its allocator, step, frame and first
+  holder word (diff two counts to see what grows). `PSPRECOMP_HEAPINIT_LOG=1` prints every game heap creation; `PSPRECOMP_SMALLHEAP_LOG=<heap object hex>` every alloc / free of one heap.
+- **The 10 KB heap at 0x099B7E30** is the game's "FUNCTION" heap (`FUN_0885C40C(block, 0x26E0, "FUNCTION", 4)` from FUN_088BD8xx at boot, made again over the same block at every battle's
+  loading screen; allocator caller 0x088BD990, free 0x088BD9E8). It holds one group of 8-608 B objects per fighter (setup: 12 allocs, 0.8 KB per fighter; a rebuild frees the
+  old body's group and allocates the new one: balanced, 384 allocs / 384 frees in the repro, peak 5.8 KB). Not a leak: with 6+ fighters alive from the start plus a rebuild's
+  transients it is simply full (w5: `alloc(24..64) FAILED, used 0x2680` of 0x26E0). Fix: `SMALLOBJ_TAGTEAM`, a 34 KB host block (region 2) the heap is made over every time
+  (`PSPRECOMP_TAGTEAM_SMALLOBJ_EXTRA`, default 0x6000, 0 = retail); `[MEMSUM]` prints `small object heap used X of Y B`. Catch: the battle overlay keeps a copy of this heap in two
+  temporary "FUNCTION_TMP" heaps whose size follows the heap (0x26B0 -> 0x86B0) and whose blocks come from the loading screen's "FIELD::MEMORY_TMP" block (0x6B800, only 0x2C00 free:
+  `heap 0x09B90080 alloc(34480) FAILED` in the first try), so that block is requested 0xC000 B bigger too (`field_tmp_extra`, hooks on the alloc and the heap init).
+- **Unverified**: the 10-player / multiplayer run (the fix is only checked in SP, peak use there 5.8 KB; the capacity gain is arithmetic: 34 KB vs 10 KB); that nothing else sizes itself
+  from the FUNCTION heap (no other symptom in the repro and the regression); an old body's blocks still referenced from a non-structure place (e.g. a pool object pointing into
+  the middle of a leftover block) would now be freed - `PSPRECOMP_TTLOCK_LEFTSCAN_OLD=1` is the switch to bisect a new crash with.
+
