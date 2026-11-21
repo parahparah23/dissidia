@@ -22,6 +22,9 @@
 #if !defined(__ANDROID__)
 #include <execinfo.h>
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <sys/prctl.h>
+#endif
 #include <pthread.h>
 #include <signal.h>
 #include <thread>
@@ -3368,6 +3371,18 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         }
         if (target && owner == target) { const uint32_t st2 = rd(target + 0x52Cu); const int hp = ok(st2, 0x40) ? static_cast<int32_t>(rd(st2 + 0xCu)) : -1; if (hp != lasthp) { std::fprintf(stderr, "[TAGTEAM] t=%.1fs KO target %08X live hp %d (max %u) script %d flags %08X\n", dissidia_battle_age() / 60.0f, target, hp, rd(target + 0x10B0u), static_cast<int16_t>(rd(target + 0x180u) & 0xFFFF), rd(target + 0x380u)); lasthp = hp; } }
     }
+    if (g_bs) if (const char* ke = std::getenv("PSPRECOMP_TAGTEAM_KO_EVERY")) {   // stress test: every <s> seconds every living fighter drops to 1 HP / 0 bravery, so KOs (and reserve call-ins) come fast
+        static float next = 0;
+        const float t = dissidia_battle_age() / 60.0f, every = static_cast<float>(std::atof(ke));
+        if (every > 0 && t >= (next ? next : std::max(every, 12.0f))) {   // (first wave not before 12 s: the extras and reserves join at ~8 s)
+            next = t + every;
+            std::vector<uint32_t> fs; for (int k = 0; k < 2; k++) fs.push_back(srd(g_bs + 56u + 4u * k));
+            for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) fs.push_back(g_extra[i].actor);
+            int n = 0;
+            for (uint32_t f : fs) if (ok(f, 0x12D0) && alive(f)) { const uint32_t st = rd(f + 0x52Cu); if (ok(st, 0x40) && static_cast<int32_t>(rd(st + 0xCu)) > 1) { wr(st + 0xCu, 1u); n++; } }   // bravery kept: any HP attack then KOs
+            std::fprintf(stderr, "[TAGTEAM] t=%.1fs KO_EVERY: %d fighter(s) on 1 HP\n", t, n);
+        }
+    }
     if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_FOESCAN")) {   // debug: who holds the two enemy fighters' addresses, before and after the lock cycle
         static bool d1 = false, d2 = false;
         const uint32_t hum = srd(g_bs + 56u + 4u * rd(g_bs + 84u));
@@ -6283,6 +6298,9 @@ void gq_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_bs && a == srd(g_bs + 56u)) { static int n = 0; const float ag = dissidia_battle_age() / 60.0f; if (ag > 9.0f && ag < 25.0f && n++ % 15 == 0) std::fprintf(stderr, "[GROUND] t=%.2fs%s %s f0 %.3f y %.3f fl %08X script %d\n", dissidia_battle_age() / 60.0f, exb_running() ? " (burst)" : "", role_of(a), ctx->f[0], rdf(a + 0x84u), rd(a + 0x380u), static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu)); }
 }
 void calllog_install() {
+#if defined(__linux__) && !defined(__ANDROID__)
+    static bool pt = false; if (!pt && std::getenv("PSPRECOMP_ALLOW_PTRACE")) { pt = true; prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0); std::fprintf(stderr, "[TAGTEAM] debugger attach allowed (PSPRECOMP_ALLOW_PTRACE)\n"); }   // debug: gdb -p from outside (Yama ptrace_scope 1)
+#endif
     static bool done = false; if (done) return; done = true;
     fxprobe_install();
     if (std::getenv("PSPRECOMP_TAGTEAM_GROUNDLOG") && !g_orig_gq) { g_orig_gq = fn(0x08838300u); if (g_orig_gq) psp_dispatch_register(0x08838300u, gq_hook); }
@@ -8868,7 +8886,8 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         if (a >= next && next <= to) { char path[512]; std::snprintf(path, sizeof path, "%s/a%06.2f.tga", dir.c_str(), a); if (std::getenv("PSPRECOMP_TAGTEAM_AGESHOTS_WIN")) ge_draw_capture_window(path, 10000); else ge_draw_capture_screenshot(path, 10000); while (next <= a) next += step; }   // _WIN=1: the whole window (our layer, post passes)
     }
     if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_MEMSHOT")) {   // debug: "<dir>": at battle ages 14 / 18 / 22 / 26 s a screenshot and a guest memory snapshot (0x08800000..0x0A000000)
-        static int next = 0; static const float ts[4] = {14.f, 18.f, 22.f, 26.f};
+        static int next = 0; static float ts[4] = {14.f, 18.f, 22.f, 26.f};
+        static bool parsed = false; if (!parsed) { parsed = true; if (const char* at = std::getenv("PSPRECOMP_TAGTEAM_MEMSHOT_AT")) std::sscanf(at, "%f,%f,%f,%f", &ts[0], &ts[1], &ts[2], &ts[3]); }   // other ages: "a,b,c,d"
         if (next < 4 && dissidia_battle_age() / 60.0f >= ts[next]) {
             char path[512]; std::snprintf(path, sizeof path, "%s/s%d.tga", std::getenv("PSPRECOMP_TAGTEAM_MEMSHOT"), next); ge_draw_capture_screenshot(path, 10000);
             std::snprintf(path, sizeof path, "%s/m%d.bin", std::getenv("PSPRECOMP_TAGTEAM_MEMSHOT"), next);
