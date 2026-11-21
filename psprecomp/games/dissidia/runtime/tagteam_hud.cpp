@@ -156,7 +156,7 @@ void dmg_number(const TagHudHit& h, double age, float ax, float y, bool right, f
 void hit_numbers_at(uint32_t victim, double tnow, float ax, float y, bool right, float em, float rise) {
     if (!victim || hpdmg_mode() <= 0) return;
     int k = 0;
-    for (const HitRec& r : g_hits) if (r.h.victim == victim && tnow - r.t0 < kNumLife) { dmg_number(r.h, tnow - r.t0, ax, y - 7.f * k, right, em, rise); k++; }
+    for (const HitRec& r : g_hits) if (r.h.victim == victim && tnow - r.t0 < kNumLife) { dmg_number(r.h, tnow - r.t0, ax, y - 0.75f * em * k, right, em, rise); k++; }
 }
 // the lost chunk as a lighter trail on a panel's HP bar: waits 0.35 s, then shrinks away (retail's delayed bar)
 void hp_trail(uint32_t victim, double tnow, float x, float y, float w, float cur_frac, bool right, float a) {
@@ -180,14 +180,14 @@ void hit_wash(uint32_t victim, double tnow, float x0, float y0, float x1, float 
     }
 }
 // the feed: the newest hits as small lines "ATT > VICTIM  -1234" (side coloured names), top centre, 3 lines at most, 2.3 s each
-void hit_feed(double tnow) {
+void hit_feed(double tnow, float top) {   // top: below the job-power bars shown along the top edge (they used to cover the feed)
     if (hpdmg_mode() <= 0 || !hpfeed_on()) return;
     std::vector<const HitRec*> live;
     for (const HitRec& r : g_hits) if (tnow - r.t0 < kFeedLife) live.push_back(&r);
     if (live.size() > 3) live.erase(live.begin(), live.end() - 3);
-    const float em = 7.4f, cx = 240.f; float y = 20.f + 8.f * (static_cast<int>(live.size()) - 1);
+    const float em = 9.4f, cx = 240.f, step = 10.5f; float y = top + 22.f + step * (static_cast<int>(live.size()) - 1);   // (20 Nov: bigger, was 7.4 / 8 px)
     // newest at the bottom, older lines above, top centre under the retail top bar
-    for (size_t i = live.size(); i-- > 0; y -= 8.f) {
+    for (size_t i = live.size(); i-- > 0; y -= step) {
         const HitRec& r = *live[i]; const float age = static_cast<float>(tnow - r.t0);
         const float a = std::min(std::min(1.f, age / 0.12f), std::clamp((static_cast<float>(kFeedLife) - age) / 0.5f, 0.f, 1.f));
         if (a <= 0.01f) continue;
@@ -195,7 +195,7 @@ void hit_feed(double tnow) {
         const std::string an = r.h.aname, vn = r.h.vname, arrow = " > ", num = "  -" + std::to_string(r.h.dmg), ko = r.h.ko ? "  KO" : "";
         const float wa = an.empty() ? 0.f : text_w(an, true, em) + text_w(arrow, true, em), wv = text_w(vn, true, em), wn = text_w(num, true, em), wk = ko.empty() ? 0.f : text_w(ko, true, em);
         const float tw = wa + wv + wn + wk, x0 = cx - tw / 2.f + (1.f - a) * 6.f;
-        g_layer.band(x0 - 8.f, y - 6.2f, x0 + tw + 8.f, y + 2.0f, [&](float x, float) { const float d = std::fabs(x - (x0 + tw / 2.f)) / (tw / 2.f + 8.f); return LayerColor{14, 16, 40, 0.55f * a * (1.f - std::pow(d, 3.f))}; });
+        g_layer.band(x0 - 8.f, y - 0.84f * em, x0 + tw + 8.f, y + 0.27f * em, [&](float x, float) { const float d = std::fabs(x - (x0 + tw / 2.f)) / (tw / 2.f + 8.f); return LayerColor{14, 16, 40, 0.55f * a * (1.f - std::pow(d, 3.f))}; });
         float x = x0;
         if (!an.empty()) { shadow_text(an, true, em, x, y, LayerColor{ca.r, ca.g, ca.b, a}); x += text_w(an, true, em); shadow_text(arrow, true, em, x, y, LayerColor{190, 195, 215, a}); x += text_w(arrow, true, em); }
         shadow_text(vn, true, em, x, y, LayerColor{cv.r, cv.g, cv.b, a}); x += wv;
@@ -243,7 +243,7 @@ void panel(const TagHudFighter& f, float x, float y, double tnow) {
     hp_trail(f.id, tnow, bx0, y + 18.6f, bw0, ko ? 0.f : float(f.hp) / float(std::max(1, f.hp_max)), right, a);
     hit_wash(f.id, tnow, x, y, x + w, y + H, a);
     // the damage number beside the panel's inner edge (the EX tube sits at the outer one), level with the HP bar
-    hit_numbers_at(f.id, tnow, right ? x - 5.f : x + w + 5.f, y + 12.f, right, 10.f, 7.f);
+    hit_numbers_at(f.id, tnow, right ? x - 5.f : x + w + 5.f, y + 12.f, right, 13.f, 8.f);   // (20 Nov: bigger, was 10)
     const std::string hp = ko ? "0" : std::to_string(std::max(0, f.hp));
     const float hw = text_w(hp, true, 6.2f);
     if (!gauges) shadow_text(hp, true, 6.2f, right ? bx0 : x + w - 2.f - hw, y + 23.f, LayerColor{230, 238, 255, a});
@@ -379,9 +379,10 @@ void tagteam_layer_frame(bool in_battle) {
         if (hpdmg_mode() > 0 && !g_hits.empty()) {   // fighters on the retail big panels (bottom corners, number beside the BRV): ours sits next to the retail pulse
             for (int s = 0; s < 2; s++) {
                 bool small = false; for (const TagHudFighter& f : g_fighters) if (f.id == g_big[s]) small = true;
-                if (!small) hit_numbers_at(g_big[s], tnow, s == 0 ? 148.f : 332.f, 243.f, s != 0, 11.f, 8.f);
+                if (!small) hit_numbers_at(g_big[s], tnow, s == 0 ? 148.f : 332.f, 243.f, s != 0, 14.f, 9.f);   // (was 11)
             }
-            hit_floating(tnow); hit_feed(tnow);
+            hit_floating(tnow);
+            { float top = 0.f; for (const Notice& n : g_notices) if (n.kind != 0) top += 19.f; hit_feed(tnow, top); }
         }
         if (!g_banner.empty()) banner(g_banner);
         { float yd = 70.f, yj = 0.f;   // falls under the join banner, job powers along the top edge

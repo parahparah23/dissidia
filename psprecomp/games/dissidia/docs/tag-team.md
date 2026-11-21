@@ -4008,3 +4008,5 @@ in region 1 again by default (the rest of high RAM is unchanged); PSPRECOMP_SOUN
 Regression (--baseline) passes.
 
 - **Sound heap back in high RAM** (20 Nov, late): the silent battle audio blamed on the sound heap in region 3 was the Japanese-voice bug (issue #119; English plays fine). The heap is in region 3 again by default (~10 MB of room for voice banks); `PSPRECOMP_SOUNDHEAP_LOW=1` keeps it in region 1.
+
+- **HP indicator bigger, feed clear of the job-power bars** (21 Nov, user): panel numbers 13 px (small panels, was 10) / 14 px (big panels, was 11), stacked by 0.75 em; the hit feed 9.4 px (was 7.4) with 10.5 px lines and placed below the job-power bars along the top edge (they covered it when a fighter fell).
