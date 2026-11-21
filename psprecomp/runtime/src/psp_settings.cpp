@@ -198,7 +198,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
-           ROW_DBG0, ROW_DBG1, ROW_DBG2, ROW_DBG3, ROW_DBG4, ROW_DBG5,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
+           ROW_DBG0, ROW_DBG1, ROW_DBG2, ROW_DBG3, ROW_DBG4, ROW_DBG5, ROW_DBG6, ROW_DBG7, ROW_DBG8, ROW_DBG9,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
            ROW_GPU, ROW_GPU_GET, ROW_GPU_DEL,   // custom GPU drivers (Android, Adreno): Drivers page
            ROW_SUB_HDR, ROW_SUB_RT,             // rows that open a sub-menu
            ROW_SUB_ENV0, ROW_SUB_ENV_END = ROW_SUB_ENV0 + 15,   // Debug page: one row per developer-options category (psp_env_options.inc)
@@ -1537,7 +1537,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
                        : "Effect lights (debug)\nHow bright the light from glowing attack effects is (PSPRECOMP_FX_LIGHT_INTENSITY); x0 = off, default x2.5. Needs Ray-Traced Shadows. Saved.";
             break;
         }
-        case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
+        case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: {
             const size_t i = size_t(r - ROW_DBG0);
             if (i >= g_dbg_toggles.size()) break;
             const bool on = g_dbg_toggles[i].get();
@@ -1608,7 +1608,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_RT_REFL_FX:
     case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_UPDATES: case ROW_LR_BUTTONS: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5:
+    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9:
         return K::Toggle;
     case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
     case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: case ROW_TEXPACK_INSTALL: case ROW_TEXPACK_DOWNLOAD: return K::Action;
@@ -2379,7 +2379,7 @@ void change(int d) {   // left / right on the selected row
         save(w ? "env.FX_LIGHT_RADIUS" : "env.FX_LIGHT_INTENSITY", b);   // exported as PSPRECOMP_FX_LIGHT_* at the next start
         break;
     }
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
+    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: {
         const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
         if (i < g_dbg_toggles.size() && g_dbg_toggles[i].get() != (d > 0)) g_dbg_toggles[i].set(d > 0);
         break;
@@ -2988,7 +2988,7 @@ void confirm_row() {
     case ROW_GLOWSOFT: change(ge_draw_fb_prefilter() ? -1 : 1); return;
     case ROW_GLOWPASS: change(ge_draw_fb_snapshot() ? -1 : 1); return;
     case ROW_FXL_INT: case ROW_FXL_RAD: change(1); return;
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: {
+    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: {
         const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
         if (i < g_dbg_toggles.size()) change(g_dbg_toggles[i].get() ? -1 : 1);
         return;
@@ -3239,7 +3239,7 @@ void pointer_release(float ux, float uy) {
 
 void psp_settings_set_frame_rate_hook(const PspFrameRateHook& hook) { g_fps = hook; }
 void psp_settings_set_voice_hook(const PspVoiceHook& hook) { g_voice = hook; }
-void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (g_dbg_toggles.size() < 6) g_dbg_toggles.push_back(t); }
+void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (g_dbg_toggles.size() < 10) g_dbg_toggles.push_back(t); }
 void psp_settings_set_texpack_hook(const PspTexPackHook& hook) { g_texpack = hook; }
 void psp_settings_set_mod_installer(const PspModInstaller& inst) { g_installer = inst; }
 

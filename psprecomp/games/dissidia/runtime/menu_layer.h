@@ -34,6 +34,7 @@ public:
     void clear();     // remove it
 
     void blend(int x, int y, float r, float g, float b, float a);   // pixel space, straight alpha "over"
+    float opacity = 1.f;   // multiplies every element drawn from now on (a faded group: the overhead mini panels)
 private:
     int s_ = 2, w_ = 0, h_ = 0;
     std::vector<float> px_;   // r, g, b (0..255, not premultiplied), a (0..1)

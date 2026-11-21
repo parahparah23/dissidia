@@ -74,6 +74,7 @@ void MenuLayer::begin(int scale) {
 }
 
 void MenuLayer::blend(int x, int y, float r, float g, float b, float a) {
+    a *= opacity;
     if (a <= 0.f || x < 0 || y < 0 || x >= w_ || y >= h_) return;
     if (a > 1.f) a = 1.f;
     float* p = &px_[(size_t(y) * size_t(w_) + size_t(x)) * 4];
