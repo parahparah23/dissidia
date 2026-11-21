@@ -4792,6 +4792,7 @@ void job_notice(const KoRec& k) {
     const int cnt = static_cast<int>(rd(G + 8u + 104u * static_cast<uint32_t>(sr) + 100u)); if (cnt < 1 || cnt > 5) return;
     int si = -1; for (int i = 0; i < cnt; i++) if (g_ram[tally_row(base, sr, i) & 0x07FFFFFFu] == k.by_ch) si = i;
     if (si < 0) return;
+    if (sr != g_human_rec && !std::getenv("PSPRECOMP_TAGTEAM_ENEMYNOTICE")) return;   // the CPU team's jobs are not the player's: retail only shows the powers the player's party received (RP6 1120: "Mime" came from the enemy Cloud of Darkness's job 9)
     if (!g_pow_have || sbase != base) { for (int r = 0; r < 2; r++) for (uint32_t o = 0; o < 19u; o++) shadow[r][o] = g_ram[(base + 10832u + 19u * static_cast<uint32_t>(r) + o) & 0x07FFFFFFu]; g_pow_have = true; sbase = base; }
     uint8_t before[19]; std::memcpy(before, shadow[sr], 19);
     const uint32_t mode1 = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(g_ram[(base + 1u) & 0x07FFFFFFu])));
@@ -6816,6 +6817,19 @@ uint32_t portrait_for(int c) {
             if (g_log) { std::fprintf(stderr, "[TAGTEAM] portrait %s from the package (%zu bytes, buffer %08X heap %08X): sprite %08X picture", path.c_str(), b.size(), buf, heap, made);
                 const uint32_t pic = ok(made, 0x40) ? rd(made + 0x10u) : 0u; for (uint32_t o = 0; ok(pic, 0x40) && o < 0x30u; o += 4) std::fprintf(stderr, " %08X", rd(pic + o)); std::fprintf(stderr, "\n"); }
         } else if (g_log) std::fprintf(stderr, "[TAGTEAM] portrait %s: not read (heap %08X)\n", path.c_str(), heap);
+        if (ok(made, 0x100)) {   // RP6 20 Nov (rp6_1120_cecil_icon.log): Cecil's portrait data landed at 0E0981B0 (model pool, high RAM) and the icon was not drawn. The host
+            // draws textures up there (GE checked, exact address incl.), so the cause is not found; the portrait's pixels are copied below 0C000000 (guest, a small
+            // arena in region 2) - the sprite is never freed, nothing else points at them. PSPRECOMP_TAGTEAM_PORTRELOC=<hex dest> = debug: move to that address;
+            // PSPRECOMP_TAGTEAM_PORTHI=1 leaves the data where the game put it; =2 also moves data from the whole of region 3 (default: from 0E000000).
+            const uint32_t pic = rd(made + 0x10u); const uint32_t A = ok(pic, 0x40) ? rd(pic) : 0u; const uint32_t N = 0x8000u;
+            const char* rl = std::getenv("PSPRECOMP_TAGTEAM_PORTRELOC"); const char* ph = std::getenv("PSPRECOMP_TAGTEAM_PORTHI");
+            const uint32_t from = ph && ph[0] == '2' ? 0x0C800000u : 0x0E000000u;
+            static uint32_t arena = 0; static unsigned slot = 0;
+            if (!rl && !(ph && ph[0] == '1') && A >= from && !arena) arena = psp_kmem_bump_alloc_named_r2(16u * N, "TAGTEAM_PORTRAIT_PIX");
+            const uint32_t dst = rl ? static_cast<uint32_t>(std::strtoul(rl, nullptr, 16)) : (arena && A >= from && !(ph && ph[0] == '1') ? arena + (slot++ % 16u) * N : 0u);
+            if (A && dst && ok(A, N) && ok(dst, N)) { std::memcpy(g_ram + (dst & 0x07FFFFFFu), g_ram + (A & 0x07FFFFFFu), N);
+                int n = 0; for (uint32_t base : {pic, made}) for (uint32_t o = 0; o < 0x100u; o += 4) { const uint32_t v = rd(base + o); if (v >= A && v < A + N) { wr(base + o, v - A + dst); n++; } }
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] portrait pixels %08X -> %08X (%d pointers rewritten)\n", A, dst, n); } }
     }
     const uint32_t obj2 = made;
     if (ok(obj2, 0x40)) g_ram[(obj2 + 22u) & 0x07FFFFFFu] = 0;   // hidden: only its picture is used

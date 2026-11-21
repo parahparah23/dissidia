@@ -3917,3 +3917,26 @@ User report (RP6, Assists OFF, human Kain, partner Squall, `rp6_1120_gauge.log`)
 - **Open / next:** pin the writer of the team-wide zeroing (suspect: the round guard path `FUN_08A23DA8` skipped / half-run, or a round re-init); on the device read `[AGAUGE]` lines around the loss (cause text and `context:` line tell the case).
 
 - **Human called in: longer slow motion** (20 Nov, user): when a CPU partner calls the human in (Assist Off round 9), the call slow motion is 0.25 for 140 ticks (retail call: 0.4 for 66) so the player can see where they landed and act; `PSPRECOMP_TTCAM_AO9HUMANSLOW=<speed>:<ticks>` tunes it; a CPU called in keeps the retail values.
+## "Mime" notice for a Monk party (20 Nov, ttlock)
+RP6 report (`rp6_1120_mime.log`): Kain (a Monk) fell, the screen said "Party received strong powers of the Mime", nobody in the player's party is a Mime.
+- Block layout (P = base+10832+19*record): +2i job of member i, +2i+1 power received, +10 member on the stage ("last byte" of the logged first 11 bytes
+  = P[10], NOT a flag: 03 = member 3 scored, it is meant to change), +11..14 gathered, +15..18 advanced. Job ids = index of `kJobName` (2 Monk, 9 Mime).
+- Log evidence: human record 0 jobs 2,2,7,2,1 (no 9); the enemy's record 1 has job 9 (member 1 in the first battle, member 4 in the last). At t=886.2
+  the fall "KO of KAIN (team 0) by CLOUD OF DARKNESS (team 1)" ran `job_notice` for the SCORER's record 1 member 4 (job 9) -> Mime notice. The
+  human's own falls (records 0 members 3 / 0, job 2) are written correctly (member 3 counted twice = same power flag, no change; no notice).
+  Nothing was written to a wrong member index; the victim's index is never used.
+- Fix: `job_notice` only for the player's team (`sr == g_human_rec`); `PSPRECOMP_TAGTEAM_ENEMYNOTICE=1` = old behaviour. The booking / replay are unchanged
+  (retail books the winner's record too; the enemy block is never shown). Regression `ttlock_reg1` PASS.
+- Unverified: no host replay of a fall by an enemy Mime (not run); job 9 = Mime rests on the pak name table (entries 9/10) read earlier.
+## Cecil's portrait missing with high RAM (20 Nov, tree tthud; host-only, window shots; cause NOT found, workaround in)
+RP6 log `rp6logs/rp6_1120_cecil_icon.log`: Cecil called in at 508.4 s (body of char 10), at 515.44 s (lock cycle) `portrait_for(7)` read `p_for100_1p.gim` and made the sprite; the picture's pixel
+data (first word of the picture, `0E0981B0`) is in the model pool in high RAM (`MODEL_POOL_TAGTEAM` 0C800000-0E780000); the big panel's icon was not drawn. Earlier portraits used `0D9E1190` (Nin), `0DE0A1E0` (Exdeath);
+the retail portraits' data are in the pool too (`0CD5CE40`...), so region 3 as such is fine; only the 0x0E.. one failed.
+- **Not reproduced on the host**: call-in of Cecil (`ENEMY2_CHAR=7 KO=cpu:10 KO_HP0=1 CALLIN_DELAY=5`, window shots, HUD crop) draws the portrait with data at `0CF72390` and with `NOHIRAM=1` (`0A2EB090`).
+  The GE side was checked by moving the pixels after creation (`PSPRECOMP_TAGTEAM_PORTRELOC=<hex>`): at `0E790000`, `0E0981B0` (exact device address), `0D0981B0`, `0C900000` the portrait draws. Code read:
+  texture address = TEXADDR | (TEXBUFWIDTH bits 16-23 << 24), masked 0x07FFFFFF, `PSP_MEM_SIZE` 128 MB, CLUT address likewise, render-target lookup `(ta & 0x07E00000) == 0x04000000` does not match 0E..; no `< 0x0C000000`
+  check in the GE / texture / Vulkan code. So the cause is something the host does not show (creation-time logic in the game that sees the pointer, the Vulkan path, the pool state at 515 s) - unverified.
+- **Workaround** (`portrait_for`): a package-loaded portrait whose pixel data is at >= 0x0E000000 gets them copied into a 16 x 32 KB arena in region 2 (`TAGTEAM_PORTRAIT_PIX`, below 0C000000) and the picture's pointer
+  is rewritten (the sprite is never freed). Log `[TAGTEAM] portrait pixels A -> B`. `PSPRECOMP_TAGTEAM_PORTHI=1` = off, `=2` = move from all of region 3 (host test: `0CF5CAA0 -> 0BD2F000`, Cecil's icon draws, regression PASS).
+  Not verified: that this fixes the RP6 (the host never showed the failure, so the workaround was only checked not to break the host).
+- **If it still fails on the device**: run with `PSPRECOMP_TAGTEAM_PORTHI=2` and with `PSPRECOMP_TAGTEAM_NOHIRAM=1`, and send the log (`[TAGTEAM] portrait pixels` line, `PSPRECOMP_TEX_WHITE=1` / `TEX_DUMP=<addr>`).
