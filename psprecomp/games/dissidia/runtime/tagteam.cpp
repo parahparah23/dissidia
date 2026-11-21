@@ -650,6 +650,15 @@ std::map<int, float> g_unref_since;                // character -> battle age si
 constexpr float kUnloadDelaySec = 3.0f;            // a departed character's banks / pack / files are released no sooner than this after its last fighter fell
 void load_character(int charId) {
     TtStep tt_step_("load_character");
+    if (std::getenv("PSPRECOMP_TAGTEAM_INFODUMP")) {   // table dump: every record of the info table (id, char, costume, type, ids +0 / +4, name)
+        static bool done = false;
+        if (!done) { done = true;
+            const uint32_t t = rd(0x089D4968u), h = ok(t, 8) ? rd(t) : 0u;
+            if (ok(h, 16)) { const uint32_t n = rd(h + 4u);
+                for (uint32_t i = 0; i < n && i < 4000; i++) { const uint32_t r = h + 8u + 0x44u * i; if (!ok(r, 0x44)) break;
+                    const uint8_t* q = g_ram + (r & 0x07FFFFFFu);
+                    std::fprintf(stderr, "[INFODUMP] rec %u id %u char %d costume %u type %u f0 %u f4 %u f8 %u name %.16s\n", i, rdh(r), static_cast<int8_t>(q[6]), q[7], q[8], rdh(r), rdh(r + 4u), rdh(r + 8u), reinterpret_cast<const char*>(q + 36)); } } }
+    }
     if (g_log) for (uint32_t a : {0x089C88B8u, 0x089E076Cu, 0x089C93E0u, 0x089CAC10u, 0x089CAF0Cu, 0x089C9ED0u, 0x089CBA28u, 0x089CBDD4u, 0x089C9564u, 0x089C9574u}) { char b[24] = {}; for (int i = 0; i < 23; i++) b[i] = static_cast<char>(g_ram[(a + i) & 0x07FFFFFFu]); std::fprintf(stderr, "[TAGTEAM] heap name %08X: %s\n", a, b); }
     if (charId <= 0 || std::getenv("PSPRECOMP_TAGTEAM_NOLOAD")) return;
     const uint32_t rec = info_for_char(charId);
@@ -1236,7 +1245,7 @@ void apply_undo(Extra& e) {
     e.undo.clear();
 }
 
-void safe_spot(uint32_t ref, float dx, float dz, float out[3]);   // below (grounded, inside-the-stage spot)
+void safe_spot(uint32_t ref, float dx, float dz, float out[3], bool callin = false);   // below (grounded, inside-the-stage spot)
 void ground_track();   // below
 float callin_countdown(int team, float age);   // below: seconds until the side's next call-in
 void entrance_effect(uint32_t A, const std::string& name, bool banter = false);
@@ -1276,7 +1285,7 @@ void start_extra(Extra& e) {
         const float dx = rdf(e.foe + 0x80u) - rdf(e.slot_actor + 0x80u), dz = rdf(e.foe + 0x88u) - rdf(e.slot_actor + 0x88u), d = std::sqrt(dx * dx + dz * dz);
         if (d > 1.0f) { const float k = std::min(5.0f, d * 0.4f) / d; pdx = dx * k - dz / d * 1.5f; pdz = dz * k + dx / d * 1.5f; }
     }
-    { float sp[3]; safe_spot(e.slot_actor, pdx, pdz, sp); wrf(vec, sp[0]); wrf(vec + 4, sp[1]); wrf(vec + 8, sp[2]); wrf(vec + 12, 1.0f); }
+    { float sp[3]; safe_spot(e.slot_actor, pdx, pdz, sp, e.callin); wrf(vec, sp[0]); wrf(vec + 4, sp[1]); wrf(vec + 8, sp[2]); wrf(vec + 12, 1.0f); }
     tp_vec("call-in start", e.actor, vec); call(PLACE, e.actor, vec, 1);
     g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
     { const uint32_t rv = call(START_ACTION, e.actor + 304u, 1, 0); if (g_log) std::fprintf(stderr, "[TAGTEAM] START_ACTION(%08X, 1) -> %u, script now %d\n", e.actor + 304u, rv, static_cast<int16_t>(rd(e.actor + 0x180u) & 0xFFFFu)); }
@@ -1410,6 +1419,7 @@ bool grounded_now(uint32_t a, GPos* o) {
 // battle (e.g. (-11.5, 6, -7) / (11.5, 6, -7), or (+-6, 23, 0) on the same stage: retail takes one pair of the table) are two of its records; the others are more spawn
 // points of the stage (other levels / sides). Found at battle start by matching a fighter's start position, then taken as the whole run of records around it.
 struct SpawnPt { float x, y, z, yaw; };
+GPos g_side_start[2]; bool g_side_start_set[2] = {false, false};   // each side's slot fighter's first grounded spot of the battle = retail's start spot of that side (call-ins appear there)
 std::vector<SpawnPt> g_spawn; bool g_spawn_tried = false; uint32_t g_spawn_pick_n = 0;
 void spawn_table_find(float px, float py, float pz) {
     g_spawn.clear(); uint32_t xb, yb, zb; std::memcpy(&xb, &px, 4); std::memcpy(&yb, &py, 4); std::memcpy(&zb, &pz, 4);
@@ -1432,17 +1442,18 @@ void spawn_table_find(float px, float py, float pz) {
     if (g_log) std::fprintf(stderr, "[SPAWNTAB] no table found for start position (%.1f,%.1f,%.1f)\n", px, py, pz);
 }
 void ground_track() {
-    if (g_ground_gen != g_battle_gen) { g_ground_gen = g_battle_gen; g_lastg.clear(); g_prevg.clear(); g_gsamp.clear(); g_lastg_t.clear(); g_gmeta.clear(); g_gstart_set = false; g_spawn.clear(); g_spawn_tried = false; g_spawn_pick_n = 0; }
-    auto sample = [&](uint32_t a) {
+    if (g_ground_gen != g_battle_gen) { g_ground_gen = g_battle_gen; g_lastg.clear(); g_prevg.clear(); g_gsamp.clear(); g_lastg_t.clear(); g_gmeta.clear(); g_gstart_set = false; g_side_start_set[0] = g_side_start_set[1] = false; g_spawn.clear(); g_spawn_tried = false; g_spawn_pick_n = 0; }
+    auto sample = [&](uint32_t a, bool slot = false) {
         GPos p; if (!ok(a, 0x12D0) || is_down(a) || ko_script(a) || !grounded_now(a, &p)) { g_prevg.erase(a); return; }
         const auto pv = g_prevg.find(a); const bool steady = pv != g_prevg.end() && std::fabs(pv->second.y - p.y) < 0.02f; g_prevg[a] = p;   // (a floor word that follows the fighter up, e.g. in a climb or a dash, is not ground: the height must hold still between two frames)
         if (!steady) return;
         const float now = dissidia_battle_age();
+        if (slot) { const uint32_t sd = side_of(a) & 1u; if (!g_side_start_set[sd] && now < 600.f) { g_side_start_set[sd] = true; g_side_start[sd] = p; if (g_log) std::fprintf(stderr, "[SPAWNTAB] side %u start spot (first grounded spot of its slot fighter %08X): (%.1f,%.1f,%.1f)\n", sd, a, p.x, p.y, p.z); } }
         if (!g_spawn_tried && !std::getenv("PSPRECOMP_TAGTEAM_NOSPAWNPTS")) { g_spawn_tried = true; spawn_table_find(p.x, p.y, p.z); }
         if (!g_gstart_set) { g_gstart_set = true; g_gstart_x = p.x; g_gstart_z = p.z; }   // (the first grounded fighter; refined below by the slot fighters at the start)
         g_lastg[a] = p; g_lastg_t[a] = now; const std::pair<int, int> c{static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.z))}; g_gsamp[c] = p; auto& m = g_gmeta[c]; m.first = now; m.second++;
     };
-    if (g_bs) for (uint32_t k = 0; k < 2; k++) sample(srd(g_bs + 56u + 4u * k));
+    if (g_bs) for (uint32_t k = 0; k < 2; k++) sample(srd(g_bs + 56u + 4u * k), true);
     for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) sample(g_extra[i].actor);
 }
 // A sample is usable when it was hit often enough to be a place fighters stand / walk (not a one-frame landing of a knock-back) and lies inside the start area's reach.
@@ -1471,8 +1482,21 @@ float nearest_sample(float x, float z, GPos* o, bool strict = true) {
 // A stage spawn point is used only where a fighter has really stood (a ground sample within 1.5 m, same height within 1 m): the old 6 m radius let
 // Ultimecia spawn at (0,0,10) inside the rubble of Order's Sanctuary (device log 1118_2030; hidden, not missing). PSPRECOMP_TAGTEAM_SPAWNR=<m> overrides.
 const float kSpawnFloorR = std::getenv("PSPRECOMP_TAGTEAM_SPAWNR") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_SPAWNR"))) : 1.5f;
-void safe_spot(uint32_t ref, float dx, float dz, float out[3]) {
+void safe_spot(uint32_t ref, float dx, float dz, float out[3], bool callin) {
     GPos b{rdf(ref + 0x80u), rdf(ref + 0x84u), rdf(ref + 0x88u)};
+    if (callin && !std::getenv("PSPRECOMP_TAGTEAM_NOSTARTSPOT") && !std::getenv("PSPRECOMP_TAGTEAM_NOSAFESPOT") && g_ground_gen == g_battle_gen && ok(ref, 0x12D0) && g_side_start_set[side_of(ref) & 1u]) {
+        // a call-in appears at the normal stage spawn point of its side (where retail put that side's fighter at the start), not at the fallen fighter's body: the spot is a place a fighter
+        // really stood (floor); when a living fighter stands there (< 3 m) the nearest free grounded spot on a ring around it (3 / 5 / 7 m) is used.
+        const GPos st = g_side_start[side_of(ref) & 1u]; std::vector<uint32_t> fs; if (g_bs) for (int k = 0; k < 2; k++) fs.push_back(srd(g_bs + 56u + 4u * k)); for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) fs.push_back(g_extra[i].actor);
+        auto taken = [&](float x, float z) { for (uint32_t f : fs) if (f != ref && ok(f, 0x12D0) && alive(f) && std::hypot(rdf(f + 0x80u) - x, rdf(f + 0x88u) - z) < 3.0f) return true; return false; };
+        out[0] = st.x; out[1] = st.y; out[2] = st.z; const char* how = "the side's start spot";
+        if (taken(st.x, st.z)) { bool done = false;
+            for (float r : {3.0f, 5.0f, 7.0f}) { for (int a = 0; a < 8 && !done; a++) { const float ang = 0.785398f * static_cast<float>(a), cx = st.x + r * std::cos(ang), cz = st.z + r * std::sin(ang); GPos g;
+                if (!taken(cx, cz) && ground_near(cx, cz, &g) && std::fabs(g.y - st.y) <= 1.0f) { out[0] = cx; out[1] = g.y; out[2] = cz; done = true; how = "beside the start spot (a fighter stands on it)"; } } if (done) break; }
+            if (!done) how = "the start spot (taken, no free ground beside it)"; }
+        if (g_log) std::fprintf(stderr, "[SAFESPOT] ref %08X (%.1f,%.1f,%.1f) call-in -> %s (%.1f,%.1f,%.1f)\n", ref, b.x, b.y, b.z, how, out[0], out[1], out[2]);
+        return;
+    }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOSAFESPOT") && g_ground_gen == g_battle_gen && !g_gsamp.empty()) {
         if (!g_spawn.empty()) {   // a stage spawn point, picked deterministically (battle age, battle number, pick counter); only one with floor (a ground sample within 6 m at the same height) and not on top of a living fighter
             std::vector<uint32_t> fs; if (g_bs) for (int k = 0; k < 2; k++) fs.push_back(srd(g_bs + 56u + 4u * k)); for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) fs.push_back(g_extra[i].actor);
@@ -2928,7 +2952,7 @@ bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     j.L = rd(A + ACT_LOCKBLK); j.B = rd(A + ACT_BRAIN); j.ctrl = rd(A + 0x5A0u); j.assist = rd(A + 0x1108u); j.foe = rd(A + 0x300u);
     j.flags = g_ram[(A + 0x5B0u) & 0x07FFFFFFu]; j.stock = rd(A + 0x10CCu); j.rev = rd(A + 0x10D0u);
     const uint32_t stock_w = rdh(A + 0x10CEu);
-    { float sp[3]; safe_spot(A, 0.f, 0.f, sp); j.x = sp[0]; j.y = sp[1]; j.z = sp[2]; }
+    { float sp[3]; safe_spot(A, 0.f, 0.f, sp, true); j.x = sp[0]; j.y = sp[1]; j.z = sp[2]; }
     j.lockmode = ok(j.L, 0x200) ? rd(j.L + 264u) : 0u;
     const uint32_t camslot = rdh(A + 4300u) & 7u;   // the camera manager slot the constructor will (re)make its lock block in
     const uint32_t side = side_of(A);
@@ -5213,7 +5237,7 @@ bool reuse_parked(Extra& e, int charId, uint32_t anchor, uint32_t foe) {
     float pdx = 3.0f, pdz = 0.0f;   // the call-in spot of start_extra: in front of the anchor, toward the foe
     { const float dx = rdf(foe + 0x80u) - rdf(anchor + 0x80u), dz = rdf(foe + 0x88u) - rdf(anchor + 0x88u), dd = std::sqrt(dx * dx + dz * dz);
       if (dd > 1.0f) { const float k = std::min(5.0f, dd * 0.4f) / dd; pdx = dx * k - dz / dd * 1.5f; pdz = dz * k + dx / dd * 1.5f; } }
-    float sp[3]; safe_spot(anchor, pdx, pdz, sp);
+    float sp[3]; safe_spot(anchor, pdx, pdz, sp, true);
     const int oldc = actor_char(A);
     auto undown = [&]() { g_down.erase(std::remove(g_down.begin(), g_down.end(), A), g_down.end()); g_defeat_hold.erase(A); g_ko_swap_at.erase(A); g_ko_mark.erase(A); g_label_char.erase(A); };   // (not g_downrec: the caller is iterating it; a pending entry of A still brings its own member later)
     const std::vector<uint32_t> down0 = g_down;
@@ -5269,7 +5293,7 @@ void call_in(DownRec& d, int charId) {
     g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
     const uint32_t vec = sp0 - 0xC0u;
     const uint32_t ref = ok(anchor, 0x12D0) ? anchor : A;
-    { float sp[3]; safe_spot(ref, 3.0f, 0.0f, sp); wrf(vec, sp[0]); wrf(vec + 4, sp[1]); wrf(vec + 8, sp[2]); wrf(vec + 12, 1.0f); }
+    { float sp[3]; safe_spot(ref, 3.0f, 0.0f, sp, true); wrf(vec, sp[0]); wrf(vec + 4, sp[1]); wrf(vec + 8, sp[2]); wrf(vec + 12, 1.0f); }
     tp_vec("call_in", A, vec); call(PLACE, A, vec, 1);
     g_ctx->r[29] = static_cast<int32_t>(sp0);
     { const int t = team_of(d.side); const std::string nm = (g_reserve.size() > static_cast<size_t>(t) && static_cast<size_t>(g_called[t]) < g_reserve[t].names.size()) ? g_reserve[t].names[static_cast<size_t>(g_called[t])] : char_label(actor_char(A), true);

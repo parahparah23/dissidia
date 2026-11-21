@@ -4286,3 +4286,24 @@ The `S` capture (the 480 x 272 render target) does not contain the game layer; u
 - 3 or more humans, 5 rows, an Internet (relay) session and a keeper whose party also holds a normal player (his player rows then stay on his own side) were not run.
 - The row order inside the CPU party is the keeper's row order; the order column ("Random") was not touched.
 - Strength / level / type of the keeper's first CPU row cannot be edited (beacon bytes); the lead's brain parameters come from the default CPU record (`apply_drive`: tier 0 / 6 unless the record has them).
+
+## "Sephiroth spawned invisible" and call-ins at the side's start spot (21 Nov, tree tthud; host-only, device not seen)
+Device log `rp6logs/rp6_1121_seph.log`: enemy slot 1 called in Sephiroth (char 14) at t=115.6 s: invisible, and standing where the fallen fighter lay.
+- **File id 1 is the right file, not a bad lookup.** `load_character` takes the first info record of the charId (`info_for_char`: table `*(0x089D4968)`, 0x44-byte
+  records, charId at +6, file id `+0`, D_ id `+4`) and uses `+0` / `+4`. `PSPRECOMP_TAGTEAM_INFODUMP=1` logs the whole table (`[INFODUMP]`, 1170 records). Sephiroth's
+  records: `rec 1 id 1 char 14 costume 1 P_SEV200_1P D_ 199`, costume 2 id 66, costume 3 id 563 (all D_ 199); ids 0 / 1 / 2 are the costume-1 models of chars 13 / 14 / 15 (the table starts with the Dissidia-1 villains), so a low id is normal. The table dump of all 31 characters: the first record is the `P_<code>_1P` costume-1 model for every character except 23 (Emperor: `P_ORG200_NORMAL`
+  285, type 6, retail's own model) and the non-roster ids 33 / 34. Costume is not used by `load_character` at all (always costume 1; the real fighter builder reads the look); every costume of a
+  character shares one D_ file, only the model id differs (+1 / +2 / +3 rows of the dump). Nothing in the log is out of range (no read past the table).
+  On the host Sephiroth loads the same file (`file id 1 loaded`) and is visible as a partner (silver hair, long sword; `/tmp/tthud_pt`, shot at 9 s).
+- **So the invisibility cause is elsewhere (unverified).** Everything the device log shows is fine except one number: `[MEMSUM] ... texture overflow used 98 of 768 KB` after
+  Sephiroth's load, the only load of the session that used the overflow heap (the earlier four show `0 of 0`, i.e. the heap did not exist yet). The textures that landed in
+  the tag team's texture overflow heap (hooks_models.cpp, memory / ttlock area) are the first lead; nothing else in the log (pack placed, no FAILED, file objects made, refs 0 = same as the working
+  characters) distinguishes him. Not changed here.
+- **Call-ins at the side's start spot.** The slot rebuild's spot came from `safe_spot`; on that stage `[SPAWNTAB] no table found` (the table is matched by a start position
+  the first grounded fighter had moved from), so `safe_spot` fell to "sample nearest to the anchor": the fallen fighter's body. Now `ground_track` records each side's slot fighter's first
+  steady grounded spot as that side's start spot (`g_side_start`, log `[SPAWNTAB] side N start spot`), and every call-in (slot rebuild, extra call-in, `reuse_parked`, `call_in`;
+  `safe_spot(..., callin = true)`) appears there (`[SAFESPOT] ... call-in -> the side's start spot`). A spot where a fighter really stood is floor by definition; if a living fighter is
+  within 3 m, the nearest free grounded spot on a 3 / 5 / 7 m ring around it is used. Partners at the battle start are unchanged. `PSPRECOMP_TAGTEAM_NOSTARTSPOT=1`: old placement.
+- **Host evidence** (quick battle, KO of the CPU slot with `KOLIST cpu:15`, reserve Sephiroth): stage 12 side 1 start (10.0,0.0,8.0) -> `[TELEPORT] rebuild finish ... (10.0,0.0,8.0)` (was the body
+  position (-23.8,0.0,3.1)); stage 5 start (0.0,0.0,-22.0) -> arrives at (0.0,0.0,-22.0). Window shots of the arrival were not usable (the camera follows the human, the spot is off screen).
+  The extra call-in path goes through the same function (`[SAFESPOT] ref 08DCF840 ... call-in -> start spot`, both stages); no separate extra-only screenshot.
