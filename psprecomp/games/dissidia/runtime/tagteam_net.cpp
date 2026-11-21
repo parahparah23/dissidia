@@ -33,6 +33,7 @@
 #include "recomp.h"
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -45,6 +46,10 @@
 
 bool dissidia_tagteam_decided();               // tagteam.cpp: the battle is decided (a side has nobody left; made from lock-step state, the same frame on every machine)
 bool dissidia_tagteam_comms_battle();          // tagteam.cpp: a Communications Mode tag battle (every machine of the group agrees)
+bool dissidia_tagteam_roster_host();           // tagteam.cpp: this machine is the room's host (its roster decides the battle)
+bool dissidia_tagteam_roster_ready();          // tagteam.cpp: this machine has the battle's agreed roster
+int dissidia_tagteam_roster_pack(uint8_t* out, int max);
+bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n);
 uint32_t dissidia_tagteam_battle_gen();
 int dissidia_tagteam_fighters(uint32_t* out, int max);   // tagteam.cpp: every fighter of the battle (slots, extras)        // tagteam.cpp: +1 per battle setup
 void dissidia_netplay_frame_delivered(uint32_t frame);   // netplay.cpp: desync check / dumps for a delivered frame
@@ -62,7 +67,7 @@ constexpr uint32_t CTRL_UPDATE = 0x088725A0u;       // EBOOT: a controller objec
 constexpr uint32_t PAD_SLOTS_PTR = 0x089D6008u;  // the pad manager: two 96-byte pad slots
 constexpr uint32_t BATTLE_PTR = 0x089D6A10u;
 constexpr uint32_t OFF_FLAGS = 16, OFF_MODE = 64, OFF_LOCAL_IDX = 68, OFF_FRAME = 72, OFF_PEERS = 76, OFF_PEER_COUNT = 852;
-constexpr uint16_t CH_INPUT = 2;
+constexpr uint16_t CH_INPUT = 2, CH_ROSTER = 3;   // CH_ROSTER: the host's roster ('TR') and the members' acknowledgement ('TA')
 constexpr int MAX_STREAMS = 12, RING = 512, WINDOW = 8, MAX_LEAD = 4;
 using Mac = std::array<uint8_t, 6>;
 
@@ -91,6 +96,7 @@ std::map<Mac, Ring> g_remote;
 Stream g_streams[MAX_STREAMS];
 uint32_t g_wait_since = 0; bool g_wait_logged = false;
 bool g_decided_logged = false;
+std::vector<Mac> g_roster_acked; uint32_t g_roster_calls = 0; bool g_roster_wait_logged = false;   // the host: members that have its roster
 double g_timeout_s = 10.0;   // a peer that sends nothing for this long (wall clock) while the lock-step needs its input has left: PSPRECOMP_TTLOCK_TIMEOUT
 std::chrono::steady_clock::time_point g_wait_t0;
 struct LowHp { uint32_t slot, frame; bool done; }; std::vector<LowHp> g_lowhp;   // PSPRECOMP_TTNET_LOWHP=<slot>:<frame>[,<slot>:<frame>...]
@@ -136,6 +142,8 @@ void reset(uint32_t obj) {
     for (int k = 2; k < MAX_STREAMS; k++) if (g_streams[k].gen != dissidia_tagteam_battle_gen()) { g_streams[k].s.clear(); g_streams[k].pad = g_streams[k].ctrl = 0; g_streams[k].last = 0; }
     psp_adhoc_local_mac(g_me.data());
     uint8_t src[6], buf[128]; while (psp_adhoc_side_recv(CH_INPUT, src, buf, sizeof buf) >= 0) {}   // the last battle's leftovers
+    { uint8_t rb[1024]; while (psp_adhoc_side_recv(CH_ROSTER, src, rb, sizeof rb) >= 0) {} }   // (the host sends its roster again until each member answers)
+    g_roster_acked.clear(); g_roster_calls = 0; g_roster_wait_logged = false;
     // The slot fighters' first drivers come from the game's own session: on a fighter's machine (+64 = 0) it is player +68 and the peer
     // is the other one; on a spectator's (+64 = 1) peer i is player i. Player k plays slot k (docs: players and slots).
     const uint32_t mode = rd(obj + OFF_MODE), me = rd(obj + OFF_LOCAL_IDX), n = rd(obj + OFF_PEER_COUNT);
@@ -167,6 +175,25 @@ void receive() {
         Ring& r = g_remote[m];
         for (int i = 0; i < cnt; i++) { uint16_t w; std::memcpy(&w, buf + 8 + 2 * i, 2); if (first + i + RING > g_F) r.put(first + i, w); }
     }
+}
+
+// The host's roster: the host sends it to every member that has not acknowledged it (every 6th call); a member takes the first one and
+// answers every copy with 'TA' (the host may not have seen the last answer). A member delivers no lock-step frame before it has it.
+void roster_step() {
+    uint8_t src[6], rb[1024]; int n;
+    const bool host = dissidia_tagteam_roster_host();
+    while ((n = psp_adhoc_side_recv(CH_ROSTER, src, rb, sizeof rb)) >= 0) {
+        if (n >= 2 && rb[0] == 'T' && rb[1] == 'A') { Mac m; std::memcpy(m.data(), src, 6); if (host && std::find(g_roster_acked.begin(), g_roster_acked.end(), m) == g_roster_acked.end()) { g_roster_acked.push_back(m); std::fprintf(stderr, "[TTLOCK] frame %u: %s has the roster\n", g_F, mac_str(m).c_str()); } continue; }
+        if (n >= 5 && rb[0] == 'T' && rb[1] == 'R' && !host) {
+            if (dissidia_tagteam_roster_adopt(rb, n)) std::fprintf(stderr, "[TTLOCK] frame %u: the host's roster is here\n", g_F);
+            if (dissidia_tagteam_roster_ready()) { const uint8_t a[2] = {'T', 'A'}; psp_adhoc_side_send(src, CH_ROSTER, a, 2); }
+        }
+    }
+    if (!host || (g_roster_calls++ % 6) != 0) return;
+    uint8_t out[5 + 33 * 16]; const int len = dissidia_tagteam_roster_pack(out, sizeof out);
+    if (len <= 0) return;
+    uint8_t macs[16][6]; const int k = psp_adhoc_group_macs(macs, nullptr, 16);
+    for (int i = 0; i < k && i < 16; i++) { Mac m; std::memcpy(m.data(), macs[i], 6); if (std::find(g_roster_acked.begin(), g_roster_acked.end(), m) == g_roster_acked.end()) psp_adhoc_side_send(macs[i], CH_ROSTER, out, len); }
 }
 
 void send_window() {
@@ -213,6 +240,7 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         if (now - t0 > std::chrono::seconds(5)) { std::fprintf(stderr, "[TTLOCK] 5 s: %u calls, %u frames delivered, %u waits, frame %u, lead %d\n", calls, g_delivered - d0, g_waits - w0, g_F, static_cast<int>(g_seq - g_F)); calls = 0; d0 = g_delivered; w0 = g_waits; t0 = now; }
     }
     receive();
+    roster_step();
     // sample the local pad for frame g_seq (the input runs at most MAX_LEAD - 1 frames ahead beyond the input delay, as retail)
     if (g_seq < g_F + static_cast<uint32_t>(delay + MAX_LEAD)) {
         const uint16_t w = sample_local(ctx);
@@ -223,6 +251,8 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
     // deliver frame F when the own input has run `delay` frames ahead and every driver's word for F is here
     bool ready = g_seq > g_F + static_cast<uint32_t>(delay);
     Mac missing{};
+    const bool roster = dissidia_tagteam_roster_ready();   // a member waits for the host's roster before its first frame
+    if (!roster) { ready = false; if (!g_roster_wait_logged) { g_roster_wait_logged = true; std::fprintf(stderr, "[TTLOCK] frame %u: waiting for the host's roster\n", g_F); } }
     for (int s = 0; s < MAX_STREAMS && ready; s++) {
         Mac m; if (!driver_at(s, g_F, &m)) continue;
         const Ring* r = ring_of(m); if (!r || !r->has(g_F)) { ready = false; missing = m; }
@@ -233,7 +263,8 @@ void dispatch_hook(uint8_t* rdram, recomp_context* ctx) {
         else if (g_timeout_s > 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - g_wait_t0).count() > g_timeout_s) {
             // A peer that stops sending (left, crashed, long stall): treat it like the pad link does (comm_battle.cpp quit()): the battle
             // is quit for this machine and the game's own leave path takes it back to the lobby.
-            std::fprintf(stderr, "[TTLOCK] frame %u: nothing from %s for %.0f s: the peer has left, this machine leaves the battle\n", g_F, mac_str(missing).c_str(), g_timeout_s);
+            if (!roster) std::fprintf(stderr, "[TTLOCK] frame %u: no roster from the host for %.0f s: this machine leaves the battle\n", g_F, g_timeout_s);
+            else std::fprintf(stderr, "[TTLOCK] frame %u: nothing from %s for %.0f s: the peer has left, this machine leaves the battle\n", g_F, mac_str(missing).c_str(), g_timeout_s);
             psp_net_notice("link_end", 0, "Online: nothing from another player for %.0f s. The battle ends.", g_timeout_s);
             wr(obj + OFF_FLAGS, rd(obj + OFF_FLAGS) | 4u);   // F_QUIT
             wr(obj + 12u, g_F);                               // quit frame

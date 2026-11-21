@@ -3963,3 +3963,38 @@ User: "There is no HP damage indicator ... show ALL HP damage and who took it." 
 - **Not verified**: the enemy partner's HP hit ON OUR PARTNER (the harness booked that attempt on the human; one earlier run logged `extraE > extraP -3000` but its panels
   were not drawn, harness g_down state); `HPDMG=2` floating number; `=0` / `HPFEED=0` (trivial code); wide / tall HUD layouts and phone sizes; KO rendering in shots (logged
   `KO` only); anything on a device.
+## Multiplayer: the host's roster (21 Nov; issue #2 of the multiplayer list, and #6)
+**Problem** (run t6 above, item 4: 60 ms lag + 15 ms jitter). Every machine took its own player list (`g_snap`: each player's party, rows, own rows,
+CPU rows and settings, the host's fighters-per-side byte) at its own battle setup from the beacons it had then. Beacons go out every 0.5 s over UDP and can
+be lost, and the setup runs at a different moment on every machine, so the lists differed per machine: different player counts, a row owned by a
+different player, and a partner human-driven on one machine only. That split the battle at frame 235.
+**Change.** The host's list decides:
+- The host (retail `GB_MEMBER` = 0) sends its `g_snap` on side channel 3 ('TR': version, rule flags, then 33 bytes per player). It sends it every 6th
+  lock-step call to each member that has not answered.
+- A member takes the first copy, replaces its own list with it (marking `local` by MAC), and answers every copy with 'TA'.
+- A member delivers no lock-step frame before the roster is here (`[TTLOCK] frame 0: waiting for the host's roster`). The start-of-battle planning
+  (partners, drivers) also waits for it, so every decision of the battle uses the same list on every machine.
+- A member that gets no roster within `PSPRECOMP_TTLOCK_TIMEOUT` (10 s) leaves the battle, like a peer that stopped sending.
+- Logged: `[TTCPU] roster from the host (...): the same as this machine's` or `DIFFERS ...`, plus both lists.
+**Host's rules (#6).** The roster's flags byte carries the host's rules: bit 0 = assists on (the setup screen's Assist setting, or
+`PSPRECOMP_TAGTEAM_ASSIST`), bit 1 = EX Burst rule `fight` (`PSPRECOMP_TAGTEAM_EXBURST`).
+- Online `assist_off_now()` and `exb_rule_fight()` use the host's value. Before this, Assist Off was always off online, and the burst rule was each
+  machine's own env value.
+- `PSPRECOMP_TAGTEAM_MP_ASSISTOFF=0` keeps assists on online, as before.
+- `PSPRECOMP_TAGTEAM_LOCALROSTER=1` restores the old per-machine list (no roster, no waiting).
+**Test aid.** `PSPRECOMP_TAGTEAM_TEST_STALESNAP=1` on a member: its own list leaves out the other players, as if their beacons were lost.
+**Test tool.** `mp_test.py --slack <s>` adds seconds at the lobby steps. Under lag, B's party press came before its party screen and both players
+ended up in Party A.
+**Evidence** (2 copies, LAN, `PSPRECOMP_TAGTEAM=1`, `LAG_MS=60 JITTER_MS=15`, `--slack 6`, B with `TEST_STALESNAP=1`, runs `~/dissidia/mpdbg3`):
+- B logged `DIFFERS from this machine's, the host's is used` (its own list: 1 player; the host's: 2).
+- Both machines built the same side orders, and the host saw B's answer at frame 3.
+- `[NETSYNC]` compared 1786 frames with 0 mismatched; the `[TTSYNC]` hash at frame 1500 was equal on A and B.
+- Control, the old per-machine list (same run with `PSPRECOMP_TAGTEAM_LOCALROSTER=1`, `~/dissidia/mpctl`): B built side 0 order `*31/p-1` and side 1 `*31/p0` against A's `*31/p0` / `*31/p1` (owners differ). In a 1 v 1 that changes no driver, so positions stayed equal; with partner rows it is the t6 split.
+- Clean network, no test aid (`~/dissidia/mpdbg2`): B waited at frame 0 and logged `the same as this machine's`.
+- A plain online battle without the tag team (`~/dissidia/mp3`): 2700 frames, all checks agreed (no change on that path).
+**Not verified:**
+- 3 or more players, or partner rows: the 2-copy walk registers one character per player, so no extra is made.
+- Assist Off in a lock-step battle with partners (the rule is now shared, but no online run with partners was made).
+- Internet / relay mode.
+- A member that joins the lock-step more than ~17 s after the host: input ring of 512 frames.
+
