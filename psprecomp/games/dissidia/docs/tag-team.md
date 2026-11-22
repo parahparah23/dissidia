@@ -4851,3 +4851,20 @@ Free-for-all needs its own player setup (players, characters, teams clear).
 - **Not done:** (1) the stone itself stays the side's (the entry's stone and its loaded resources are made once; a member with another stone would need `FUN_08890BB8` run again with its resources, i.e. a load in the
   battle, not attempted) so every member of a side summons the side's stone; (2) extras never summon (no manager entry; presenting an extra through `FUN_08A22C78` would use the side's entry and stone); (3) the orb icon of a member who
   swaps in after a use stays in the "used" look (flipping the flag back does not re-create the orb effect) and a used member who comes back does not get the orb back either; the use itself is correct.
+
+### Summonstones, tenth round (22 Nov): the partner's orb on the HUD, extras go through the manager step; per-member stones not done
+- **HUD (done, `tagteam_hud.cpp` `stone_orb`, `TagHudFighter::stone / stone_auto / stone_used`).** Every small panel (partner, other enemy) shows that fighter's OWN summonstone as the retail orb look: a red jewel at the panel's inner top corner with
+  the label "R+O" (yellow, manual stone) or a purple "A" badge (AUTO stone); greyed once the member's use is spent (the used map of `sum_track`). The stone is read from the member's record (set `+0xBA`); manual / auto from the stone table
+  `FUN_088C6CA4(id)` (records 0..0x0B are the AUTO stones, `+8` low byte 3; the record names, `PSPRECOMP_TAGTEAM_STONETAB=1` dumps all 0x32 records: `PAST_AUTO`, `COPY_AUTO`, `WALL_AUTO`, `RAND_POCT` (0x19 = the Moogle's random stone), `CHEAT`, ...).
+  Window shot (`BT_WINDOW=1440x816 BT_WINDOW_SHOT=1`, `/tmp/ttcam_sm/hd4.png`): left partner panel red "R+O" orb, right enemy panel grey "A" orb (its AUTO stone already used). Note the Quick Battle clone partners
+  share the slot fighter's character id, so they share its used state (a test artefact; real partners have their own).
+- **The big (retail) panel's orb** is the manager's own effect and was not made to follow the slot fighter: after a swap it keeps the old fighter's look (used = no orb) although the use state is right.
+- **Extras (`slotactor_hook`, `PSPRECOMP_TAGTEAM_NOXSUMMON=1` = off):** when an extra of a side has the summon request bit (`+0x5B3 & 0x10`, set by his AI) and the slot fighter has not, the rules / summon step is
+  handed the extra as the side's fighter, the side's used flag is set from his own booking for that step, and `rules_hook` books the result on him and puts the slot fighter's flag back. Test aid
+  `PSPRECOMP_TAGTEAM_FORCESUMMON=<extra index>:<hframe>`: the request bit is set on that extra. Log (`CLONES=1`, enemy extra 0, frame 700): `[SUMUSED] side 1: extra 09D4BFB0 (char 31) presented to the summon step` and
+  `[SUMUSED] side 1 extra ... summon used` (the manager's used flag came back set, i.e. the step ran the use). **Not verified visually:** the game-time `shot` frames after the forced request show no cut-in (the shots did not land on it or
+  the cut-in does not play for an extra; the cut-in presenter reads the slot table / camera). Treat extras' summons as experimental.
+- **Not done:** per-member STONES (each side still summons its slot stone: the entry's resources are loaded once at the battle start by `FUN_08890BB8`; making a member with another stone work needs that function run per member with
+  the resources loaded, e.g. during the call-in's loading); a real partner AUTO summon from his own AI conditions and an enemy-extra AI summon were not seen in the runs.
+- Regression `tagteam_test.py --baseline` PASS (`/tmp/ttcam_sm/reg7`); two-copy `mp_test.py` 120 s (clones): `frames compared 3901 / 3900, mismatched 0`. (`mp_test.py` on the plain `work_*_mpA/B` dirs timed out at the debug socket: another session kills
+  processes named `psprecomp_runtime`; use renamed copies of the runtime like `mkx.sh` does.)

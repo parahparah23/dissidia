@@ -218,6 +218,21 @@ void hit_floating(double tnow) {
     }
 }
 
+// the summon orb as the retail HUD draws it (a red jewel with a small label: "R+O" yellow for a manual stone, a purple "A" badge for an AUTO one); greyed when the use is spent
+void stone_orb(float cx, float cy, bool autoStone, bool used, float a) {
+    const float r = 3.6f;
+    g_layer.band(cx - r - 0.6f, cy - r - 0.6f, cx + r + 0.6f, cy + r + 0.6f, [&](float xx, float yy) {
+        const float dx = xx - cx, dy = yy - cy, d = std::sqrt(dx * dx + dy * dy); if (d > r + 0.5f) return LayerColor{0, 0, 0, 0};
+        if (d > r - 0.5f) return LayerColor{used ? 70.f : 40.f, used ? 70.f : 20.f, used ? 78.f : 30.f, 0.95f * a};
+        const float hl = std::clamp(1.f - std::sqrt((dx + 1.1f) * (dx + 1.1f) + (dy + 1.1f) * (dy + 1.1f)) / 3.f, 0.f, 1.f);
+        if (used) return LayerColor{90.f + 40.f * hl, 90.f + 40.f * hl, 100.f + 40.f * hl, 0.8f * a};
+        return LayerColor{200.f + 55.f * hl, 40.f + 110.f * hl, 40.f + 110.f * hl, a};
+    });
+    if (autoStone) { g_layer.band(cx + 1.6f, cy + 1.6f, cx + 5.4f, cy + 5.4f, [&](float, float) { return LayerColor{used ? 90.f : 150.f, used ? 90.f : 70.f, used ? 100.f : 235.f, 0.95f * a}; });
+        shadow_text("A", true, 3.4f, cx + 2.3f, cy + 4.9f, LayerColor{255, 255, 255, 0.95f * a}); }
+    else shadow_text("R+O", true, 3.0f, cx - 3.6f, cy + 7.2f, used ? LayerColor{150, 150, 160, 0.9f * a} : LayerColor{255, 226, 90, a});
+}
+
 constexpr double kLethalPulse = 4.65;   // rad/s of the lethal-BRV glow (retail's shimmer, period 1.35 s, measured from window shots of the big panel)
 // one compact panel: 112 x 24 design units (31 with the gauges), plus the EX tube at its outer edge
 void panel(const TagHudFighter& f, float x, float y, double tnow) {
@@ -265,6 +280,7 @@ void panel(const TagHudFighter& f, float x, float y, double tnow) {
         if (f.assist >= 0.f) assist_chevrons(ax, y + 24.6f, aw, ko ? 0.f : f.assist, right, f.has_assist, a);
         shadow_text(hp, true, 6.2f, right ? bx0 : x + w - 2.f - hw, y + 29.3f, LayerColor{230, 238, 255, a});
     }
+    if (f.stone >= 0 && !ko) stone_orb(right ? x + 5.5f : x + w - 5.5f, y + 4.6f, f.stone_auto, f.stone_used, a);   // the member's summon orb at the panel's inner top corner
     if (!ko && (f.ex_mode || f.ex >= 0.999f)) {   // "EX" at the panel's far end of the BRV row: gold = the gauge is full (EX Mode ready), pulsing magenta = in EX Mode
         const float pulse = f.ex_mode ? 0.85f + 0.15f * static_cast<float>(std::sin(tnow * 9.0)) : 1.f;
         const std::string t = f.ex_mode ? "EX MODE" : "EX";

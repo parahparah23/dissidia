@@ -18,6 +18,9 @@ struct TagHudFighter {
     bool ex_mode = false;       // in EX Mode (actor +0x5B2 bit 2)
     uint32_t id = 0;            // the actor this panel shows (HP hit indicator / trail key)
     bool lethal = false;        // BRV >= the HP of this fighter's own target: the BRV number glows purple (retail's lethal-BRV look)
+    int stone = -1;             // the member's summonstone id (-1: none); drawn as the retail summon orb
+    bool stone_auto = false;    // an AUTO stone (label "A") rather than a manual one ("R+O")
+    bool stone_used = false;    // its use is spent (the orb is greyed)
     bool has_assist = true;     // the fighter has an assist (actor +0x1108); without one retail never fills the gauge: drawn dim
 };
 struct TagHudReserve {

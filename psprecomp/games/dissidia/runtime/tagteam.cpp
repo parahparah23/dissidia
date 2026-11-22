@@ -146,6 +146,8 @@ uint32_t side_of(uint32_t a);
 bool foes(uint32_t a, uint32_t b);
 bool hud_lethal(uint32_t a, int brv);
 void hud_gauges(TagHudFighter& f, uint32_t a);   // the small panel's EX / assist bars
+int g_hframe = 0;   // controller frames (hit attribution)
+std::map<std::pair<int, int>, bool> g_sum_used;   // (side, character id) -> that member's summon is used (sum_track)
 bool g_enabled = false;  // PSPRECOMP_TAGTEAM=1 or Settings > Debug > Tag Team (2v2): the next battle is a tag battle
 bool g_menu_mode = false;   // Battle Mode > Tag Team Battle was chosen (menu_settings.cpp): the group battle it starts is a tag battle
 // Communications Mode: the tag team is on for the whole group when any member has it on and every member runs a build that knows it.
@@ -1191,6 +1193,11 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     pool_dump("setup start"); intro_release("setup");
     sumgate::install();
+    if (std::getenv("PSPRECOMP_TAGTEAM_STONETAB")) for (uint32_t id = 0; id < 0x50; id++) {   // debug: the stone parameter records FUN_088C6CA4(id) (88 bytes each)
+        const uint32_t r = call(0x088C6CA4u, id); if (!ok(r, 88)) continue;
+        std::string h; char t[16]; for (uint32_t o = 0; o < 88; o += 4) { std::snprintf(t, sizeof t, " %08X", rd(r + o)); h += t; }
+        std::fprintf(stderr, "[STONETAB] %02X rec %08X:%s\n", id, r, h.c_str());
+    }
     if (const char* ts = std::getenv("PSPRECOMP_TEST_STONE")) {   // test aid: "side:id[,side:id]" sets that side record's equipped stone byte (current set +0xB8) before the fighters are made
         for (const char* q = ts; q && *q;) { const int sd = std::atoi(q); const char* c = std::strchr(q, ':'); if (!c) break; const int id = std::atoi(c + 1);
             if (sd >= 0 && sd < 2) { const uint32_t rec = REC_BASE + 0x1060u * static_cast<uint32_t>(sd); const uint32_t set = g_ram[(rec + 0x773u) & 0x07FFFFFFu];
@@ -2636,6 +2643,17 @@ void hud_gauges(TagHudFighter& f, uint32_t a) {
     const uint32_t st = rd(a + 0x52Cu); if (!ok(st, 0x40)) return;
     f.ex = std::clamp(rdf(st + 0x18u) / 10000.f, 0.f, 1.f); f.assist = std::clamp(rdf(st + 0x1Cu) / 10000.f, 0.f, 1.f);
     f.ex_mode = ((g_ram[(a + 0x5B2u) & 0x07FFFFFFu] >> 2) & 1u) != 0; f.has_assist = rd(a + 0x1108u) != 0;
+    // the member's own summonstone (record +0x10 + 0xC6 * set + 0xBA; stone table FUN_088C6CA4: records 0..0x0B are AUTO stones, the rest manual R + Circle)
+    f.stone = -1;
+    if (const uint32_t rec = rd(a + 0x30Cu); ok(rec, 0x778)) {
+        const uint32_t set = g_ram[(rec + 0x773u) & 0x07FFFFFFu]; const int id = g_ram[(rec + 0x10u + 0xC6u * (set > 4 ? 0 : set) + 0xBAu) & 0x07FFFFFFu];
+        if (id < 0x50) {
+            static int8_t is_auto[0x50]; static bool init = false; if (!init) { init = true; std::memset(is_auto, -1, sizeof is_auto); }
+            if (is_auto[id] < 0) { const uint32_t r = call(0x088C6CA4u, static_cast<uint32_t>(id)); is_auto[id] = ok(r, 88) ? ((rd(r + 8u) & 0xFFu) == 3u ? 1 : 0) : 0; }
+            f.stone = id; f.stone_auto = is_auto[id] == 1;
+            const auto it = g_sum_used.find({side_of(a), actor_char(a)}); f.stone_used = it != g_sum_used.end() && it->second;
+        }
+    }
 }
 
 // EX and assist gauges of the extras (19 Nov). The battle controller FUN_08886C88 (g_bctl) runs, per slot k, the EX gauge handler C+32+4k
@@ -4251,13 +4269,33 @@ bool alive(uint32_t a);
 uint32_t side_of(uint32_t a);
 int team_of(uint32_t side);
 int reserve_left(int team);
-void rules_hook(uint8_t* rdram, recomp_context* ctx) { g_in_rules = true; g_orig_rules(rdram, ctx); g_in_rules = false; if (g_natko_vic && g_natko_frames > 0 && ctx->r[2]) std::fprintf(stderr, "[NATTRACE] rules step returned %d\n", static_cast<int>(ctx->r[2])); }
+uint32_t g_sum_pres[2] = {0, 0};   // an extra presented as the side's slot fighter for this rules step (summon request), 0 = none
+void rules_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_in_rules = true; g_sum_pres[0] = g_sum_pres[1] = 0;
+    g_orig_rules(rdram, ctx);
+    g_in_rules = false;
+    for (uint32_t k = 0; k < 2; k++) if (g_sum_pres[k] && g_bs) {   // the extra's use was processed with the side's entry: book it on him, put the slot fighter's own state back
+        const uint32_t fa = 0x09AEE40Cu + 0x3C8u + 4u * k, S = srd(g_bs + 56u + 4u * k);
+        if (rd(fa) != 0) { g_sum_used[{static_cast<int>(k), actor_char(g_sum_pres[k])}] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] side %u extra %08X (char %d): summon used\n", k, g_sum_pres[k], actor_char(g_sum_pres[k])); }
+        wr(fa, ok(S, 0x12D0) && g_sum_used[{static_cast<int>(k), actor_char(S)}] ? 1u : 0u); g_sum_pres[k] = 0;
+    }
+ if (g_natko_vic && g_natko_frames > 0 && ctx->r[2]) std::fprintf(stderr, "[NATTRACE] rules step returned %d\n", static_cast<int>(ctx->r[2])); }
 void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t req_side = static_cast<uint32_t>(ctx->r[4]);
     g_orig_slotactor(rdram, ctx);
     if (!g_in_rules || !g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
     g_ram = rdram; g_ctx = ctx;
     const uint32_t a = static_cast<uint32_t>(ctx->r[2]);
     if (!ok(a, 0x12D0)) return;
+    if (const uint32_t sd = req_side; sd < 2 && !std::getenv("PSPRECOMP_TAGTEAM_NOXSUMMON") && !(g_ram[(a + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) {   // an extra of this side asks for a summon: the manager's step treats him as the slot fighter
+        if (g_sum_pres[sd]) { ctx->r[2] = g_sum_pres[sd]; return; }
+        for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].side == side_of(a) && g_extra[i].actor != a && alive(g_extra[i].actor) && (g_ram[(g_extra[i].actor + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) {
+            g_sum_pres[sd] = g_extra[i].actor; ctx->r[2] = g_extra[i].actor;
+            wr(0x09AEE40Cu + 0x3C8u + 4u * sd, g_sum_used[{static_cast<int>(sd), actor_char(g_extra[i].actor)}] ? 1u : 0u);   // his own used state for the step
+            if (g_log) std::fprintf(stderr, "[SUMUSED] side %u: extra %08X (char %d) presented to the summon step\n", sd, g_extra[i].actor, actor_char(g_extra[i].actor));
+            return;
+        }
+    }
     bool mate = false;
     for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != a && side_of(g_extra[i].actor) == side_of(a) && alive(g_extra[i].actor)) mate = true;
     bool reserve = !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTCALLIN") && reserve_left(team_of(side_of(a))) > 0;
@@ -6358,8 +6396,11 @@ void hg_hook(uint8_t* rdram, recomp_context* ctx) {
 void sum_track() {
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOSUMUSED") != nullptr;
     constexpr uint32_t MGR = 0x09AEE40Cu;
-    static uint32_t last_bs = 0; static std::map<std::pair<int, int>, bool> used; static int last_key[2] = {-1, -1};
+    static uint32_t last_bs = 0; auto& used = g_sum_used; static int last_key[2] = {-1, -1};
     if (off || !g_bs || !ok(MGR, 0x400) || g_nextra == 0) return;
+    if (const char* fs = std::getenv("PSPRECOMP_TAGTEAM_FORCESUMMON")) {   // test aid "<extra index>:<hframe>": that extra asks for a summon (request bit 0x10 of +0x5B3) at that controller frame
+        int xi = 0, hf = 0; if (std::sscanf(fs, "%d:%d", &xi, &hf) == 2 && g_hframe == hf && xi >= 0 && xi < g_nextra && ok(g_extra[xi].actor, 0x12D0)) { g_ram[(g_extra[xi].actor + 0x5B3u) & 0x07FFFFFFu] |= 0x10u; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.1fs test: extra %d (%08X) asks for a summon\n", dissidia_battle_age() / 60.0f, xi, g_extra[xi].actor); }
+    }
     if (g_bs != last_bs) { last_bs = g_bs; used.clear(); last_key[0] = last_key[1] = -1; }
     for (uint32_t k = 0; k < 2; k++) {
         const uint32_t F = srd(g_bs + 56u + 4u * k); if (!ok(F, 0x12D0)) continue;
@@ -6372,7 +6413,6 @@ void sum_track() {
         } else if (rd(fa) != 0 && !used[{static_cast<int>(k), key}]) { used[{static_cast<int>(k), key}] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] side %u char %d: summon used\n", k, key); }
     }
 }
-int g_hframe = 0;   // controller frames (hit attribution)
 FuncPtr g_orig_ctrl = nullptr;
 void ctrl_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
