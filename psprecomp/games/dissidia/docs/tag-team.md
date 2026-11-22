@@ -4602,3 +4602,16 @@ User after play: the retail finish for a mid-battle KO changed the music (defeat
   (cam = `*0x08B3D6B8 + 1872`), then 0.20 after 140 ticks and release after 210 (`[KOCAM] extra ... kill camera started / over`). The camera returns to normal by itself (shots `~/dissidia/tt/ttx_killcam2_extra_montage.png`:
   the camera frames the KO'd enemy extra, then the normal view). `PSPRECOMP_TAGTEAM_NOXKOCAM=1` off. The "KO Kill Camera" row switches both (off: no wait / no camera).
 - Not done / unverified: the fade to black seen near the end of the retail slot presentation (state 3) is still there; the camera of an extra KO online (view only, the slow motion is battle state); EX Burst KO; subtitles of our own KO line.
+
+## Kill camera, round 2: no fade, every route into the finish (22 Nov, tree ttx; host-only)
+- **Fade to black:** the finish machine's state-3 update (`FUN_08B06734`, per frame from ~+2.4 s) programs the screen fader at its end (`FUN_08873CE0` / `08873DEC` / `08873C20` keys, ra `08B0680C` / `08B06828`).
+  `fadekey_hook` / `fadekey2_hook` skip those calls for a mid-battle KO when ra is in `08B06700..08B07000` (`[KOCAM] finish fader key skipped`; `PSPRECOMP_TAGTEAM_NOFADESKIP=1` off). The state-2 keys (`08B062xx`) are NOT
+  skipped: skipping them left the screen white after an EX Burst (the burst's fade to white is cleared by them; seen in the first try, screenshot mean 255 for the rest of the run).
+- **Every route into the finish:** `FUN_08B09D88` (finish machine start, from the phase update `0888C2FC`) is hooked (`finstart_hook`): at that moment a slot fighter with HP <= 0 whose side has a living mate / reserve / (FFA) others
+  = mid-battle KO, the flag is set (and cleared otherwise, so a stale flag never touches the real end); a fallen fighter with live HP (forfeit) and the match-ending KO get the full retail finish. This covers the HP step, EX Burst damage,
+  KO aids without `_NAT` and other retail chains (`[KOCAM] retail finish start (bs+72 3): mid-battle KO of ...` / `match-ending / forfeit: full retail finish`).
+- **Debug aid:** `PSPRECOMP_TAGTEAM_NATKO_REPEAT=<s>` re-arms NATKO with a new victim of the same side every s seconds; `PSPRECOMP_TAGTEAM_FINGATE2=a:b:c:d` (FIRSTCALL phases relative to the finish start).
+- **Verified (headless):** human slot KO (HP step): flag, BGM step / KO line / fader keys skipped, no 0889F234 / 0889F3E4 call, shots without a dark frame (mean luma 132-139 throughout); EX Burst KO (`EXBAT=s0:7:s1`, `NATKO=cpu:9:50`): burst damage lethal at 22.5,
+  KO flow deferred by the burst, finish at 23.4 flagged mid, fader keys skipped, shots normal (mean luma ~90) after the fix; enemy slot KO, enemy extra KO (camera sheet `~/dissidia/tt/ttx_killcam3_extra_montage.png`), two slot KOs 3 s apart (`KOLIST=human:12,cpu:15`,
+  one merged presentation, both swapped at 17.8), FFA 4 and 3v3 with real + aid KOs, `tagteam_test.py --baseline` PASS, two-copy `mp_test.py` 150 s 0 mismatched with the match-ending KO classified "full retail finish" on both.
+- **Not verified:** a called-in reserve member's own KO as a real HP KO (NATKO_REPEAT did not produce a second real lethal hit in 25 s windows); KO aids with `_NAT` do not start a retail finish at all; extra KO camera online.

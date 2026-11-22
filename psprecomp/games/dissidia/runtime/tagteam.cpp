@@ -3745,10 +3745,13 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         static uint32_t vic = 0; static bool set = false;
         char who[16] = {}; float at = 0; int hp = 40; std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_NATKO"), "%15[a-z0-9]:%f:%d", who, &at, &hp);
         const uint32_t hs = rd(g_bs + 84u);
-        if (!set && dissidia_battle_age() / 60.0f >= at && g_nextra) {
+        static float last_set = -1e9f; static uint32_t natko_gen = ~0u;
+        if (natko_gen != g_battle_gen) { natko_gen = g_battle_gen; set = false; last_set = -1e9f; vic = 0; }
+        if (set && std::getenv("PSPRECOMP_TAGTEAM_NATKO_REPEAT") && dissidia_battle_age() / 60.0f - last_set >= static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_NATKO_REPEAT")))) { set = false; vic = 0; g_natko_vic = 0; }   // debug: re-arm every N s (a new victim from the same side)
+        if (!set && (dissidia_battle_age() / 60.0f >= at || last_set > -1e8f) && g_nextra) {
             uint32_t a = 0;
             if (!std::strcmp(who, "human")) a = srd(g_bs + 56u + 4u * hs); else if (!std::strcmp(who, "cpu")) a = srd(g_bs + 56u + 4u * (1u - hs)); else if (!std::strcmp(who, "enemy2") || !std::strcmp(who, "partner")) { const uint32_t hside = side_of(srd(g_bs + 56u + 4u * hs)); for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && ((side_of(g_extra[i].actor) == hside) == !std::strcmp(who, "partner"))) a = g_extra[i].actor; }
-            if (ok(a, 0x12D0)) { const uint32_t st = rd(a + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0xCu, static_cast<uint32_t>(hp)); wr(st + 0x8u, 0); vic = a; set = true; g_natko_vic = a; g_natko_frames = 900; std::fprintf(stderr, "[TAGTEAM] t=%.1fs NATKO victim %s %08X live HP %d, bravery held at 0\n", dissidia_battle_age() / 60.0f, who, a, hp); } }
+            if (ok(a, 0x12D0)) { const uint32_t st = rd(a + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0xCu, static_cast<uint32_t>(hp)); wr(st + 0x8u, 0); vic = a; set = true; last_set = dissidia_battle_age() / 60.0f; g_natko_vic = a; g_natko_frames = 900; std::fprintf(stderr, "[TAGTEAM] t=%.1fs NATKO victim %s %08X live HP %d, bravery held at 0\n", dissidia_battle_age() / 60.0f, who, a, hp); } }
         }
         if (!set && std::getenv("PSPRECOMP_TAGTEAM_STATDUMP") && dissidia_battle_age() / 60.0f >= at - 1.0f) { static bool d = false; if (!d) { d = true; const uint32_t a = srd(g_bs + 56u + 4u * ((!std::strcmp(who, "human")) ? hs : 1u - hs)); const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[STATDUMP] actor %08X status %08X:", a, st); for (uint32_t o = 0; o < 0x60; o += 4) std::fprintf(stderr, " +%02X=%X", o, rd(st + o)); std::fprintf(stderr, "\n[STATDUMP] actor words +10A0..:"); for (uint32_t o = 0x10A0; o < 0x10D4; o += 4) std::fprintf(stderr, " %X=%X", o, rd(a + o)); std::fprintf(stderr, "\n"); } }
         if (vic && owner == vic) { const uint32_t st = rd(vic + 0x52Cu); if (ok(st, 0x40)) { wr(st + 0x14u, rd(st + 0x14u) & 0xFFFF0000u); static int lasthp = -1; const int h = static_cast<int32_t>(rd(st + 0xCu)); if (h != lasthp) { std::fprintf(stderr, "[TAGTEAM] t=%.2fs NATKO victim live HP %d script %d\n", dissidia_battle_age() / 60.0f, h, static_cast<int16_t>(rd(vic + 0x180u) & 0xFFFF)); lasthp = h; } } }
@@ -6002,8 +6005,43 @@ void finvoice_hook(uint8_t* rdram, recomp_context* ctx) {
     if (static_cast<uint32_t>(ctx->r[31]) == 0x08B064D4u && mid_finish()) { if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish KO line %08X skipped (mid-battle KO)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[5])); ctx->r[2] = 0; return; }
     g_orig_finvoice(rdram, ctx);
 }
+// The finish machine's screen fader keys (state 2 / 3 / 4 program screen fader index 2 through FUN_08873C20(fader, key, ...) and FUN_08873DEC(...): the flash and the fade to black at the end
+// of the presentation). For a mid-battle KO they are not programmed (ra inside the machine's code 08B06000..08B07000), so the screen is never faded.
+FuncPtr g_orig_fadekey = nullptr, g_orig_fadekey2 = nullptr;
+bool finish_fader_call(uint32_t ra) { static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOFADESKIP") != nullptr; return !off && mid_finish() && ra >= 0x08B06700u && ra < 0x08B07000u; }   // (state 3 update 08B06734: the fade to black; the state-2 keys 08B062xx stay: they also clear a leftover EX Burst fade)
+void fadekey_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (finish_fader_call(static_cast<uint32_t>(ctx->r[31]))) { static int n = 0; if (g_log && n++ < 4) std::fprintf(stderr, "[KOCAM] t=%.2fs finish fader key skipped (ra %08X)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[31])); ctx->r[2] = 0; return; }
+    g_orig_fadekey(rdram, ctx);
+}
+void fadekey2_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (finish_fader_call(static_cast<uint32_t>(ctx->r[31]))) { ctx->r[2] = 0; return; }
+    g_orig_fadekey2(rdram, ctx);
+}
+// Every route into retail's finish phase goes through FUN_08B09D88(machine, ...) (called by the phase update, 0888C2FC): decide here, whatever caused the KO (HP step, EX Burst damage, KO aids, other
+// retail chains), whether the match goes on: a slot fighter with no HP left whose side still has a living team mate, a reserve member or (FFA) others standing = a mid-battle KO -> camera-only treatment (the flag
+// is set / cleared HERE, so a stale flag never touches the match-ending finish). A fallen fighter with live HP is a forfeit: full retail.
+FuncPtr g_orig_finstart = nullptr;
+void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    bool mid = false; uint32_t who = 0;
+    if (g_oneround && g_tagin && g_bs && g_nextra && g_kocam && !std::getenv("PSPRECOMP_TAGTEAM_FULLFINISH") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) {
+        for (uint32_t k = 0; k < 2; k++) {
+            const uint32_t S = srd(g_bs + 56u + 4u * k); if (!ok(S, 0x12D0) || hp_eff(S) > 0) continue;
+            bool mate = false; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != S && side_of(g_extra[i].actor) == side_of(S) && alive(g_extra[i].actor)) mate = true;
+            if (ffa_now() ? ffa_keep(S) : (mate || reserve_left(team_of(side_of(S))) > 0)) { mid = true; who = S; }
+        }
+    }
+    g_midfin_gen = mid ? g_battle_gen : ~0u;
+    if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish start (bs+72 %u): %s%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, mid ? "mid-battle KO of " : "match-ending / forfeit: full retail finish", mid ? role_of(who) : "");
+    g_orig_finstart(rdram, ctx);
+}
 void finish_hooks_install() {
     if (!g_orig_finbgm) { g_orig_finbgm = fn(0x08B0998Cu); if (g_orig_finbgm) psp_dispatch_register(0x08B0998Cu, finbgm_hook); }
+    if (!g_orig_fadekey) { g_orig_fadekey = fn(0x08873C20u); if (g_orig_fadekey) psp_dispatch_register(0x08873C20u, fadekey_hook); }
+    if (!g_orig_fadekey2) { g_orig_fadekey2 = fn(0x08873DECu); if (g_orig_fadekey2) psp_dispatch_register(0x08873DECu, fadekey2_hook); }
+    if (!g_orig_finstart) { g_orig_finstart = fn(0x08B09D88u); if (g_orig_finstart) psp_dispatch_register(0x08B09D88u, finstart_hook); }
     if (!g_orig_finvoice) { g_orig_finvoice = fn(0x08B33F8Cu); if (g_orig_finvoice) psp_dispatch_register(0x08B33F8Cu, finvoice_hook); }
 }
 void fnlog_install() {
@@ -10065,6 +10103,12 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                       if (g_hud && a >= g_hud && a < g_hud + 0x2000u) std::fprintf(stderr, " hud+%X", a - g_hud); for (const auto& kv : g_extra_hdl) if (a >= kv.second && a < kv.second + 0x310u) std::fprintf(stderr, " hdlcopy(%s)+%X", role_of(kv.first), a - kv.second); }
                     std::fprintf(stderr, "\n"); if (i == k) { psp_mem_watch_set(a & ~3u); std::fprintf(stderr, "[VALSCAN] watching %08X\n", a & ~3u); } i++; } }
         } }
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_FINGATE2")) {   // debug (with PSPRECOMP_FIRSTCALL=0BFFF000:<file>): "<a>:<b>:<c>:<d>" seconds after bs+72 became 4: FIRSTCALL phase 1 = [a, b), phase 2 = [c, d)
+        static float t4 = -1.f; static uint32_t gen = ~0u; const float age = dissidia_battle_age(); if (gen != g_battle_gen) { gen = g_battle_gen; t4 = -1.f; }
+        if (rd(g_bs + 72u) == 4u && t4 < 0.f) t4 = age;
+        float a = 0, b = 0, c = 0, d = 0; std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_FINGATE2"), "%f:%f:%f:%f", &a, &b, &c, &d);
+        const float t = t4 < 0.f ? -1.f : (age - t4) / 60.f;
+        g_ram[0x0BFFF000u & 0x07FFFFFFu] = (t >= a && t < b) ? 1 : (t >= c && t < d) ? 2 : 0; }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_FINGATE")) {   // debug (with PSPRECOMP_FIRSTCALL=0BFFF000:<file>): phase 2 = battle age [6, 9) s (plain play), phase 1 = the first 4 s of the finish phase (bs+72 == 4)
         static float t4 = -1.f; static uint32_t gen = ~0u; const float age = dissidia_battle_age(); if (gen != g_battle_gen) { gen = g_battle_gen; t4 = -1.f; }
         if (rd(g_bs + 72u) == 4u && t4 < 0.f) t4 = age;
