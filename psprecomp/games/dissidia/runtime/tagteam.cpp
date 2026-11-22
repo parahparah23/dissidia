@@ -384,7 +384,7 @@ const char* g_gnote = nullptr; uint32_t g_gnote_a = 0; void agauge_note(const ch
 float agauge_of(uint32_t a); void agauge_hit_note(const char* who, uint32_t att, uint32_t vic, float g0);   // cause of the assist-gauge write our own code is about to make / just made (the gauge log, agauge_watch)
 void fix_assist();
 void assist_aim_follow(); void aim_fix(); void ai_target(); void aim_debug_force();
-int hit_attackers(uint32_t out[8]); uint32_t ao8_x_of_slot(uint32_t slot); uint32_t ao8_stand_in(uint32_t a); uint32_t ao8_body_of(uint32_t x); uint32_t ao8_hit_switch(uint32_t x, uint32_t att); int ao8_hit_test(uint8_t* rdram, recomp_context* ctx, uint32_t v);   // Assist Off round 8: a parked partner -> its assist actor during the call, and back
+int hit_attackers(uint32_t out[8]); bool ao9_wall_pass(uint32_t c, uint32_t v); void ao9_wall_done(); uint32_t ao8_x_of_slot(uint32_t slot); uint32_t ao8_stand_in(uint32_t a); uint32_t ao8_body_of(uint32_t x); uint32_t ao8_hit_switch(uint32_t x, uint32_t att); int ao8_hit_test(uint8_t* rdram, recomp_context* ctx, uint32_t v);   // Assist Off round 8: a parked partner -> its assist actor during the call, and back
 void stock_hook(uint8_t* rdram, recomp_context* ctx);
 void rules_hook(uint8_t* rdram, recomp_context* ctx);
 void slotactor_hook(uint8_t* rdram, recomp_context* ctx);
@@ -5943,7 +5943,9 @@ void hitguard_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_log && std::getenv("PSPRECOMP_TTCAM_GUARDLOG")) { static int c = 0; if (c++ < 40) std::fprintf(stderr, "[GUARDLOG] t=%.2fs hit test victim %08X guarded %d\n", dissidia_battle_age() / 60.0f, v, g_appear_guard.count(v) ? 1 : 0); }
     if (appear_guarded(v)) { static int n = 0; if (g_log && n++ < 200) std::fprintf(stderr, "[ASSISTOFF] t=%.2fs hit test on the appearing partner %08X skipped\n", dissidia_battle_age() / 60.0f, v); ctx->r[2] = 0; return; }
     if (ao8_hit_test(rdram, ctx, v)) return;   // Assist Off: the assist actor of a call is tested with its partner standing in (see ao8_hit_test)
+    const bool wp = ao9_wall_pass(static_cast<uint32_t>(ctx->r[4]), v);   // a called-in fighter's attack on a wall-rushed (pinned, invincible) foe
     g_orig_hg(rdram, ctx);
+    if (wp) ao9_wall_done();
 }
 void hg_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
@@ -9030,6 +9032,25 @@ void assist_off_move(uint32_t k, uint32_t M, uint32_t kind) {
 // Switches: PSPRECOMP_TTCAM_AO9=0 off. Test aids: PSPRECOMP_TTCAM_AO9FORCE="extraP@12,extraE@30" (calls at battle second; kind = PSPRECOMP_TTCAM_FORCEKIND), PSPRECOMP_TTCAM_AO9STATE="slotH:600@17.9,.."
 // (puts that fighter into that script first), PSPRECOMP_TTCAM_AO9LOG=1 (every +0x5B6 / +0x12AC change of the extras). Battle ticks + game state only.
 struct Ao9 { uint32_t E = 0, M = 0, foe = 0, gen = 0; float t0 = 0; bool human = false; } g_ao9[2];
+// Assist Off round 9 (21 Nov, user: "I did a BRV attack and it passed through the enemy": the enemy was wall-rushed): a wall rush pins the foe in script 704 / 754 (motion 32 / 36) with the
+// motion's `invincible` flag (+0x190 bit 0x40) on for the whole motion, so no normal fighter's attack registers on it. A retail assist's follow-up does, and the called-in fighter
+// (human or CPU slot fighter) plays as a normal fighter right after the call (and in slow motion the pin lasts 4x as long on the clock). For 6 s after a round 9 call the called
+// fighter's attacks pass that flag on a pinned foe (the invincible bits are off for that one hit test only). Battle ticks + game state only. PSPRECOMP_TTCAM_AO9WALLHIT=0: off.
+struct Ao9Last { uint32_t M = 0, gen = 0; float t0 = 0; } g_ao9_last[2];
+uint8_t g_wall_saved = 0; uint32_t g_wall_victim = 0;
+bool ao9_wall_pass(uint32_t c, uint32_t v) {
+    static const bool off = [] { const char* e = std::getenv("PSPRECOMP_TTCAM_AO9WALLHIT"); return e && e[0] == '0'; }();
+    if (off || !ok(v, 0x12D0) || !ok(c, 0x40)) return false;
+    const int sc = static_cast<int16_t>(rd(v + 0x180u) & 0xFFFFu); if (sc != 703 && sc != 704 && sc != 753 && sc != 754) return false;
+    const uint32_t rec = rd(c), att = ok(rec, 0x40) ? rd(rec + 24u) : 0u; if (!ok(att, 0x12D0) || side_of(att) == side_of(v)) return false;
+    bool called = false; for (const Ao9Last& l : g_ao9_last) if (l.M == att && l.gen == g_battle_gen && dissidia_battle_age() - l.t0 < 360.f) called = true;
+    if (!called) return false;
+    const uint8_t b = g_ram[(v + 400u) & 0x07FFFFFFu]; if (!(b & 0x60u)) return false;
+    g_wall_saved = b; g_wall_victim = v; g_ram[(v + 400u) & 0x07FFFFFFu] = static_cast<uint8_t>(b & ~0x60u);
+    if (g_log) { static int n = 0; if (n++ < 40) std::fprintf(stderr, "[AO9WALL] t=%.2fs called fighter %08X (char %d) attacks the wall-rushed %s %08X (script %d): its invincible flag is off for this hit test\n", dissidia_battle_age() / 60.0f, att, actor_char(att), role_of(v), v, sc); }
+    return true;
+}
+void ao9_wall_done() { if (g_wall_victim && ok(g_wall_victim, 0x12D0)) g_ram[(g_wall_victim + 400u) & 0x07FFFFFFu] |= (g_wall_saved & 0x60u); g_wall_victim = 0; }
 bool ao9_on() { static const char* e = std::getenv("PSPRECOMP_TTCAM_AO9"); return !(e && e[0] == '0'); }
 bool ao9_out(uint32_t k) {   // a call by the extra of side k is still out (the human is "out" for 1.5 s: appear + placement; a CPU slot fighter until its opener is over, see ao_busy)
     if (k > 1) return false;
@@ -9109,6 +9130,7 @@ bool ao9_call(uint32_t k, uint32_t E, uint32_t M, uint32_t kind, const char* by)
     wrf(st + 0x1Cu, std::max(0.0f, rdf(st + 0x1Cu) - cost));
     agauge_note("Assist Off round 9: extra's call of its slot fighter, cost from the extra's own gauge");
     g_ao9[k] = Ao9{E, M, foe, g_battle_gen, dissidia_battle_age(), human};
+    g_ao9_last[k] = Ao9Last{M, g_battle_gen, dissidia_battle_age()};
     aohit_start(k, E, M, foe, true);
     std::fprintf(stderr, "[AO9] t=%.2fs side %u: extra %08X (char %d, %s) called %s %08X (char %d) kind %u, foe %08X (%s): assist gauge -> %.0f\n", age, k, E, actor_char(E), by, human ? "the HUMAN" : "its CPU slot fighter", M, actor_char(M), kind, foe, fw, static_cast<double>(rdf(st + 0x1Cu)));
     return true;
@@ -9243,6 +9265,8 @@ void actl_hook(uint8_t* rdram, recomp_context* ctx) {
         static float from = -1.f; const float age = dissidia_battle_age() / 60.0f; const float len = static_cast<float>(std::atof(sf));
         static const char* fcs = std::getenv("PSPRECOMP_TTLOCK_FORCECALL"); const uint32_t cs = fcs && std::atoi(fcs) == 1 ? 1u : 0u;
         if (from < 0.f && age > 2.f && ok(ctl, 0x80) && rd(ctl + 8u + 24u * cs) == 0u) from = age;
+        { static const char* sfrom = std::getenv("PSPRECOMP_TTCAM_AO9STILLFROM"); if (from < 0.f && sfrom && age >= static_cast<float>(std::atof(sfrom))) from = age;   // (round 9 tests: start at a battle second, or at the human's call)
+          if (from < 0.f && g_ao9[cs].E && g_ao9[cs].human && g_ao9[cs].gen == g_battle_gen) from = age; }
         const uint32_t Mc = g_bs ? srd(g_bs + 56u + 4u * cs) : 0u;
         if (from >= 0.f && ok(Mc, 0x12D0)) {
             const bool hold = age - from < len; static std::map<uint32_t, float> floor_y; static const char* af = std::getenv("PSPRECOMP_TTCAM_AIRFOE");
