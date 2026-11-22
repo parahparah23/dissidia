@@ -2591,13 +2591,15 @@ void set_open(bool open);
 struct TestState {
     std::atomic<bool> active{false};
     int player = 0;
+    int view = 0;                         // compact canvases: 0 the PSP, 1 the controller panel
     int64_t exit_t0 = 0, next_t0 = 0;     // when the Start+Select / L+R hold began (0 = not held)
+    int64_t view_t0 = 0; bool view_done = false;   // the Select + R hold (PSP / Controller view)
     bool next_done = false;               // the L+R hold already switched; wait for a release
     PspInputSample sample;
 } g_test;
 constexpr uint32_t T_SELECT = 0x0001, T_START = 0x0008, T_L = 0x0100, T_R = 0x0200;
 void test_begin() {
-    g_test.player = 0; g_test.exit_t0 = g_test.next_t0 = 0; g_test.next_done = false;
+    g_test.player = 0; g_test.view = 0; g_test.view_t0 = 0; g_test.view_done = false; g_test.exit_t0 = g_test.next_t0 = 0; g_test.next_done = false;
     g_test.sample = PspInputSample{};
     g_test.active = true;
     g_dirty = true;
@@ -2627,6 +2629,10 @@ void test_tick(int64_t t) {   // the holds: Start + Select 2 s leaves, L + R 1 s
         if (!g_test.next_t0) g_test.next_t0 = t;
         if (!g_test.next_done && t - g_test.next_t0 >= 1000) { g_test.next_done = true; test_set_player(g_test.player + 1); }
     } else { g_test.next_t0 = 0; g_test.next_done = false; }
+    if ((b & (T_SELECT | T_R | T_START | T_L)) == (T_SELECT | T_R) && !g_test.exit_t0) {   // Select + R (only) for 1 s: the other view
+        if (!g_test.view_t0) g_test.view_t0 = t;
+        if (!g_test.view_done && t - g_test.view_t0 >= 1000) { g_test.view_done = true; g_test.view ^= 1; g_dirty = true; }
+    } else { g_test.view_t0 = 0; g_test.view_done = false; }
 }
 bool restart_supported() {
 #if defined(_WIN32) || defined(__ANDROID__)
@@ -3450,7 +3456,8 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
         const SDL_Keycode k = ev.key.keysym.sym;
         if (open && g_test.active) {   // the test screen: only these keys are the menu's (everything else is a button under test)
             if (k == SDLK_ESCAPE || k == SDLK_F1 || k == SDLK_AC_BACK) { if (!ev.key.repeat) test_end(); return true; }
-            if (k == SDLK_PAGEDOWN || k == SDLK_F2) { if (!ev.key.repeat) test_set_player(g_test.player + 1); }
+            if (k == SDLK_F3) { if (!ev.key.repeat) { g_test.view ^= 1; g_dirty = true; } }
+            else if (k == SDLK_PAGEDOWN || k == SDLK_F2) { if (!ev.key.repeat) test_set_player(g_test.player + 1); }
             else if (k == SDLK_PAGEUP) { if (!ev.key.repeat) test_set_player(g_test.player - 1); }
             return false;
         }
@@ -3552,6 +3559,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
                 else if (ev.button.button == SDL_BUTTON_LEFT && mouse_to_canvas(ev.button.x, ev.button.y, &ux, &uy)) {
                     const auto& g = g_view.geom();
                     if (g.test_exit.has(ux, uy)) test_end();
+                    for (size_t i = 0; i < g.test_views.size(); ++i) if (g.test_views[i].has(ux, uy)) { g_test.view = int(i); g_dirty = true; }
                     for (size_t i = 0; i < g.test_tabs.size(); ++i) if (g.test_tabs[i].has(ux, uy)) test_set_player(int(i));
                 }
             }
@@ -3590,6 +3598,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
             if (ev.type == SDL_FINGERDOWN) {
                 const auto& g = g_view.geom();
                 if (g.test_exit.has(ux, uy)) { test_end(); return true; }
+                for (size_t i = 0; i < g.test_views.size(); ++i) if (g.test_views[i].has(ux, uy)) { g_test.view = int(i); g_dirty = true; return true; }
                 for (size_t i = 0; i < g.test_tabs.size(); ++i) if (g.test_tabs[i].has(ux, uy)) { test_set_player(int(i)); return true; }
             }
             return false;
@@ -3641,6 +3650,14 @@ void psp_settings_tick() {
     if (g_request_saves.exchange(false)) {
         if (!g_open.load()) { set_open(true); g_gate_dirty.store(true); }
         if (g_open.load() && !g_closing) open_category(PAGE_SAVES);
+    }
+    {   // test rigs: PSPRECOMP_TEST_OPEN_TESTCONTROLS=<seconds after start> opens Settings > Controls > Test Controls by itself
+        static const int at = [] { const char* e = std::getenv("PSPRECOMP_TEST_OPEN_TESTCONTROLS"); return e ? std::atoi(e) : -1; }();
+        static bool done = false;
+        if (at >= 0 && !done && now_ms() > int64_t(at) * 1000) {
+            if (!g_open.load()) { set_open(true); g_gate_dirty.store(true); }
+            else { test_begin(); if (const char* v = std::getenv("PSPRECOMP_TEST_TESTCONTROLS_VIEW")) g_test.view = std::atoi(v) ? 1 : 0; done = true; }
+        }
     }
     if (!g_open.load()) return;
     if (!g_closing && (psp_adhoc_connected() || psp_adhoc_in_session())) {   // a match started while the menu was open (e.g. from a pad press queued before): give the game back
@@ -3776,14 +3793,19 @@ void psp_settings_tick() {
         psp_sddialog::SetTest& tt = sc.test;
         tt.active = true;
         tt.player = g_test.player;
+        tt.view = g_test.view;
         for (int i = 0; i < psp_input_sample_players(); ++i) tt.players.push_back("Player " + std::to_string(i + 1));
         tt.buttons = g_test.sample.buttons;
         tt.lx = g_test.sample.lx; tt.ly = g_test.sample.ly;
         tt.present = g_test.sample.present;
         tt.device = g_test.sample.name;
+        {   const PspInputSample& sm = g_test.sample;
+            tt.pad = sm.pad; tt.rx = sm.rx; tt.ry = sm.ry; tt.lrx = sm.lraw_x; tt.lry = sm.lraw_y; tt.lt = sm.lt; tt.rt = sm.rt;
+            tt.pad_buttons = sm.pad_buttons; tt.l2_map = sm.pad_l2_map; tt.r2_map = sm.pad_r2_map; tt.rs_map = sm.pad_rstick_map; tt.pad_map = sm.pad_map; }
         const int64_t tn = now_ms();
         tt.exit_frac = g_test.exit_t0 ? float(tn - g_test.exit_t0) / 2000.f : 0.f;
         tt.next_frac = g_test.next_t0 && !g_test.next_done ? float(tn - g_test.next_t0) / 1000.f : 0.f;
+        tt.view_frac = g_test.view_t0 && !g_test.view_done ? float(tn - g_test.view_t0) / 1000.f : 0.f;
         tt.keyboard = true;
     }
     static std::unique_ptr<psp_sddialog::Canvas> canvas;

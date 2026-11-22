@@ -46,7 +46,17 @@ list of pressed buttons on its screen. It shows the input after the game's mappi
 (Player 1 Controller, L / R Buttons, A / B swap), the on-screen touch controls (they stay live over the screen; Start + Select touches
 leave) and, for player 1, debug-socket injections. A tab per player: Player 1 is what the game reads for player 1; Player 2 is a
 placeholder for split screen that reads the second connected controller (the first one Player 1 does not use; "No controller" if none).
-Switch with a click or touch on a tab, PageUp / PageDown / F2, or by holding L + R for 1 s on a pad. Leave with Esc, F1, Android Back,
+The **Controller** panel shows the same player's physical controller (SDL game controller) raw, before the game's mapping: left and right
+stick (live nub, raw -32768..32767 values, L3 / R3 click lights the ring), L2 / R2 as analogue bars (0..100 %, "DOWN" past the press
+threshold) and the other buttons by SDL name (A B X Y, LB RB, Back / Guide / Start, D-pad), lit while down. Each control states what the game
+does with it, read from the runtime's own mapping: L2 / R2 follow `PSPRECOMP_PAD_L2` / `_R2` (the game's run.sh sets L2 = R + Cross) or become
+the PSP L / R when Controls > L / R Buttons = Triggers (LB / RB then do nothing); the A / B swap shows in A / B; R3 is the camera re-center; the
+right stick is the PSP right analog the game reads. A line lists what is down as "button > game action". Keyboard-only / touch players show
+"No controller for this player". On a tall canvas (design height >= 380) the PSP and the panel are stacked; on 16:9 two tabs (PSP /
+Controller, click, touch or F3) switch between them. Test rigs: `PSPRECOMP_TEST_VPAD="rx,ry,lt,rt,buttonmask,lx,ly"` attaches an SDL virtual
+controller holding those raw values (buttonmask bit i = SDL_GameControllerButton i), `PSPRECOMP_TEST_OPEN_TESTCONTROLS=<s>` opens the screen
+by itself after that many seconds and `PSPRECOMP_TEST_TESTCONTROLS_VIEW=1` starts on the Controller tab.
+Switch with a click or touch on a tab, PageUp / PageDown / F2, or by holding L + R for 1 s on a pad; on 16:9 the PSP / Controller views switch with a tab click or touch, F3, or Select + R held 1 s (pad). Leave with Esc, F1, Android Back,
 the Exit button (click / touch), right click, or by holding Start + Select for 2 s (from any player's input; a bar shows the hold); all
 other keys and buttons are the buttons under test and do nothing to the menu. `psp_input_sample(player, &sample)` (`psp_event_loop.h`)
 is the API a split-screen mode can reuse; the pre-menu-gate state is kept by `publish_input` even while the menu hides it.

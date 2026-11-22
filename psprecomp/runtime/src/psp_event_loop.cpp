@@ -377,6 +377,68 @@ void publish_input() {
 
 }  // namespace
 
+// ---- Test Controls: the raw controller panel ----
+// Test rigs only: PSPRECOMP_TEST_VPAD="rx,ry,lt,rt,buttonmask,lx,ly" attaches an SDL virtual game controller holding those raw values
+// (axes -32768..32767, triggers 0..32767, buttonmask bit i = SDL_GameControllerButton i), so Test Controls can be checked without a pad.
+static SDL_Joystick* g_vpad = nullptr;
+static int16_t g_vpad_axes[6];
+static int g_vpad_buttons = 0;
+// Applied once the runtime has opened the controller, so the changes arrive as events like a real pad's
+static void test_vpad_apply() {
+    if (!g_vpad) return;
+    for (int i = 0; i < 6; ++i) SDL_JoystickSetVirtualAxis(g_vpad, i, g_vpad_axes[i]);
+    for (int i = 0; i < 15; ++i) SDL_JoystickSetVirtualButton(g_vpad, i, (g_vpad_buttons >> i) & 1);
+    g_vpad = nullptr;
+}
+void test_vpad_attach() {
+    const char* e = std::getenv("PSPRECOMP_TEST_VPAD");
+    if (!e || !e[0]) return;
+    int v[7] = {0, 0, 0, 0, 0, 0, 0};
+    std::sscanf(e, "%d,%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
+    const int idx = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 6, 15, 0);
+    SDL_Joystick* js = idx >= 0 ? SDL_JoystickOpen(idx) : nullptr;
+    if (!js) { std::fprintf(stderr, "[RT] test virtual pad failed: %s\n", SDL_GetError()); return; }
+    g_vpad = js;
+    for (int i = 0; i < 6; ++i) g_vpad_axes[i] = int16_t(std::max(-32768, std::min(32767, i < 2 ? v[5 + i] : i < 4 ? v[i - 2] : v[i - 2] * 2 - 32768)));   // lx ly rx ry; a trigger axis rests at -32768 (SDL maps it to 0..32767)
+    g_vpad_buttons = v[4];
+    std::fprintf(stderr, "[RT] test virtual pad attached (device %d)\n", idx);
+}
+
+namespace {
+std::string psp_bits_name(uint32_t m) {
+    static const struct { uint32_t bit; const char* n; } nm[] = {{P_L, "L"}, {P_R, "R"}, {P_UP, "Up"}, {P_DOWN, "Down"}, {P_LEFT, "Left"}, {P_RIGHT, "Right"},
+        {P_CROSS, "Cross"}, {P_CIRCLE, "Circle"}, {P_SQUARE, "Square"}, {P_TRI, "Triangle"}, {P_START, "Start"}, {P_SELECT, "Select"}};
+    std::string r;
+    for (auto& e : nm) if (m & e.bit) { if (!r.empty()) r += " + "; r += e.n; }
+    return r;
+}
+// The pad player 1 reads: the one last used if allowed, else the first allowed (as the button prompts pick it)
+SDL_GameController* test_p1_pad() {
+    if (g_p1_pad == "keyboard") return nullptr;
+    if (g_last_pad >= 0 && g_pads.count(g_last_pad) && pad_allowed(g_last_pad)) return g_pads[g_last_pad];
+    for (auto& pr : g_pads) if (pad_allowed(pr.first)) return pr.second;
+    return nullptr;
+}
+void test_fill_pad(SDL_GameController* gc, PspInputSample* out) {
+    out->pad = true;
+    out->rx = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
+    out->ry = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+    out->lraw_x = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
+    out->lraw_y = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+    out->lt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    out->rt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    out->pad_map.assign(SDL_CONTROLLER_BUTTON_MAX, std::string());
+    for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i) {
+        if (SDL_GameControllerGetButton(gc, SDL_GameControllerButton(i))) out->pad_buttons |= 1u << i;
+        out->pad_map[size_t(i)] = psp_bits_name(pad_button_to_psp(uint8_t(i)));
+    }
+    out->pad_map[SDL_CONTROLLER_BUTTON_RIGHTSTICK] = "Camera re-center";   // see the button handler: R3 without L3
+    out->pad_l2_map = psp_bits_name(g_lr_triggers ? P_L : g_trig_l_mask);
+    out->pad_r2_map = psp_bits_name(g_lr_triggers ? P_R : g_trig_r_mask);
+    out->pad_rstick_map = "Right analog";
+}
+}  // namespace
+
 // ---- Test Controls (Settings > Controls): the input a player would give the game, readable while the menu hides it ----
 int psp_input_sample_players() { return 2; }
 bool psp_input_sample(int player, PspInputSample* out) {
@@ -394,6 +456,7 @@ bool psp_input_sample(int player, PspInputSample* out) {
         if (now_ms < g_injected_analog_deadline_ms.load(std::memory_order_relaxed)) a = g_injected_analog.load(std::memory_order_relaxed);
         out->buttons = b;
         out->lx = uint8_t(a & 255); out->ly = uint8_t((a >> 8) & 255);
+        if (SDL_GameController* gc = test_p1_pad()) test_fill_pad(gc, out);
         return true;
     }
     // Player 2 (placeholder until split screen): the second connected controller, i.e. the first one Player 1 does not use
@@ -414,6 +477,7 @@ bool psp_input_sample(int player, PspInputSample* out) {
     out->buttons = b;
     out->lx = axis_to_psp(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
     out->ly = axis_to_psp(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY));
+    test_fill_pad(gc, out);
     return true;
 }
 
@@ -633,6 +697,7 @@ static void handle_sdl_event(const SDL_Event& ev) {
     }
     case SDL_CONTROLLERDEVICEADDED:
         pad_open(ev.cdevice.which);  // 'which' is a device index here
+        test_vpad_apply();
         prompts_update();
         return;
     case SDL_CONTROLLERDEVICEREMOVED:
@@ -773,6 +838,8 @@ int psp_runtime_init_sdl() {
             "[RT] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+
+    test_vpad_attach();
 
     // 1b. Optional user gamecontrollerdb mapping file
     if (const char* db = std::getenv("PSPRECOMP_GAMECONTROLLERDB")) {

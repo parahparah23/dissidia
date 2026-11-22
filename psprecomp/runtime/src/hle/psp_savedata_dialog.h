@@ -239,8 +239,15 @@ struct SetTest {                              // the Test Controls screen (full 
     int lx = 128, ly = 128;                   // left stick as the game reads it, 0..255
     bool present = true;                      // the player has a device
     std::string device;                       // what feeds the player
-    float exit_frac = 0, next_frac = 0;       // progress of the Start+Select hold (leave) and the L+R hold (next player)
+    float exit_frac = 0, next_frac = 0, view_frac = 0;       // progress of the Start+Select hold (leave) and the L+R hold (next player)
     bool keyboard = true;                     // hints name keys (else pad)
+    int view = 0;                             // compact canvases show one view at a time: 0 the PSP, 1 the controller
+    bool pad = false;                         // the player has a physical controller: the raw panel shows it (else "no controller")
+    int rx = 0, ry = 0, lrx = 0, lry = 0;     // raw sticks, -32768..32767
+    int lt = 0, rt = 0;                       // raw triggers 0..32767
+    uint32_t pad_buttons = 0;                 // bit i = SDL_CONTROLLER_BUTTON i
+    std::string l2_map, r2_map, rs_map;       // what the triggers / right stick do in the game ("" = nothing)
+    std::vector<std::string> pad_map;         // [SDL button] what it does in the game
 };
 struct SetScene {
     std::string title = "Settings";
@@ -272,6 +279,7 @@ struct SetGeom {
     SetRect back, list, scroll_track, scroll_thumb, detail, side;
     std::vector<SetRect> dlg_btns;            // the dialog's buttons while it is open
     std::vector<SetRect> test_tabs;           // Test Controls: the player tabs
+    std::vector<SetRect> test_views;          // Test Controls: the PSP / Controller view tabs (compact canvases)
     SetRect test_exit;                        // Test Controls: the Exit button
     std::vector<SetRect> cats;
     struct Row { int idx = 0; SetRect r, dec, inc, track; };

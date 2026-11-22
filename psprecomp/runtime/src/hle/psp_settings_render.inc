@@ -1187,12 +1187,93 @@ struct SettingsDraw {
     }
 
 
+    // -- Test Controls: the physical controller of the player, raw (before the game's mapping), and what each control does in the game --
+    void draw_test_pad(const SetTest& T_, float y0, float y1) {
+        const Col edge = rgb(150, 158, 206), off = rgb(58, 62, 92), glow = rgb(255, 214, 92), lit_txt = rgb(30, 30, 60);
+        const float x0 = 10.f, w = float(SCREEN_W) - 20.f;
+        const float h = 118.f, ytop = y0 + std::max(0.f, (y1 - y0 - h) / 2.f);   // a taller area: the panel stays centred
+        P.rrect(x0, ytop, w, h, 8.f, rgb(14, 16, 36, 0.92f));
+        P.rrect(x0 + 1.f, ytop + 1.f, w - 2.f, h - 2.f, 7.f, rgb(22, 24, 52, 0.92f));
+        if (!T_.pad) {
+            P.text(bodyb, 9.f * fs, x0 + w / 2.f, ytop + h / 2.f - 4.f, "No controller for this player", rgb(255, 150, 150), w - 20.f, 2);
+            P.text(body, 7.4f * fs, x0 + w / 2.f, ytop + h / 2.f + 9.f, "Keyboard and touch have no sticks, triggers or pad buttons", rgb(150, 156, 200), w - 20.f, 2);
+            return;
+        }
+        auto pad_bit = [&](int i) { return (T_.pad_buttons >> i & 1u) != 0; };
+        auto map_of = [&](int i) -> std::string { return i >= 0 && size_t(i) < T_.pad_map.size() && !T_.pad_map[size_t(i)].empty() ? T_.pad_map[size_t(i)] : std::string("nothing"); };
+        P.text(bodyb, 8.f * fs, x0 + 8.f, ytop + 12.f, "Controller (raw, before the game's mapping)", rgb(150, 190, 255), 0, 0);
+        char b[96];
+        // the sticks: nub + raw values + the click (L3 / R3)
+        auto stick = [&](float cx, float cy, int rx, int ry, int click, const char* nm, const std::string& game) {
+            const float R = 19.f;
+            const bool cl = pad_bit(click);
+            P.ring(cx, cy, R + 2.f, 2.f, cl ? glow : edge);
+            P.rrect(cx - R, cy - R, 2.f * R, 2.f * R, R, cl ? rgb(70, 62, 30) : rgb(18, 20, 44));
+            P.ring(cx, cy, R * 0.5f, 0.8f, rgb(70, 74, 110));
+            const float dx = float(rx) / 32768.f, dy = float(ry) / 32768.f;
+            const float mag = std::sqrt(dx * dx + dy * dy), k = mag > 1.f ? 1.f / mag : 1.f;
+            const float nx = cx + dx * k * (R - 6.f), ny = cy + dy * k * (R - 6.f);
+            const bool moved = rx != 0 || ry != 0;
+            if (moved) P.segment(cx, cy, nx, ny, 1.2f, rgb(255, 214, 92, 0.7f));
+            P.rrect(nx - 7.f, ny - 7.f, 14.f, 14.f, 7.f, moved || cl ? glow : edge);
+            P.rrect(nx - 5.5f, ny - 5.5f, 11.f, 11.f, 5.5f, moved || cl ? rgb(255, 232, 150) : off);
+            P.text(bodyb, 7.8f * fs, cx, cy - R - 4.f, nm, C_SILVER, 0, 2);
+            std::snprintf(b, sizeof b, "X %d   Y %d", rx, ry); P.text(body, 6.8f * fs, cx, cy + R + 10.f, b, rgb(190, 196, 236), 88.f, 2);
+            P.text(body, 6.4f * fs, cx, cy + R + 20.f, std::string(click == 7 ? "L3 " : "R3 ") + (cl ? "DOWN" : "up") + " > " + game, cl ? glow : rgb(120, 126, 170), 118.f, 2);
+        };
+        stick(x0 + 48.f, ytop + 48.f, T_.lrx, T_.lry, 7, "Left stick", map_of(7));
+        stick(x0 + 144.f, ytop + 48.f, T_.rx, T_.ry, 8, "Right stick", map_of(8));
+        // L2 / R2: analogue bars
+        auto trig = [&](float y, int v, const char* nm, const std::string& game) {
+            const float bx = x0 + 214.f, bw = 64.f, f = std::max(0.f, std::min(1.f, float(v) / 32767.f));
+            const bool on = f > 0.18f;   // the runtime's press threshold (default 6000 / 32767)
+            P.text(bodyb, 8.f * fs, bx - 4.f, y + 8.f, nm, on ? glow : C_SILVER, 0, 1);
+            P.rrect(bx, y, bw, 10.f, 4.f, edge);
+            P.rrect(bx + 1.f, y + 1.f, bw - 2.f, 8.f, 3.f, rgb(18, 20, 44));
+            if (f > 0.f) P.rrect(bx + 1.f, y + 1.f, std::max(3.f, (bw - 2.f) * f), 8.f, 3.f, on ? glow : rgb(120, 140, 230));
+            std::snprintf(b, sizeof b, "%3d%%", int(f * 100.f + 0.5f));
+            P.text(bodyb, 7.4f * fs, bx + bw + 4.f, y + 8.f, b, on ? glow : rgb(190, 196, 236), 0, 0);
+            P.text(body, 6.4f * fs, bx, y + 18.f, std::string(on ? "DOWN   " : "") + "game: " + (game.empty() ? std::string("nothing") : "PSP " + game), rgb(120, 126, 170), 150.f, 0);
+        };
+        trig(ytop + 26.f, T_.lt, "L2", T_.l2_map);
+        trig(ytop + 56.f, T_.rt, "R2", T_.r2_map);
+        // the other buttons by their SDL names, lit while down
+        {
+            struct Ch { int id; const char* n; };
+            static const Ch rows[3][5] = {{{0, "A"}, {1, "B"}, {2, "X"}, {3, "Y"}, {-1, ""}},
+                                          {{9, "LB"}, {10, "RB"}, {4, "Back"}, {5, "Guide"}, {6, "Start"}},
+                                          {{11, "Up"}, {12, "Down"}, {13, "Left"}, {14, "Right"}, {-1, ""}}};
+            const float cx0 = x0 + 316.f, cw = 26.f, ch = 12.f, g = 2.f;
+            for (int r = 0; r < 3; ++r)
+                for (int i = 0; i < 5; ++i) {
+                    const Ch& e = rows[r][i];
+                    if (e.id < 0) continue;
+                    const float x = cx0 + float(i) * (cw + g), y = ytop + 20.f + float(r) * (ch + g);
+                    const bool on = pad_bit(e.id);
+                    P.rrect(x - 1.f, y - 1.f, cw + 2.f, ch + 2.f, 4.f, on ? glow : edge);
+                    P.rrect(x, y, cw, ch, 3.f, on ? glow : off);
+                    P.text(bodyb, 6.6f * fs, x + cw / 2.f, y + 9.f, e.n, on ? lit_txt : C_SILVER, cw - 2.f, 2);
+                }
+        }
+        // what is down right now, and what the game does with it
+        std::string list;
+        static const char* const names[21] = {"A", "B", "X", "Y", "Back", "Guide", "Start", "L3", "R3", "LB", "RB", "Up", "Down", "Left", "Right",
+                                              "Misc1", "Paddle1", "Paddle2", "Paddle3", "Paddle4", "Touchpad"};
+        for (int i = 0; i < 21; ++i) if (pad_bit(i)) { if (!list.empty()) list += "    "; list += std::string(names[i]) + " > " + map_of(i); }
+        if (list.empty()) list = "(no button down)";
+        P.text(bodyb, 7.6f * fs, x0 + w / 2.f, ytop + h - 24.f, list, list[0] == '(' ? rgb(120, 126, 170) : glow, w - 16.f, 2);
+        P.text(body, 6.8f * fs, x0 + w / 2.f, ytop + h - 10.f, "Button > what the game does with it (nothing = ignored).  L / R Buttons = Triggers moves L / R to L2 / R2.", rgb(120, 126, 170), w - 16.f, 2);
+    }
+
     // -- Test Controls: a PSP drawn with shapes; each control lights while the input reads it ---------------------------------
     void draw_test() {
         const SetTest& T_ = S.test;
         P.ga = 1.f;
         V.g_.test_tabs.clear();
-        const float dh = float(c.dh), oy = (dh - float(SCREEN_H)) / 2.f;   // a tall canvas: the drawing stays centred
+        V.g_.test_views.clear();
+        const float dh = float(c.dh), oy = (dh - float(SCREEN_H)) / 2.f;
+        const bool stacked = dh >= 380.f;                         // tall: the PSP and the controller panel together; else one view at a time
+        const bool show_psp = stacked || T_.view == 0, show_pad = stacked || T_.view == 1;   // a tall canvas: the drawing stays centred
         const Col off = rgb(58, 62, 92), edge = rgb(150, 158, 206), glow = rgb(255, 214, 92), lit_txt = rgb(30, 30, 60);
         auto pressed = [&](uint32_t bit) { return (T_.buttons & bit) != 0; };
         // header: title, the player tabs, Exit
@@ -1204,6 +1285,16 @@ struct SettingsDraw {
             P.rrect(ex.x, ex.y, ex.w, ex.h, 5.f, rgb(214, 218, 240));
             P.text(bodyb, 9.f * fs, ex.x + ex.w / 2.f, ex.y + 13.f, "Exit", C_INK, ex.w - 6.f, 2);
         }
+        if (!stacked) {
+            static const char* const vn[2] = {"PSP", "Controller"};
+            for (int i = 0; i < 2; ++i) {
+                const SetRect r{136.f + float(i) * 78.f, 6.f, 72.f, 19.f};
+                V.g_.test_views.push_back(r);
+                const bool sel = i == T_.view;
+                P.rrect(r.x, r.y, r.w, r.h, 5.f, sel ? rgb(40, 52, 222) : rgb(208, 212, 238));
+                P.text(bodyb, 9.f * fs, r.x + r.w / 2.f, r.y + 13.f, vn[i], sel ? C_WHITE : C_INK, r.w - 6.f, 2);
+            }
+        }
         const int n = int(T_.players.size());
         const float tw = 92.f, tg = 8.f, tx0 = (float(SCREEN_W) - (float(n) * tw + float(n - 1) * tg)) / 2.f, ty = 36.f;
         for (int i = 0; i < n; ++i) {
@@ -1213,8 +1304,9 @@ struct SettingsDraw {
             P.rrect(r.x, r.y, r.w, r.h, 6.f, sel ? rgb(40, 52, 222) : rgb(208, 212, 238));
             P.text(bodyb, 9.f * fs, r.x + r.w / 2.f, r.y + 12.f, T_.players[size_t(i)], sel ? C_WHITE : C_INK, r.w - 8.f, 2);
         }
+        if (show_psp) {
         // the PSP: shoulders, body, screen
-        const float bx = 62.f, by = 82.f + oy * 0.5f, bw = 356.f, bh = 140.f;
+        const float bx = 62.f, by = stacked ? 74.f : 82.f + oy * 0.5f, bw = 356.f, bh = 140.f;
         auto shoulder = [&](float x, uint32_t bit, const char* name) {
             const bool on = pressed(bit);
             P.rrect(x, by - 12.f, 84.f, 16.f, 7.f, on ? glow : edge);
@@ -1319,6 +1411,8 @@ struct SettingsDraw {
             pill(bx + bw - 96.f, 0x0001, "SELECT");
             pill(bx + bw - 50.f, 0x0008, "START");
         }
+        }   // show_psp
+        if (show_pad) draw_test_pad(T_, stacked ? 226.f : 68.f, stacked ? dh - 40.f : dh - 44.f);
         // hints
         {
             const float hy = dh - 22.f;
@@ -1326,7 +1420,7 @@ struct SettingsDraw {
             P.text(body, 7.8f * fs, float(SCREEN_W) / 2.f, hy - 8.f,
                    "Hold START + SELECT for 2 s to leave" + (k1.empty() ? std::string() : "   |   " + k1), rgb(48, 54, 130), float(SCREEN_W) - 20.f, 2);
             P.text(body, 7.8f * fs, float(SCREEN_W) / 2.f, hy + 4.f,
-                   std::string("Switch player: hold L + R for 1 s") + (T_.keyboard ? ",  PageUp / PageDown,  or click a tab" : ""), rgb(48, 54, 130), float(SCREEN_W) - 20.f, 2);
+                   std::string("Switch player: hold L + R for 1 s;  PSP / Controller view: hold SELECT + R for 1 s") + (T_.keyboard ? ",  PageUp / PageDown,  or click a tab" : ""), rgb(48, 54, 130), float(SCREEN_W) - 20.f, 2);
             auto bar = [&](float y, float f, Col k) {
                 if (f <= 0.f) return;
                 const float w = 200.f, x = (float(SCREEN_W) - w) / 2.f;
@@ -1335,6 +1429,7 @@ struct SettingsDraw {
             };
             bar(dh - 40.f, T_.exit_frac, rgb(230, 90, 100));
             bar(dh - 44.f + 0.f, T_.next_frac > 0.f && T_.exit_frac <= 0.f ? T_.next_frac : 0.f, rgb(60, 80, 230));
+            bar(dh - 48.f, T_.view_frac > 0.f && T_.exit_frac <= 0.f ? T_.view_frac : 0.f, rgb(40, 170, 110));
         }
     }
 

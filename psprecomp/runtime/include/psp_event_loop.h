@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 /// SDL2+GL initialization: creates window, GL context, loads GLAD.
 /// Must be called from main thread before any GL calls.
@@ -39,6 +40,15 @@ struct PspInputSample {
     uint8_t lx = 128, ly = 128;
     bool present = false;       // false: no device for this player
     std::string name;           // what feeds this player
+    // The physical controller behind the player (SDL game controller), raw, before the game's mapping. Keyboard-only / touch: pad = false.
+    bool pad = false;
+    int16_t rx = 0, ry = 0;     // right stick, -32768..32767
+    int16_t lraw_x = 0, lraw_y = 0;   // left stick raw
+    int16_t lt = 0, rt = 0;     // analogue triggers 0..32767
+    uint32_t pad_buttons = 0;   // bit i = SDL_CONTROLLER_BUTTON i (SDL_GameControllerButton) is down
+    std::string pad_l2_map, pad_r2_map;       // what each trigger does in the game: PSP button names ("L", "R + Cross"), "" = nothing
+    std::string pad_rstick_map;               // what the right stick does ("" = nothing)
+    std::vector<std::string> pad_map;         // [SDL_GameControllerButton] what that button does in the game ("" = nothing)
 };
 int psp_input_sample_players();
 bool psp_input_sample(int player, PspInputSample* out);
