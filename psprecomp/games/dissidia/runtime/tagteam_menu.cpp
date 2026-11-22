@@ -276,7 +276,7 @@ const LobbyMode kLobbyModes[] = {
 constexpr int kLobbyModeCount = sizeof kLobbyModes / sizeof kLobbyModes[0];
 int lobby_mode_index(const uint8_t* L) { for (int i = 0; i < kLobbyModeCount; i++) if (kLobbyModes[i].mode == L[0] && (L[0] == 3 || kLobbyModes[i].size == L[1])) return i; return 1; }
 int lobby_needed(const uint8_t*) { return 2; }   // players the room needs: party members fill the other places in team and free-for-all battles
-int lobby_fighters(const uint8_t* L, int players) { return L[0] == 1 ? 2 * L[1] : L[0] == 3 ? std::clamp(players, 2, 4) : 2; }   // fighters on the stage at once
+int lobby_fighters(const uint8_t* L, int players) { return L[0] == 1 ? 2 * L[1] : L[0] == 3 ? (L[2] ? 4 : std::clamp(players, 2, 4)) : 2; }   // (CPU fill: free-for-all of four)   // fighters on the stage at once
 std::string lobby_summary(const uint8_t* L) {
     return std::string(kLobbyModes[lobby_mode_index(L)].label) + "  /  " + kStages[std::min<int>(L[4], 34)] + "  /  " + kRules[std::min<int>(L[5], 5)] + "  /  " + kJudge[std::min<int>(L[6], 4)];
 }

@@ -190,6 +190,10 @@ bool g_snap_valid = false;
 uint32_t g_cpu_stage_gen = 0xFFFFFFFFu;   // the battle in which the CPU stage fighters were handed to the AI
 bool g_roster_ok = true;      // this machine has the battle's agreed roster (the host: its own snapshot; a member: once the host's arrived)
 uint8_t g_shared_flags = 0; bool g_shared_valid = false;
+uint8_t g_shared_fill = 0;   // the battle lobby's CPU fill, from the host with the roster: 0 = off, else the CPUs' strength (1-9)
+}  // namespace
+uint8_t lobby_fill_strength();   // below, outside the unnamed namespace (the host lobby: 0 = CPU fill off)
+namespace {
 uint8_t host_mode_byte();   // below (the host's fighters-per-side byte)
 // Single player: the CPU rows of the player's own party, set on the Tournament setup screen (tagteam_menu.cpp; docs/tag-team.md "Single player: CPU rows").
 struct SpRows { uint8_t chars[5] = {}; uint8_t cpu_mask = 0; uint8_t cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}}; };
@@ -338,6 +342,8 @@ int g_ffa = 0;   // free-for-all: 0 off, 3 or 4 fighters (see foes() below)
 bool g_ffa_auto = false;   // the battle lobby's Free-for-all: online, the host sets g_ffa from the players in the room at the battle setup (one fighter each)
 bool comms_battle();
 int three_now();   // 3 v 3 (below)
+int cpu_fill_now();   // CPU fill (below)
+bool fill_has(int side, int ch);
 int late_per_side();
 int ffa_now();   // the battle's FFA: offline this machine's setting; in a Communications battle the host's (its roster flags, bit 2)
 int eff_mask() { const int f = ffa_now(); return f ? g_ffa_mask_of(f) : eff_mask_base(); }   // online: the host's FFA, so every machine spawns the same fighters
@@ -848,8 +854,9 @@ bool make_comms_cpu_record(uint32_t G, int charId) {
     if (side > 1u) return false;
     TagEntry l[10]; const int n = party_order(static_cast<int>(side), l, 10);
     int ci = -1; for (int i = 0; i < n && ci < 0; i++) if (l[i].charId == charId && l[i].is_cpu) ci = i;
-    if (ci < 0) return false;
-    const uint32_t tier = static_cast<uint32_t>(l[ci].strength - 1), lvlArg = l[ci].level, typeArg = l[ci].type ? static_cast<uint32_t>(l[ci].type - 1) : 0xFFFFFFFFu;
+    const bool fill = ci < 0 && fill_has(static_cast<int>(side), charId);   // CPU fill: the host's strength, level Auto, type Random
+    if (ci < 0 && !fill) return false;
+    const uint32_t tier = static_cast<uint32_t>((fill ? cpu_fill_now() : l[ci].strength) - 1), lvlArg = fill ? 0u : l[ci].level, typeArg = (!fill && l[ci].type) ? static_cast<uint32_t>(l[ci].type - 1) : 0xFFFFFFFFu;
     const int key = static_cast<int>(side) * 64 + charId;
     if (auto it = g_comms_cache.find(key); it != g_comms_cache.end()) {
         std::memcpy(g_ram + (g_rec_scratch & 0x07FFFFFFu), it->second.data(), 0x1060u); g_rec_cpu_made = true;
@@ -1180,11 +1187,13 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, " mode %02X\n", host_mode_byte());
         if (dissidia_ttnet_enabled() && !std::getenv("PSPRECOMP_TAGTEAM_LOCALROSTER")) {   // the host's list decides (members wait for it, tagteam_net.cpp)
             g_roster_ok = g_me.host; g_shared_valid = g_me.host;
+            if (g_me.host) g_shared_fill = lobby_fill_strength();
             if (g_me.host && g_ffa_auto) {   // Free-for-all: one fighter per player in the room (up to 4); two players = a plain duel (copies only in test setups)
                 const int n = static_cast<int>(g_snap.size());
-                g_ffa = n == 3 ? 3 : 4;   // (two players: no player left for the extras, so none is added: a duel)
-                std::fprintf(stderr, "[FFA] %d player(s) in the room: free-for-all of up to %d, one fighter per player\n", n, g_ffa);
+                g_ffa = (n == 3 && !g_shared_fill) ? 3 : 4;   // (two players: no player left for the extras, so none is added: a duel; CPU fill: CPUs up to four)
+                std::fprintf(stderr, "[FFA] %d player(s) in the room: free-for-all of up to %d, one fighter per player%s\n", n, g_ffa, g_shared_fill ? ", CPUs fill the rest" : "");
             }
+            if (g_me.host) std::fprintf(stderr, "[CPUFILL] host: CPU fill %s\n", g_shared_fill ? ("on, strength " + std::to_string(g_shared_fill)).c_str() : "off");
             if (g_me.host) g_shared_flags = local_rule_flags();
             std::fprintf(stderr, "[TTCPU] roster: %s\n", g_me.host ? "this machine is the host, its list is sent to the others" : "waiting for the host's list");
         }
@@ -1787,6 +1796,10 @@ bool make_sp_cpu_record(uint32_t G, int charId) {
 // the player of that party who registered it.
 bool comms_battle() { return g_snap_valid && psp_adhoc_in_session(); }
 int ffa_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 4u) ? ((g_shared_flags & 0x10u) ? 3 : 4) : 0; return g_ffa; }   // online: bit 2 = FFA, bit 4 = three fighters (else four)
+int cpu_fill_now() { return (comms_battle() && g_shared_valid) ? g_shared_fill : 0; }   // online: the host's CPU fill (0 = off, else strength)
+// CPU fill: the CPUs made for empty places this battle, per side (side * 64 + char); they get a CPU record and brain of the host's strength.
+std::vector<int> g_fill_keys; uint32_t g_fill_gen = 0xFFFFFFFFu;
+bool fill_has(int side, int ch) { if (g_fill_gen != g_battle_gen) return false; for (int k : g_fill_keys) if (k == side * 64 + ch) return true; return false; }
 int three_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 8u) ? 1 : 0; return g_three; }
 // Extras queued per side at the battle setup: 2 in 3 v 3. Online a member has not got the host's rules yet when the battle is set up, so two are
 // queued there and the plan (once the host's roster is in) drops the second one of a side that fields fewer than three (fighters_per_side).
@@ -2056,6 +2069,25 @@ int ffa_player_char(int* driver) {
     std::fprintf(stderr, "[FFA] no player left for another fighter\n");
     return 0;
 }
+// A character for an empty place: the same on every machine (seeded by the host's roster), not one already on the stage or filled before.
+int fill_pick(int side) {
+    if (!cpu_fill_now() || side < 0 || side > 1) return 0;
+    if (g_fill_gen != g_battle_gen) { g_fill_gen = g_battle_gen; g_fill_keys.clear(); }
+    bool used[64] = {};
+    uint32_t f[8]; const int nf = all_fighters(f); for (int i = 0; i < nf; i++) { const int c = actor_char(f[i]); if (c > 0 && c < 64) used[c] = true; }
+    for (int k : g_fill_keys) used[k & 63] = true;
+    for (int sd = 0; sd < 2; sd++) { TagEntry l[10]; const int n = party_order(sd, l, 10); const int st = stage_index(sd, l, n); if (st >= 0 && l[st].charId > 0 && l[st].charId < 64) used[l[st].charId] = true; }
+    std::vector<int> cand; for (int c = 1; c <= 33; c++) if (!used[c] && info_for_char(c)) cand.push_back(c);
+    if (cand.empty()) { std::fprintf(stderr, "[CPUFILL] side %d: no character left for a CPU\n", side); return 0; }
+    std::vector<NetPlayer> tmp; uint32_t h = 2166136261u;   // the host's roster: players' MACs and rows
+    for (const NetPlayer* q : players_sorted(snap_or_live(tmp))) { for (int i = 0; i < 6; i++) h = (h ^ q->mac[i]) * 16777619u; for (int r = 0; r < q->n; r++) h = (h ^ q->regs[r]) * 16777619u; }
+    h = (h ^ static_cast<uint32_t>(side * 31 + static_cast<int>(g_fill_keys.size()) * 7 + 1)) * 16777619u;
+    const int c = cand[h % cand.size()];
+    g_fill_keys.push_back(side * 64 + c);
+    std::fprintf(stderr, "[CPUFILL] side %d: an empty place, CPU %s (strength %d)\n", side, char_label(c, true).c_str(), cpu_fill_now());
+    return c;
+}
+int ffa_fill_or_player(int side, int* driver) { const int c = ffa_player_char(driver); return c ? c : cpu_fill_now() ? fill_pick(side) : 0; }   // CPU fill: CPUs after the players
 int comms_partner_char(int side, int* driver) {
     *driver = -1;
     log_order(side);
@@ -2070,7 +2102,9 @@ int comms_partner_char(int side, int* driver) {
     bool owner_on[16] = {};
     for (int i = 0; i < n; i++) if (((g_order_used[side] >> i) & 1) && !l[i].is_cpu && l[i].owner >= 0 && l[i].owner < 16) owner_on[l[i].owner] = true;
     if (st >= 0) for (int i = st + 1; i < n && pi < 0; i++) if (!((g_order_used[side] >> i) & 1) && (l[i].is_cpu || l[i].owner < 0 || l[i].owner >= 16 || !owner_on[l[i].owner])) pi = i;
-    if (pi < 0) { std::fprintf(stderr, "[TTCPU] side %d: no entry after the one on the stage that another player or a CPU plays, no partner\n", side); return 0; }
+    if (pi < 0) {
+        if (cpu_fill_now()) { const int c = fill_pick(side); if (c) return c; }
+        std::fprintf(stderr, "[TTCPU] side %d: no entry after the one on the stage that another player or a CPU plays, no partner\n", side); return 0; }
     const TagEntry& e = l[pi];
     if (!info_for_char(e.charId)) { std::fprintf(stderr, "[TTCPU] side %d: no character record for %d, no partner\n", side, e.charId); return 0; }
     order_mark(side, pi);
@@ -3048,7 +3082,7 @@ void apply_drive(uint32_t A, int drive) {
         if (comms_battle() && !std::getenv("PSPRECOMP_TAGTEAM_NOCOMMSCPU")) {   // a CPU row of a Communications party (also the lead the retail slot starts with, and a CPU party's): its row's strength / type decide the brain
             const uint32_t sd = side_of(A); const int ch = actor_char(A);
             if (sd < 2u && ch > 0 && ch <= 0x3F) {
-                TagEntry l[10]; const int n = party_order(static_cast<int>(sd), l, 10); bool cpu_row = false; for (int i = 0; i < n; i++) if (l[i].charId == ch && l[i].is_cpu) cpu_row = true;
+                TagEntry l[10]; const int n = party_order(static_cast<int>(sd), l, 10); bool cpu_row = fill_has(static_cast<int>(sd), ch); for (int i = 0; i < n; i++) if (l[i].charId == ch && l[i].is_cpu) cpu_row = true;
                 const int key = static_cast<int>(sd) * 64 + ch;
                 if (cpu_row && !g_rec_scratch) g_rec_scratch = psp_kmem_bump_alloc_named(0x1100u, "TAGTEAM_CHAR_RECORD");
                 if (cpu_row && !g_comms_cache.count(key)) make_comms_cpu_record(REC_BASE + 4192u * sd, ch);   // (the scratch record is only the vehicle: the fighter on the stage keeps the record the setup gave it)
@@ -9934,7 +9968,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 static const bool sp_partner = std::getenv("PSPRECOMP_TAGTEAM_SP_PARTNER") != nullptr;
                 if (team == 0) update_party_reserve();   // (which team record is the human's)
                 const bool spc = team == 0 && !no_real && !l.callin && l.info_slot < 100 && sp_cpu_battle();   // single player: his first CPU row is the partner
-                const int c = spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_player_char(&drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
+                const int c = spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_fill_or_player(static_cast<int>(l.side), &drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
                 if (spc) { sp_mark(c, true); std::fprintf(stderr, "[TTSP] partner at the start: CPU member %d (%s)\n", c, c ? char_label(c, true).c_str() : "none loadable"); }
                 else if (!comms_battle() && team == 0 && !sp_partner && !clones_allowed() && g_log) std::fprintf(stderr, "[TAGTEAM] single player: no CPU row on the human's team, no partner (1 v 2)\n");
                 l.driver = drv;
@@ -10566,7 +10600,7 @@ int dissidia_tagteam_roster_pack(uint8_t* out, int max) {   // 'T' 'R' 1 flags c
     if (!g_snap_valid) return 0;
     const int cnt = std::min<int>(static_cast<int>(g_snap.size()), 16);
     if (max < 5 + kRosterRec * cnt) return 0;
-    out[0] = 'T'; out[1] = 'R'; out[2] = 1; out[3] = g_shared_flags; out[4] = static_cast<uint8_t>(cnt);
+    out[0] = 'T'; out[1] = 'R'; out[2] = static_cast<uint8_t>(1u | (g_shared_fill << 4)); out[3] = g_shared_flags;  /* byte 2: version 1, CPU fill strength << 4 */ out[4] = static_cast<uint8_t>(cnt);
     uint8_t* q = out + 5;
     for (int i = 0; i < cnt; i++, q += kRosterRec) {
         const NetPlayer& p = g_snap[static_cast<size_t>(i)];
@@ -10587,7 +10621,7 @@ std::string roster_str(const std::vector<NetPlayer>& v) {   // (players by MAC, 
     return s;
 }
 bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the host's list replaces this machine's own snapshot
-    if (g_roster_ok || !comms_battle() || n < 5 || d[0] != 'T' || d[1] != 'R' || d[2] != 1) return false;
+    if (g_roster_ok || !comms_battle() || n < 5 || d[0] != 'T' || d[1] != 'R' || (d[2] & 15) != 1) return false;
     const int cnt = d[4]; if (cnt <= 0 || cnt > 16 || n < 5 + kRosterRec * cnt) return false;
     uint8_t me[6]; psp_adhoc_local_mac(me);
     std::vector<NetPlayer> v; bool found_me = false;
@@ -10604,7 +10638,8 @@ bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the
     const std::string mine = roster_str(g_snap), host = roster_str(v);
     std::fprintf(stderr, "[TTCPU] roster from the host (%d player(s)%s): %s%s\n", cnt, found_me ? "" : ", this machine is NOT in it", mine == host ? "the same as this machine's" : "DIFFERS from this machine's, the host's is used:", mine == host ? "" : host.c_str());
     if (mine != host) std::fprintf(stderr, "[TTCPU]   this machine had:%s\n", mine.c_str());
-    g_snap = v; g_roster_ok = true; g_shared_flags = d[3]; g_shared_valid = true;
+    g_snap = v; g_roster_ok = true; g_shared_flags = d[3]; g_shared_fill = static_cast<uint8_t>(d[2] >> 4); g_shared_valid = true;
+    std::fprintf(stderr, "[CPUFILL] host's CPU fill: %s\n", g_shared_fill ? ("on, strength " + std::to_string(g_shared_fill)).c_str() : "off");
     std::fprintf(stderr, "[TTCPU] host's rules: assists %s, EX Burst rule %s, free-for-all %s, 3 v 3 %s\n", (d[3] & 1) ? "on" : "off", (d[3] & 2) ? "fight" : "freeze", (d[3] & 4) ? ((d[3] & 0x10) ? "3" : "4") : "off", (d[3] & 8) ? "on" : "off");
     return true;
 }
@@ -10751,6 +10786,7 @@ bool dissidia_tagteam_group_on() { return g_group_mode || ((g_enabled || g_menu_
 // (size 3..4 fighters), 4 local (split screen on one PC: not online).
 struct LobbyCfg { uint8_t mode = 1, size = 2, cpu_fill = 0, cpu_str = 5, stage = 0, rules = 0, judge = 0, exb = 0, assist = 0; };
 LobbyCfg g_lobby; bool g_lobby_init = false;
+uint8_t lobby_fill_strength() { return (g_lobby_init && g_lobby.cpu_fill) ? static_cast<uint8_t>(std::clamp<int>(g_lobby.cpu_str, 1, 9)) : 0; }
 void dissidia_tagteam_lobby_encode(uint8_t out[8]) {
     std::memset(out, 0, 8);
     if (!g_me.host || !g_lobby_init) return;

@@ -2194,6 +2194,13 @@ User + Schindler: one place for the mode and the battle's rules, showing every p
   at its stall address. Not exercised here (needs a reserve call-in).
 - **FFA (4) slow result** (same rig): not the mod; both machines leave the battle normally (member 6 s, host 41 s after the decision), the
   rest is the game's own end exchange on a host running 10 copies at ~15 fps.
+- **CPU fill** (lobby row CPU FILL + strength): an empty place is played by a CPU. The host sends it with the roster (byte 2 = version 1 |
+  strength << 4; 0 = off), `cpu_fill_now()` reads it. Team modes: a side with no other player or CPU row for a partner gets a CPU
+  (`comms_partner_char` -> `fill_pick`); free-for-all: the fighters after the players are CPUs, so a free-for-all with fill always has 4.
+  `fill_pick` chooses a character that is not on the stage yet, the same on every machine (seeded by the host's roster). The CPU gets the
+  record retail's CPU builder makes for the host's strength (level Auto, type Random) and the matching AI brain (`make_comms_cpu_record`,
+  the brain setup; `fill_has`). Verified with 2 linked copies: Team 2 vs 2 (Kuja, Warrior of Light added) and free-for-all (Firion,
+  Gilgamesh added: 4 fighters), the same CPUs on both machines, 0 mismatches.
 - Test aid: `PSPRECOMP_TAGTEAM_DEBUG_LOWHP=<s>`: every fighter's live HP (status +0xC) capped at 300 at that battle second, the same frame on
   every machine, so a battle ends quickly.
 
