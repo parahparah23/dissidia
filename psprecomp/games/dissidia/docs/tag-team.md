@@ -4559,3 +4559,17 @@ RP6 report: an HP attack that should have killed left the victim at 1 HP and a s
   KOLIST=human:15 CALLIN_DELAY=10`): "the human waits" 16.6 -> "wait is over" 26.6 -> "takes the slot ... with the pad" 30.3 s, same as the old hold build; FFA 4 and 3v3 runs with real + aid KOs; forfeit via the pause menu
   (decided at once, tally, "Proceed" row left out); `tagteam_test.py --baseline` PASS; two-copy `mp_test.py` 150 s: 0 mismatched, identical presentation timings on both copies.
 - Not verified: EX Burst KO, an extra's HP KO beyond the earlier HPDMG lines, a real HP-step KO online, the survive-effect clearing firing, 3+ real HP KOs in a row.
+
+## EX Burst only on the fighter the burster's attack hit (21 Nov, tree tthud; host-only, headless, nothing seen on a device)
+User rule: "an EX Burst can only be used on someone if they were first hit with an HP move from that player". Retail starts the burst (FUN_08A3EB70(controller, burster, foe)) on the
+burster's foe word, which in a 2v2 is the enemy slot fighter, not the fighter the attack hit.
+- `hitreg_hook` keeps each burster's last registered hit (`g_exb_lasthit`: victim + battle tick; an extra's own assist and a slot fighter's assist / Assist Off call count for their master).
+- `exbstart_hook` (with the old KO check): the victim must be that last hit, <= 660 ticks old, alive, an enemy. If it differs from the foe the start was given, the start is re-aimed
+  (`[EXBHIT] ... the burst goes to the fighter hit`: foe words +0x2FC / +0x300 and the call's foe set to the victim; the existing extra-burst paths then run: lock block, camera slot 4, `held` list).
+  With no such hit (a whiff) the start is refused and the chance flag (+0x5B2 bit 0x10) is cleared (`[EXBHIT] ... refused`); no burst, no slow motion started by us.
+  Battle state only (hit registration + ticks), same on every machine. `PSPRECOMP_TAGTEAM_NOEXBHITRULE=1` = old.
+- Test aids: `PSPRECOMP_TAGTEAM_EXBRULE=1` sends the `EXBAT` start through the rule (the plain aid bypasses it); `PSPRECOMP_TAGTEAM_EXBHITSEED=<who>=<victim>` books a hit (who/victim as in EXBAT: s0 / s1 / x0..).
+- Headless (CLONES=1, EXBAT at 20 s): `x0:20:s1` seeded `x0=x1` -> asked on slotC, `EX Burst in it:extraE,extraP held: slotH slotC` (before: in it extraE,slotC); same without a seed -> refused (running=0);
+  `s0:20:s1` seeded `s0=x0` -> in it slotH,extraE. Bursts end normally (`EX Burst over`). `tagteam_test.py --baseline` PASS. Two-copy `mp_test.py` 150 s (burst x0 routed + refused burst):
+  `[NETSYNC]` 2400 frames compared, 0 mismatched, both copies log the same burst pair.
+- Not checked: a natural EX-mode HP hit by retail's AI / the human pad on a partner (the aids seed the hit); the burst chance prompt after a refused start (retail's own timeout ends it, not verified); devices.

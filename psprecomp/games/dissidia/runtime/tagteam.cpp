@@ -422,6 +422,9 @@ std::map<uint32_t, uint32_t> g_extra_mod;   // extra actor -> its damage module 
 uint32_t g_exb_slot_addr = 0, g_exb_slot_lb = 0;   // an extra burster's lock block put into a free camera-manager slot for the burst: table address / block
 std::map<uint32_t, uint8_t> g_exb_shown;   // lock block -> its +0x125 "shown" byte before the burst moved it to the burster
 std::map<uint32_t, uint32_t> g_exb_fc;   // lock block -> its +0xFC word cleared for the running EX Burst (burst camera)
+struct ExbHit { uint32_t vic = 0; float age = -1e9f; };
+std::map<uint32_t, ExbHit> g_exb_lasthit;   // burster (the fighter itself; an assist's hit counts for its master) -> the last fighter its attack really hit (hit registration)
+bool g_exb_debug_call = false;   // the EXBAT test aid starts a burst without a hit
 std::set<uint32_t> g_exb_frozen;   // fighters held out of a running EX Burst (their pad input is dropped: dissidia_tagteam_pad_blocked)
 std::map<uint32_t, float> g_xbreak_show;   // extra -> battle age of its last break (the BREAK flash on its own small panel)
 std::map<uint32_t, uint32_t> g_extra_hdl;   // extra actor -> its damage handler copy (hitreact_hook)
@@ -3611,6 +3614,7 @@ void swap_roles() {
 // tag clock reaches s seconds and no burst runs. who / foe by side, never by the local player, so every machine of a lock-step battle starts the
 // same burst on the same battle frame: s0 / s1 = the slot fighters (battle setup +56 / +60), x0 / x1 / ... = the extras in creation order.
 // foe defaults to the other side's slot fighter. Runs from the slot-0 brain tick (one step of the battle simulation).
+void exbstart_hook(uint8_t* rdram, recomp_context* ctx);
 uint32_t exb_fighter(const char* w) {
     if (!g_bs || !w || !w[0]) return 0;
     if (w[0] == 's' && (w[1] == '0' || w[1] == '1')) return srd(g_bs + 56u + 4u * static_cast<uint32_t>(w[1] - '0'));
@@ -3643,7 +3647,11 @@ void exb_debug_start() {
         if (!ok(a, 0x12D0) || !ok(foe, 0x12D0) || !alive(a) || !alive(foe)) { std::fprintf(stderr, "[EXBAT] t=%.2fs %s -> %s: no such fighter / down\n", dissidia_battle_age() / 60.0f, sp.who, sp.foe); continue; }
         if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_EXBWATCHLB")) { const uint32_t lb = rd(a + 0x5ACu); if (ok(lb, 0x400)) { psp_mem_watch_set(lb + static_cast<uint32_t>(std::strtoul(w, nullptr, 16))); std::fprintf(stderr, "[EXBAT] watching burster lock block %08X + %s (now %08X)\n", lb, w, rd(lb + static_cast<uint32_t>(std::strtoul(w, nullptr, 16)))); } }   // debug
         if (!std::getenv("PSPRECOMP_TAGTEAM_EXBNOFOEFORCE")) { wr(a + 0x2FCu, foe); wr(a + 0x300u, foe); }   // (the start takes the attacker's own foe word as the victim: the asked foe is what it frames)
-        call(EXB_START, c, a, foe);
+        // test aid: PSPRECOMP_TAGTEAM_EXBRULE=1 starts the burst through the hit rule (no bypass); PSPRECOMP_TAGTEAM_EXBHITSEED="<who>=<victim>" first books a hit of who on victim
+        const bool through_rule = std::getenv("PSPRECOMP_TAGTEAM_EXBRULE") != nullptr;
+        if (through_rule) if (const char* sd = std::getenv("PSPRECOMP_TAGTEAM_EXBHITSEED")) { char w[8] = {}, v[8] = {}; if (std::sscanf(sd, "%7[^=]=%7s", w, v) == 2 && exb_fighter(w) == a && ok(exb_fighter(v), 0x12D0)) g_exb_lasthit[a] = {exb_fighter(v), dissidia_battle_age()}; }
+        if (through_rule) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(c); g_ctx->r[5] = static_cast<int32_t>(a); g_ctx->r[6] = static_cast<int32_t>(foe); exbstart_hook(g_ram, g_ctx); *g_ctx = sv; }   // (as retail's caller reaches the hook)
+        else { g_exb_debug_call = true; call(EXB_START, c, a, foe); g_exb_debug_call = false; }
         std::fprintf(stderr, "[EXBAT] t=%.2fs burst %s %08X (foe asked %08X): running=%u, in it %08X / %08X\n", dissidia_battle_age() / 60.0f, sp.who, a, foe, rd(c + 0x278u), rd(c + 0x26Cu), rd(c + 0x270u));
         break;
     }
@@ -4194,7 +4202,7 @@ void dtor_hook(uint8_t* rdram, recomp_context* ctx) {
             g_sweep_due = false;   // (replaced by the per-actor sweep in dissidia_tagteam_after_free)
         }
         if (!std::getenv("PSPRECOMP_TAGTEAM_NOLEFTOVER")) for (const auto& kv : g_own_load) g_leftover_load[kv.first] = kv.second;
-        xas_reset(true); g_nextra = 0; g_bs = 0; voice_banks_release(); portrait_reset(true); g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear(); g_down.clear(); reset_ko_state(); g_ko_mark.clear();
+        xas_reset(true); g_nextra = 0; g_bs = 0; voice_banks_release(); portrait_reset(true); g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_lasthit.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear(); g_down.clear(); reset_ko_state(); g_ko_mark.clear();
         g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_entrant = 0; g_cycs.clear();
         g_banner_until = 0; g_banner_text.clear(); tagteam_hud_set_banner(""); tagteam_hud_clear(); g_dissidia_entr_actor = 0; g_dissidia_vic_actor = 0;   // nothing of this battle's announcements reaches the next one
         for (Extra& x : g_extra) x = Extra();
@@ -5627,7 +5635,7 @@ void reset_battle_state() {
     xas_reset(false);
     g_match_cache.clear(); g_comms_cache.clear(); g_sp_cache.clear(); g_rec_cpu_made = false;
     for (Extra& x : g_extra) x = Extra();
-    g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear();
+    g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_lasthit.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear();
     g_down.clear(); reset_ko_state(); g_ko_mark.clear(); g_entrant = 0; g_cycs.clear(); g_late_q.clear(); g_late_load.clear();
     g_own_load.clear(); g_gone_since.clear(); g_unref_since.clear();   // (the battle's end released every file object)
     portrait_reset(false);
@@ -6401,6 +6409,27 @@ void exbstart_hook(uint8_t* rdram, recomp_context* ctx) {
                 if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst of %s %08X on %s %08X not started: its opening hit KO'd char %d %.2fs ago (not the foe it was given)\n", now / 60.0f, role_of(a), a, role_of(foe), foe, it->ch, (now - it->age) / 60.0f);
                 ctx->r[2] = 0; return;
             }
+        }
+    }
+    // An EX Burst only plays against a fighter the burster's own attack hit (user rule 21 Nov: "an EX Burst can only be used on someone if they were first hit
+    // with an HP move from that player"). The start is given the burster's foe word, which in a 2v2 is not the fighter the attack hit (18 / 21 Nov: Gabranth's
+    // hit landed on a partner / body and the burst went to the human, who was never hit). The victim is the burster's last registered hit (this chance's, <= 11 s old,
+    // alive, an enemy): the start is re-aimed at him (foe words +0x2FC / +0x300 as the EXBAT aid does); with no such hit (a whiff) the start is refused and the chance
+    // runs out on its own (flag +0x5B2 bit 0x10 cleared). PSPRECOMP_TAGTEAM_NOEXBHITRULE=1: old.
+    static const bool norule = std::getenv("PSPRECOMP_TAGTEAM_NOEXBHITRULE") != nullptr;
+    if (g_bs && g_nextra && !norule && !g_exb_debug_call && ok(a, 0x12D0)) {
+        const float now = dissidia_battle_age(); uint32_t vic = 0;
+        const auto it = g_exb_lasthit.find(a);
+        if (it != g_exb_lasthit.end() && now - it->second.age <= 660.f && now >= it->second.age && ok(it->second.vic, 0x12D0) && alive(it->second.vic) && foes(it->second.vic, a)) vic = it->second.vic;
+        static int said = 0;
+        if (!vic) {
+            g_ram[(a + 0x5B2u) & 0x07FFFFFFu] &= static_cast<uint8_t>(~0x10u);
+            if (g_log && said++ < 100) std::fprintf(stderr, "[EXBHIT] t=%.2fs EX Burst of %s %08X (char %d) on %s %08X refused: no live fighter hit by its attack in the last 11 s; chance flag cleared\n", now / 60.0f, role_of(a), a, actor_char(a), ok(foe, 0x12D0) ? role_of(foe) : "?", foe);
+            ctx->r[2] = 0; return;
+        }
+        if (vic != foe) {
+            if (g_log && said++ < 100) std::fprintf(stderr, "[EXBHIT] t=%.2fs EX Burst of %s %08X: asked on %s %08X, its attack hit %s %08X: the burst goes to the fighter hit\n", now / 60.0f, role_of(a), a, ok(foe, 0x12D0) ? role_of(foe) : "?", foe, role_of(vic), vic);
+            wr(a + 0x2FCu, vic); wr(a + 0x300u, vic); ctx->r[6] = static_cast<int32_t>(vic);
         }
     }
     g_orig_exbstart(rdram, ctx);
@@ -7900,6 +7929,13 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
             if (keep_foe && g_log) { static int c = 0; if (c++ < 60) std::fprintf(stderr, "[HITFOE] t=%.2fs %s %08X also hit %s %08X this frame: the hit on its foe %s %08X is kept for the damage step\n", dissidia_battle_age() / 60.0f, role_of(att), att, role_of(vic), vic, role_of(g_hits[i].vic), g_hits[i].vic); }
             if (i == g_nhits && g_nhits < 8) g_nhits++;
             if (i < 8 && !keep_foe) g_hits[i] = {vic, att, g_hframe};
+            if (!keep_foe) {   // the EX Burst rule: the burster's last hit (an assist's hit counts for its master)
+                uint32_t own = att;
+                for (int q = 0; q < g_nextra; q++) if (g_extra[q].started && (att == g_extra[q].actor || att == xas_ptr(g_extra[q].actor) )) own = g_extra[q].actor;
+                if (own == att) for (int sd = 0; sd < 2; sd++) { const uint32_t S = srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd)); if (ok(S, 0x12D0) && (att == S || att == rd(S + 0x1108u) || att == ao8_x_of_slot(S))) own = S; }
+                g_exb_lasthit[own] = {vic, dissidia_battle_age()};
+                if (own != att) g_exb_lasthit[att] = {vic, dissidia_battle_age()};
+            }
         }
         if (g_chase_ctl_now && ok(g_chase_ctl_now, 0x40) && rd(g_chase_ctl_now) && ok(vic, 0x12D0) && g_chase_int.frame < 0) {   // a fighter outside the chase hits one in it
             const uint32_t ca = rd(g_chase_ctl_now + 28u), co = rd(g_chase_ctl_now + 32u);
