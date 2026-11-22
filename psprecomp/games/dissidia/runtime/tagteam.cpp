@@ -396,6 +396,13 @@ template <int I> void hook(uint8_t* rdram, recomp_context* ctx) {
     g_g[I].orig(rdram, ctx);
     const uint32_t v = static_cast<uint32_t>(ctx->r[2]);
     g_g[I].n++; if (v == 1) g_g[I].nv1++;
+    if (I == 6 && std::getenv("PSPRECOMP_TAGTEAM_SUMGATE")[0] == '3') {   // 3: the manager's own memory (this .. +0x700, the two entries) diffed after every call
+        static std::vector<uint32_t> prev; std::vector<uint32_t> cur;
+        for (uint32_t o = 0; o < 0x700u; o += 4) cur.push_back(rd(a0 + o));
+        for (uint32_t o = 0; o < 0x50u; o += 4) cur.push_back(rd(0x08B87DBCu + o));
+        if (prev.size() == cur.size()) { std::string d; for (size_t j = 0; j < cur.size(); j++) if (cur[j] != prev[j]) { char t[40]; std::snprintf(t, sizeof t, " %s%X:%X>%X", j < 0x1C0 ? "" : "E", static_cast<unsigned>(j < 0x1C0 ? j * 4 : (j - 0x1C0) * 4), prev[j], cur[j]); d += t; } if (!d.empty()) std::fprintf(stderr, "[SUMMEM] call %u:%s\n", g_g[6].n, d.c_str()); }
+        prev = cur;
+    }
     if (I == 6 && g_g[6].n % 120 == 0) { std::fprintf(stderr, "[SUMCNT] mgr call %u:", g_g[6].n); for (int k = 0; k < 18; k++) std::fprintf(stderr, " %04X:%u/%u", g_g[k].addr & 0xFFFFu, g_g[k].n, g_g[k].nv1); std::fprintf(stderr, "\n"); }
     if (std::getenv("PSPRECOMP_TAGTEAM_SUMGATE")[0] == '1' && (v != g_g[I].last_v || a0 != g_g[I].last_a0 || a1 != g_g[I].last_a1)) { g_g[I].last_v = v; g_g[I].last_a0 = a0; g_g[I].last_a1 = a1; std::fprintf(stderr, "[SUMGATE] %08X(a0 %08X a1 %08X) -> %08X\n", g_g[I].addr, a0, a1, v); }
 }
@@ -1187,7 +1194,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     if (const char* ts = std::getenv("PSPRECOMP_TEST_STONE")) {   // test aid: "side:id[,side:id]" sets that side record's equipped stone byte (current set +0xB8) before the fighters are made
         for (const char* q = ts; q && *q;) { const int sd = std::atoi(q); const char* c = std::strchr(q, ':'); if (!c) break; const int id = std::atoi(c + 1);
             if (sd >= 0 && sd < 2) { const uint32_t rec = REC_BASE + 0x1060u * static_cast<uint32_t>(sd); const uint32_t set = g_ram[(rec + 0x773u) & 0x07FFFFFFu];
-                const uint32_t a = rec + 0x10u + 0xC6u * (set > 4 ? 0 : set) + 0xB8u; std::fprintf(stderr, "[TESTSTONE] side %d stone %02X -> %02X (rec %08X set %u)\n", sd, g_ram[a & 0x07FFFFFFu], id, rec, set); g_ram[a & 0x07FFFFFFu] = static_cast<uint8_t>(id); }
+                const uint32_t a = rec + 0x10u + 0xC6u * (set > 4 ? 0 : set) + 0xBAu; std::fprintf(stderr, "[TESTSTONE] side %d stone %02X -> %02X (rec %08X set %u)\n", sd, g_ram[a & 0x07FFFFFFu], id, rec, set); g_ram[a & 0x07FFFFFFu] = static_cast<uint8_t>(id); }
             q = std::strchr(c, ','); if (q) q++; }
     }
     if (!g_orig_ctor) {   // ownership recording for the retail pair (the constructor and the init run inside the original setup)
@@ -6343,6 +6350,28 @@ void hg_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HITGATE")) { const bool all2 = std::getenv("PSPRECOMP_TAGTEAM_HITGATE")[0] == '2'; const uint32_t rec = ok(c, 0x40) ? rd(c) : 0u, att = ok(rec, 0x40) ? rd(rec + 24u) : 0u; if (att && ok(att, 0x12D0) && ok(v, 0x12D0) && (all2 || extra_of(att) || extra_of(v))) { static int m = 0; if (m++ < 900) std::fprintf(stderr, "[HITGATE]   -> returned r2=%d, victim flags380=%08X\n", static_cast<int>(ctx->r[2]), rd(v + 0x380u)); } }
 }
 
+
+// Summon used state per member. Retail keeps ONE summon per side in the summon manager (this = 0x09AEE40C): the side's entry (bs + 0x754, +20 stone id, +24 the resolved id) and a used flag at
+// this + 0x3C8 + 4 * side (set when the use ends; found by diffing the manager's memory across a summon, FUN_08A23DA8 chain). In a tag battle the side's slot is taken by other fighters
+// (swap, call-in), so the flag is kept per member: each frame the side's flag is booked on the current slot fighter (character id), and when the slot fighter changes the flag is set from the
+// new fighter's own booking. The stone itself stays the side's (its resources are loaded once at the battle start). PSPRECOMP_TAGTEAM_NOSUMUSED=1 turns it off.
+void sum_track() {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOSUMUSED") != nullptr;
+    constexpr uint32_t MGR = 0x09AEE40Cu;
+    static uint32_t last_bs = 0; static std::map<std::pair<int, int>, bool> used; static int last_key[2] = {-1, -1};
+    if (off || !g_bs || !ok(MGR, 0x400) || g_nextra == 0) return;
+    if (g_bs != last_bs) { last_bs = g_bs; used.clear(); last_key[0] = last_key[1] = -1; }
+    for (uint32_t k = 0; k < 2; k++) {
+        const uint32_t F = srd(g_bs + 56u + 4u * k); if (!ok(F, 0x12D0)) continue;
+        const int key = actor_char(F), fa = MGR + 0x3C8u + 4u * k;
+        if (key != last_key[k]) {
+            const bool u = used[{static_cast<int>(k), key}];
+            if (last_key[k] != -1 && g_log) std::fprintf(stderr, "[SUMUSED] side %u: slot fighter char %d -> %d, used flag %u -> %u\n", k, last_key[k], key, rd(fa), u ? 1u : 0u);
+            if (last_key[k] != -1) wr(fa, u ? 1u : 0u);
+            last_key[k] = key;
+        } else if (rd(fa) != 0 && !used[{static_cast<int>(k), key}]) { used[{static_cast<int>(k), key}] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] side %u char %d: summon used\n", k, key); }
+    }
+}
 int g_hframe = 0;   // controller frames (hit attribution)
 FuncPtr g_orig_ctrl = nullptr;
 void ctrl_hook(uint8_t* rdram, recomp_context* ctx) {
@@ -6352,6 +6381,7 @@ void ctrl_hook(uint8_t* rdram, recomp_context* ctx) {
         static uint32_t last_lf = ~0u; const bool lk = dissidia_ttnet_running() && !std::getenv("PSPRECOMP_TTLOCK_HFRAME_OLD");
         if (!lk) g_hframe++; else if (dissidia_ttnet_frame() != last_lf) { last_lf = dissidia_ttnet_frame(); g_hframe++; }
     }
+    sum_track();
     if (g_log && g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_PDIFF2")) {   // debug: which shared objects (pointer words the human and its partner clone share) change when the partner leaves idle
         static std::vector<std::pair<uint32_t, uint32_t>> objs; static std::vector<uint32_t> snap; static int last_script = -1, shown = 0; static bool init = false;
         const uint32_t hs = rd(g_bs + 84u), hum = srd(g_bs + 56u + 4u * hs);
