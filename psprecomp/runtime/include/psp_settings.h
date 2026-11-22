@@ -85,6 +85,11 @@ struct PspDebugToggle {
 };
 void psp_settings_add_debug_toggle(const PspDebugToggle& toggle);
 
+/// A game module remembers a value of its own in settings.ini (any thread; call rarely): `psp_settings_saved_value` is what the file held at the
+/// last read or save ("" = nothing saved), `psp_settings_save_value` stores one and rewrites the file.
+std::string psp_settings_saved_value(const char* key);
+void psp_settings_save_value(const char* key, const std::string& value);
+
 /// First thing in main(): read settings.ini and export the saved values as
 /// the PSPRECOMP_* variables the window, renderer and game module read.
 void psp_settings_load_early();

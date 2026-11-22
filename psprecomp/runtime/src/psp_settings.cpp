@@ -3923,3 +3923,6 @@ void psp_settings_guest_wait() {
     while (g_open.load() && !g_should_exit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     g_parked.fetch_sub(1);
 }
+
+std::string psp_settings_saved_value(const char* key) { auto it = g_saved.find(key); return it == g_saved.end() ? std::string() : it->second; }
+void psp_settings_save_value(const char* key, const std::string& value) { save(key, value); }

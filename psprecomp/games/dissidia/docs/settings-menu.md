@@ -140,3 +140,9 @@ menu / title rows then overlap the retail rows; the pause menu row does not depe
 - Debug > **Button Chord Window (ms)** (Off, 10 to 200 ms in steps of 10): the fine version of Controls > Button Chord Window, the same saved `chord_ms` (default 70), applied at once. The Controls row shows "Custom (N ms)" when the value is none of its presets (Off / Short 70 / Medium 110).
 - `PspDebugToggle` has `def` (the value Reset All sets) and `group`: rows with the same group name are listed on a submenu row of the Debug page (Cross opens, Back returns; the row shows "N of M on"). The Dissidia tag team rows use group "Tag Team". Generic code only: `g_dbg_groups`, `PAGE_DBGGRP`, `ROW_GRP0..`.
 - Debug > **Reset All** (last row, asks Yes / No, No pre-selected): Performance Overlay off, FX Shaders on, GPU Sync off, Vertex Upload Sub, Glow Softening / Passes on, Effect Light sliders 2.5 / 1.5, chord window 70 ms, every game toggle to its `def`, and every developer option back to its default (those apply at the next start). Saved.
+
+## Game-module saved values, Tag Team debug rows are test overrides (22 Nov)
+- `psp_settings_saved_value(key)` / `psp_settings_save_value(key, value)` (psp_settings.h): a game module reads / writes a settings.ini key of its own (what the file held at the last read or save; writing rewrites the file). Dissidia uses
+  `tagteam_lobby=mode,size,fill,strength,stage,rules,judgement,exb,assist` for the battle lobby's last choice.
+- Debug > Tag Team: the mode rows (Tag Team (2v2), 3v3, 2v1, 1v2, Free-for-all) are test overrides now: the Battle Lobby (Select on a row of the Tag Team Battle setup screens, Battle Mode and Communications) decides the mode;
+  a Debug row / env variable that is on wins over the lobby, and "Tag Team (2v2)" on makes every battle a tag battle (default off: plain Quick Battle / Group Battle are retail). See tag-team.md "Battle lobby in single player".
