@@ -5040,6 +5040,15 @@ void voice_banks_load(uint32_t A) {
         if (failed) sndreg_fix_record(ar, "call-in");
         sndreg_dump("call-in");
     }
+    // The call line (an assist's id + 50000) sits in the member's ASSIST voice bank (voice_p_<code>_a_00). Its record was loaded with the member's assist
+    // (XAS) but, with the 20 bank slots full, registered with index -1: the line found no sound (headless 21 Nov: no SAS voice after the request).
+    // The assist record's banks are registered now, other assists' banks making room (PSPRECOMP_TAGTEAM_NOCALLLINEFIX=1: off).
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOCALLLINEFIX")) {
+        const uint32_t as = xas_any(A); const uint32_t ra = as ? actor_record(as) : 0u;   // (the extra's own assist, g_xas)
+        if (ra && rec_is_assist(ra)) { int reg = 0, failed = 0; rec_banks(ra + 96u, &reg, &failed);
+            if (g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs call line of %08X: assist record %08X (%s): %d bank(s) registered, %d without a slot\n", dissidia_battle_age() / 60.f, A, ra, rec_bank_name(ra).c_str(), reg, failed);
+            if (failed) sndreg_fix_record(ra, "call line", true, true); }
+    }
     if (g_vbank_chars.count(c)) return;
     g_vbank_chars.insert(c);
     for (int k = 0; k < 2; k++) { const uint32_t sa = srd(g_bs + 56u + 4u * k); if (ok(sa, 0x12D0) && sa != A && actor_char(sa) == c) return; }   // a character of the battle's own: its banks are there
@@ -5069,6 +5078,7 @@ void voice_banks_load(uint32_t A) {
             std::fprintf(stderr, "[TAGTEAM] voice banks of char %d: record %08X linked by its fighter (use count %d), %d bank(s) registered, %d without a slot\n", c, frec, static_cast<int16_t>(rdh(frec + 224u)), reg, failed); }
         if (rdh(frec + 224u) != 0) sndreg_fix_record(frec, "voice banks");
     }
+    if (!xas_any(A) && sndreg_free() < 3 && !std::getenv("PSPRECOMP_TAGTEAM_NOCALLLINEFIX")) sndreg_make_room(3, frec, "the call line bank");   // (no assist of its own to register: the _a bank below needs slots; other assists give theirs up)
     if (sndreg_free() < 3 && !std::getenv("PSPRECOMP_TAGTEAM_RAREALWAYS")) { if (g_log) std::fprintf(stderr, "[TAGTEAM] assist bank of char %d skipped: %d sound bank slots free\n", c, sndreg_free()); return; }
     for (int a = 0; a < 1; a++) {
         char path[128]; std::snprintf(path, sizeof path, "voice/%s/battle/voice_p_%s%s.scd", lang, code.c_str(), a ? "_00" : "_a_00");
@@ -5099,6 +5109,29 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
     face_foe(A);   // before the warp-in: the facing is taken while he still moves (in the pose, with the match paused, a new yaw did not turn the model)
     const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]);
     g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+    // The call line is requested FIRST (21 Nov: it used to follow the warp-in's start; a retail assist shouts as it is called, before it appears): the member's
+    // banks are registered, then the line goes out, then the warp-in / pose start. Audio only.
+    voice_banks_load(A);
+    if (!banter) {   // the assist's call line: the assist summon (FUN_08B031AC) plays voice *(*(actor+0x5A4) + 136) through FUN_08B33F8C(actor, id, 0, 0)
+        const uint32_t vp = rd(A + 0x5A4u); uint32_t id = ok(vp, 0x90) ? rd(vp + 136u) : 0u;
+        // an assist's lines are the +50000 variant (FUN_08842828 adds it from the assist's character data): a member that is not an assist has no
+        // record for the plain id, so the variant is asked for directly (FUN_08B33F8C adds nothing for him)
+        if (id && !call(0x088A4364u, id, id, 1) && call(0x088A4364u, id + 50000u, id + 50000u, 1)) id += 50000u;
+        if (g_log && ok(vp, 0x200)) {   // every voice-id-looking word of the parameter block, and whether the voice table has a record for it
+            const uint32_t base = (id / 10000u) * 10000u;
+            std::fprintf(stderr, "[VOICEPARAMS] %08X:", A);
+            for (uint32_t o = 0; o < 0x200u; o += 4) { const uint32_t v = rd(vp + o); if (base && v >= base && v < base + 1000u) std::fprintf(stderr, " +%03X=%u%s", o, v, call(0x088A4364u, v, v, 1) ? "(found)" : ""); }
+            std::fprintf(stderr, "\n");
+        }
+        if (g_log && id) { const uint32_t r0 = call(0x088A4364u, id, id, 1); if (ok(r0, 0x40)) { std::fprintf(stderr, "[VOICEREC] %u at %08X:", id, r0); for (uint32_t o = 0; o < 0x30; o += 4) std::fprintf(stderr, " %08X", rd(r0 + o)); std::fprintf(stderr, " |"); for (uint32_t o = 0; o < 0x30; o++) { const uint8_t ch = g_ram[(r0 + o) & 0x07FFFFFFu]; std::fputc(ch >= 32 && ch < 127 ? ch : '.', stderr); } std::fprintf(stderr, "\n"); }
+          const uint32_t sp = srd(g_bs + 56u); const uint32_t svp = ok(sp, 0x12D0) ? rd(sp + 0x5A4u) : 0u; const uint32_t sid = ok(svp, 0x90) ? rd(svp + 136u) : 0u; const uint32_t r1 = sid ? call(0x088A4364u, sid + 50000u, sid + 50000u, 1) : 0u;
+          if (ok(r1, 0x40)) { std::fprintf(stderr, "[VOICEREC] slot fighter's %u at %08X:", sid + 50000u, r1); for (uint32_t o = 0; o < 0x30; o += 4) std::fprintf(stderr, " %08X", rd(r1 + o)); std::fprintf(stderr, "\n"); }
+          for (const uint32_t q : {id, sid + 50000u, sid}) { const uint32_t e = q ? call(0x088A0BC0u, q) : 0u; std::fprintf(stderr, "[SNDENTRY] id %u -> %08X:", q, e); for (uint32_t o = 0; o < 0x30 && ok(e, 0x30); o += 4) std::fprintf(stderr, " %08X", rd(e + o)); std::fprintf(stderr, "\n"); } }
+        if (g_log && id) { const uint32_t rec = call(0x088A4364u, id, id, 1); std::fprintf(stderr, "[TAGTEAM] entrance of %08X: voice record of %u: %08X, params %08X:", A, id, rec, vp); for (uint32_t o = 120; o < 160; o += 4) std::fprintf(stderr, " %u", rd(vp + o)); std::fprintf(stderr, "\n"); }
+        if (const char* vo = std::getenv("PSPRECOMP_TAGTEAM_ENTRVOICE_OFS")) { const uint32_t o2 = static_cast<uint32_t>(std::strtoul(vo, nullptr, 0)); if (ok(vp, 0x100)) { id = rd(vp + o2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance: voice from params +%u = %u (record %08X)\n", o2, id, call(0x088A4364u, id, id, 1)); } }
+        if (id && !std::getenv("PSPRECOMP_TAGTEAM_NOENTRVOICE")) { if (std::getenv("PSPRECOMP_TAGTEAM_VOICEDIRECT")) { const uint32_t h = call(0x088A24D4u, 1, id, 2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: direct play of %u -> %08X\n", A, id, h); } else { const uint32_t f380 = rd(A + 0x380u); wr(A + 0x380u, f380 & ~2u); call(0x08B33F8Cu, A, id, 0, 0); wr(A + 0x380u, f380); }   /* (the AI gate bit also silenced its voice) */ if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line voice %u\n", A, id); }
+        else if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: no call line (voice params %08X)\n", A, vp);
+    }
     bool warp = false;
     if (!banter && appear > 0 && appear != 1100 && appear_s > 0.f) {
         // opt-in experiment (APPEARFX=1), the assist controller's appear (FUN_08B031AC): FUN_08834DF4(actor), display state 0x12 with actor+900 bit 0x1000 (it HID the member for the whole entrance),
@@ -5121,27 +5154,6 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
     intro_load(A);
     if (!warp) { face_foe(A); intro_play(); }
     wr(A + 0x380u, rd(A + 0x380u) | 2u);   // its AI waits until the entrance is over (it cut the warp-in short)
-    voice_banks_load(A);
-    if (!banter) {   // the assist's call line: the assist summon (FUN_08B031AC) plays voice *(*(actor+0x5A4) + 136) through FUN_08B33F8C(actor, id, 0, 0)
-        const uint32_t vp = rd(A + 0x5A4u); uint32_t id = ok(vp, 0x90) ? rd(vp + 136u) : 0u;
-        // an assist's lines are the +50000 variant (FUN_08842828 adds it from the assist's character data): a member that is not an assist has no
-        // record for the plain id, so the variant is asked for directly (FUN_08B33F8C adds nothing for him)
-        if (id && !call(0x088A4364u, id, id, 1) && call(0x088A4364u, id + 50000u, id + 50000u, 1)) id += 50000u;
-        if (g_log && ok(vp, 0x200)) {   // every voice-id-looking word of the parameter block, and whether the voice table has a record for it
-            const uint32_t base = (id / 10000u) * 10000u;
-            std::fprintf(stderr, "[VOICEPARAMS] %08X:", A);
-            for (uint32_t o = 0; o < 0x200u; o += 4) { const uint32_t v = rd(vp + o); if (base && v >= base && v < base + 1000u) std::fprintf(stderr, " +%03X=%u%s", o, v, call(0x088A4364u, v, v, 1) ? "(found)" : ""); }
-            std::fprintf(stderr, "\n");
-        }
-        if (g_log && id) { const uint32_t r0 = call(0x088A4364u, id, id, 1); if (ok(r0, 0x40)) { std::fprintf(stderr, "[VOICEREC] %u at %08X:", id, r0); for (uint32_t o = 0; o < 0x30; o += 4) std::fprintf(stderr, " %08X", rd(r0 + o)); std::fprintf(stderr, " |"); for (uint32_t o = 0; o < 0x30; o++) { const uint8_t ch = g_ram[(r0 + o) & 0x07FFFFFFu]; std::fputc(ch >= 32 && ch < 127 ? ch : '.', stderr); } std::fprintf(stderr, "\n"); }
-          const uint32_t sp = srd(g_bs + 56u); const uint32_t svp = ok(sp, 0x12D0) ? rd(sp + 0x5A4u) : 0u; const uint32_t sid = ok(svp, 0x90) ? rd(svp + 136u) : 0u; const uint32_t r1 = sid ? call(0x088A4364u, sid + 50000u, sid + 50000u, 1) : 0u;
-          if (ok(r1, 0x40)) { std::fprintf(stderr, "[VOICEREC] slot fighter's %u at %08X:", sid + 50000u, r1); for (uint32_t o = 0; o < 0x30; o += 4) std::fprintf(stderr, " %08X", rd(r1 + o)); std::fprintf(stderr, "\n"); }
-          for (const uint32_t q : {id, sid + 50000u, sid}) { const uint32_t e = q ? call(0x088A0BC0u, q) : 0u; std::fprintf(stderr, "[SNDENTRY] id %u -> %08X:", q, e); for (uint32_t o = 0; o < 0x30 && ok(e, 0x30); o += 4) std::fprintf(stderr, " %08X", rd(e + o)); std::fprintf(stderr, "\n"); } }
-        if (g_log && id) { const uint32_t rec = call(0x088A4364u, id, id, 1); std::fprintf(stderr, "[TAGTEAM] entrance of %08X: voice record of %u: %08X, params %08X:", A, id, rec, vp); for (uint32_t o = 120; o < 160; o += 4) std::fprintf(stderr, " %u", rd(vp + o)); std::fprintf(stderr, "\n"); }
-        if (const char* vo = std::getenv("PSPRECOMP_TAGTEAM_ENTRVOICE_OFS")) { const uint32_t o2 = static_cast<uint32_t>(std::strtoul(vo, nullptr, 0)); if (ok(vp, 0x100)) { id = rd(vp + o2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance: voice from params +%u = %u (record %08X)\n", o2, id, call(0x088A4364u, id, id, 1)); } }
-        if (id && !std::getenv("PSPRECOMP_TAGTEAM_NOENTRVOICE")) { if (std::getenv("PSPRECOMP_TAGTEAM_VOICEDIRECT")) { const uint32_t h = call(0x088A24D4u, 1, id, 2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: direct play of %u -> %08X\n", A, id, h); } else { const uint32_t f380 = rd(A + 0x380u); wr(A + 0x380u, f380 & ~2u); call(0x08B33F8Cu, A, id, 0, 0); wr(A + 0x380u, f380); }   /* (the AI gate bit also silenced its voice) */ if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line voice %u\n", A, id); }
-        else if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: no call line (voice params %08X)\n", A, vp);
-    }
     g_ctx->r[29] = static_cast<int32_t>(sp0);
     const float now = dissidia_battle_age(), total = (warp ? appear_s : 0.f) + (banter ? banter_s : pose_s);
     if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: %s, script now %d\n", A, warp ? "warp-in then pose" : "pose", static_cast<int16_t>(rd(A + 0x180u) & 0xFFFFu));

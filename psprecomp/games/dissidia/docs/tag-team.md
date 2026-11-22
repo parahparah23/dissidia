@@ -871,6 +871,20 @@ next entrance; the object is zeroed when a new battle starts. `ctx` is recorded 
 Headless: KOLIST cpu:12,human:45 played Laguna's `la_battle_132` and Cloud of Darkness's `cd_battle_55` (ATRAC decodes of the right files), and the battle shut down cleanly. Not heard on a device yet.
 The line is the one the game picks for that character at this battle's start (the matchup data at 0x09AFDFB0), not one aimed at the current foe.
 
+## Call line made audible (21 Nov)
+Cause of the silent call line (headless Quick Battle, `KO=human:10 KO_HP0=1 CALLIN_DELAY=8 RESERVE=1,2;20,24`, `PSPRECOMP_SAS_TRACE=1`): the line
+(WoL 1060041 = 1010041 + 50000) lives in the member's ASSIST voice bank (`voice_p_<code>_a_00`). The member's own assist (XAS) loads that record, but with
+the sound registry full (`call-in: 20 of 20 used`) it registered `p_one100_a[voice]` with index -1 (no slot), and `voice_banks_load` then skipped its own `_a`
+bank ("0 sound bank slots free"). The request `FUN_08B33F8C(actor, 1060041, 0, 0)` found a record (voice table is global) but no sound: **no `SetVoice` /
+`KeyOn` followed it** (the earlier note "a SAS voice is keyed" only held when slots were free). Not the 5000 parking spot, not the AI gate bit, not volume.
+Fix: `voice_banks_load` registers the member's assist record (`xas_any(A)` -> `actor_record`, `sndreg_fix_record(..., room=true)`; other assists' banks make
+room as before, an assist without sound rather than a silent call line); without an XAS assist and with <3 free slots it makes room for its own `_a` bank.
+And the call line is now requested FIRST in `entrance_effect` (banks, line, then the appear action 240 / pose 1100), so it is shouted as the member is
+called, before it shows. The intro line still plays at the pose. All call-in paths (extras, slot rebuild, late load) go through `entrance_effect`.
+After: `SetVoice size=8048` + `KeyOn` right after the request (volume l/r about 1300-2000, like other voices) and the registry log shows
+`call line: record ... registered again: 2 registered, 0 without a slot`. `PSPRECOMP_TAGTEAM_NOCALLLINEFIX=1` turns the bank fix off.
+Not verified: Japanese voices (no `voice_jp/` installed on this host; the bank path uses the same language lookup), partner swap / tag-in line, a device.
+
 ## Round 5 fixes (16 Nov)
 - **Break cooldown on the partner.** A slot fighter's hit on an extra played its reaction in the slot fighter's damage handler: `FUN_08AE3320(handler, ...)`
   (queues the reaction with `FUN_08ADFBFC(handler + 0x2A8, attacker handler)`, sets the state with `FUN_08AE1270`) ran on the attacker's slot opponent.
