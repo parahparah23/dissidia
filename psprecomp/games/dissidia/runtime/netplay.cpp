@@ -14,6 +14,7 @@
 // (frame, checksum) pairs, +68 local player index, +72 the frame being delivered next, +76 peer records (84 bytes:
 // MAC at +0, +8 the received input window, +80 the last frame delivered with its input), +852 peer count, +860 the
 // local record (+8 its input window, +524 the newest local input frame = the send sequence). Pad slots: [0x089D6008] + 96 x player, words +64..+79 (SceCtrlData).
+#include "psp_memory.h"
 #include "psp_game_module.h"
 #include "psp_netplay.h"
 #include "hle/psp_hle.h"
@@ -97,7 +98,7 @@ uint32_t viewer_mask(uint32_t off) {   // bits of the word at `off` that are has
 }
 uint32_t hashed_word(uint32_t a, uint32_t off) {
     const uint32_t w = r32(a + off);
-    return ok(w) ? 0 : w & viewer_mask(off);
+    return (ok(w) || psp_guest_user_ok(w, 4)) ? 0 : w & viewer_mask(off);   // a pointer (also into the high RAM, where a rebuilt fighter's files live) is not compared
 }
 uint32_t fnv(uint32_t a, uint32_t off, uint32_t n) {
     uint32_t h = 2166136261u;

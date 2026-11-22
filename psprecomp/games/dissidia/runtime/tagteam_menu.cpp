@@ -267,10 +267,10 @@ const char* const kRules[6] = {"None", "Official", "Official (Skill)", "EX Centr
 const char* const kJudge[5] = {"None", "Cosmos Judgment", "Chaos Judgment", "Double Judgment", "Random"};
 struct LobbyMode { uint8_t mode, size; const char* label; const char* help; };
 const LobbyMode kLobbyModes[] = {
-    {0, 1, "1 vs 1 Duel", "One fighter each"},
+    {0, 1, "1 vs 1 Duel", "One character each; the first KO decides"},
     {1, 2, "Team 2 vs 2", "Two fighters per team"},
     {1, 3, "Team 3 vs 3", "Three fighters per team"},
-    {2, 1, "Tag Duel", "One fighter each; the next party member tags in on a KO"},
+    {2, 1, "Tag Duel", "One fighter each; your Assist calls in your next member, a KO brings the next in"},
     {3, 4, "Free-for-all", "Every player fights for himself (up to 4)"},
 };
 constexpr int kLobbyModeCount = sizeof kLobbyModes / sizeof kLobbyModes[0];

@@ -2201,6 +2201,52 @@ User + Schindler: one place for the mode and the battle's rules, showing every p
   record retail's CPU builder makes for the host's strength (level Auto, type Random) and the matching AI brain (`make_comms_cpu_record`,
   the brain setup; `fill_has`). Verified with 2 linked copies: Team 2 vs 2 (Kuja, Warrior of Light added) and free-for-all (Firion,
   Gilgamesh added: 4 fighters), the same CPUs on both machines, 0 mismatches.
+- **1 vs 1 Duel vs Tag Duel**: with one fighter per side the tag logic has no extras and retail plays a party as a SERIES of battles (after a
+  KO the next member fights a new battle; seen in the 2-copy test: KO, results, then battle 2 with the second member). Tag Duel keeps that.
+  1 vs 1 Duel: the host's rule flag bit 5 (0x20, `duel_now()`), and the first KO of a slot fighter decides the whole group battle
+  (`group_decided`, in `ko_oneround` before its no-extras return), so nobody else comes in. Cutting the party count during the battle instead
+  desynced (hashed memory changed mid-series). Verified with 2 copies (the host with 2 members): one battle, results, back to the setup screen,
+  0 mismatches. The low-HP test aid now also runs in battles without extras.
+- **Tag Duel = 2XKO-style tag, one battle** (rule flag bit 6, 0x40, `tagduel_now()`): one fighter per side, the tag KO flow runs without
+  extras (`tag_live()` opens the round guard and `ko_oneround`). SELECT on a side's pad slot (the lock-step's word, SceCtrlData buttons at
+  pad slot + 68: the same frame on every machine) rebuilds the slot fighter as the side's next bench member (`tagduel_swap_tick`, 3 s
+  between swaps, not while down / in an entrance, a rebuild, an EX Burst or a KO). The one going out keeps his HP / BRV on the bench
+  (`g_bench`) and his order entry is free again; a later swap, or a KO call-in (`comms_next_char` -> slot call-in), brings him back with that
+  HP. A KO brings the next living member in (same battle); a side with nobody left loses (`group_decided`).
+- **Tag Duel: the tag is an assist call** (user 22 Nov: "it should still function as a normal assist", "the assist character shouldn't be attacking",
+  "the position of the fighter who switches should be there, not on the character before's position"). `tdx_*` in tagteam.cpp, before `actl_hook`:
+  - Every party member of a Tag Duel side gets an assist actor made from HIS OWN assist file (`xas_build`, the old `xas_spawn` core taking any master /
+    side / character; forced = the member's character, the default costume record `info_for_char`, the same one the rebuild uses: the slot fighter's own
+    model row differed between the two machines, costume 1 on one, 2 on the other). Made 4 s into the battle, one per frame, ready 1 s later (master = the slot fighter).
+  - The slot fighter's assist word (+0x1108) points to the NEXT BENCH MEMBER's assist actor, so the normal assist buttons start the retail call: slow motion,
+    the ASSIST banner and the summon (script 240 ...). When the summoned assist starts its attack (first script 10000+) the attack is cut (hidden idle script 1,
+    "available" bit back), the slot fighter is placed on the assist's summon spot (cached from the summon frames: the attack's first frame already warps it onto
+    its target) and rebuilt as that member there (`tagduel_swap(sd, how, spot)`: bench HP / BRV, the one going out to the bench). The player then picks the follow-up.
+  - The word then moves to the new bench member's assist (the old main's). A call whose assist is hit before it appears does not tag. Nobody on the bench (or the
+    assist not ready yet): the call request is dropped (`tdx_gate`, after the test aids so a forced call is gated too). A side with one fighter keeps its retail assist.
+  - The rebuild no longer puts the member on the side's start spot (rebuild_begin's call-in rule): a tag (SELECT too) keeps the spot it was given / the one
+    going out stood on.
+  - SELECT (instant tag, above) is off while this runs; `PSPRECOMP_TAGTEAM_TDSELECT=1` keeps it, `PSPRECOMP_TAGTEAM_TDASSIST=0` = the SELECT tag only. Log `[TDASSIST]`,
+    `PSPRECOMP_TAGTEAM_TDLOG=1` = the assist's script / position every frame of a call.
+- **Tag Duel HUD + control** (user 23 Nov: "that should switch the player who played and also the HUD"): every tag hands the slot's lock-step stream to
+  the incoming member's owner (`slot_handover` in `tagduel_swap`, as for a KO call-in), and `hudref_hook` now has a Tag Duel branch (no extras): the
+  big panel's portrait follows the slot fighter's character (`portrait_show`; its own picture when the first character is back). Verified with 3 copies
+  (host + Third on one side, one character each, vs Guest; `probe3_td.py`, forced calls 19 / 31 s): stream 0 -> Third's MAC at frame 605, back to the
+  host at frame 965, the same on all three; portrait -> Vaan at 20.18 s, back to Lightning at 32.18 s on all three (screens: the host's and Third's corner
+  and the Guest's enemy panel show Vaan, 6999 HP); 0 mismatches.
+- **Mid-battle KO in Duel / Tag Duel** (`finstart_hook`): the "a team mate / reserve is left = mid-battle KO, camera only" decision was gated on `g_nextra`, so with
+  no extras (Tag Duel) a KO with a member on the bench ran retail's FULL finish. That finish differs per machine (the local player's win / lose), so the guest
+  saw its own winner's 1200 script as a KO, decided the match and went to the replay save while the host called the bench member in (lock-step stopped). Now
+  gated on `tag_live()`: both machines treat it as a mid-battle KO and bring the member in on the same frame.
+- Verified (22 Nov, 2 copies, host Lightning + Vaan vs Lightning, forced calls `PSPRECOMP_TTLOCK_FORCECALL=0:19:31:43`, `PSPRECOMP_TAGTEAM_ASSISTFILL=1`, KO by
+  `PSPRECOMP_TAGTEAM_DEBUG_LOWHP`): three tags 1.13 - 1.20 s after the call at the summon spot (5 - 20 m from the main, where retail put the assist), no assist
+  hit (the foe's BRV unchanged), the KO brought the bench member in on both, 0 mismatches over 3500 frames.
+- **Sync check fix**: netplay.cpp hashed words that are pointers into the HIGH RAM (0x0B800000 and up: the files a rebuild loads) as data.
+  Two players with the same character have two file sets, loaded in a different order on each machine, so a member swapped back to the
+  slot's starting character pointed to the same file at a different address: a false DESYNC (5 fighter blocks, only pointer words, found by
+  diffing a dump of the fighter on both machines). Every guest pointer (`psp_guest_user_ok`) is now skipped. Verified: Tag Duel with 2 copies,
+  the host with 2 members, three swaps (Lightning -> Vaan fresh -> Lightning from the bench -> Vaan from the bench) and the KOs, 0 mismatches
+  over 2400 frames, the same decisions on both. Known gap: the retail portrait in the corner keeps the first character after a swap.
 - Test aid: `PSPRECOMP_TAGTEAM_DEBUG_LOWHP=<s>`: every fighter's live HP (status +0xC) capped at 300 at that battle second, the same frame on
   every machine, so a battle ends quickly.
 

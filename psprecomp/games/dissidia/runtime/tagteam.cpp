@@ -339,9 +339,14 @@ int g_ffa_mask_of(int ffa) { return ffa == 3 ? 1 : 3; }
 int eff_mask_base() { return (g_two_v_one == g_one_v_two) ? g_mask : (g_two_v_one ? (g_mask & 2) : (g_mask & 1)); }
 int g_three = 0;   // 3 v 3: two extras per side instead of one (PSPRECOMP_TAGTEAM_3V3=1, Settings > Debug > 3 vs 3)
 int g_ffa = 0;   // free-for-all: 0 off, 3 or 4 fighters (see foes() below)
+bool g_tagduel = false;   // the battle lobby's Tag Duel (2XKO style): one fighter each in ONE battle; SELECT swaps with a bench member (each keeps his HP), a KO brings the next in
+bool g_duel = false;   // the battle lobby's 1 vs 1 Duel: one character each, the first KO decides (no party member comes in)
 bool g_ffa_auto = false;   // the battle lobby's Free-for-all: online, the host sets g_ffa from the players in the room at the battle setup (one fighter each)
 bool comms_battle();
 int three_now();   // 3 v 3 (below)
+bool duel_now();   // 1 vs 1 Duel (below)
+bool tagduel_now();   // Tag Duel (below)
+bool tag_live();   // the tag KO flow runs (extras on the stage, or a Tag Duel)
 int cpu_fill_now();   // CPU fill (below)
 bool fill_has(int side, int ch);
 int late_per_side();
@@ -1800,6 +1805,8 @@ int cpu_fill_now() { return (comms_battle() && g_shared_valid) ? g_shared_fill :
 // CPU fill: the CPUs made for empty places this battle, per side (side * 64 + char); they get a CPU record and brain of the host's strength.
 std::vector<int> g_fill_keys; uint32_t g_fill_gen = 0xFFFFFFFFu;
 bool fill_has(int side, int ch) { if (g_fill_gen != g_battle_gen) return false; for (int k : g_fill_keys) if (k == side * 64 + ch) return true; return false; }
+bool tagduel_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 0x40u) != 0; return g_tagduel; }   // online: bit 6 = Tag Duel
+bool duel_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 0x20u) != 0; return g_duel; }   // online: bit 5 = Duel (no call-ins)
 int three_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 8u) ? 1 : 0; return g_three; }
 // Extras queued per side at the battle setup: 2 in 3 v 3. Online a member has not got the host's rules yet when the battle is set up, so two are
 // queued there and the plan (once the host's roster is in) drops the second one of a side that fields fewer than three (fighters_per_side).
@@ -2660,6 +2667,14 @@ struct XAsDead { uint32_t actor = 0, ctl = 0, mgr = 0; float at = 0.f; uint32_t 
 std::vector<XAsDead> g_xas_dead;                     // destroyed assists whose actor block is freed a little later
 std::vector<std::pair<float, uint32_t>> g_xas_unload_q;   // (battle age, assist file id) whose files are released once no assist uses them
 uint32_t g_amgr = 0;                                 // retail's assist manager object (seen by actl_hook)
+struct TdX { int sd = -1, ch = 0; XAs x; float tried = -1e9f; };
+std::vector<TdX> g_tdx;   // Tag Duel: an assist actor per party member (its own assist file); the bench member's plays the call (tdx_frame)
+struct TdCall { uint32_t X = 0; int ch = 0; float t0 = 0, atk = -1.f, idle = -1.f, busy = 0.f, px = 0, py = 0, pz = 0, yaw = 0; bool on = false, hit = false, have = false, air = false; } g_tdc[2];
+uint32_t g_tdx_a0[2] = {0, 0};   // the slot fighters' retail assists (used when nobody is on the bench)
+uint32_t g_tdx_gen = 0xFFFFFFFFu;
+void tdx_frame();
+bool tagduel_swap(int sd, const char* how, const float* spot);
+bool tdx_on() { static const char* e = std::getenv("PSPRECOMP_TAGTEAM_TDASSIST"); return !(e && e[0] == '0'); }
 std::set<uint32_t> g_xas_mgrs;                       // the copies' addresses (actl_hook leaves them alone)
 bool xas_enabled() { static const char* e = std::getenv("PSPRECOMP_TAGTEAM_XASSIST"); return !(e && e[0] == '0'); }
 bool xas_load_enabled() { static const char* e = std::getenv("PSPRECOMP_TAGTEAM_XASSIST_LOAD"); return !(e && e[0] == '0'); }
@@ -2684,19 +2699,10 @@ void xas_unlink_files(uint32_t fid) {
     if (g_log) { std::fprintf(stderr, "[XAS] t=%.1fs assist file id %u: %d of %zu file objects released\n", dissidia_battle_age() / 60.f, fid, n, f->second.size()); dissidia_models_mem_summary(g_ram, "after the assist unload"); }
     g_xas_files.erase(f);
 }
-// Make the assist actor of extra `idx`. Returns false (and marks nothing) when it cannot be made now.
-bool xas_spawn(int idx, bool forced = false) {
-    Extra& e = g_extra[idx]; XAs x; x.master_char = actor_char(e.actor); x.forced = forced;
-    const uint32_t side = e.side & 1u, mgrc = dissidia_camera_manager(), fm = rd(FILE_MGR_PTR);
-    if (!ok(mgrc, 0x700) || !ok(fm, 0x10) || !g_amgr) { if (g_log) std::fprintf(stderr, "[XAS] extra %08X: xas_spawn skipped (%s)\n", e.actor, !ok(mgrc, 0x700) ? "no camera manager" : !ok(fm, 0x10) ? "no file manager" : "no retail assist manager seen yet"); return false; }
-    xas_choice(e.actor, x.ach, x.acost);
-    // round 8: the assist of the partner's own character, in the partner's OWN costume: the costume byte of the object table entry its model was built from
-    // (info +0x2F8 = that row: byte 6 char, byte 7 costume). FUN_088FB934(char, costume, 1) -> FUN_088470DC(char, costume, 1): costume 0 is the manikin entry
-    // P_<code>_ZAKO_A (the crystal look; the old hard-coded 0), 1..3 = P_<code>_<n>P_A (a missing costume falls back to 1 there). PSPRECOMP_TTCAM_AO8COSTUME=<n>: that costume.
-    if (forced) { x.ach = x.master_char; const uint32_t row = rd(e.actor + 0x2F8u); int c = 1; const char* how = "default 1";
-        if (ok(row, 0x44) && g_ram[(row + 6u) & 0x07FFFFFFu] == static_cast<uint32_t>(x.master_char)) { c = g_ram[(row + 7u) & 0x07FFFFFFu]; how = "its model's entry"; }
-        if (const char* oc = std::getenv("PSPRECOMP_TTCAM_AO8COSTUME")) { c = std::atoi(oc); how = "env"; }
-        x.acost = c; std::fprintf(stderr, "[XAS] extra %08X (char %d): forced assist costume %d (%s, info row %08X)\n", e.actor, x.master_char, c, how, row); }
+// The assist actor for `x` (x.ach / x.acost / x.forced / x.master_char set): built with `owner` as its master (+0x1108) on `side`, aimed at `foe`.
+bool xas_build(XAs& x, uint32_t owner, uint32_t side, uint32_t foe) {
+    const uint32_t mgrc = dissidia_camera_manager(), fm = rd(FILE_MGR_PTR);
+    if (!ok(mgrc, 0x700) || !ok(fm, 0x10) || !g_amgr) return false;
     int32_t id = x.ach > 0 ? static_cast<int32_t>(call(0x088FB934u, static_cast<uint32_t>(x.ach), static_cast<uint32_t>(x.acost), 1u)) : -1;
     bool have = id > 0 && call(FILE_FIND, fm, static_cast<uint32_t>(id)) != 0;
     std::vector<uint32_t> own;
@@ -2705,7 +2711,7 @@ bool xas_spawn(int idx, bool forced = false) {
         uint32_t tot, fr, lg; dissidia_fx_pool_free(g_ram, &tot, &fr, &lg);
         const uint32_t mp = dissidia_model_pool_free(g_ram);
         const bool room = ok(row, 0x44) && mp >= 3200u * 1024u && lg >= 1500u * 1024u;
-        if (g_log) std::fprintf(stderr, "[XAS] extra %08X (char %d): own assist char %d costume %d file id %d not loaded; model pool free %u KB, effect pool largest %u KB -> %s\n", e.actor, x.master_char, x.ach, x.acost, id, mp / 1024, lg / 1024, room ? "load" : "no room");
+        if (g_log) std::fprintf(stderr, "[XAS] extra %08X (char %d): own assist char %d costume %d file id %d not loaded; model pool free %u KB, effect pool largest %u KB -> %s\n", owner, x.master_char, x.ach, x.acost, id, mp / 1024, lg / 1024, room ? "load" : "no room");
         if (room) {
             const uint32_t heap = load_heap(), fail0 = dissidia_fx_fail_count(); const std::set<uint32_t> before = file_objects(fm);
             if (heap) {
@@ -2720,12 +2726,12 @@ bool xas_spawn(int idx, bool forced = false) {
             }
         }
     }
-    if (!have && forced) { std::fprintf(stderr, "[XAS] extra %08X (char %d): its own assist file %d is not available: no assist move (round 7 attack)\n", e.actor, x.master_char, id); return false; }
+    if (!have && x.forced) { std::fprintf(stderr, "[XAS] extra %08X (char %d): its own assist file %d is not available: no assist move (round 7 attack)\n", owner, x.master_char, id); return false; }
     if (!have) {   // the slot's retail assist character (its files are loaded by the loading screen)
         int32_t rid = -1;
         for (uint32_t k : {side, side ^ 1u}) { const int32_t r = static_cast<int32_t>(rd(g_bs + 2032u + 4u * k)); if (r > 0 && call(FILE_FIND, fm, static_cast<uint32_t>(r))) { rid = r; break; } }
-        if (rid <= 0) { if (g_log) std::fprintf(stderr, "[XAS] extra %08X: no assist file to use\n", e.actor); return false; }
-        if (g_log) std::fprintf(stderr, "[XAS] extra %08X (char %d): assist char %d (file %d) not available, using the retail assist file %d\n", e.actor, x.master_char, x.ach, id, rid);
+        if (rid <= 0) { if (g_log) std::fprintf(stderr, "[XAS] extra %08X: no assist file to use\n", owner); return false; }
+        if (g_log) std::fprintf(stderr, "[XAS] extra %08X (char %d): assist char %d (file %d) not available, using the retail assist file %d\n", owner, x.master_char, x.ach, id, rid);
         id = rid; x.fallback = true; own.clear(); x.loaded_here = false;
     }
     x.fid = static_cast<uint32_t>(id); x.row = call(0x088470B8u, x.fid);
@@ -2762,7 +2768,7 @@ bool xas_spawn(int idx, bool forced = false) {
     g_ram[(buf + 16u + 1892u) & 0x07FFFFFFu] = rcostume;
     { const uint32_t vt = rd(mem + 1348) + 256u; const uint32_t voff = static_cast<uint32_t>(static_cast<int16_t>(rd(vt) & 0xFFFFu)), vfn = rd(vt + 4);
       if (FuncPtr f = fn(vfn)) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(mem + voff); g_ctx->r[5] = static_cast<int32_t>(buf); g_ctx->r[6] = 0; f(g_ram, g_ctx); *g_ctx = sv; } }
-    call(SET_FOE, mem, e.foe);
+    call(SET_FOE, mem, foe);
     wr(mem + 896u, rd(mem + 896u) & ~2u);
     call(LOCK_MODE, rd(mem + ACT_LOCKBLK), 1u, 0u);
     call(TARGET_REFRESH, mem);
@@ -2771,7 +2777,7 @@ bool xas_spawn(int idx, bool forced = false) {
     call(BRAIN_LEVEL, rd(mem + ACT_BRAIN), 0u);
     { const uint32_t vt = rd(mem + 1348) + 352u; const uint32_t voff = static_cast<uint32_t>(static_cast<int16_t>(rd(vt) & 0xFFFFu)), vfn = rd(vt + 4);
       if (FuncPtr f = fn(vfn)) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(mem + voff); f(g_ram, g_ctx); *g_ctx = sv; } }
-    wr(mem + 0x1108u, e.actor);   // (the extra's own link is set once the assist is ready)
+    wr(mem + 0x1108u, owner);   // (the extra's own link is set once the assist is ready)
     g_own_ctx = 0;
     // what the constructor registered (camera slot, camera manager words, the old lock block's words): taken back once the assist is ready, as for an extra
     { const uint32_t new_lb = rd(mem + ACT_LOCKBLK);
@@ -2793,9 +2799,25 @@ bool xas_spawn(int idx, bool forced = false) {
     g_xas_refs[x.fid]++;
     if (!own.empty()) g_xas_files[x.fid] = own;
     if (g_log) std::fprintf(stderr, "[XAS] t=%.2fs extra %08X (char %d, side %u) got assist actor %08X: char %d (file id %u row %08X)%s, foe %08X, %zu words to take back when ready, controller %08X, manager copy %08X\n",
-        dissidia_battle_age() / 60.f, e.actor, x.master_char, side, mem, rch, x.fid, x.row, x.fallback ? " [retail assist file]" : x.loaded_here ? " [own, loaded now]" : " [own, already loaded]", e.foe, x.undo.size(), x.ctl, x.mgr);
-    g_xas[e.actor] = x;
+        dissidia_battle_age() / 60.f, owner, x.master_char, side, mem, rch, x.fid, x.row, x.fallback ? " [retail assist file]" : x.loaded_here ? " [own, loaded now]" : " [own, already loaded]", foe, x.undo.size(), x.ctl, x.mgr);
     g_ctx->r[29] = static_cast<int32_t>(sp0);
+    return true;
+}
+// Make the assist actor of extra `idx`. Returns false (and marks nothing) when it cannot be made now.
+bool xas_spawn(int idx, bool forced = false) {
+    Extra& e = g_extra[idx]; XAs x; x.master_char = actor_char(e.actor); x.forced = forced;
+    const uint32_t side = e.side & 1u, mgrc = dissidia_camera_manager(), fm = rd(FILE_MGR_PTR);
+    if (!ok(mgrc, 0x700) || !ok(fm, 0x10) || !g_amgr) { if (g_log) std::fprintf(stderr, "[XAS] extra %08X: xas_spawn skipped (%s)\n", e.actor, !ok(mgrc, 0x700) ? "no camera manager" : !ok(fm, 0x10) ? "no file manager" : "no retail assist manager seen yet"); return false; }
+    xas_choice(e.actor, x.ach, x.acost);
+    // round 8: the assist of the partner's own character, in the partner's OWN costume: the costume byte of the object table entry its model was built from
+    // (info +0x2F8 = that row: byte 6 char, byte 7 costume). FUN_088FB934(char, costume, 1) -> FUN_088470DC(char, costume, 1): costume 0 is the manikin entry
+    // P_<code>_ZAKO_A (the crystal look; the old hard-coded 0), 1..3 = P_<code>_<n>P_A (a missing costume falls back to 1 there). PSPRECOMP_TTCAM_AO8COSTUME=<n>: that costume.
+    if (forced) { x.ach = x.master_char; const uint32_t row = rd(e.actor + 0x2F8u); int c = 1; const char* how = "default 1";
+        if (ok(row, 0x44) && g_ram[(row + 6u) & 0x07FFFFFFu] == static_cast<uint32_t>(x.master_char)) { c = g_ram[(row + 7u) & 0x07FFFFFFu]; how = "its model's entry"; }
+        if (const char* oc = std::getenv("PSPRECOMP_TTCAM_AO8COSTUME")) { c = std::atoi(oc); how = "env"; }
+        x.acost = c; std::fprintf(stderr, "[XAS] extra %08X (char %d): forced assist costume %d (%s, info row %08X)\n", e.actor, x.master_char, c, how, row); }
+    if (!xas_build(x, e.actor, side, e.foe)) return false;
+    g_xas[e.actor] = x;
     return true;
 }
 // The destructor (FIGHTER_DTOR) unlinks the actor from the fighter list (head world+20, tail world+24, link +0x1114) by walking from the head until a node whose
@@ -2849,16 +2871,18 @@ void xas_reset(bool teardown) {
         retail_detach(d.actor, "released assist"); call(0x0883133Cu, d.actor);
         if (g_log) std::fprintf(stderr, "[XAS] teardown: released assist %08X freed now\n", d.actor); }
     g_xas.clear(); g_xas_refs.clear(); g_xas_files.clear(); g_xas_dead.clear(); g_xas_unload_q.clear(); g_xas_mgrs.clear(); g_amgr = 0;
+    g_tdx.clear(); g_tdc[0] = g_tdc[1] = TdCall(); g_tdx_a0[0] = g_tdx_a0[1] = 0; g_tdx_gen = 0xFFFFFFFFu;
 }
 // every frame at the safe point (scene tick): make / ready / retire the extras' assists
 void xas_frame() {
-    if (!xas_enabled() || !g_bs || !g_nextra) return;
+    if (!xas_enabled() || !g_bs || (!g_nextra && !tagduel_now())) return;
     const float age = dissidia_battle_age();
     if (!g_amgr) return;
     for (size_t i = 0; i < g_xas_dead.size();) {   // a destroyed assist's block is freed two seconds later (the world flushes its objects by then)
         if (age - g_xas_dead[i].at >= 120.f) { if (ok(g_xas_dead[i].actor, 0x12D0)) { retail_detach(g_xas_dead[i].actor, "released assist"); call(0x0883133Cu, g_xas_dead[i].actor); } g_xas_dead.erase(g_xas_dead.begin() + static_cast<long>(i)); } else i++; }
     for (size_t i = 0; i < g_xas_unload_q.size();) {
         if (age - g_xas_unload_q[i].first >= 300.f) { const uint32_t f = g_xas_unload_q[i].second; if (!g_xas_refs.count(f)) xas_unlink_files(f); g_xas_unload_q.erase(g_xas_unload_q.begin() + static_cast<long>(i)); } else i++; }
+    if (!g_nextra) { tdx_frame(); return; }
     const bool off = assist_off_now();
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
@@ -4193,7 +4217,7 @@ int reserve_left(int team);
 void rules_hook(uint8_t* rdram, recomp_context* ctx) { g_in_rules = true; g_orig_rules(rdram, ctx); g_in_rules = false; if (g_natko_vic && g_natko_frames > 0 && ctx->r[2]) std::fprintf(stderr, "[NATTRACE] rules step returned %d\n", static_cast<int>(ctx->r[2])); }
 void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_slotactor(rdram, ctx);
-    if (!g_in_rules || !g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
+    if (!g_in_rules || !g_oneround || !g_tagin || !g_bs || !tag_live()) return;
     g_ram = rdram; g_ctx = ctx;
     const uint32_t a = static_cast<uint32_t>(ctx->r[2]);
     if (!ok(a, 0x12D0)) return;
@@ -4643,7 +4667,7 @@ void reset_ko_state() { g_side_entry[0] = g_side_entry[1] = -1e9f; g_ko_swap_at.
 int team_of(uint32_t side) { return g_bs && side == side_of(srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u))) ? 0 : 1; }
 int team_of_side(uint32_t side) { return team_of(side); }
 uint32_t side_of_team(int team) { return team_of(0) == team ? 0u : 1u; }
-int reserve_left(int team) { if (comms_handover()) return comms_unused(static_cast<int>(side_of_team(team))); if (team == 0 && sp_cpu_battle()) return sp_left(false); const int n = static_cast<int>(g_reserve.size() > static_cast<size_t>(team) ? g_reserve[team].names.size() : 0u); return n - g_called[team]; }
+int reserve_left(int team) { if (duel_now()) return 0; if (comms_handover()) return comms_unused(static_cast<int>(side_of_team(team))); if (team == 0 && sp_cpu_battle()) return sp_left(false); const int n = static_cast<int>(g_reserve.size() > static_cast<size_t>(team) ? g_reserve[team].names.size() : 0u); return n - g_called[team]; }
 
 // The entrance of a member coming in, in two steps while the match pauses (only the entrant moves): the assist warp-in (action 240: what an assist
 // plays when it is called, with its effect and call line), then the battle-start pose (1100) with the banner naming him; then he fights.
@@ -5745,6 +5769,82 @@ void reset_battle_state() {
     g_banner_until = 0; g_banner_text.clear(); g_entr_name.clear(); g_entr_pose_at = 0.f;   // the previous battle's "JOINS THE BATTLE" (its age is far ahead of the new battle's clock)
     tagteam_hud_set_banner(""); tagteam_hud_clear(); g_dissidia_entr_actor = 0; g_dissidia_vic_actor = 0; g_win_team = -1;
 }
+bool tag_live() { return g_nextra > 0 || (g_bs && tagduel_now()); }
+// ---- Tag Duel swap (2XKO style tag) ----
+// SELECT on a side's pad slot (the lock-step's word for that side: the same frame on every machine) rebuilds the slot fighter as the side's next
+// bench member (the next order entry not fielded); the one going out keeps his HP / BRV on the bench (g_bench) and his entry is free again, so a
+// later swap or a KO call-in brings him back with that HP. A KO brings the next member in (the slot call-in, same battle); a side with nobody left loses.
+struct BenchRec { int hp = 0; int brv = 0; };
+std::map<int, BenchRec> g_bench;   // side * 64 + char -> his HP / BRV when he went out
+uint32_t g_bench_gen = 0xFFFFFFFFu;
+bool bench_take(int side, int ch, BenchRec* out) {
+    if (g_bench_gen != g_battle_gen) { g_bench_gen = g_battle_gen; g_bench.clear(); }
+    auto it = g_bench.find(side * 64 + ch); if (it == g_bench.end()) return false;
+    *out = it->second; g_bench.erase(it); return true;
+}
+// The next bench member of side sd (index into l, -1 = nobody): the next order entry not fielded. *st_out = the stage entry.
+int tagduel_next(int sd, uint32_t S, const TagEntry* l, int n, int* st_out) {
+    order_reset();
+    const int sc = actor_char(S); int st = -1;
+    for (int i = 0; i < n && st < 0; i++) if (l[i].charId == sc && ((g_order_used[sd] >> i) & 1)) st = i;
+    if (st < 0) st = stage_index(sd, l, n);
+    int pick = -1;
+    for (int k = 1; k <= n && pick < 0; k++) { const int i = (st + k) % n; if (i == st || ((g_order_used[sd] >> i) & 1) || !info_for_char(l[i].charId)) continue; pick = i; }
+    if (st_out) *st_out = st;
+    return pick;
+}
+// Side sd's slot fighter is rebuilt as the next bench member (his bench HP / BRV, else fresh); the one going out goes to the bench.
+bool tagduel_swap(int sd, const char* how, const float* spot) {   // spot: where the member comes in (null: where the one going out stands)
+    const float age = dissidia_battle_age();
+    const uint32_t S = srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd));
+    if (!ok(S, 0x12D0)) return false;
+    TagEntry l[10]; const int n = party_order(sd, l, 10);
+    int st = -1; const int pick = tagduel_next(sd, S, l, n, &st);
+    if (pick < 0) { std::fprintf(stderr, "[TAGDUEL] t=%.1fs side %d %s: no swap, nobody on the bench\n", age / 60.f, sd, how); return false; }
+    const int sc = actor_char(S);
+    const uint32_t sts = rd(S + 0x52Cu);
+    BenchRec out; out.hp = hp_eff(S); out.brv = ok(sts, 0x40) ? static_cast<int>(rd(sts + 0x14u)) : 0;
+    const int nc = l[pick].charId;
+    BenchRec in; const bool known = bench_take(sd, nc, &in);
+    const int b0 = static_cast<int>(rd(S + 0x10ACu) & 0xFFFFu);
+    if (!rebuild_begin(S, nc, known ? in.hp : static_cast<int>(rd(S + 0x10B0u)), known ? in.brv : ((b0 << 16) | b0))) { std::fprintf(stderr, "[TAGDUEL] t=%.1fs side %d: rebuild refused\n", age / 60.f, sd); if (known) g_bench[sd * 64 + nc] = in; return false; }
+    g_rebuild.back().own_stats = !known;   // a member coming in for the first time: his own full HP / base BRV
+    { RebuildJob& j = g_rebuild.back(); if (spot) { j.x = spot[0]; j.y = spot[1]; j.z = spot[2]; } else { j.x = rdf(S + 0x80u); j.y = rdf(S + 0x84u); j.z = rdf(S + 0x88u); } }   // (not the call-in start spot rebuild_begin picks)
+    g_bench[sd * 64 + sc] = out;
+    if (st >= 0) g_order_used[sd] &= ~(1u << st);   // the one going out can come back
+    order_mark(sd, pick);
+    if (comms_handover()) slot_handover(S, (!l[pick].is_cpu && l[pick].owner >= 0) ? l[pick].owner : -1);
+    std::fprintf(stderr, "[TAGDUEL] t=%.1fs side %d (%s): %s tags out (hp %d brv %d), %s tags in (%s)\n", age / 60.f, sd, how, char_label(sc, true).c_str(), out.hp, out.brv,
+                 char_label(nc, true).c_str(), known ? ("hp " + std::to_string(in.hp) + " from the bench").c_str() : "fresh");
+    return true;
+}
+// SELECT = an instant tag (no assist call). Off while the assist tag runs (tdx_on), PSPRECOMP_TAGTEAM_TDSELECT=1 keeps it on too.
+void tagduel_swap_tick() {
+    if (!g_bs || !tagduel_now() || g_decided || rd(g_bs + 72) == 0) return;
+    if (g_bench_gen != g_battle_gen) { g_bench_gen = g_battle_gen; g_bench.clear(); }
+    static const bool sel = !tdx_on() || std::getenv("PSPRECOMP_TAGTEAM_TDSELECT") != nullptr;
+    if (!sel) return;
+    static uint32_t gen = 0xFFFFFFFFu; static uint32_t prev[2] = {0, 0}; static float last[2] = {-1e9f, -1e9f};
+    if (gen != g_battle_gen) { gen = g_battle_gen; prev[0] = prev[1] = 0; last[0] = last[1] = -1e9f; }
+    const uint32_t slots = rd(0x089D6008u);   // the pad manager: two 96-byte pad slots, SceCtrlData at +64 (buttons +68)
+    if (!ok(slots, 0x200)) return;
+    const float age = dissidia_battle_age();
+    for (int sd = 0; sd < 2; sd++) {
+        const uint32_t btn = rd(slots + 96u * static_cast<uint32_t>(sd) + 68u);
+        const bool edge = (btn & 1u) && !(prev[sd] & 1u);   // SELECT
+        if (btn != prev[sd] && std::getenv("PSPRECOMP_TAGTEAM_SWAPLOG")) std::fprintf(stderr, "[TAGDUEL] t=%.2fs side %d pad %08X\n", age / 60.f, sd, btn);
+        prev[sd] = btn;
+        if (!edge) continue;
+        const uint32_t S = srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd));
+        const char* why = nullptr;
+        if (!ok(S, 0x12D0) || !alive(S)) why = "the fighter is down";
+        else if (age - last[sd] < 3.f * 60.f) why = "too soon after the last swap";
+        else if (is_rebuilding(S) || entrance_busy() || exb_busy() || exb_in(S) || g_ko_mark.count(S)) why = "busy (an entrance, a rebuild, an EX Burst or a KO)";
+        else if (g_tdc[sd].on) why = "an assist call is running";
+        if (why) { std::fprintf(stderr, "[TAGDUEL] t=%.1fs side %d SELECT: no swap, %s\n", age / 60.f, sd, why); continue; }
+        if (tagduel_swap(sd, "SELECT", nullptr)) last[sd] = age;
+    }
+}
 void ko_oneround() {
     ledger_step();   // the KO ledger (tally, jobs) sees every fall before it is handled
     if (g_oneround && g_tagin && g_bs && g_nextra == 0 && !g_decided && !std::getenv("PSPRECOMP_TAGTEAM_NOEARLYFORFEIT") && !std::getenv("PSPRECOMP_TAGTEAM_NOFORFEITEND") && !psp_adhoc_in_session()) {
@@ -5759,7 +5859,29 @@ void ko_oneround() {
             group_decided(team_of(side_of(S))); return;
         }
     }
-    if (!g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
+    // (before the return below: a battle of one fighter per side has no extras but takes the test aid too)
+    if (static const char* lowhp = std::getenv("PSPRECOMP_TAGTEAM_DEBUG_LOWHP"); lowhp) {   // test aid: every fighter at 300 HP at this battle second (the same frame on every machine), so a battle ends fast
+        static uint32_t done_gen = ~0u;
+        if (done_gen != g_battle_gen && g_bs && dissidia_battle_age() >= std::atof(lowhp) * 60.f) {
+            done_gen = g_battle_gen; uint32_t f[6]; const int n = all_fighters(f);
+            for (int i = 0; i < n; i++) { const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x40)) { const uint32_t h = std::min<uint32_t>(rd(st + 0xCu), 300u); wr(st + 0xCu, h); } }
+            std::fprintf(stderr, "[TAGTEAM] t=%.1fs debug: %d fighters at 300 HP\n", dissidia_battle_age() / 60.f, n);
+        }
+    }
+    // 1 vs 1 Duel: retail plays a party as a series of battles (the next member in a new battle after a KO). The first KO decides the whole
+    // group battle instead (group_decided, as when a tag side has nobody left), on every machine at the frame the KO is seen.
+    if (g_bs && duel_now() && !g_decided) {
+        static uint32_t duel_gen = 0xFFFFFFFFu;
+        if (duel_gen != g_battle_gen) for (uint32_t k = 0; k < 2; k++) {
+            const uint32_t S = srd(g_bs + 56u + 4u * k);
+            if (!ok(S, 0x12D0) || dissidia_battle_age() < 5.f * 60.f || static_cast<int>(rd(S + 0x10B0u)) <= 0 || hp_eff(S) > 0) continue;   // (not while the fighters are still being set up)
+            duel_gen = g_battle_gen; g_decided = true; g_slot_callin.clear();
+            std::fprintf(stderr, "[DUEL] t=%.1fs slot %u (%s) is KO'd: the duel is decided, no party member comes in\n", dissidia_battle_age() / 60.0f, k, char_label(actor_char(S), true).c_str());
+            group_decided(team_of(side_of(S))); return;
+        }
+    }
+    if (!g_oneround || !g_tagin || !g_bs || !tag_live()) return;
+    tagduel_swap_tick();
     if (std::getenv("PSPRECOMP_TAGTEAM_BSDIFF")) {   // debug: the setup object's words that changed during the last frames (at the KO and after)
         static uint32_t snap[0x1400 / 4]; static int shown = 0; static bool have = false; static float lastage = -1;
         const float a = dissidia_battle_age();
@@ -5773,14 +5895,6 @@ void ko_oneround() {
     // The battle is decided once a slot fighter goes down with nobody on its side to take over and no reserve: from then on the retail finish, the
     // victory pose and the results run untouched (the winner's outro was taken for a KO: its slot was rebuilt and a member called in over the results).
     ground_track();
-    if (static const char* lowhp = std::getenv("PSPRECOMP_TAGTEAM_DEBUG_LOWHP"); lowhp) {   // test aid: every fighter at 300 HP at this battle second (the same frame on every machine), so a battle ends fast
-        static uint32_t done_gen = ~0u;
-        if (done_gen != g_battle_gen && dissidia_battle_age() >= std::atof(lowhp) * 60.f) {
-            done_gen = g_battle_gen; uint32_t f[6]; const int n = all_fighters(f);
-            for (int i = 0; i < n; i++) { const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x40)) { const uint32_t h = std::min<uint32_t>(rd(st + 0xCu), 300u); wr(st + 0xCu, h); } }
-            std::fprintf(stderr, "[TAGTEAM] t=%.1fs debug: %d fighters at 300 HP\n", dissidia_battle_age() / 60.f, n);
-        }
-    }
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_STARTSCAN") && g_bs && dissidia_battle_age() > 20.f) {   // debug: where does the game keep the battle start positions? scan RAM for the slot fighters' x / z words
         static uint32_t done_gen = 0xFFFFFFFFu;
         if (done_gen != g_battle_gen) { done_gen = g_battle_gen;
@@ -5861,7 +5975,7 @@ void ko_oneround() {
             continue;
         }
         if (!te) {   // nobody to take over: with reserve members left the fall plays out (the round guard holds the round) and the next member comes straight into the slot
-            const int tm = team_of(side_of(S)), cid = ffa_now() ? 0 : next_member_char(tm);
+            const int tm = team_of(side_of(S)), cid = (ffa_now() || duel_now()) ? 0 : next_member_char(tm);   // (Duel: nobody comes in, the first KO decides)
             if (cid && !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTCALLIN")) { { const float dly = slot_fall_delay();
                 g_slot_callin.push_back({S, age + dly * 60.f, tm, age}); side_entry_mark(side_of(S), age + dly * 60.f);
                 // the player's own fighter with no partner: the fall plays first (script 1210 + the KO line, the pose held), then the next member comes in
@@ -5928,6 +6042,8 @@ void ko_oneround() {
         if (cid && rebuild_begin(c.S, cid, static_cast<int>(rd(c.S + 0x10B0u)), static_cast<int>(((rd(c.S + 0x10ACu) & 0xFFFFu) << 16) | (rd(c.S + 0x10ACu) & 0xFFFFu)))) {
             g_rebuild.back().own_stats = true;
             g_rebuild.back().entr = char_label(cid, true);
+            if (BenchRec br; tagduel_now() && bench_take(static_cast<int>(side_of(c.S)), cid, &br)) { g_rebuild.back().own_stats = false; g_rebuild.back().hp = br.hp; g_rebuild.back().brv = br.brv;
+                std::fprintf(stderr, "[TAGDUEL] t=%.1fs %s comes back from the bench with hp %d\n", age / 60.0f, char_label(cid, true).c_str(), br.hp); }
             g_ko_mark.erase(c.S);
             g_called[c.team]++;
             if (c.team == 0 && sp_cpu_battle()) {   // single player: a CPU member into the human's slot (he has no own member left) is AI-driven
@@ -6112,7 +6228,7 @@ FuncPtr g_orig_finstart = nullptr;
 void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     bool mid = false; uint32_t who = 0;
-    if (g_oneround && g_tagin && g_bs && g_nextra && g_kocam && !std::getenv("PSPRECOMP_TAGTEAM_FULLFINISH") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) {
+    if (g_oneround && g_tagin && g_bs && tag_live() && g_kocam && !std::getenv("PSPRECOMP_TAGTEAM_FULLFINISH") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) {
         for (uint32_t k = 0; k < 2; k++) {
             const uint32_t S = srd(g_bs + 56u + 4u * k); if (!ok(S, 0x12D0) || hp_eff(S) > 0) continue;
             bool mate = false; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != S && side_of(g_extra[i].actor) == side_of(S) && alive(g_extra[i].actor)) mate = true;
@@ -6746,6 +6862,11 @@ void hudref_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx; g_hud = static_cast<uint32_t>(ctx->r[4]);
     static uint32_t lastP[2] = {}, T[2] = {}, last_bs = 0;
     if (last_bs != g_battle_gen) { last_bs = g_battle_gen; lastP[0] = lastP[1] = 0; }
+    // Tag Duel (no extras): the slot fighter is rebuilt as the member who tags in, so the big panel's portrait follows the slot fighter's character
+    if (g_bs && !g_nextra && tagduel_now() && ok(g_hud, 0x200) && !std::getenv("PSPRECOMP_TAGTEAM_NOPORTRAIT")) for (uint32_t sd = 0; sd < 2; sd++) {
+        const uint32_t S = srd(g_bs + 56u + 4u * sd); if (!ok(S, 0x12D0) || is_rebuilding(S)) continue;
+        const uint32_t side = side_of(S); if (side <= 1) portrait_show(side, actor_char(S));
+    }
     if (g_bs && g_nextra && ok(g_hud, 0x200)) for (uint32_t sd = 0; sd < 2; sd++) {
         const uint32_t S = srd(g_bs + 56u + 4u * sd); if (!ok(S, 0x12D0)) continue;
         const uint32_t side = side_of(S); if (side > 1) continue;
@@ -9610,6 +9731,110 @@ void agauge_watch(uint32_t ctl) {
         for (int i = 0; i < n; i++) { const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x40)) std::fprintf(stderr, " %s %.0f%s", role_of(f[i]), static_cast<double>(rdf(st + 0x1Cu)), is_down(f[i]) ? "(down)" : ""); }
         std::fprintf(stderr, "\n"); }
 }
+// ---- Tag Duel: the bench member comes in through its assist call ----
+// Every party member of a Tag Duel side gets an assist actor made from HIS OWN assist file (xas_build, forced = the member's character, the default
+// costume record the rebuild uses too), master = the slot fighter. The slot fighter's assist word (+0x1108) points to the next bench member's: the
+// retail controller plays the call as for any assist (slow motion, the summon, the BRV or HP assist attack by the button). When that attack is over
+// the slot fighter takes the assist's place and is rebuilt as that member (tagduel_swap: bench HP, the one going out to the bench), the assist goes
+// back to its hidden idle and the word moves on to the new bench member's assist. A call whose assist was hit (Assist Lock) does not tag. Nobody on the
+// bench: no call (the request is dropped). All of it from battle state: the same frame on every machine. PSPRECOMP_TAGTEAM_TDASSIST=0: off (SELECT tag).
+TdX* tdx_find(int sd, int ch) { for (TdX& t : g_tdx) if (t.sd == sd && t.ch == ch) return &t; return nullptr; }
+uint32_t tdx_actor(int sd, int ch) { TdX* t = tdx_find(sd, ch); return (t && t->x.ready && ok(t->x.assist, 0x12D0)) ? t->x.assist : 0u; }
+const TdX* tdx_of(uint32_t a) { if (a) for (const TdX& t : g_tdx) if (t.x.assist == a) return &t; return nullptr; }
+int tdx_costume(int ch, uint32_t S) {
+    (void)S;   // (not the slot fighter's own model row: that differs between machines; the default record is what the rebuild uses too)
+    const uint32_t r = info_for_char(ch); const int c = ok(r, 0x44) ? static_cast<int>(g_ram[(r + 7u) & 0x07FFFFFFu]) : 0;
+    return c > 0 ? c : 1;
+}
+void tdx_tag(int sd, uint32_t S, const TdCall& c) {
+    const float age = dissidia_battle_age();
+    const char* why = !ok(S, 0x12D0) || !alive(S) || is_down(S) ? "the fighter is down" : (is_rebuilding(S) || exb_busy() || exb_in(S) || g_ko_mark.count(S)) ? "busy (a rebuild, an EX Burst or a KO)" : !ok(c.X, 0x12D0) ? "the assist is gone" : nullptr;
+    if (why) { std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: no tag, %s\n", age / 60.f, sd, why); return; }
+    float hx = c.have ? c.px : rdf(c.X + 0x80u), hy = c.have ? c.py : rdf(c.X + 0x84u), hz = c.have ? c.pz : rdf(c.X + 0x88u); const float hyaw = c.have ? c.yaw : rdf(c.X + 0x9Cu); const bool hair = c.have ? c.air : game_airborne(c.X);
+    bool spot = std::isfinite(hx) && std::isfinite(hy) && std::isfinite(hz) && std::fabs(hx) < 3000.f && std::fabs(hz) < 3000.f;
+    // (the summon spot is trusted as it is: retail put the assist there with its own floor check; our ground samples only know where fighters have stood,
+    //  so snapping to the nearest one put the member back on the main's spot)
+    start_script(c.X, 1); wr(c.X + 904u, rd(c.X + 904u) | rd(0x089C7FC0u));   // the assist goes back to its hidden idle, "available" again (see ao8_finish)
+    const float at[3] = {hx, hy, hz};
+    if (spot) { place_at(S, hx, hy, hz, "tag duel: the main takes the assist's place"); wrf(S + 0x9Cu, hyaw); wrf(S + 0x320u, hyaw); }
+    if (!tagduel_swap(sd, "assist call", spot ? at : nullptr)) return;
+    std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: %s tags in at the assist's spot (%.1f,%.1f,%.1f)%s, %.2f s after the call\n", age / 60.f, sd, char_label(c.ch, true).c_str(), hx, hy, hz, spot ? (hair ? " in the air" : "") : " (no floor there: the old spot)", (age - c.t0) / 60.f);
+}
+void tdx_frame() {
+    if (!tdx_on() || !g_bs || !tagduel_now() || !g_amgr) return;
+    if (g_tdx_gen != g_battle_gen) { g_tdx_gen = g_battle_gen; g_tdx.clear(); g_tdc[0] = g_tdc[1] = TdCall(); g_tdx_a0[0] = g_tdx_a0[1] = 0; }
+    const float age = dissidia_battle_age();
+    if (age < 4.f * 60.f || g_decided) return;
+    bool spawned = false;
+    for (int sd = 0; sd < 2; sd++) {
+        const uint32_t S = srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd)); if (!ok(S, 0x12D0)) continue;
+        { const uint32_t cur = rd(S + 0x1108u); if (!g_tdx_a0[sd] && ok(cur, 0x12D0) && !tdx_of(cur)) g_tdx_a0[sd] = cur; }
+        TagEntry l[10]; const int n = party_order(sd, l, 10);
+        if (n < 2) continue;
+        for (int i = 0; i < n && !spawned; i++) {   // one assist made per frame
+            const int ch = l[i].charId; if (!info_for_char(ch)) continue;
+            TdX* t = tdx_find(sd, ch); if (!t) { g_tdx.push_back(TdX()); t = &g_tdx.back(); t->sd = sd; t->ch = ch; }
+            if (t->x.assist || age - t->tried < 120.f) continue;
+            t->tried = age; spawned = true;
+            XAs x; x.forced = true; x.master_char = ch; x.ach = ch; x.acost = tdx_costume(ch, S);
+            const uint32_t foe = srd(g_bs + 56u + 4u * static_cast<uint32_t>(1 - sd));
+            if (xas_build(x, S, static_cast<uint32_t>(sd), foe)) { t->x = x; std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: %s's assist actor %08X made (costume %d, file %u%s)\n", age / 60.f, sd, char_label(ch, true).c_str(), x.assist, x.acost, x.fid, x.loaded_here ? ", loaded now" : ""); }
+            else std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: %s's assist actor could not be made (tried again in 2 s)\n", age / 60.f, sd, char_label(ch, true).c_str());
+        }
+        for (TdX& t : g_tdx) if (t.sd == sd && t.x.assist && !t.x.ready && age - t.x.born >= 60.f) {
+            for (const auto& u : t.x.undo) wr(u.first, u.second);
+            t.x.undo.clear(); t.x.ready = true; wr(t.x.assist + 0x1108u, S);
+            std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: %s's assist actor %08X is ready (script %d)\n", age / 60.f, sd, char_label(t.ch, true).c_str(), t.x.assist, static_cast<int16_t>(rd(t.x.assist + 0x180u) & 0xFFFFu));
+        }
+        TdCall& c = g_tdc[sd];
+        const uint32_t curA = rd(S + 0x1108u);
+        if (!c.on) if (const TdX* t = tdx_of(curA)) if (ok(curA, 0x12D0) && static_cast<int16_t>(rd(curA + 0x180u) & 0xFFFFu) != 1) {
+            c = TdCall(); c.on = true; c.X = curA; c.ch = t->ch; c.t0 = age; c.busy = age;
+            std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: assist call, %s comes in (assist %08X script %d)\n", age / 60.f, sd, char_label(c.ch, true).c_str(), curA, static_cast<int16_t>(rd(curA + 0x180u) & 0xFFFFu));
+        }
+        if (c.on) {
+            const int xs = ok(c.X, 0x12D0) ? static_cast<int16_t>(rd(c.X + 0x180u) & 0xFFFFu) : 1;
+            if (xs >= 500 && xs < 1000) c.hit = true;
+            if (xs != 1) c.busy = age;   // (a summon can show the idle script for a few frames before its attack)
+            if (ok(c.X, 0x12D0)) { static const bool tl = std::getenv("PSPRECOMP_TAGTEAM_TDLOG") != nullptr;
+                if (tl) std::fprintf(stderr, "[TDLOG] t=%.2fs side %d assist %08X script %d pos (%.2f,%.2f,%.2f) yaw %.2f +380 %08X | main (%.2f,%.2f,%.2f)\n", age / 60.f, sd, c.X, xs, rdf(c.X + 0x80u), rdf(c.X + 0x84u), rdf(c.X + 0x88u), rdf(c.X + 0x9Cu), rd(c.X + 0x380u), rdf(S + 0x80u), rdf(S + 0x84u), rdf(S + 0x88u));
+                if (xs != 1 && xs < 10000) { c.px = rdf(c.X + 0x80u); c.py = rdf(c.X + 0x84u); c.pz = rdf(c.X + 0x88u); c.yaw = rdf(c.X + 0x9Cu); c.air = game_airborne(c.X); c.have = true; } }   // the summon spot: before the attack moves it
+            // the summon is over when the assist starts its attack (scripts 10000+ of its assist moveset): that attack is cut, the member takes over there
+            const char* end = nullptr; bool tag = false;
+            if (c.hit) end = "the assist was hit";
+            else if (xs >= 10000) { end = "the summon is over"; tag = true; }
+            else if (xs == 1 && age - c.busy >= 90.f) end = "the call ended without the summon";
+            else if (age - c.t0 > 720.f) end = "timeout";
+            if (end) {
+                std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: the call is over (%s, %.2f s)%s\n", age / 60.f, sd, end, (age - c.t0) / 60.f, tag ? ": tag" : ": no tag");
+                const TdCall cc = c; c = TdCall();
+                if (tag) tdx_tag(sd, S, cc);
+            }
+            continue;   // the assist word stays on the calling assist until the call is over
+        }
+        if (is_rebuilding(S)) continue;
+        const int pick = tagduel_next(sd, S, l, n, nullptr);
+        uint32_t want = pick >= 0 ? tdx_actor(sd, l[pick].charId) : 0u;
+        if (!want) want = g_tdx_a0[sd];
+        if (want && curA != want) {
+            wr(S + 0x1108u, want);
+            const TdX* t = tdx_of(want);
+            std::fprintf(stderr, "[TDASSIST] t=%.2fs side %d: the assist is now %s (%08X)\n", age / 60.f, sd, t ? char_label(t->ch, true).c_str() : "the retail assist (nobody on the bench)", want);
+        }
+    }
+}
+// A new call request (word 0) of a Tag Duel side whose assist word is not a member's assist (nobody on the bench / not ready yet) is dropped.
+void tdx_gate(uint32_t ctl) {
+    if (!tdx_on() || !g_bs || !tagduel_now() || !ok(ctl, 0x80) || g_xas_mgrs.count(ctl)) return;
+    for (uint32_t k = 0; k < 2; k++) {
+        if (rd(ctl + 8u + 24u * k) != 0u) continue;
+        const uint32_t M = srd(g_bs + 56u + 4u * k); if (!ok(M, 0x12D0)) continue;
+        TagEntry l[10]; if (party_order(static_cast<int>(k), l, 10) < 2) continue;   // a side with one fighter: its retail assist as usual
+        if (tdx_of(rd(M + 0x1108u))) continue;
+        wr(ctl + 8u + 24u * k, 0xFFFFFFFFu);
+        std::fprintf(stderr, "[TDASSIST] t=%.2fs side %u: assist call dropped (nobody on the bench, or the assist is not ready yet)\n", dissidia_battle_age() / 60.f, k);
+    }
+}
 void actl_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     const uint32_t ctl = static_cast<uint32_t>(ctx->r[4]);
@@ -9663,6 +9888,7 @@ void actl_hook(uint8_t* rdram, recomp_context* ctx) {
         while (next < at.size() && age >= at[next]) { char path[512]; std::snprintf(path, sizeof path, "%s/shot_%06.2f.tga", dir.c_str(), static_cast<double>(at[next])); std::string ps(path);
             std::thread([ps] { ::ge_draw_capture_screenshot(ps.c_str(), 3000); }).detach(); std::fprintf(stderr, "[SHOTAT] t=%.2fs %s\n", age, path); next++; }
     }
+    tdx_gate(ctl);   // (after the test aids: a forced call is gated like a pressed one)
     air_learn_step(); own_learn_step(); callfx_step(); xkocam_step(); atk_pad_step(); atk_due_step(); appear_fx_step(); if (g_log) atk_watch_step(); aohit_step(); ao_busy_step(); ao_combo_step();
     if (aohit_on() && !assist_off_now() && ok(ctl, 0x80) && g_bs) for (uint32_t k = 0; k < 2; k++) if (rd(ctl + 8u + 24u * k) == 0u) {   // (measurement) a retail call starts now
         const uint32_t M = srd(g_bs + 56u + 4u * k); const char* w = ""; if (ok(M, 0x12D0)) aohit_start(k, M, 0u, ao_pick_foe(M, 0, &w), false); }
@@ -10591,7 +10817,7 @@ uint32_t dissidia_tagteam_fighter_sig() {
 uint8_t local_rule_flags() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
     const bool assist_on = (e ? e[0] != '0' : g_sp_assist_on) || g_ffa;   // free-for-all: assists on for the group
-    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four)
+    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u) | (g_duel ? 0x20u : 0u) | (g_tagduel ? 0x40u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four), bit 5: Duel (no call-ins), bit 6: Tag Duel
 }
 constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
 bool dissidia_tagteam_roster_host() { return comms_battle() && g_me.host; }
@@ -10641,6 +10867,8 @@ bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the
     g_snap = v; g_roster_ok = true; g_shared_flags = d[3]; g_shared_fill = static_cast<uint8_t>(d[2] >> 4); g_shared_valid = true;
     std::fprintf(stderr, "[CPUFILL] host's CPU fill: %s\n", g_shared_fill ? ("on, strength " + std::to_string(g_shared_fill)).c_str() : "off");
     std::fprintf(stderr, "[TTCPU] host's rules: assists %s, EX Burst rule %s, free-for-all %s, 3 v 3 %s\n", (d[3] & 1) ? "on" : "off", (d[3] & 2) ? "fight" : "freeze", (d[3] & 4) ? ((d[3] & 0x10) ? "3" : "4") : "off", (d[3] & 8) ? "on" : "off");
+    if (d[3] & 0x20) std::fprintf(stderr, "[TTCPU] host's rules: 1 vs 1 Duel, no party member comes in\n");
+    if (d[3] & 0x40) std::fprintf(stderr, "[TTCPU] host's rules: Tag Duel, SELECT swaps with a bench member\n");
     return true;
 }
 bool dissidia_tagteam_decided() { return g_decided; }
@@ -10813,6 +11041,8 @@ void lobby_apply() {   // the host: the lobby's settings into the switches the b
     else if (c.mode == 1) { per = c.size == 3 ? 3 : 2; g_three = c.size == 3 ? 1 : 0; }
     else if (c.mode == 3) { g_ffa = 4; per = 2; }
     g_ffa_auto = c.mode == 3;
+    g_duel = c.mode == 0;
+    g_tagduel = c.mode == 2;
     if ((g_three || g_ffa) && g_overhead == 0) g_overhead = 1;
     g_sp_assist_on = c.assist != 0; g_exb_lobby = c.exb;
     g_mode_pick = static_cast<uint8_t>(0x80 | per | (per << 2));
