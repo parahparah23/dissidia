@@ -6,6 +6,8 @@
   - Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.
   - Final screen: remove the options the Battle Lobby now covers (stage, rules, judgment).
   - Battle Lobby: follow the game's design language (frames, fonts, colours).
+  - Free-for-all: fighters still spawn as two teams; spread them out (each player his own start spot).
+  - Free-for-all: much of the code still assumes a "partner" cannot be attacked (who takes the damage, who gets broken, friendly-fire paths); make every hit / break / HP path treat every other fighter as a foe.
 
 - **Proper PvE (humans vs a CPU party): DONE on the host (21 Nov, tree ttfa, section "Proper PvE: a CPU party the host sets up"; the old keeper is behind `PSPRECOMP_TAGTEAM_KEEPER=1`).** Open: 3 or more humans, a CPU party with more than the host's rows when a human also joined it, an Internet (relay) session, the CPU lead's own level (it keeps the owner's save level of that character; its AI strength / type do follow the row), a real device.
 - **10-player tests of the online modes (21 Nov, rig `~/dissidia/tt/net10m`, `runcase.sh TAG 3v3|ffa4|ffa3|pve|pve3v3`):**
