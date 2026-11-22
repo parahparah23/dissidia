@@ -2850,6 +2850,7 @@ Desktop logs `rp6logs/desk_1119_terrahit_holy.log`, `desk_1119_vaanmiss.log`, `d
 - Tooling: `hang_watch` (`PSPRECOMP_TAGTEAM_HANGDUMP=1`) now repeats its backtrace dump every 4 s (max 8) instead of once; resolve addresses with `nm psprecomp_runtime` (PIE offsets). Drivers in `~/dissidia/tt/ttfa_tools/` (`wd2.py` runs the battle with FF, presses cross, reports a hang and leaves the game alive; `dbg.py`, `heap.py` read heaps over the debug socket).
 
 ## Assist On / Off instead of Round-Robin (19 Nov, tree ttlock; host-only)
+Wording (user, 22 Nov): the setup screen shows **Assist: Default** (On: retail assists) / **Assist: Partner** (Off: the tag partner comes in instead); the format bar reads "Assists: DEFAULT / PARTNER". The code and env names keep On / Off.
 User wish: no Round-Robin; Square toggles assists; with assists off an assist call teleports the caller's tag partner to where the assist would stand.
 - **Setup screen** (`tagteam_menu.cpp sp_draw`): on the single-player Tournament list Square no longer reaches the screen (`dissidia_tagteam_menu_pad` masks it for
   40 polls after the last screen tick, so it never leaks into a battle), so "Swap format" / Round-Robin cannot be set. Square toggles `g_sp_assist_on`

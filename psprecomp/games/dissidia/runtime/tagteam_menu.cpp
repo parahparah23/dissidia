@@ -485,7 +485,7 @@ void sp_label(float cx, float baseline, const std::string& txt, float em, LayerC
 void sp_format_bar(bool assists) {   // "Tournament" / "Round-Robin" -> "Assists: ON / OFF"
     static const float a0[3] = {114, 123, 161}, a1[3] = {124, 134, 167};
     g_layer.band(198.f, 103.f, 284.f, 115.f, [&](float x, float) { return lerp_col(x, 200.f, 300.f, a0, a1); });
-    sp_label(240.f, 112.f, assists ? "Assists: ON" : "Assists: OFF", 8.f, LayerColor{255, 255, 255, 1.f}, 80.f);
+    sp_label(240.f, 112.f, assists ? "Assists: DEFAULT" : "Assists: PARTNER", 8.f, LayerColor{255, 255, 255, 1.f}, 80.f);
 }
 // The enemy side's CPU strength of round i: the round dialog keeps its STRENGTH in the screen object, one block of 0x16DC bytes per round (found with PSPRECOMP_TTSP_CURDUMP=2 as the
 // word at +0x2134 / +0x3810 whose top byte was 4 > 3 > 2 / 4 > 5 while the dialog's STRENGTH of round 2 / 3 moved; tier = screen value - 1).
@@ -566,7 +566,7 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
             tag(141.f, y + 5.f, 162.f, y + 14.f, "CPU", a);   // after the member's job name, before the matchup's "2nd"
         }
         float right = 334.f;   // the bar at the top, left of the screen's own hints ("Swap format" from x ~341, "R Job Settings"; user screenshot 18 Nov: at 370 ours covered "Swap format")
-        if (sq_ours && !g_dlg_open) { right = bar_text(right, dissidia_tagteam_sp_assist_on() ? "Assist: On" : "Assist: Off", a); key(right - 3.f, "", true, a); right -= 20.f; }   // Square (not drawn by the game: its "Swap format" is blocked); host-unverified placement
+        if (sq_ours && !g_dlg_open) { right = bar_text(right, dissidia_tagteam_sp_assist_on() ? "Assist: Default" : "Assist: Partner", a); key(right - 3.f, "", true, a); right -= 20.f; }   // Square (not drawn by the game: its "Swap format" is blocked); host-unverified placement
         if (cpu_row && !g_dlg_open) right = bar_text(right, "Select: CPU Settings", a) - 8.f;
         if (switchable && !g_dlg_open) { right = bar_text(right, (mask >> row) & 1 ? "Player" : "CPU", a); key(right - 3.f, "L", false, a); }
         if (g_dlg_open) dialog(rdram, ctx, opened_now ? 0u : pressed, dt, a);
