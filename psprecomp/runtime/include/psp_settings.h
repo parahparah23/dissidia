@@ -73,12 +73,13 @@ struct PspModInstaller {
 void psp_settings_set_mod_installer(const PspModInstaller& inst);
 
 /// A game module adds on/off rows to the Debug page (this session only, not saved): `get` says whether it is on, `set` switches it.
-/// Up to 10 rows; the label and help text must stay valid (string literals).
+/// Up to 16 rows (under_fx: listed right below the FX Shaders row instead of at the end); the label and help text must stay valid (string literals).
 struct PspDebugToggle {
     const char* label;
     const char* help;
     bool (*get)();
     void (*set)(bool on);
+    bool under_fx = false;
 };
 void psp_settings_add_debug_toggle(const PspDebugToggle& toggle);
 

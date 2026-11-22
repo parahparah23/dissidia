@@ -45,7 +45,7 @@ Switch with a click or touch on a tab, PageUp / PageDown / F2, or by holding L +
 the Exit button (click / touch), right click, or by holding Start + Select for 2 s (from any player's input; a bar shows the hold); all
 other keys and buttons are the buttons under test and do nothing to the menu. `psp_input_sample(player, &sample)` (`psp_event_loop.h`)
 is the API a split-screen mode can reuse; the pre-menu-gate state is kept by `publish_input` even while the menu hides it.
-**Keyboard > Move Keys**: one key for each move that takes two buttons, both going down in the same pad read as the game needs
+**Keyboard > Move Keys** (a row that opens a list page: Cross opens, Back returns; two-button moves first, then the other keys): one key for each move that takes two buttons, both going down in the same pad read as the game needs
 (R held first makes a block instead): D dodge (R + Cross), F dash (R + Triangle), E EX Mode (R + Square), V summon (R + Circle),
 1 Brave assist (L + Circle), 2 HP assist (L + Square). Holding R or L and pressing the face button still works. (VCKing101's idea,
 `docs/port/keyboard-controls.md`; our keys, as our keyboard layout is fixed.) `PSPRECOMP_KEY_LOG=1` logs every change of the buttons
@@ -116,3 +116,9 @@ of retail textures: `tools/texpack_extract.py`.
 
 A loose-file mod that replaces one of the two layout files keeps its own layout (the built-in edit is skipped), and the start
 menu / title rows then overlap the retail rows; the pause menu row does not depend on files.
+
+## Debug page notes (21 Nov)
+- `psp_settings_add_debug_toggle` takes up to 16 rows (was 10: the Jecht Combo Timing row, registered third, was dropped once the tag team added rows). `PspDebugToggle::under_fx`
+  lists a row right below the FX Shaders row; the Jecht Combo Timing helper uses it.
+- Controls > L / R Buttons (Shoulders / Triggers) is a value selector (< value >), not an On / Off switch.
+- Controls > Move Keys opens the Move Keys sub-page (read-only lines: key, move, PSP buttons).

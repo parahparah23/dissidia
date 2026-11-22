@@ -198,7 +198,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
-           ROW_DBG0, ROW_DBG1, ROW_DBG2, ROW_DBG3, ROW_DBG4, ROW_DBG5, ROW_DBG6, ROW_DBG7, ROW_DBG8, ROW_DBG9,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
+           ROW_DBG0, ROW_DBG1, ROW_DBG2, ROW_DBG3, ROW_DBG4, ROW_DBG5, ROW_DBG6, ROW_DBG7, ROW_DBG8, ROW_DBG9, ROW_DBG10, ROW_DBG11, ROW_DBG12, ROW_DBG13, ROW_DBG14, ROW_DBG15,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
            ROW_GPU, ROW_GPU_GET, ROW_GPU_DEL,   // custom GPU drivers (Android, Adreno): Drivers page
            ROW_SUB_HDR, ROW_SUB_RT,             // rows that open a sub-menu
            ROW_SUB_ENV0, ROW_SUB_ENV_END = ROW_SUB_ENV0 + 15,   // Debug page: one row per developer-options category (psp_env_options.inc)
@@ -211,8 +211,9 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_TEXPACK_DOWNLOAD,                                    // Graphics page: download the game's own pack (PspTexPackHook::download)
            ROW_CLOUD_CONFLICTS,                 // Cloud page: saves waiting for a choice (opens Saves)
            ROW_EXT0, ROW_EXT_END = ROW_EXT0 + 219,   // Saves page: the rows psp_saves::Page builds (headers included)
+           ROW_KEYMAP0, ROW_KEYMAP_END = ROW_KEYMAP0 + 31,   // Move Keys sub-menu: one read-only line per key
            ROW_SEC_WINDOW, ROW_SEC_PERF, ROW_SEC_QUALITY, ROW_SEC_AA, ROW_SEC_TEX, ROW_SEC_ENGINE, ROW_SEC_COLOUR, ROW_SEC_HDR, ROW_SEC_LIGHT,
-           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD, ROW_SEC_KEYBOARD,   // section captions (not selectable)
+           ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD, ROW_SEC_KEYBOARD, ROW_SEC_KEYS_MOVE, ROW_SEC_KEYS_BASIC,   // section captions (not selectable)
            ROW_COUNT };
 static_assert(ROW_COUNT < psp_sddialog::SET_MAX_IDS, "row ids are animation slots");
 // Settings > Saves (psp_saves_page.h): its rows are ROW_EXT0 + i.
@@ -229,10 +230,10 @@ int p1_index(const std::vector<std::pair<std::string, std::string>>& v);
 int g_sel = 0;
 // Pages: the categories shown in the sidebar, and the sub-menus a row can open (PAGE_HDR under Image, PAGE_RT under Effects).
 enum Page { PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS, PAGE_CONTROLS, PAGE_NETWORK, PAGE_CLOUD, PAGE_SYSTEM, PAGE_GPU, PAGE_DEBUG, PAGE_MODS,
-            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
+            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_KEYS, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
 constexpr int k_env_cats = 11;   // = EC_COUNT (psp_env_options.inc)
 const char* const k_page_names[PAGES] = {"Display", "Graphics", "Image", "Effects", "Controls", "Network", "Cloud", "System", "Drivers", "Debug", "Mods", "Saves",
-                                         "HDR", "Ray Tracing",
+                                         "HDR", "Ray Tracing", "Move Keys",
                                          "Camera", "Input", "Timing", "Graphics", "Effects tuning", "Vulkan", "Textures", "Audio / video", "Game data", "Game logs", "Engine logs"};
 int g_page = 0;                        // the category (an index into page_list()): L / R, Q / E or Tab, the sidebar
 int g_sub = -1;                        // the open sub-menu page, -1 = none
@@ -253,7 +254,7 @@ const std::vector<int>& page_list() {
 }
 int page_id() { return g_sub >= 0 ? g_sub : page_list()[size_t(g_page)]; }
 // Sidebar icon of a page (settings_render.inc draw_icon).
-int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
+int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page == PAGE_KEYS ? PAGE_CONTROLS : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
 int g_ring_next = -1;                  // vertex upload mode saved for the next launch (-1 = unchanged)
 bool g_quit_armed = false;
 bool g_dirty = true;
@@ -691,6 +692,13 @@ bool mod_set_enabled(size_t i, bool on) {
     std::fprintf(stderr, "[SETTINGS] mod %s %s (next start)\n", g_mods[i].dir.c_str(), on ? "enabled" : "disabled");
     return true;
 }
+// The keyboard map the Move Keys page lists (keys of psp_event_loop.cpp key_to_psp_button): { key, what it does, the PSP buttons }, moves first.
+struct KeyLine { const char* key; const char* what; const char* btn; };
+const KeyLine k_key_moves[] = {{"D", "Dodge", "R + Cross"}, {"F", "Dash", "R + Triangle"}, {"E", "EX Mode (EX Revenge when hit)", "R + Square"}, {"V", "Summon", "R + Circle"},
+                               {"1", "Brave assist", "L + Circle"}, {"2", "HP assist", "L + Square"}};
+const KeyLine k_key_basic[] = {{"Arrow keys", "Move / menu cursor", "D-pad"}, {"X or Enter", "Confirm", "Cross"}, {"Z", "Cancel", "Circle"}, {"A", "", "Square"}, {"S", "", "Triangle"},
+                               {"Q", "", "L"}, {"W", "", "R"}, {"Space", "Pause", "Start"}, {"Tab", "", "Select"}, {"Esc or F1", "Settings menu", "(not a PSP button)"}};
+constexpr int k_nmoves = int(sizeof k_key_moves / sizeof *k_key_moves), k_nbasic = int(sizeof k_key_basic / sizeof *k_key_basic);
 bool is_mod_row(Row r) { return r >= ROW_MOD0 && r <= ROW_MOD_END; }
 
 // ---- Debug > developer options: one row per environment variable (psp_env_options.inc) ----
@@ -750,6 +758,14 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
     char buf[96];
     for (Row r : g_rows) {
         psp_sddialog::MenuRow m;
+        if (r >= ROW_KEYMAP0 && r <= ROW_KEYMAP_END) {   // Move Keys page
+            const int i = int(r - ROW_KEYMAP0);
+            const KeyLine& k = i < k_nmoves ? k_key_moves[i] : k_key_basic[i - k_nmoves];
+            m.label = std::string(k.key) + (k.what[0] ? "   " : "") + k.what;
+            m.value = k.btn;
+            m.help = std::string("Keyboard key: ") + k.key + "\n" + (k.what[0] ? std::string(k.what) + ": " : std::string("PSP ")) + k.btn + (i < k_nmoves ? ". Both buttons go down together, as the game needs (R held first makes a block instead). Holding R or L and pressing the face button still works." : ". Fixed layout; a controller works as usual.");
+            out.push_back(std::move(m)); continue;
+        }
         if (is_mod_row(r)) {
             const size_t i = size_t(r - ROW_MOD0);
             if (i < g_mods.size()) {
@@ -1001,8 +1017,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         }
         case ROW_KEYS_INFO:
             m.label = "Move Keys";
-            m.value = "D F E V 1 2";
-            m.help = "Keyboard keys for moves that take two buttons\nD: dodge (R + Cross). F: dash (R + Triangle). E: EX Mode (R + Square). V: summon (R + Circle). 1: Brave assist (L + Circle). 2: HP assist (L + Square). Both buttons go down together, as the game needs. The rest: arrows, X / Z / A / S for Cross / Circle / Square / Triangle, Q / W for L / R, Space START, Tab SELECT.";
+            m.value = "D F E V 1 2   >";
+            m.help = "Press Cross to open the full list of keyboard keys.\nKeyboard keys for moves that take two buttons\nD: dodge (R + Cross). F: dash (R + Triangle). E: EX Mode (R + Square). V: summon (R + Circle). 1: Brave assist (L + Circle). 2: HP assist (L + Square). Both buttons go down together, as the game needs. The rest: arrows, X / Z / A / S for Cross / Circle / Square / Triangle, Q / W for L / R, Space START, Tab SELECT.";
             break;
         case ROW_TEST_CTRL:
             m.label = "Test Controls";
@@ -1255,6 +1271,8 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_SEC_TOUCH: m.label = "Touch screen"; break;
         case ROW_SEC_PAD: m.label = "Controller"; break;
         case ROW_SEC_KEYBOARD: m.label = "Keyboard"; break;
+        case ROW_SEC_KEYS_MOVE: m.label = "Two-button moves"; break;
+        case ROW_SEC_KEYS_BASIC: m.label = "Other keys"; break;
         case ROW_SEC_GAME: m.label = "Game"; break;
         case ROW_SEC_SESSION: m.label = "Session"; break;
         case ROW_SEC_REFL: m.label = "Reflections"; break;
@@ -1541,7 +1559,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
                        : "Effect lights (debug)\nHow bright the light from glowing attack effects is (PSPRECOMP_FX_LIGHT_INTENSITY); x0 = off, default x2.5. Needs Ray-Traced Shadows. Saved.";
             break;
         }
-        case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: {
+        case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15: {
             const size_t i = size_t(r - ROW_DBG0);
             if (i >= g_dbg_toggles.size()) break;
             const bool on = g_dbg_toggles[i].get();
@@ -1604,23 +1622,24 @@ bool slider_of(Row r, int* steps, int* cur) {
 psp_sddialog::SetKind row_kind(Row r) {
     using K = psp_sddialog::SetKind;
     if (is_ext_row(r)) { const auto& v = g_saves.rows(); const size_t i = size_t(r - ROW_EXT0); return i < v.size() ? v[i].kind : K::Info; }
-    if (r == ROW_CLOUD_CONFLICTS) return K::Submenu;
+    if (r == ROW_CLOUD_CONFLICTS || r == ROW_KEYS_INFO) return K::Submenu;
+    if (r >= ROW_KEYMAP0 && r <= ROW_KEYMAP_END) return K::Info;
     if (is_mod_row(r)) return K::Toggle;
     if (r >= ROW_SUB_ENV0 && r <= ROW_SUB_ENV_END) return K::Submenu;
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
-    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_UPDATES: case ROW_LR_BUTTONS: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
+    case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_UPDATES: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9:
+    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15:
         return K::Toggle;
-    case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
+    case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: case ROW_LR_BUTTONS: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
     case ROW_TEST_CTRL: case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: case ROW_TEXPACK_INSTALL: case ROW_TEXPACK_DOWNLOAD: return K::Action;
     case ROW_MOD_UNINSTALL: case ROW_TEXPACK_DEL: case ROW_TEXPACK: return K::Choice;
     case ROW_QUIT: return K::Danger;
     case ROW_SUB_HDR: case ROW_SUB_RT: return K::Submenu;
     case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_CLOUD_FOLDER: case ROW_CLOUD_URL: case ROW_CLOUD_USER: case ROW_CLOUD_PASS: return K::Text;
-    case ROW_NET_STATUS: case ROW_NET_UPNP_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: case ROW_KEYS_INFO: case ROW_MOD_INSTALL_STATUS: case ROW_TEXPACK_INSTALL_STATUS: return K::Info;
+    case ROW_NET_STATUS: case ROW_NET_UPNP_STATUS: case ROW_DISCORD_STATUS: case ROW_CLOUD_STATUS: case ROW_MODS_NONE: case ROW_MOD_INSTALL_STATUS: case ROW_TEXPACK_INSTALL_STATUS: return K::Info;
     default: return is_section(r) ? K::Header : K::Choice;
     }
 }
@@ -2383,7 +2402,7 @@ void change(int d) {   // left / right on the selected row
         save(w ? "env.FX_LIGHT_RADIUS" : "env.FX_LIGHT_INTENSITY", b);   // exported as PSPRECOMP_FX_LIGHT_* at the next start
         break;
     }
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: {
+    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15: {
         const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
         if (i < g_dbg_toggles.size() && g_dbg_toggles[i].get() != (d > 0)) g_dbg_toggles[i].set(d > 0);
         break;
@@ -2440,6 +2459,12 @@ void build_rows() {
         if (!psp_rt_active()) add(ROW_CONTACT);   // ray-traced shadows replace them
         if (!psp_rt_refl_active()) add(ROW_SSR);  // ray-traced reflections replace them
         add(ROW_SEC_RT); add(ROW_SUB_RT);
+        break;
+    case PAGE_KEYS:
+        add(ROW_SEC_KEYS_MOVE);
+        for (int i = 0; i < k_nmoves; i++) g_rows.push_back(Row(ROW_KEYMAP0 + i));
+        add(ROW_SEC_KEYS_BASIC);
+        for (int i = 0; i < k_nbasic; i++) g_rows.push_back(Row(ROW_KEYMAP0 + k_nmoves + i));
         break;
     case PAGE_RT:
         add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_CHAR); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
@@ -2499,8 +2524,10 @@ void build_rows() {
         if (!uninstallable().empty()) add(ROW_MOD_UNINSTALL);
         break;
     case PAGE_DEBUG:
-        add(ROW_PERF); add(ROW_FX); add(ROW_SYNC); add(ROW_RING); add(ROW_GLOWSOFT); add(ROW_GLOWPASS); add(ROW_FXL_INT); add(ROW_FXL_RAD);
-        for (size_t i = 0; i < g_dbg_toggles.size(); i++) g_rows.push_back(Row(ROW_DBG0 + int(i)));
+        add(ROW_PERF); add(ROW_FX);
+        for (size_t i = 0; i < g_dbg_toggles.size(); i++) if (g_dbg_toggles[i].under_fx) g_rows.push_back(Row(ROW_DBG0 + int(i)));   // (the Jecht combo helper)
+        add(ROW_SYNC); add(ROW_RING); add(ROW_GLOWSOFT); add(ROW_GLOWPASS); add(ROW_FXL_INT); add(ROW_FXL_RAD);
+        for (size_t i = 0; i < g_dbg_toggles.size(); i++) if (!g_dbg_toggles[i].under_fx) g_rows.push_back(Row(ROW_DBG0 + int(i)));
         add(ROW_SEC_DEV);
         for (int c = 0; c < EC_COUNT; c++) g_rows.push_back(Row(ROW_SUB_ENV0 + c));
         break;
@@ -2915,6 +2942,7 @@ void confirm_row() {
     switch (g_rows[size_t(g_sel)]) {
     case ROW_SUB_HDR: enter_sub(PAGE_HDR); return;
     case ROW_SUB_RT: enter_sub(PAGE_RT); return;
+    case ROW_KEYS_INFO: enter_sub(PAGE_KEYS); return;
     case ROW_QUIT:
         if (!g_quit_armed) { g_quit_armed = true; g_dirty = true; return; }
         std::fprintf(stderr, "[SETTINGS] quit from the settings menu\n");
@@ -2978,7 +3006,6 @@ void confirm_row() {
     case ROW_PROMPTS: change(psp_input_prompt_setting() >= PSP_PROMPT_KEYBOARD ? -5 : 1); return;
     case ROW_LR_BUTTONS: change(psp_input_lr_triggers() ? -1 : 1); return;
     case ROW_P1_PAD: { const auto v = p1_choices(); change(p1_index(v) + 1 >= int(v.size()) ? -p1_index(v) : 1); return; }
-    case ROW_KEYS_INFO: break;
     case ROW_TEST_CTRL: test_begin(); return;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
     case ROW_NET_MODE: change(g_net_internet ? 1 : -1); return;
@@ -3035,7 +3062,7 @@ void confirm_row() {
     case ROW_GLOWSOFT: change(ge_draw_fb_prefilter() ? -1 : 1); return;
     case ROW_GLOWPASS: change(ge_draw_fb_snapshot() ? -1 : 1); return;
     case ROW_FXL_INT: case ROW_FXL_RAD: change(1); return;
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: {
+    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15: {
         const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
         if (i < g_dbg_toggles.size()) change(g_dbg_toggles[i].get() ? -1 : 1);
         return;
@@ -3286,7 +3313,7 @@ void pointer_release(float ux, float uy) {
 
 void psp_settings_set_frame_rate_hook(const PspFrameRateHook& hook) { g_fps = hook; }
 void psp_settings_set_voice_hook(const PspVoiceHook& hook) { g_voice = hook; }
-void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (g_dbg_toggles.size() < 10) g_dbg_toggles.push_back(t); }
+void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (g_dbg_toggles.size() < 16) g_dbg_toggles.push_back(t); }
 void psp_settings_set_texpack_hook(const PspTexPackHook& hook) { g_texpack = hook; }
 void psp_settings_set_mod_installer(const PspModInstaller& inst) { g_installer = inst; }
 

@@ -2064,6 +2064,11 @@ bool exb_running();   // below
 // controls; the lock target's is brighter and shows its bravery. View only (no battle state).
 // 0 = off, 1 = HP bars, 2 = mini panels, 3 = the PPSSPP plugin's HUD (Settings > Debug; PSPRECOMP_TAGTEAM_OVERHEAD=1/2/3). With any of them the side panels are not drawn.
 int g_overhead = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e ? std::atoi(e) : 0; }();
+// Separate from the overhead style (user, 21 Nov): g_oh_assist = the bottom ally / other-enemy panels + moved gauges and orbs (the assist bar change),
+// g_hide_ui = hide our side panels. Both default off; the env override (the test scripts) and the 3v3 / FFA switches turn them on with the style.
+bool g_oh_assist = [] { const char* a = std::getenv("PSPRECOMP_TAGTEAM_OH_ASSIST"); if (a) return std::atoi(a) != 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e && std::atoi(e) != 0; }();   // PSPRECOMP_TAGTEAM_OH_ASSIST=0|1 and _HIDE_UI=0|1 set them alone
+bool g_hide_ui = [] { const char* a = std::getenv("PSPRECOMP_TAGTEAM_HIDE_UI"); if (a) return std::atoi(a) != 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e && std::atoi(e) != 0; }();
+void overhead_default_on() { if (g_overhead == 0) { g_overhead = 1; g_oh_assist = true; g_hide_ui = true; } }   // 3v3 / free-for-all: the side panels cover only two foes
 void overhead_update() {
     std::vector<TagHudOverhead> bars;
     if (g_overhead && g_bs && !exb_running()) {
@@ -2080,7 +2085,7 @@ void overhead_update() {
             bars.push_back(o);
         }
     }
-    tagteam_hud_overhead(bars, g_overhead);
+    tagteam_hud_overhead(bars, g_overhead, g_hide_ui);
 }
 void hud_update() {
     // The reserve lists are battle state (reserve_left / next_member_char decide KOs and call-ins), so they are kept up to date with the HUD off too:
@@ -6731,7 +6736,7 @@ void frame(recomp_context* c, uint32_t a0) {
     const uint32_t P = a0 + 0x1DCu;
     // styles 1 and 2 share style 3's bottom of the screen (user, 21 Nov): the ally / other-enemy panels under the HP bars, the gauges and the summon
     // orbs as below; only the two panels over the enemies are style 3's own (styles 1 and 2 draw their own bars / mini panels there)
-    const bool want = g_overhead >= 1 && g_overhead <= 3 && g_bs && g_nextra > 0 && ok(a0, 0x1DC + 0x900) && rb(P) == 1;
+    const bool want = (g_overhead == 3 || g_oh_assist) && g_bs && g_nextra > 0 && ok(a0, 0x1DC + 0x900) && rb(P) == 1;
     if (g_root && g_root != P) { for (View& w : g_v) { w.ok = w.num_ok = false; w.f = 0; } g_root = 0; g_gbase.clear(); g_orb.clear(); g_orb_scanned = false; }   // (a new HUD: the old one's panels went with it)
     if (!want) { if (g_root == P) release_all(c); return; }
     if (!alloc_mem()) return;
@@ -6753,11 +6758,12 @@ void frame(recomp_context* c, uint32_t a0) {
     for (int v = 0; v < NV; v++) {
         View& w = g_v[v];
         w.side = v == V_ALLY ? static_cast<int>(hs) : eside; w.s = v <= V_E1 ? OH_SCALE : BOT_SCALE;
-        if (v <= V_E1 && g_overhead != 3) { if (w.ok) release(c, w); continue; }
+        if (v <= V_E1 ? g_overhead != 3 : !g_oh_assist) { if (w.ok) release(c, w); continue; }
         if (w.ok && w.f != wantf[v]) release(c, w);
         if (!w.ok && wantf[v]) create(c, P, v, wantf[v], me);
         update(c, P, v, me, tgt, hide);
     }
+    if (!g_oh_assist) { restore_gauges(c); orb_restore(); return; }   // the assist bar change is its own option: the gauges and orbs stay as the game has them
     if (assist_off_now()) orb_restore(); else orb_move();   // Assist on: the summon orbs above the portrait badges; Assist off: their own spot (user, 21 Nov)
     if (assist_off_now()) { hide_assist(native_panel(P, 0)); hide_assist(native_panel(P, 1)); }   // Assist off: the bottom panels take the gauges' place (as the plugin)
     else move_gauges(c, P);   // Assist on: the gauge beside the Bravery number
@@ -9452,7 +9458,7 @@ void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t o = rd(0x089D5EA8u); static float last_left = 0;
         if (ok(o, 0x10)) { const float v = rdf(o), left = rdf(o + 4u); if (left > 0.0f && last_left <= 0.0f) { std::fprintf(stderr, "[SLOW] t=%.2fs slow motion %.2f for %.1f flags %08X:", dissidia_battle_age() / 60.0f, v, left, rd(o + 8u)); uint32_t f[6]; const int n = g_bs ? all_fighters(f) : 0; for (int i = 0; i < n; i++) std::fprintf(stderr, " %s %d", role_of(f[i]), static_cast<int16_t>(rd(f[i] + 0x180u) & 0xFFFFu)); std::fprintf(stderr, "\n"); } last_left = left; }
     }
-    if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}); }
+    if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); }
 }
 
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
@@ -9507,7 +9513,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static float last = -1.f; static unsigned same = 0, multi = 0, runs = 0; const float st = dissidia_logic_tick_len(); runs++;
         if (g_tt_age == last) same++; else if (last >= 0.f && g_tt_age - last > st * 1.5f) multi++;
         last = g_tt_age; if (runs % 600 == 0) std::fprintf(stderr, "[STEPCHK] t=%.2fs runs %u without a step %u over several steps %u\n", g_tt_age / 60.0f, runs, same, multi); }
-    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}); }   // no battle tick for a while: take the panels and strips off the screen
+    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); }   // no battle tick for a while: take the panels and strips off the screen
     if (g_bs && comms_handover() && g_roster_ok && rd(g_bs + 72) != 0 && g_cpu_stage_gen != g_battle_gen) {   // a party of CPUs: the retail slot fighter of a side whose stage entry is a CPU row is played by the AI from the first frame (the same decision on every machine: the roster)
         g_cpu_stage_gen = g_battle_gen; g_ram = rdram; g_ctx = ctx;
         for (int sd = 0; sd < 2; sd++) {
@@ -10200,8 +10206,8 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_enabled = e && e[0] && e[0] != '0';
     g_log = std::getenv("PSPRECOMP_TAGTEAM_LOG") != nullptr;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_EXTRAS")) g_mask = std::atoi(m);
-    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_3V3")) { g_three = (m[0] == '1') ? 1 : 0; if (g_three && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) g_overhead = 1; }
-    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_FFA")) { g_ffa = std::atoi(m) == 3 ? 3 : (std::atoi(m) == 4 ? 4 : 0); if (g_ffa && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) g_overhead = 1; }
+    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_3V3")) { g_three = (m[0] == '1') ? 1 : 0; if (g_three && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) overhead_default_on(); }
+    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_FFA")) { g_ffa = std::atoi(m) == 3 ? 3 : (std::atoi(m) == 4 ? 4 : 0); if (g_ffa && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) overhead_default_on(); }
     g_one_v_two = std::getenv("PSPRECOMP_TAGTEAM_1V2") && std::getenv("PSPRECOMP_TAGTEAM_1V2")[0] == '1';
     g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
@@ -10284,17 +10290,21 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     psp_settings_add_debug_toggle({"Tag Team 1v2", "Tag team 1 v 2 (experimental)\nWith Tag Team on: you alone fight the CPU's two fighters (no partner for you). Off: 2 v 2.\nAffects the next battle that starts.",
                                    +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }});
     psp_settings_add_debug_toggle({"Tag Team 3v3", "Tag team 3 v 3 (experimental)\nWith Tag Team on: two partners per side instead of one, three fighters on each team. L cycles the lock through every enemy. A fallen fighter's place is taken by a team mate still standing; a team with nobody left loses. Online the host's setting decides.\nAffects the next battle that starts.",
-                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on && g_overhead == 0) g_overhead = 1; }});
+                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on) overhead_default_on(); }});
     psp_settings_add_debug_toggle({"Free-for-all (3)", "Tag team free-for-all, 3 fighters (experimental)\nWith Tag Team on: you, the CPU and a second CPU fighter, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
-                                   +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on && g_overhead == 0) g_overhead = 1; }});
+                                   +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on) overhead_default_on(); }});
     psp_settings_add_debug_toggle({"Free-for-all (4)", "Tag team free-for-all, 4 fighters (experimental)\nWith Tag Team on: you and three CPU fighters, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
-                                   +[]() { return g_ffa == 4; }, +[](bool on) { g_ffa = on ? 4 : 0; if (on && g_overhead == 0) g_overhead = 1; }});
-    psp_settings_add_debug_toggle({"Overhead HP Bars", "Tag team: HP bars over the enemies' heads\nOn: a thin HP bar over each enemy; the one you are locked on to is brighter and shows its Bravery. Replaces the small side panels. Only on your screen. This session only.",
+                                   +[]() { return g_ffa == 4; }, +[](bool on) { g_ffa = on ? 4 : 0; if (on) overhead_default_on(); }});
+    psp_settings_add_debug_toggle({"Overhead HP Bars", "Tag team: HP bars over the enemies' heads\nOn: a thin HP bar over each enemy; the one you are locked on to is brighter and shows its Bravery. Only on your screen. This session only.",
                                    +[]() { return g_overhead == 1; }, +[](bool on) { g_overhead = on ? 1 : 0; }});
-    psp_settings_add_debug_toggle({"Overhead Mini Panels", "Tag team: mini status panels over the enemies' heads\nOn: a small panel (name, Bravery, HP bar and number) over each enemy, see-through; the one you are locked on to is stronger. Replaces the small side panels and the HP bars. Only on your screen. This session only.",
+    psp_settings_add_debug_toggle({"Overhead Mini Panels", "Tag team: mini status panels over the enemies' heads\nOn: a small panel (name, Bravery, HP bar and number) over each enemy, see-through; the one you are locked on to is stronger. Replaces the other overhead styles. Only on your screen. This session only.",
                                    +[]() { return g_overhead == 2; }, +[](bool on) { g_overhead = on ? 2 : 0; }});
-    psp_settings_add_debug_toggle({"Overhead PPSSPP HUD", "Tag team: the HUD of the PPSSPP plugin\nOn: half-size panels (face, Bravery, HP) over the enemies' heads, the one you are locked on to stronger; your ally and the other enemy in small panels at the bottom. Replaces the small side panels and the other overhead styles. Only on your screen. This session only.",
+    psp_settings_add_debug_toggle({"Overhead PPSSPP HUD", "Tag team: the HUD of the PPSSPP plugin\nOn: half-size panels (face, Bravery, HP) over the enemies' heads, the one you are locked on to stronger(the bottom panels and our side panels are separate options below). Replaces the other overhead styles. Only on your screen. This session only.",
                                    +[]() { return g_overhead == 3; }, +[](bool on) { g_overhead = on ? 3 : 0; }});
+    psp_settings_add_debug_toggle({"Overhead: Assist Bar", "Tag team: the assist bar change (for the overhead HUDs)\nOn: the ally and the other enemy get small panels at the bottom of the screen under the HP bars, the assist gauges move beside the Bravery numbers and the summon orbs above the portrait badges (the PPSSPP plugin's layout). Off: the game's own bottom bar. Works with or without an overhead style. This session only.",
+                                   +[]() { return g_oh_assist; }, +[](bool on) { g_oh_assist = on; }});
+    psp_settings_add_debug_toggle({"Hide Tag Team UI", "Tag team: hide the side panels\nOn: our small status panels at the screen edges are not drawn (the overhead styles show the same). Off: they are drawn next to any overhead style. This session only.",
+                                   +[]() { return g_hide_ui; }, +[](bool on) { g_hide_ui = on; }});
     if (!std::getenv("PSPRECOMP_SOUNDHEAP_RETAIL")) psp_dispatch_register(0x088A0C10u, soundheap_hook);
     std::fprintf(stderr, "[TAGTEAM] installed (%s)\n", g_enabled ? "on" : "off, Settings > Debug > Tag Team (2v2)");
 }

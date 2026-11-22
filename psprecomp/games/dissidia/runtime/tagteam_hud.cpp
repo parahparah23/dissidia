@@ -31,7 +31,7 @@ dissidia::MenuLayer g_layer;
 bool g_layer_shown = false;
 std::vector<TagHudFighter> g_fighters;
 std::vector<TagHudReserve> g_reserves;
-std::vector<TagHudOverhead> g_overhead; int g_overhead_style = 0;
+std::vector<TagHudOverhead> g_overhead; int g_overhead_style = 0; bool g_hide_panels = false;
 const uint8_t* g_hud_ram = nullptr;
 std::string g_banner;
 struct Notice { std::string text; int kind; double until, start; };   // wall-clock seconds
@@ -364,7 +364,7 @@ void tagteam_hud_big_panels(uint32_t l, uint32_t r) { g_big[0] = l; g_big[1] = r
 void tagteam_hud_clear() { g_hits.clear(); g_notices.clear(); g_banner.clear(); }
 
 void tagteam_hud_set_banner(const std::string& t) { g_banner = t; }
-void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style) { g_overhead = bars; g_overhead_style = style; }
+void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style, bool hide_panels) { g_overhead = bars; g_overhead_style = style; g_hide_panels = hide_panels; }
 void tagteam_hud_set_ram(const uint8_t* rdram) { g_hud_ram = rdram; }
 
 
@@ -431,7 +431,7 @@ void tagteam_layer_frame(bool in_battle) {
         for (const TagHudOverhead& o : g_overhead) if (o.target) overhead_bar(o);
         int row[2] = {0, 0};
         for (const TagHudFighter& f : g_fighters) {
-            if (g_overhead_style != 0) break;   // the overhead styles replace the side panels
+            if (g_hide_panels) break;   // Settings > Debug > Hide Tag Team UI
             const int s = f.side != 0;
             const bool g = f.ex >= 0.f || f.assist >= 0.f;   // with the gauges a panel is 31 high (rows 34 apart) and its EX tube sits outside it
             // Smaller and a little see-through (user, 22 Nov: "the side HUD is too big and distracting"): the stack is zoomed to kSideZoom about the

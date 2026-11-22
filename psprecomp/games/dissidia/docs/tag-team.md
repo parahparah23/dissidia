@@ -4470,3 +4470,10 @@ Rig copy `~/dissidia/tt/net4w` (net4t with ports 978x, process `net4wrt`, `PSPRE
 | `net10x/logs/z1` | 10 players, `KOLIST=slot0:20,slot1:40,slot0:60,slot0:80,slot1:100` + `CALLIN_DELAY=8` | 5th member of side 0 (the failing w5 point) | no `FAILED` / `alloc failed`, no `rebuild refused`, [TTSYNC] 82 samples equal on 10, 0 DESYNC lines |
 Notes: `AO9FORCE` role names (`extraP` / `extraE`) are read from each machine's own view, so pass BOTH roles at the same times on every copy. Only the `[AO8] .. fx <handle>` word differs between machines (an effect handle, local).
 Not verified: a CPU enemy hitting a running assist (round 10 swap) in a lock-step battle (no natural hit in 16 + 16 calls); a CPU slot fighter called by a human partner in round 9; 4-player run of the battle heap (the 4-/3-player rigs have at most 3 characters per side).
+
+## Overhead style, assist bar and side panels are separate (21 Nov; user request)
+- Overhead rows (HP Bars / Mini Panels / PPSSPP HUD) now only control the overheads.
+- **Overhead: Assist Bar** (`g_oh_assist`): the bottom ally / other-enemy panels, the moved gauges and orbs (used to come with every overhead style). Default off; works without an overhead style.
+- **Hide Tag Team UI** (`g_hide_ui`): our side panels are not drawn (used to be implied by any overhead style). Default off.
+- With overhead off and both options off the look is as before. Turning on 3v3 / FFA (switch or env) when no style is on still picks style 1 AND turns both options on (`overhead_default_on()`), as before.
+- `PSPRECOMP_TAGTEAM_OVERHEAD=N` (N > 0) turns both options on too (existing test scripts); `PSPRECOMP_TAGTEAM_OH_ASSIST=0|1` and `PSPRECOMP_TAGTEAM_HIDE_UI=0|1` set them alone.

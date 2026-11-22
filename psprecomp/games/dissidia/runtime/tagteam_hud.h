@@ -40,7 +40,7 @@ struct TagHudOverhead {
 // The bars for the next frames (once per HUD tick); an empty list removes them. style: 1 = a thin HP bar (the target's with its Bravery),
 // 2 = a mini status panel (name, Bravery, HP bar and number), 3 = the PPSSPP plugin's HUD (v0.52-v0.61): half-size panels with the face over the
 // enemies, the ally and the other enemy on the assist-gauge row at the bottom; 0 = off. With 1, 2 or 3 the side panels are not drawn.
-void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style = 1);
+void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style = 1, bool hide_panels = false);
 // Guest memory, for the bars' positions (tagteam.cpp, every frame before tagteam_layer_frame).
 void tagteam_hud_set_ram(const uint8_t* rdram);
 
