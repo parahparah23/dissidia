@@ -310,6 +310,10 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
     g.step('cross')                                    # Quick Battle (1-on-1) -> Player Select
     time.sleep(1.0)
     lap('player select')
+    if os.environ.get('BT_PS_SHOT'):                   # debugging: the Player Select grid (where is a character?)
+        time.sleep(3.0); g.shot().save(os.environ['BT_PS_SHOT'])
+    if os.environ.get('BT_GRID'):                      # BT_GRID=down,right overrides the character's cursor steps (a character not in GRID)
+        GRID[char.lower()] = tuple(int(x) for x in os.environ['BT_GRID'].split(','))
     row, col = GRID[char.lower()]
     for _ in range(row):
         g.step('down', settle=False)

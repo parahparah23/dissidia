@@ -384,6 +384,24 @@ void wrf(uint32_t a, float f) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &f, 4); }
 bool ok(uint32_t a, uint32_t n) { return psp_guest_user_ok(a, n); }
 
 FuncPtr fn(uint32_t addr) { return addr >= 0x089DD4C0u ? ovl_battle_lookup(addr) : psp_dispatch_probe_lookup(addr); }
+// Debug (PSPRECOMP_TAGTEAM_SUMGATE=1): log the return values of the summon manager's gates (FUN_08A235C0 / 08A23454 / 08A07504 / 08889B10 / 08ADFE20 / 088912D0 / 08A23DA8) whenever one changes.
+namespace sumgate {
+struct G { uint32_t addr; FuncPtr orig; uint32_t last_a0 = 0xFFFFFFFFu, last_a1 = 0xFFFFFFFFu, last_v = 0xFFFFFFFFu; uint32_t n = 0, nv1 = 0; };
+G g_g[18] = {{0x08A235C0u, nullptr}, {0x08A23454u, nullptr}, {0x08A07504u, nullptr}, {0x08889B10u, nullptr}, {0x08ADFE20u, nullptr}, {0x088912D0u, nullptr}, {0x08A23DA8u, nullptr}, {0x08891510u, nullptr}, {0x08A076F8u, nullptr}, {0x08891944u, nullptr}, {0x08A07548u, nullptr}, {0x0889120Cu, nullptr}, {0x08A22C78u, nullptr}, {0x08A23488u, nullptr}, {0x08A23AECu, nullptr}, {0x08A23BB8u, nullptr}, {0x08A0785Cu, nullptr}, {0x08A0777Cu, nullptr}};
+template <int I> void hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]), a1 = static_cast<uint32_t>(ctx->r[5]);
+    g_g[I].orig(rdram, ctx);
+    const uint32_t v = static_cast<uint32_t>(ctx->r[2]);
+    g_g[I].n++; if (v == 1) g_g[I].nv1++;
+    if (I == 6 && g_g[6].n % 120 == 0) { std::fprintf(stderr, "[SUMCNT] mgr call %u:", g_g[6].n); for (int k = 0; k < 18; k++) std::fprintf(stderr, " %04X:%u/%u", g_g[k].addr & 0xFFFFu, g_g[k].n, g_g[k].nv1); std::fprintf(stderr, "\n"); }
+    if (std::getenv("PSPRECOMP_TAGTEAM_SUMGATE")[0] == '1' && (v != g_g[I].last_v || a0 != g_g[I].last_a0 || a1 != g_g[I].last_a1)) { g_g[I].last_v = v; g_g[I].last_a0 = a0; g_g[I].last_a1 = a1; std::fprintf(stderr, "[SUMGATE] %08X(a0 %08X a1 %08X) -> %08X\n", g_g[I].addr, a0, a1, v); }
+}
+void install() {
+    if (!std::getenv("PSPRECOMP_TAGTEAM_SUMGATE") || g_g[0].orig) return;
+    FuncPtr hs[18] = {hook<0>, hook<1>, hook<2>, hook<3>, hook<4>, hook<5>, hook<6>, hook<7>, hook<8>, hook<9>, hook<10>, hook<11>, hook<12>, hook<13>, hook<14>, hook<15>, hook<16>, hook<17>};
+    for (int i = 0; i < 18; i++) { g_g[i].orig = fn(g_g[i].addr); if (g_g[i].orig) psp_dispatch_register(g_g[i].addr, hs[i]); }
+}
+}
 
 // Calls a guest function with up to 5 integer arguments and returns v0; the registers are restored afterwards.
 uint32_t call(uint32_t addr, uint32_t a0, uint32_t a1 = 0, uint32_t a2 = 0, uint32_t a3 = 0, uint32_t a4 = 0) {
@@ -1162,6 +1180,13 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t bs = static_cast<uint32_t>(ctx->r[4]);
     g_ram = rdram; g_ctx = ctx;
     pool_dump("setup start"); intro_release("setup");
+    sumgate::install();
+    if (const char* ts = std::getenv("PSPRECOMP_TEST_STONE")) {   // test aid: "side:id[,side:id]" sets that side record's equipped stone byte (current set +0xB8) before the fighters are made
+        for (const char* q = ts; q && *q;) { const int sd = std::atoi(q); const char* c = std::strchr(q, ':'); if (!c) break; const int id = std::atoi(c + 1);
+            if (sd >= 0 && sd < 2) { const uint32_t rec = REC_BASE + 0x1060u * static_cast<uint32_t>(sd); const uint32_t set = g_ram[(rec + 0x773u) & 0x07FFFFFFu];
+                const uint32_t a = rec + 0x10u + 0xC6u * (set > 4 ? 0 : set) + 0xB8u; std::fprintf(stderr, "[TESTSTONE] side %d stone %02X -> %02X (rec %08X set %u)\n", sd, g_ram[a & 0x07FFFFFFu], id, rec, set); g_ram[a & 0x07FFFFFFu] = static_cast<uint8_t>(id); }
+            q = std::strchr(c, ','); if (q) q++; }
+    }
     if (!g_orig_ctor) {   // ownership recording for the retail pair (the constructor and the init run inside the original setup)
         g_orig_ctor = fn(FIGHTER_CTOR);
         const uint32_t vfn0 = rd(FIGHTER_VT + 256u + 4u);
@@ -1233,6 +1258,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!g_orig_dmg && std::getenv("PSPRECOMP_TAGTEAM_LETHALCLAMP")) { g_orig_dmg = fn(0x08AE6D2Cu); if (g_orig_dmg) psp_dispatch_register(0x08AE6D2Cu, dmg_hook); }   // opt-in experiment: HP attacks do not go through FUN_08AE6D2C (never fired)
     if (!g_orig_rules && !std::getenv("PSPRECOMP_TAGTEAM_NOROUNDGUARD")) { g_orig_rules = fn(0x08A23DA8u); g_orig_slotactor = fn(0x08A22C78u); if (g_orig_rules && g_orig_slotactor) { psp_dispatch_register(0x08A23DA8u, rules_hook); psp_dispatch_register(0x08A22C78u, slotactor_hook); } }
     if (!g_orig_ast3) { g_orig_ast3 = fn(0x08AED83Cu); if (g_orig_ast3) psp_dispatch_register(0x08AED83Cu, ast3_hook); }
+    sumgate::install();
     if (!g_orig_bctl) { g_orig_bctl = fn(0x08886C88u); if (g_orig_bctl) psp_dispatch_register(0x08886C88u, bctl_hook); }
     if (!g_orig_extick && std::getenv("PSPRECOMP_TAGTEAM_EXTICKLOG")) { g_orig_extick = fn(0x08AEBF10u); if (g_orig_extick) psp_dispatch_register(0x08AEBF10u, extick_log_hook); }
     if (!g_orig_corepick && !std::getenv("PSPRECOMP_TAGTEAM_NOEXTRACORE")) { g_orig_corepick = fn(0x08AC27DCu); if (g_orig_corepick) psp_dispatch_register(0x08AC27DCu, corepick_hook); }
@@ -4225,6 +4251,8 @@ void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
     bool reserve = !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTCALLIN") && reserve_left(team_of(side_of(a))) > 0;
     if (ffa_now()) { mate = ffa_keep(a); reserve = false; }
     if (alive(a) || mate || reserve) {
+        // a slot fighter with a pending summon request (bit 0x10 of +0x5B3, set by the fighter's step on R + Circle / the AI's use) must reach the manager: the same step processes the summon (use + cut-in)
+        if ((g_ram[(a + 0x5B3u) & 0x07FFFFFFu] & 0x10u) && alive(a) && !std::getenv("PSPRECOMP_TAGTEAM_NOSUMFIX")) return;
         ctx->r[2] = 0;
         static std::map<uint32_t, float> last_t;
         if (g_log && (!last_t.count(a) || dissidia_battle_age() - last_t[a] > 1800.f)) { last_t[a] = dissidia_battle_age(); std::fprintf(stderr, "[TAGTEAM] t=%.1fs round guard: rules step skips slot actor %08X (%s, hp %d script %d)\n", dissidia_battle_age() / 60.0f, a, alive(a) ? "alive" : mate ? "KO'd, a team mate takes over" : "KO'd, a reserve member comes in", static_cast<int>(rd(rd(a + 0x52Cu) + 0xCu)), static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu)); }

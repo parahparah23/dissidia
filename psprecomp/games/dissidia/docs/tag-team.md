@@ -4688,3 +4688,121 @@ player lobby); all these modes are tag-team modes, so they exist only under Batt
   (`ttfa_f`): no extras; Team 2 v 2 without fill and without CPU rows (`ttfa_g`): only the enemy's second member (as before). Menu-mode walk `tagteam_menu_walk.txt` (no env) = tag battle; `sp_cpu_walk.txt` with `PSPRECOMP_TAGTEAM=1`: Terra partner; the same with
   `PSPRECOMP_TAGTEAM_FFA=4`: override honoured. Online: two-copy `mp_test.py` 150 s with the debug switch: lobby `[LOBBY] host`, `[NETSYNC]` 4800 frames compared, 0 mismatched.
 - Not tested: a real device, Communications > Tag Team Battle through the menu rows (only the debug-switch route of mp_test), a saved lobby read at a fresh start with a different mode (only the write was seen), 1 vs 1 Duel vs Tag Duel are the same battle (as online).
+## Summonstones per fighter: research notes, NOT implemented (21 Nov, tree ttcam; host-only, headless)
+Request: every fighter should have his own Summonstone (own gauge / uses), the HUD orb should show the panel fighter's stone. **Result: the retail summon mechanism was not found in
+this session, so no per-fighter (and no slot-switching) code was written.** What was established:
+- **Where the stone is stored.** In the 0x778-byte character record (the save's per-character record, the actor's copy at `actor +0x30C`, the side record at `0x09AFB8A0 + 0x1060 * side`),
+  per loadout set (`record + 0x10 + 0xC6 * set`, set = byte `+0x773`) the 16-byte trailer at set `+0xB6` is `{char id u16, X, stone?, ...}`. The byte at set `+0xB8` was `0x12` for Jecht and
+  Squall (the test save has Ifrit on Squall; Jecht probably too), `0x0B` for the Lightning CPU, `0x15` for the CPU-built enemy partner (Terra / char 30 row), `0xFF` / `0x01 0xFF` in the unused
+  sets 1-4. (Inferred from the values only: the code that reads it was not located; the 40 EBOOT functions that read `+184` of a pointer are menu / customization code.)
+  Because the actor's copy and the rebuild / extra records come from `record_for(...)` (same path as the accessories, see "Accessories per fighter"), every fighter already carries HIS OWN stone byte.
+  `PSPRECOMP_TAGTEAM_SUMOBJ=1` logs `[SUMOBJ] ... stonebyte NN` per fighter (frames 200 / 1200 / 2400); `PSPRECOMP_TAGTEAM_ACCLOG=3` dumps the whole record copy as hex (`[ACCREC]`).
+- **Not the summon state:** actor `+0x5A4` (object whose byte 0 is the character id; the HUD function `FUN_089E4CC0` picks the orb effect from a table by `*(+0x5A4)` byte == 0x20, so it is a character-info
+  object, not a stone object); the status block (`+0x52C`: `+0x18` EX, `+0x1C` assist, nothing else climbing); ability block `+1508` (accessory boost, 100 / 120 / 144); the battle controller `FUN_08886C88`'s
+  per-side handler lists (+0x20 EX, +0x28 assist, +0x30 `FUN_08ADC5C0`, +0x38 `FUN_08AEBA2C`, +0x48 `FUN_08AEF4B0`: no summon-like gauge in the fields that change).
+  `PSPRECOMP_TAGTEAM_SUMLOG=1` (per 120 frames, `[SUMLOG]` per fighter: changed words of the status block, ability block and actor +0x1100..; `[SUMCTL]` the controller's handler objects) was used for this.
+- **Behaviour seen:** R + Circle in a Quick Battle (Squall, Ifrit equipped) is just Squall's Circle attack (script 10008, Ravager banner), no summon. In a 430 s 1v1 run (`FIRSTCALL` phases of 50 s) no function was
+  called for the first time after the start, i.e. no stone fired; in the 90 s party runs none either (the 15 Nov notes: "In 100 s of normal AI 2v2 no Summonstone fired at all"). So the stone is either gated by
+  something not set in the test fights (battle rule, gauge fill source such as damage dealt) or the gauge is not in the data looked at. The RP6 log `desk_logs/rp6_summon_2158.log` has no summon line (only texture-pack names).
+- **Orb on the HUD:** drawn from HUD effect data (see "Summon orb" in the HUD notes); the left (human) orb of the test fight shows an "A", the CPU's orb none. How it reads its fighter was not traced.
+- **Next steps (for whoever continues):** (1) find the reader of set `+0xB8`: watch for the stone byte with a read breakpoint under gdb (`watch -l` on the record copy's stone byte, `rwatch`), or look
+  for lookups by the stone id into a table (battle.bin / main.bin stone parameter table, Ifrit = 0x12?); (2) once the summon object / gauge is known, a per-fighter version is likely the same
+  construction as the extras' EX / assist handler copies (see "EX and assist gauges of the extras"): copy the slot's stone handler per extra with owner = the extra, and switch the side's entry in
+  the controller list on swap / call-in.
+
+### Summonstones, second round (21 Nov, 1v1 with the tag team off): still no summon fired, more is ruled out
+- **Read-watch recipe (works):** the host has `ptrace_scope=1`, so gdb cannot attach, but it can START the game: replace `work_Xx/build/psprecomp_runtime` by `exec gdb -batch -x CMD --args .../ttcamrt "$@"`; CMD breaks on a battle function
+  (`break FUN_0888ba0c` = setup, or `ovl_battle_FUN_089e1fd0` = a HUD frame), takes `$B = $rdi` (the rdram base; guest address a is at `$B + (a & 0x07FFFFFF)`) and arms `rwatch` / python `gdb.Breakpoint(..., gdb.BP_WATCHPOINT,
+  gdb.WP_READ)` objects whose `stop()` prints the backtrace and returns False. Register args of a recompiled function: rdi = rdram, rsi = ctx (`r[n]` at `ctx + 4n`). Log with `set logging file`.
+- **Who reads the stone byte (set +0xB8):** only the setup copies, no battle code. Side record (`0x09AFB968` set 0, side 0): `FUN_08835468` (the actor's record copy, from `FUN_08B2EAC0`) and `FUN_088FB1A4` (called from
+  `FUN_088C990C`, copies both side records and the rule block `REC_BASE + 9640..` into a snapshot struct, `0x08B99034` here; nothing read that snapshot's stone byte in a 40 s battle). The actor copies (`actor +0x30C`,
+  e.g. `09D33000` for Squall, `09D33E20` for the CPU) were watched for reads of the stone byte from the end of the init for 40 s of battle, with and without R + Circle pressed: **no read at all**. The side
+  record itself is reused after the setup (garbage by the first HUD frame).
+- **The orb is not the stone icon:** `PSPRECOMP_TEST_STONE=<side>:<id>[,..]` (new test aid, applied in `setup_hook`, logs `[TESTSTONE]`) sets the equipped stone byte before the fighters are made. Stones 1..24 on side 0 give
+  the identical HUD (red orb with the purple "A" = the ASSIST gauge orb, not a summon icon). So, in this Quick Battle, the stone has no visible effect: no icon, no gauge.
+- **R + Circle** (R held first, `[CHORD] raw 2200 -> game 2200`) in a neutral frame (frozen dummy) starts no action; with a fighting CPU it once gave `scr 10030` for 400 ms (`/tmp` run r15, not reproduced in three tries), otherwise Squall's
+  Circle attack (10008). `08A76A88` is the player's pad-to-action translator (reads `FUN_088119B0`'s button word: R 0x200, Circle 0x2000; the R branch calls `FUN_08A74FC4`), no summon there that I could identify.
+- **Rule block:** `REC_BASE + 9640` (the quick battle's rules, e.g. `9648` byte 2 = 02, 01, 00, FF; 100-percent style words at 9676..9716; the two per-side structs at 10000 / 10056 with the char id at +0x26): possibly a
+  "summonstones allowed" flag lives here (`FUN_08886C88` tests byte `+9648 == 1`); not tested. Next: compare this block between a mode where the user sees summons work (Arcade? the exact mode / stone / steps from the user)
+  and the Quick Battle walk, and run the gdb recipe with the stone byte watch armed in THAT mode while pressing R + Circle.
+
+### Summonstones, third round (22 Nov, tree ttcam re-synced to tag-slot eda9e74): still not triggered
+- `PSPRECOMP_TEST_STONE=0:<id>` for every id 1..24 with R held first (set R, R + Circle 300 ms later, R, release; frozen dummy, neutral): in no case did the player's action change, no screenshot shows any summon.
+  The same with the default stone (0x12) pressed every 15 s for 300 s of game time (frozen dummy): nothing. (A gauge that needs damage / hits to fill is not excluded: the dummy is frozen and the fighter is not hit.)
+- CPU side: `PSPRECOMP_TEST_STONE=1:<id>` for ids 1..22, 150 s of CPU-vs-idle-human with first-call phases (30 s each): the functions that appear only in a few stone runs are fighter action-state handlers (0x08A5xxxx / 0x08A0xxxx
+  state classes: knock-down / guard states, random with the fight), not stone-specific code; nothing points at a summon.
+- Still needed: the user's exact mode and steps (which stone, which battle mode, how much of the fight before it fires), then the gdb read-watch recipe above armed on the stone byte in THAT fight.
+
+### Summonstones, fourth round: the RP6 1v1 log `desk_logs/rp6_summon1v1_0702.log` (22 Nov; tag team off, 120 fps, texture pack on)
+- Battle starts at `[CHORD] 56590973`; the user's pad in the fight: Cross at +0.0 s and +2.7 s (two Cross taps), then at **+11.06 s `raw 2200 -> game 2200`** (R and Circle together, 70 ms window passes it), R alone 320 ms later.
+- Right after it the log shows: `ui/battleairdodgeeffect.png` loaded (the dodge effect texture), `[FPS] 30 Hz logic off` (= `battle_running()` / `in_fight()` went false, NOT a slow motion; framerate.cpp 2545), `30 Hz logic on (fight)` again,
+  `30 Hz logic off` a second time, and from ~10 s later `[HANGDUMP] game thread stuck` every 4 s to the end of the log (9 dumps, game frame counter frozen while the GPU still draws 90 fps). The world list at the hang: 2 fighters (kind 0),
+  1 assist (kind 1) and **37 kind-5 objects** (flags 0805E802 / 0805F800, bullets / summoned objects: the first 20 `E802`, the rest `F800`). No `[FIGHTER]` lines (not enabled), no summon voice / SE line; the only extra IO is async reads on fd 9
+  (47996 / 49280 / 1284 bytes: streaming).
+- So what the user saw after R + Circle looks like the summon starting and the game thread then hanging inside its object update (or the battle being torn down), not a finished summon. Not reproduced headless: on the host (30 fps, Squall with stone 0x12,
+  CPU fighting or frozen, with and without hits first) R + Circle never leaves "Circle attack" and never toggles the 30 Hz logic. Differences still open: 120 fps (30 Hz logic mode), the character and stone of the user's party (unknown),
+  the texture pack.
+- Next: run the same fight at `--fps 120` with `PSPRECOMP_FIGHTER_LOG=1`, the user's character / stone (ask which), and the gdb read-watch on the stone byte; check `g_hang_watch` / the hang dump for the loop (kind-5 chain).
+
+### Summonstones, fifth round (22 Nov): a summon fires headless; correction: the stone byte is set `+0xBA`, not `+0xB8`
+- **Reproduction (works).** The user's RP6 save (Cecil / Squall set up with stones), copied to a test dir's `ms0/PSP/SAVEDATA/ULUS10566GameData00` (never written back, no cloud). Quick Battle walk, frozen dummy (`FREEZE`), script
+  `8000 set R / 8300 set R+CIRCLE / 8600 set R / 8900 set -` (R first, then Circle, neutral). Squall with that save: the orb under the HP bar shows **"R+O"** (manual stone; the old test save showed **"A"** = an AUTO stone, so the label is the
+  stone's trigger), R + Circle at 8.3 s gives the Moogle cut-in "Gaia's Wrath", the foe's BRV drops, "BRV tripled when damaged!". Cecil: `PSPRECOMP_TEST_CHAR_SWAP=15=7` (charId 7 = Cecil; the quick walk's Squall is swapped for his
+  model and his own record from the save) gives the "Delta Attack" cut-in and "Bravery halved!" (foe BRV 9999 -> 4999). Earlier headless failures were the old test save (an AUTO stone, no R + Circle summon) and CPU-only tests.
+- **Stone byte:** `record + 0x10 + 0xC6 * set + 0xBA` (set = byte `+0x773`): Squall 3 (old save) / 0x19 (new; Gaia's Wrath), the Lightning CPU 0x0A / 0x13 (CPU builder, random per run), unused sets 0xFF. (`+0xB8` was the
+  wrong guess of the earlier sections; it holds a different field.) Watching the actor copy `actor +0x30C` for reads during the fight again showed none: the id is consumed at init (copied into the fighter's own state) and
+  I did not find where. Fighter-struct diffs old / new save: status block, ability block and actor `+0x10B8..0x10C7` (four words, `ff ff ff ff` in the new save for Squall) differ but are not the stone.
+- **Entry points seen** (gdb `break` on recompiled functions, args via ctx): the cut-in and the BRV message run through `FUN_08AE3E34` (< `FUN_08891D84` < `FUN_08A00078` < `08A02628` < `08A03BD8` < `08A07DFC` < `08A23DA8` < `08A23358` <
+  `08A220F4` < `08A22978`, the per-frame battle HUD / message system, id 5 / 6 = message ids), which also calls `FUN_08AEA080` / `FUN_08AE9E2C` / `FUN_08AE3710`; these are only called while a summon is on (first-call diff: 324 new
+  functions in the 1.5 s of the cut-in, most in 0x0894xxxx - 0x0897xxxx = the cut-in's own HUD / effect code, `FUN_08A5B2B4` starts actions 0x1D6 / 0x1D7 = 470 / 471, `FUN_088A9DE8` effect start). `FUN_0882FA10` (start action) is NOT
+  called with a summon-specific id for the human during the cut-in (only 470).
+- **Not done:** the per-side summon state (used flag, orb label, timers) is still unlocated, so no per-fighter / slot-following summon code was written. Tools added: `battle_test.py` `BT_GRID=down,right` (Player Select cursor for a
+  character not in `GRID`) and `BT_PS_SHOT=<file>`; the gdb recipe above. Next step with the working repro: diff the whole battle state (actors, controller `FUN_08886C88` handlers, the HUD object at `0x089D...`) at three moments
+  (before, during the cut-in, after) with the debug socket (`R` reads of 64 KB) restricted to the regions that are NOT effect / texture memory, or a gdb write-watch on the orb's HUD effect when it is re-created
+  after the use (the "R+O" icon disappears after the summon: the foe's / own orb loses its label in the screenshots).
+
+### Summonstones, sixth round (22 Nov): tag battles with extras do NOT summon for the human; where the summon state lives
+Same user save copy (Squall: stone 0x19 Gaia's Wrath, manual "R+O"; Cecil via `PSPRECOMP_TEST_CHAR_SWAP=15=7`), R then R + Circle (300 ms later), frozen dummy.
+- **Plain 1v1 Quick Battle:** summons (Moogle "Gaia's Wrath" cut-in, BRV x3 when damaged). **Plain party battle (`party_battle_walk.txt`, tag off; Jecht human):** summons too (Gaia's Wrath at 12 s).
+  **Tag team on, no extras (Quick Battle, `PSPRECOMP_TAGTEAM=1`):** summons (the CPU even used "Judgment Bolt", its orb lost its label). **Tag team on WITH extras (`CLONES=1` Quick Battle, and the party battle with `SP_PARTNER=1`):
+  R + Circle does nothing for the human**, at 8 s (inside the extras' entrance banter) and at 24 s alike: no cut-in, the orb keeps its "R+O" label, the use is never spent. This is the user's "summons don't work" report. (Orb label "R+O" is
+  shown on the human's panel in tag battles; the CPU's orb shows no label of its own kind until it fires.) The swap / call-in and extras' AUTO-stone questions could not be tested: nothing fires for the human at all.
+- **What differs:** with first-call tracing (`FIRSTCALL`, press at 24 s) the human's action 470 (`FUN_08A5B2B4`, script 0x1D6 = the summon pose) starts in BOTH modes, with the same first 30 new functions; the tag run then never reaches the
+  cut-in (124 new functions against 655). The functions missing in the tag run start at `FUN_08830938`, `FUN_088912D0`, `FUN_08B33914` (called from the summon HUD updater `FUN_08A23DA8`), then `08A07DFC`, `08A03BD8`, `08A02628`, `08891D84`,
+  `08AE3E34` (the cut-in / message), `088A9DE8` (effect start).
+- **Summon state found (plain run, write-watch + polling):** per fighter, **actor `+0x10CE` (halfword) = summon uses left (1 at the start; 0 after the use) and actor `+0x10D0` (word) = "use event" flag**, both changed by `FUN_08B33914(actor+0x10CE-ish)`:
+  `if (h > 0) { h--; *(actor+0x10D0) = 1; }`, called from the summon HUD / manager updater `FUN_08A23DA8` (call chain `FUN_08A22978 > 08A220F4 > 08A23358 > 08A23DA8`, per frame) once per side after `FUN_088912D0(this + 240 + 40 * side)` says
+  that side's entry has a pending use. `FUN_08A22C78(side)` returns the side's fighter from the battle object's slot table (`*(0x089D6A10) + 56 + 4 * side`, the table the tag code lends to extras in a chase: candidate cause). The CPU fighters also
+  keep `+0x10C0 / +0x10C4` (e.g. 0x0F / 0x13 = a stone id) and `+0x10CC` = 1; the human's `+0x10C0..0x10C7` are `ff ff ff ff`. `FUN_08B33DDC(actor, kind)` starts the common effect for the stone (`FUN_088A9DE8` with the effect id from the
+  fighter's equipment/skill table at `actor + 0xD5C`); the AI side asks through `FUN_08B2FB6C` (called from the brain tick `FUN_08A64400`).
+- **Not done:** no implementation. The next step is to find why the summon manager's per-side entry is not filled in tag battles (compare `this + 240` entries and `FUN_08A22C78` results plain vs tag at the press), then make
+  the entry follow the panel fighter; extras need their own `+0x10CE` use counter and stone id copied from their records (stone byte `+0xBA` of the current set).
+
+### Summonstones, seventh round (22 Nov): the request flag and the manager's entries; tag battles still do not summon
+- **Switches tried (tag on, `CLONES=1`, press at 24 s): `NOCHASE_BS`, `NOCHASEPAIR`, `NOHUDLOCK`, `NOACCUI`: none restores the summon** (screens `/tmp/ttcam_sm/nc_all.png`: orb still "R+O", no cut-in).
+- **Summon request flag:** the fighter's step `FUN_08B3526C` sets **bit 0x10 of actor `+0x5B3`** (byte 3 of the flags word at `+0x5B0`) when R + Circle starts the summon action (this happens in both modes: write-watch on `actor + 0x5B0`
+  shows the `FUN_08B3526C` write in plain and in tag). In plain the summon manager's updater `FUN_08A23DA8` (this = `0x09AEE40C`) reads and CLEARS that bit (`byte &= ~0x10`, seen as a write by `FUN_08A23DA8`), then runs
+  `FUN_08B33914` (uses `+0x10CE` -1, `+0x10D0` = 1) and the cut-in chain. **In tag battles the bit is set but never cleared: the manager does not consume it** (no write from `FUN_08A23DA8`, entry flag never set).
+- **Manager data:** `this + 240` = `0x08B87DBC` (inside the battle struct, bs + 0x754), two 40-byte per-side entries: `+0` active (1), `+4` side index, `+8` "use pending" flag (1 for a frame in plain when the summon is
+  taken), `+20` the side's STONE ID (Squall 0x19; CPU 0x04 / 0x03 / 0x13 ...), `+24` a second id (0x3B plain / 0x1F tag: differs between modes, unexplained), `+36` vtable `0x089CA748`. `this + 244` = `0x09AEE508`. The
+  slot fighters come from `FUN_08A22C78(side)` = `*(*(0x089D6A10) + 56 + 4 * side)`; in both modes these were the retail slot fighters (`09D18110`, `09D25790`) at the sampled moments.
+- **Open:** the gate that makes `FUN_08A23DA8` skip the per-side step in tag mode (its first call `FUN_08A235C0(this, flag)` returns 0 in the early frames in both modes; the gates inside it (`FUN_08A23454`, `FUN_08A07504`,
+  `*(0x089D6A00 + 27128)`, `FUN_08ADFE20`) were not decoded; my gdb return-value tracer was too slow / hung the run). Suggested: run `FUN_08A235C0` / `FUN_08A23454` / `FUN_08A07504` with a conditional breakpoint
+  (only the 24 s press) and compare the return values plain vs tag, and check whether the tag code's HUD hooks (`tagteam_hud.cpp` hides or re-parents parts of this manager, e.g. via the portrait / panel objects) change `this + 12`.
+- No implementation of per-fighter summons yet.
+
+### Summonstones, eighth round (22 Nov): FIXED, the human (and CPU slot fighters) summon in tag battles; cause = the round guard
+- **Cause.** `FUN_08A23DA8` is not only the round-end rules step (see "Round guard"): the same per-slot step reads the fighter's summon request (bit 0x10 of `actor +0x5B3`, set by the fighter step `FUN_08B3526C` on R + Circle /
+  by the AI's `FUN_08B2FB6C`), spends the use (`FUN_08B33914`) and starts the cut-in (`FUN_08A07DFC` > `08A03BD8` > ... > `08AE3E34`). The round guard (`slotactor_hook` on `FUN_08A22C78`) answered "no fighter" for every living
+  slot fighter while that step ran, so in tag battles WITH extras (the guard is only active then) the step skipped the slot and a summon was never processed (the request bit stayed set, the orb kept "R+O"). Tag on without extras
+  summoned fine; `PSPRECOMP_TAGTEAM_NOROUNDGUARD=1` summoned too (found by `PSPRECOMP_TAGTEAM_SUMGATE=1/2`: per-gate return values and, with `=2`, per-120-frame call counts `[SUMCNT]`: the manager `FUN_08A23DA8` ran 4320 times in a plain
+  run and (almost) never in the tag run). The earlier switches (`NOCHASE_BS`, `NOCHASEPAIR`, `NOHUDLOCK`, `NOACCUI`, `XASSIST=0`, `NOXGAUGE`) changed nothing.
+- **Fix** (`slotactor_hook`, `PSPRECOMP_TAGTEAM_NOSUMFIX=1` = old): a living slot fighter whose `+0x5B3 & 0x10` is set is NOT hidden from the rules step, so the summon is processed. Battle state only (the bit is set by the fighter step on every
+  machine). The loss predicates still see an alive fighter, so no round end.
+- **Verified (host, user's RP6 save, frozen dummy):** tag + `CLONES=1`: R + Circle at 24 s summons for the human (cut-in "Octopus Ink" / "Self-Destruct" depending on the stone; the human's orb label disappears and the Moogle summon
+  icon shows on his panel; `fx1`, `fx2` with the CPU's stone removed by `PSPRECOMP_TEST_STONE=1:255`). Party battle, `SP_PARTNER=1`, `KOLIST_NAT=1 KOLIST=human:12`: Jecht is KO'd at 12 s, Squall is rebuilt into the slot, his own orb shows "R+O" and
+  R + Circle at 50 s gives "Fire Arcana" (`sw1`): after a swap the new slot fighter's own stone works (the rebuild runs retail's init with his own record). `tagteam_test.py --baseline` PASS (`/tmp/ttcam_sm/reg5`); two-copy `mp_test.py`
+  120 s with `TAGTEAM=1 TAGTEAM_CLONES=1`: `frames compared 3896, mismatched 0` on both copies.
+- **Not done / gaps:** extras (the 2nd fighter of a side, not in the slot table) have no entry in the summon manager (`this + 240` has two per-side entries read through `FUN_08A22C78(side)` = the slot fighters) so an extra can never summon; a
+  fighter keeps his own use / stone only while he is in the slot (a swapped-out slot fighter's used flag is lost with his object; the rebuilt one starts with a fresh use). The per-fighter version would need the manager's entry rewritten from
+  the panel fighter on each swap / call-in and the use counter (`+0x10CE`) kept per member. CPU AI summons of slot fighters go through the same step (the CPU's cut-ins appear in the runs); extras' AI does not.
