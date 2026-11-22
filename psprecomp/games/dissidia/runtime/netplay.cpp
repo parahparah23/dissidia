@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+uint32_t dissidia_tagteam_fighter_sig();   // tagteam.cpp
 namespace {
 
 constexpr uint32_t BATTLE_PTR = 0x089D6A10u;          // battle object: +56 + 4 x side = fighter, +96 the battle clock (float)
@@ -52,7 +53,7 @@ constexpr Field k_fighter_fields[] = {
 };
 constexpr int k_nf = sizeof k_fighter_fields / sizeof k_fighter_fields[0];
 constexpr int PER_FIGHTER = k_nf + 2 + BLOCKS;   // + assist gauge (2) + blocks
-constexpr int NVALUES = 1 + 2 * PER_FIGHTER;
+constexpr int NVALUES = 1 + 2 * PER_FIGHTER + 1;   // + the tag team's fighters on the stage (count and characters)
 const char* g_names[NVALUES];
 
 void build_names() {
@@ -70,6 +71,7 @@ void build_names() {
             store[k++] = p + t;
         }
     }
+    store[k++] = "tag_fighters";
     for (int i = 0; i < NVALUES; i++) g_names[i] = store[i].c_str();
 }
 
@@ -119,6 +121,7 @@ int collect(uint32_t* v) {
         v[k++] = ok(g) ? r32(g + 0x1C) : 0;
         for (int b = 0; b < BLOCKS; b++) v[k++] = fnv(a, BLOCK_START + b * BLOCK, BLOCK);
     }
+    v[k++] = dissidia_tagteam_fighter_sig();   // a different number of fighters (or characters) is a desync too
     return k;
 }
 

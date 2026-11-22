@@ -5,6 +5,7 @@
 //   PSPRECOMP_TAGTEAM=1        turn the spike on
 //   PSPRECOMP_TAGTEAM_EXTRAS=n 1 = the enemy's second fighter, 2 = the human's partner, 3 = both (default)
 //   PSPRECOMP_TAGTEAM_LOG=1    log what the hook does
+#include "psp_render_queue.h"
 #include "psp_memory.h"
 #include "psp_game_module.h"
 #include "psp_runtime.h"
@@ -161,8 +162,8 @@ bool g_menu_mode = false;   // Battle Mode > Tag Team Battle was chosen (menu_se
 bool g_log = false;
 uint8_t* g_ram = nullptr;
 uint32_t rd(uint32_t a);   // below
-constexpr uint8_t kTagNetVersion = 8;   // 8: + 3 v 3 (roster flags bit 3); 7: the host's rules carry free-for-all (roster flags bit 2; a version-6 build would ignore it and split); 6: + the host's CPU party (bytes 24-39, docs "Proper PvE"); 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
-constexpr int kTagNetLen = 40;
+constexpr uint8_t kTagNetVersion = 9;   // 9: + the host's battle lobby (bytes 40-47, docs "Battle lobby"); 8: + 3 v 3 (roster flags bit 3); 7: the host's rules carry free-for-all (roster flags bit 2; a version-6 build would ignore it and split); 6: + the host's CPU party (bytes 24-39, docs "Proper PvE"); 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
+constexpr int kTagNetLen = 48;
 bool g_group_mode = false;
 // The local player's Group Battle data (found by diffing two machines and a party swap, 16 Nov):
 constexpr uint32_t GB_LOCAL_PTR = 0x089D7F3Cu;   // EBOOT: the local player's group block; +0x18 = the party joined (0 = A, 1 = B)
@@ -172,9 +173,13 @@ constexpr uint32_t GB_REGS = 0x09B6F2B4u;        // the characters this player r
 struct NetPlayer { int party = -1; bool host = false, local = false; uint8_t mode = 0, serial = 0, cpu_mask = 0, own_mask = 0; int n = 0; uint8_t regs[5] = {}; uint8_t mac[6] = {};
     uint8_t cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}};
     // The CPU party (docs "Proper PvE"): only the host's counts. Up to 5 CPU rows for the party OPPOSITE the host's (no human of it needed): characters and settings, bytes 24-39 of the beacon.
-    int bp_n = 0; uint8_t bp_regs[5] = {}; uint8_t bp_cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}}; };   // cfg[row] = {STRENGTH 1-9, LEVEL 0 = Auto / 1-100, TYPE 0 = Random / 1-8} of a CPU row. mac: the player's ad-hoc MAC (who drives a fighter in the lock-step, tagteam_net.cpp)
+    int bp_n = 0; uint8_t bp_regs[5] = {}; uint8_t bp_cfg[5][3] = {{5,0,0},{5,0,0},{5,0,0},{5,0,0},{5,0,0}};
+    uint8_t lobby[8] = {}; };   // the host's battle lobby (beacon bytes 40-47; lobby[0] == 'L' when set)   // cfg[row] = {STRENGTH 1-9, LEVEL 0 = Auto / 1-100, TYPE 0 = Random / 1-8} of a CPU row. mac: the player's ad-hoc MAC (who drives a fighter in the lock-step, tagteam_net.cpp)
 NetPlayer g_me;              // this player (party / host read every sync, regs while the setup screen runs)
-uint8_t g_mode_pick = 0;     // the host's fighters-per-side choice (encoded as byte 6); 0 = default
+uint8_t g_mode_pick = 0;     // the host's fighters-per-side choice (encoded as byte 6; bit 7: set by the battle lobby); 0 = default
+}  // namespace
+void dissidia_tagteam_lobby_encode(uint8_t out[8]);   // the battle lobby (below): the host's settings as beacon bytes 40-47
+namespace {
 std::vector<NetPlayer> g_snap;   // the group as it was when this battle was set up (every spawn decision of the battle uses it)
 bool g_snap_valid = false;
 // The host's roster (multiplayer, docs/tag-team.md "Multiplayer: the host's roster"): every machine built g_snap from the beacons it had at its own
@@ -245,6 +250,7 @@ bool parse_player(const uint8_t* d, int len, NetPlayer& p) {
         if ((a & 15) <= 8) p.cfg[r][2] = a & 15;
         if (b <= 100) p.cfg[r][1] = b;
     }
+    std::memcpy(p.lobby, d + 40, 8);
     p.bp_n = std::min<int>(d[24], 5);
     for (int r = 0; r < 5; r++) {   // the host's CPU party: character per row, settings (strength << 4 | type, level)
         p.bp_regs[r] = r < p.bp_n ? d[25 + r] : 0; p.bp_cfg[r][0] = 5; p.bp_cfg[r][1] = 0; p.bp_cfg[r][2] = 0;
@@ -258,7 +264,7 @@ bool parse_player(const uint8_t* d, int len, NetPlayer& p) {
 // Every player of the group (this one first, then the others as the network layer lists them), from the beacon bytes.
 std::vector<NetPlayer> group_players() {
     std::vector<NetPlayer> v; NetPlayer me = g_me; me.local = true; psp_adhoc_local_mac(me.mac); v.push_back(me);
-    uint8_t d[16][40]; int lens[16] = {}; uint8_t macs[16][6] = {};
+    uint8_t d[16][48]; int lens[16] = {}; uint8_t macs[16][6] = {};
     const int n = psp_adhoc_group_game_data(d, lens, 16, macs);
     for (int i = 0; i < n && i < 16; i++) { NetPlayer p; if (parse_player(d[i], lens[i], p)) { std::memcpy(p.mac, macs[i], 6); v.push_back(p); } }
     return v;
@@ -268,8 +274,8 @@ void mp_sync_mode() {
     orec_test_level();
     const bool local = g_enabled || g_menu_mode;
     gb_read_local();
-    uint8_t d[40];
-    uint8_t d0[16][40]; int lens[16] = {};
+    uint8_t d[48];
+    uint8_t d0[16][48]; int lens[16] = {};
     const int n = psp_adhoc_group_game_data(d0, lens, 16);
     if (n == 0 && !psp_adhoc_in_session()) { g_me.n = 0; std::memset(g_me.regs, 0, sizeof g_me.regs); g_me.cpu_mask = 0; g_me.own_mask = 0; g_me.bp_n = 0; g_mode_pick = 0; g_me.party = -1; g_me.host = false; }   // out of the group: nothing carries over to the next room
     static uint8_t last_key[64] = {}; static uint8_t serial = 0;
@@ -278,6 +284,7 @@ void mp_sync_mode() {
     for (int r = 0; r < 5; r++) { key[11 + r] = static_cast<uint8_t>(((g_me.cpu_mask >> r) & 1) ? g_me.cfg[r][0] : 0); key[16 + r] = static_cast<uint8_t>(((g_me.cpu_mask >> r) & 1) ? g_me.cfg[r][1] : 0); key[21 + r] = static_cast<uint8_t>(((g_me.cpu_mask >> r) & 1) ? g_me.cfg[r][2] : 0); }
     key[26] = static_cast<uint8_t>(g_me.host ? g_me.bp_n : 0); std::memcpy(key + 27, g_me.bp_regs, 5);
     for (int r = 0; r < 5; r++) { key[32 + r] = g_me.bp_cfg[r][0]; key[37 + r] = g_me.bp_cfg[r][1]; key[42 + r] = g_me.bp_cfg[r][2]; }
+    uint8_t lob[8] = {}; dissidia_tagteam_lobby_encode(lob); if (g_me.host) std::memcpy(key + 47, lob, 8);
     if (std::memcmp(key, last_key, sizeof key) != 0) { std::memcpy(last_key, key, sizeof key); serial++; }
     g_me.serial = serial; g_me.mode = key[2];
     std::memset(d, 0, sizeof d);
@@ -286,6 +293,7 @@ void mp_sync_mode() {
     d[8] = static_cast<uint8_t>(g_me.n); std::memcpy(d + 9, g_me.regs, 5); d[14] = g_me.cpu_mask; d[15] = g_me.own_mask;
     for (int r = 0; r < 5; r++) { const int k = cfg_slot(g_me.own_mask, r); if (k < 0 || k > 3) continue; d[16 + 2 * k] = static_cast<uint8_t>((g_me.cfg[r][0] << 4) | g_me.cfg[r][2]); d[17 + 2 * k] = g_me.cfg[r][1]; }
     if (g_me.host) { d[24] = static_cast<uint8_t>(g_me.bp_n); for (int r = 0; r < g_me.bp_n && r < 5; r++) { d[25 + r] = g_me.bp_regs[r]; d[30 + 2 * r] = static_cast<uint8_t>((g_me.bp_cfg[r][0] << 4) | g_me.bp_cfg[r][2]); d[31 + 2 * r] = g_me.bp_cfg[r][1]; } }
+    if (g_me.host) std::memcpy(d + 40, lob, 8);
     psp_adhoc_set_game_data(d, kTagNetLen);
     bool any = local, all_know = true;
     for (int i = 0; i < n && i < 16; i++) {
@@ -327,11 +335,13 @@ int g_ffa_mask_of(int ffa) { return ffa == 3 ? 1 : 3; }
 int eff_mask_base() { return (g_two_v_one == g_one_v_two) ? g_mask : (g_two_v_one ? (g_mask & 2) : (g_mask & 1)); }
 int g_three = 0;   // 3 v 3: two extras per side instead of one (PSPRECOMP_TAGTEAM_3V3=1, Settings > Debug > 3 vs 3)
 int g_ffa = 0;   // free-for-all: 0 off, 3 or 4 fighters (see foes() below)
+bool g_ffa_auto = false;   // the battle lobby's Free-for-all: online, the host sets g_ffa from the players in the room at the battle setup (one fighter each)
 bool comms_battle();
 int three_now();   // 3 v 3 (below)
 int late_per_side();
 int ffa_now();   // the battle's FFA: offline this machine's setting; in a Communications battle the host's (its roster flags, bit 2)
-int eff_mask() { return g_ffa ? g_ffa_mask_of(g_ffa) : eff_mask_base(); }   // FFA 3: the CPU side's extra only; FFA 4: both extras
+int eff_mask() { const int f = ffa_now(); return f ? g_ffa_mask_of(f) : eff_mask_base(); }   // online: the host's FFA, so every machine spawns the same fighters
+// FFA 3: the CPU side's extra only; FFA 4: both extras
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
@@ -1170,6 +1180,11 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
         std::fprintf(stderr, " mode %02X\n", host_mode_byte());
         if (dissidia_ttnet_enabled() && !std::getenv("PSPRECOMP_TAGTEAM_LOCALROSTER")) {   // the host's list decides (members wait for it, tagteam_net.cpp)
             g_roster_ok = g_me.host; g_shared_valid = g_me.host;
+            if (g_me.host && g_ffa_auto) {   // Free-for-all: one fighter per player in the room (up to 4); two players = a plain duel (copies only in test setups)
+                const int n = static_cast<int>(g_snap.size());
+                g_ffa = n == 3 ? 3 : 4;   // (two players: no player left for the extras, so none is added: a duel)
+                std::fprintf(stderr, "[FFA] %d player(s) in the room: free-for-all of up to %d, one fighter per player\n", n, g_ffa);
+            }
             if (g_me.host) g_shared_flags = local_rule_flags();
             std::fprintf(stderr, "[TTCPU] roster: %s\n", g_me.host ? "this machine is the host, its list is sent to the others" : "waiting for the host's list");
         }
@@ -1771,7 +1786,7 @@ bool make_sp_cpu_record(uint32_t G, int charId) {
 // player's party, rows and CPU flags, taken once when the battle is set up (g_snap). The order list = the record, each entry matched to
 // the player of that party who registered it.
 bool comms_battle() { return g_snap_valid && psp_adhoc_in_session(); }
-int ffa_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 4u) ? 4 : 0; return g_ffa; }
+int ffa_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 4u) ? ((g_shared_flags & 0x10u) ? 3 : 4) : 0; return g_ffa; }   // online: bit 2 = FFA, bit 4 = three fighters (else four)
 int three_now() { if (comms_battle() && g_shared_valid) return (g_shared_flags & 8u) ? 1 : 0; return g_three; }
 // Extras queued per side at the battle setup: 2 in 3 v 3. Online a member has not got the host's rules yet when the battle is set up, so two are
 // queued there and the plan (once the host's roster is in) drops the second one of a side that fields fewer than three (fighters_per_side).
@@ -1961,7 +1976,7 @@ uint8_t host_mode_byte() { std::vector<NetPlayer> t; for (const NetPlayer& p : s
 // Three or more: the host's choice (default 2 v 2).
 int fighters_per_side(int party) {
     std::vector<NetPlayer> t; const int humans = static_cast<int>(snap_or_live(t).size());
-    if (humans >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR")) { const int c = (host_mode_byte() >> (2 * party)) & 3; return c == 1 ? 1 : c == 3 ? 3 : 2; }
+    if (humans >= 3 || std::getenv("PSPRECOMP_TAGTEAM_SELECTOR") || (host_mode_byte() & 0x80)) { const int c = (host_mode_byte() >> (2 * party)) & 3; return c == 1 ? 1 : c == 3 ? 3 : 2; }
     if (three_now()) return 3;   // two players: the host's 3 v 3 rule (roster flags bit 3)
     TagEntry l[10]; const int n = party_order(party, l, 10);
     for (int i = 0; i < n; i++) if (l[i].is_cpu) return 2;
@@ -2016,6 +2031,31 @@ int comms_unused(int side) { order_reset(); TagEntry l[10]; const int n = party_
 // The character for a side's second fighter at the start of a Communications Mode tag battle, 0 = none: the next entry after the one on the
 // stage in the order list that is not the on-stage player's own (the rule for later changes too: the next entry, whoever's it is, skipping the
 // rows of a player who is already on the stage).
+// Free-for-all online (Schindler, 22 Nov: "4 independent players", no party members): each fighter besides the two on the slots is the next player
+// of the room (the agreed player order) who is not on the stage yet, with his own character (his first own player row), driven by him. 0 = no
+// player left (the fighter is not added; copies only in test setups). The same on every machine (the host's roster).
+int ffa_player_char(int* driver) {
+    *driver = -1;
+    static uint32_t gen = 0xFFFFFFFFu; static uint32_t used = 0;
+    if (gen != g_battle_gen) { gen = g_battle_gen; used = 0; }
+    std::vector<NetPlayer> tmp; const std::vector<NetPlayer>& pl = snap_or_live(tmp);
+    const std::vector<const NetPlayer*> ps = players_sorted(pl);
+    for (int side = 0; side < 2; side++) { TagEntry l[10]; const int n = party_order(side, l, 10); const int st = stage_index(side, l, n); if (st >= 0 && l[st].owner >= 0 && l[st].owner < 32) used |= 1u << l[st].owner; }
+    for (size_t k = 0; k < ps.size() && k < 32; k++) {
+        if ((used >> k) & 1u) continue;
+        const NetPlayer& p = *ps[k]; int c = 0;
+        for (int r = 0; r < p.n && !c; r++) if (((p.own_mask >> r) & 1) && !((p.cpu_mask >> r) & 1)) c = p.regs[r];
+        for (int r = 0; r < p.n && !c; r++) if ((p.own_mask >> r) & 1) c = p.regs[r];
+        if (!c && p.n > 0) c = p.regs[0];
+        used |= 1u << k;
+        if (!c || !info_for_char(c)) { std::fprintf(stderr, "[FFA] player %d has no loadable character (%d), left out\n", static_cast<int>(k), c); continue; }
+        if (dissidia_ttnet_enabled()) *driver = static_cast<int>(k);
+        std::fprintf(stderr, "[FFA] fighter for player %d: %s, driven by %s\n", static_cast<int>(k), char_label(c, true).c_str(), *driver >= 0 ? "that player" : "the AI");
+        return c;
+    }
+    std::fprintf(stderr, "[FFA] no player left for another fighter\n");
+    return 0;
+}
 int comms_partner_char(int side, int* driver) {
     *driver = -1;
     log_order(side);
@@ -2257,7 +2297,8 @@ bool exb_busy() {
 // View only: this machine's player is outside the running burst under the keep-fighting rule (set by the frame's view choice). The
 // burst's full-screen presentation (screen fader #0, the white flash) is then not drawn on this screen.
 bool g_view_outside_exb = false;
-bool exb_rule_fight_env() { static const bool f = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_EXBURST"); return e && !std::strcmp(e, "fight"); }(); return f; }
+int g_exb_lobby = -1;   // the battle lobby's EX Burst rule (-1 = not set: PSPRECOMP_TAGTEAM_EXBURST decides)
+bool exb_rule_fight_env() { static const bool f = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_EXBURST"); return e && !std::strcmp(e, "fight"); }(); return g_exb_lobby >= 0 ? g_exb_lobby != 0 : f; }
 bool exb_rule_fight() { if (g_shared_valid && comms_battle()) return (g_shared_flags & 2u) != 0; return exb_rule_fight_env(); }   // online: the host's rule
 // Keep-fighting rule, during a burst: x and y are on opposite sides of it (one fights in it, the other outside it). The fighters outside
 // then aim only at each other (aim_fix treats one in the burst as no target), so they do not chase the burst pair across the stage.
@@ -3238,6 +3279,9 @@ bool rebuild_begin(uint32_t A, int charId, int hp, int brv) {
     if (!fresh_brain) wr(A + ACT_BRAIN, 0);
     wr(A + ACT_LOCKBLK, 0);
     g_in_ctor = true;                                   // resource releases are skipped (the old character's data may be needed again)
+    // The GE may still be drawing the last frames (a loaded machine: DrawSync gives up after 500 ms): the destructor frees the old character's
+    // model packets and the constructor reuses that memory, so a list still running would read it as commands (Unknown cmd, an endless list).
+    if (const int w = render_queue_wait_caught_up(3000); w != 0 && g_log) std::fprintf(stderr, "[TAGTEAM] rebuild %08X: %s for the GE before the destructor\n", A, w < 0 ? "gave up waiting (3 s)" : (std::to_string(w) + " ms waited").c_str());
     g_rebuild_dtor = true; call(FIGHTER_DTOR, A, 0); g_rebuild_dtor = false;
     if (!std::getenv("PSPRECOMP_TAGTEAM_REBUILD_KEEPOLD")) {   // the destructor leaves some of the old character's constructor blocks allocated (as retail's teardown does for extras); nothing refers to them any
         // more once the new character is built, so they are freed here (same address and size still in the heap chain; not the kept brain / lock block)
@@ -5695,6 +5739,14 @@ void ko_oneround() {
     // The battle is decided once a slot fighter goes down with nobody on its side to take over and no reserve: from then on the retail finish, the
     // victory pose and the results run untouched (the winner's outro was taken for a KO: its slot was rebuilt and a member called in over the results).
     ground_track();
+    if (static const char* lowhp = std::getenv("PSPRECOMP_TAGTEAM_DEBUG_LOWHP"); lowhp) {   // test aid: every fighter at 300 HP at this battle second (the same frame on every machine), so a battle ends fast
+        static uint32_t done_gen = ~0u;
+        if (done_gen != g_battle_gen && dissidia_battle_age() >= std::atof(lowhp) * 60.f) {
+            done_gen = g_battle_gen; uint32_t f[6]; const int n = all_fighters(f);
+            for (int i = 0; i < n; i++) { const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x40)) { const uint32_t h = std::min<uint32_t>(rd(st + 0xCu), 300u); wr(st + 0xCu, h); } }
+            std::fprintf(stderr, "[TAGTEAM] t=%.1fs debug: %d fighters at 300 HP\n", dissidia_battle_age() / 60.f, n);
+        }
+    }
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_STARTSCAN") && g_bs && dissidia_battle_age() > 20.f) {   // debug: where does the game keep the battle start positions? scan RAM for the slot fighters' x / z words
         static uint32_t done_gen = 0xFFFFFFFFu;
         if (done_gen != g_battle_gen) { done_gen = g_battle_gen;
@@ -9867,6 +9919,10 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             int per_side_seen[2] = {0, 0};
             for (Late& l : g_late_q) {
                 const int team = (l.slot_actor == hum) ? 0 : 1;
+                if (ffa_now() && !l.callin && !((eff_mask() >> (team == 0 ? 1 : 0)) & 1)) {   // FFA: a member queued its extras before the host's rules came (FFA 3 has only the CPU side's)
+                    if (g_log) std::fprintf(stderr, "[TAGTEAM] team %d extra: not in a free-for-all of %d, dropped\n", team, ffa_now());
+                    continue;
+                }
                 if (l.side < 2 && !l.callin && ++per_side_seen[l.side] >= 2 && (comms_battle() ? fighters_per_side(static_cast<int>(l.side)) < 3 : !three_now())) {
                     if (g_log) std::fprintf(stderr, "[TAGTEAM] side %u: a second partner was queued, but the side fields fewer than three: dropped\n", l.side);
                     continue;
@@ -9878,7 +9934,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 static const bool sp_partner = std::getenv("PSPRECOMP_TAGTEAM_SP_PARTNER") != nullptr;
                 if (team == 0) update_party_reserve();   // (which team record is the human's)
                 const bool spc = team == 0 && !no_real && !l.callin && l.info_slot < 100 && sp_cpu_battle();   // single player: his first CPU row is the partner
-                const int c = spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
+                const int c = spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_player_char(&drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
                 if (spc) { sp_mark(c, true); std::fprintf(stderr, "[TTSP] partner at the start: CPU member %d (%s)\n", c, c ? char_label(c, true).c_str() : "none loadable"); }
                 else if (!comms_battle() && team == 0 && !sp_partner && !clones_allowed() && g_log) std::fprintf(stderr, "[TAGTEAM] single player: no CPU row on the human's team, no partner (1 v 2)\n");
                 l.driver = drv;
@@ -10490,11 +10546,18 @@ void fa2ac_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 void dissidia_ttnet_install(uint8_t* rdram);   // tagteam_net.cpp: the lock-step players and the slot fighters
 bool dissidia_tagteam_comms_battle() { return comms_battle(); }
+// netplay.cpp's desync check: the fighters on the stage (count << 24 | a hash of their characters, in order), 0 outside a tag battle.
+uint32_t dissidia_tagteam_fighter_sig() {
+    if (!g_ram || !g_bs) return 0;
+    uint32_t f[6]; const int n = all_fighters(f); uint32_t h = 2166136261u;
+    for (int i = 0; i < n; i++) h = (h ^ static_cast<uint32_t>(actor_char(f[i]) & 0xFF)) * 16777619u;
+    return static_cast<uint32_t>(n) << 24 | (h & 0xFFFFFFu);
+}
 // ---- the host's roster (see g_roster_ok) ----
 uint8_t local_rule_flags() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
     const bool assist_on = (e ? e[0] != '0' : g_sp_assist_on) || g_ffa;   // free-for-all: assists on for the group
-    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3
+    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four)
 }
 constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
 bool dissidia_tagteam_roster_host() { return comms_battle() && g_me.host; }
@@ -10542,7 +10605,7 @@ bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the
     std::fprintf(stderr, "[TTCPU] roster from the host (%d player(s)%s): %s%s\n", cnt, found_me ? "" : ", this machine is NOT in it", mine == host ? "the same as this machine's" : "DIFFERS from this machine's, the host's is used:", mine == host ? "" : host.c_str());
     if (mine != host) std::fprintf(stderr, "[TTCPU]   this machine had:%s\n", mine.c_str());
     g_snap = v; g_roster_ok = true; g_shared_flags = d[3]; g_shared_valid = true;
-    std::fprintf(stderr, "[TTCPU] host's rules: assists %s, EX Burst rule %s, free-for-all %s, 3 v 3 %s\n", (d[3] & 1) ? "on" : "off", (d[3] & 2) ? "fight" : "freeze", (d[3] & 4) ? "on" : "off", (d[3] & 8) ? "on" : "off");
+    std::fprintf(stderr, "[TTCPU] host's rules: assists %s, EX Burst rule %s, free-for-all %s, 3 v 3 %s\n", (d[3] & 1) ? "on" : "off", (d[3] & 2) ? "fight" : "freeze", (d[3] & 4) ? ((d[3] & 0x10) ? "3" : "4") : "off", (d[3] & 8) ? "on" : "off");
     return true;
 }
 bool dissidia_tagteam_decided() { return g_decided; }
@@ -10677,7 +10740,91 @@ int tagteam_fighters_per_side(int party) { return fighters_per_side(party); }
 // tagteam_menu.cpp (the Tournament setup screen)
 bool dissidia_tagteam_sp_tag_on() { return (g_enabled || g_menu_mode) && !psp_adhoc_in_session(); }   // single player tag mode (the Tournament screen)
 bool dissidia_tagteam_group_on() { return g_group_mode || ((g_enabled || g_menu_mode) && psp_adhoc_in_session()); }
-void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); bp_inject_rows(); }   // the setup screen runs: no battle, its snapshot is over
+// ---- Battle lobby (docs/tag-team.md "Battle lobby"; user + Schindler, 22 Nov) ----
+// The host picks the mode (how many fighters, which format) and the battle's rules in one dialog of the Group Battle setup screen (tagteam_menu.cpp);
+// everyone else sees them read-only. The settings go out in the host's beacon (bytes 40-47) and are applied:
+//   mode / size      -> the host's mode byte (fighters per side, bit 7 = the lobby decides), 3 v 3 and free-for-all switches (roster flags)
+//   EX Burst, Assist -> the host's rule flags (bits 1 / 0), as the Settings > Debug switches did
+//   stage / rules / judgement -> round 1's record of the setup screen (0x08C64F58: byte +3 stage, +6 rules, +7 judgement; the same on every machine,
+//                       found by diffing the round dialog; retail's own dialog writes it at 0x08AB1D64), written on every machine while the screen runs.
+// Modes: 0 1 vs 1 duel, 1 team (size 2 or 3 per side), 2 tag duel (one fighter per side, the next party member comes in on a KO), 3 free-for-all
+// (size 3..4 fighters), 4 local (split screen on one PC: not online).
+struct LobbyCfg { uint8_t mode = 1, size = 2, cpu_fill = 0, cpu_str = 5, stage = 0, rules = 0, judge = 0, exb = 0, assist = 0; };
+LobbyCfg g_lobby; bool g_lobby_init = false;
+void dissidia_tagteam_lobby_encode(uint8_t out[8]) {
+    std::memset(out, 0, 8);
+    if (!g_me.host || !g_lobby_init) return;
+    out[0] = 'L'; out[1] = static_cast<uint8_t>(g_lobby.mode | (g_lobby.size << 4)); out[2] = static_cast<uint8_t>((g_lobby.cpu_fill & 1) | (g_lobby.cpu_str << 4));
+    out[3] = g_lobby.stage; out[4] = g_lobby.rules; out[5] = g_lobby.judge; out[6] = static_cast<uint8_t>((g_lobby.exb & 1) | ((g_lobby.assist & 1) << 1));
+}
+bool lobby_decode(const uint8_t* in, LobbyCfg& c) {
+    if (in[0] != 'L') return false;
+    c.mode = in[1] & 15; c.size = in[1] >> 4; c.cpu_fill = in[2] & 1; c.cpu_str = std::clamp<uint8_t>(in[2] >> 4, 1, 9);
+    c.stage = std::min<uint8_t>(in[3], 34); c.rules = std::min<uint8_t>(in[4], 5); c.judge = std::min<uint8_t>(in[5], 4); c.exb = in[6] & 1; c.assist = (in[6] >> 1) & 1;
+    return c.mode <= 4;
+}
+// The lobby the battle follows: the host's own (on the host) or the one in the host's beacon.
+bool lobby_current(LobbyCfg& c) {
+    if (g_me.host) { if (!g_lobby_init) return false; c = g_lobby; return true; }
+    std::vector<NetPlayer> t; for (const NetPlayer& p : snap_or_live(t)) if (p.host) return lobby_decode(p.lobby, c);
+    return false;
+}
+void lobby_apply() {   // the host: the lobby's settings into the switches the battle reads
+    if (!g_me.host || !g_lobby_init) return;
+    const LobbyCfg& c = g_lobby;
+    int per = 2; g_three = 0; g_ffa = 0;
+    if (c.mode == 0 || c.mode == 2) per = 1;
+    else if (c.mode == 1) { per = c.size == 3 ? 3 : 2; g_three = c.size == 3 ? 1 : 0; }
+    else if (c.mode == 3) { g_ffa = 4; per = 2; }
+    g_ffa_auto = c.mode == 3;
+    if ((g_three || g_ffa) && g_overhead == 0) g_overhead = 1;
+    g_sp_assist_on = c.assist != 0; g_exb_lobby = c.exb;
+    g_mode_pick = static_cast<uint8_t>(0x80 | per | (per << 2));
+    mp_sync_mode();
+    std::fprintf(stderr, "[LOBBY] host: mode %d size %d, stage %d rules %d judgement %d, EX Burst %s, assist %s, CPU fill %s (strength %d)\n", c.mode, c.size, c.stage, c.rules, c.judge,
+                 c.exb ? "keep fighting" : "freeze", c.assist ? "on" : "off", c.cpu_fill ? "on" : "off", c.cpu_str);
+}
+void lobby_init_host() {   // first use: start from the current switches
+    if (g_lobby_init) return;
+    g_lobby_init = true;
+    if (g_ffa) { g_lobby.mode = 3; g_lobby.size = static_cast<uint8_t>(g_ffa); }
+    else if (g_three) { g_lobby.mode = 1; g_lobby.size = 3; }
+    else { g_lobby.mode = 1; g_lobby.size = 2; }
+    g_lobby.assist = g_sp_assist_on ? 1 : 0; g_lobby.exb = exb_rule_fight_env() ? 1 : 0;
+}
+constexpr uint32_t ROUND1_REC = 0x08C64F58u;
+void lobby_write_round() {   // every machine, while the setup screen runs: round 1's stage / rules / judgement from the host's lobby
+    LobbyCfg c; if (!lobby_current(c)) return;
+    const uint32_t w0 = rd(ROUND1_REC), w1 = rd(ROUND1_REC + 4u);   // word 0 = 0x04 << 24 | stage, word 1 = 0x6523 << 16 | rules << 8 | judgement
+    if ((w1 >> 16) != 0x6523u || (w0 >> 24) != 4u) { static int warned = 0; if (warned++ < 3) std::fprintf(stderr, "[LOBBY] round 1 record not at %08X (%08X %08X): stage / rules / judgement not written\n", ROUND1_REC, rd(ROUND1_REC), rd(ROUND1_REC + 4u)); return; }
+    const uint32_t n0 = (w0 & 0xFFFFFF00u) | c.stage, n1 = (w1 & 0xFFFF0000u) | uint32_t(c.rules) << 8 | c.judge;
+    if (n0 != w0 || n1 != w1) { wr(ROUND1_REC, n0); wr(ROUND1_REC + 4u, n1); std::fprintf(stderr, "[LOBBY] round 1: stage %d rules %d judgement %d\n", c.stage, c.rules, c.judge); }
+}
+// tagteam_menu.cpp: the lobby as 9 bytes {mode, size, cpu_fill, cpu_str, stage, rules, judge, exb, assist}; false = the host has not set one yet
+bool dissidia_tagteam_lobby_get(uint8_t out[9]) {
+    if (g_me.host) lobby_init_host();
+    LobbyCfg c; if (!lobby_current(c)) return false;
+    const uint8_t v[9] = {c.mode, c.size, c.cpu_fill, c.cpu_str, c.stage, c.rules, c.judge, c.exb, c.assist}; std::memcpy(out, v, 9); return true;
+}
+void dissidia_tagteam_lobby_set(const uint8_t in[9]) {
+    if (!g_me.host) return;
+    lobby_init_host();
+    g_lobby = LobbyCfg{in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7], in[8]};
+    lobby_apply();
+}
+// The group for the lobby's player list: nickname, first registered character, party (-1 = none yet); this player first.
+int dissidia_tagteam_lobby_players(char names[16][32], uint8_t chars[16], int8_t parties[16], bool hosts[16]) {
+    uint8_t macs[16][6] = {}; char nicks[16][32] = {}; const int nm = psp_adhoc_group_macs(macs, nicks, 16);
+    const std::vector<NetPlayer> v = group_players(); int k = 0;
+    for (const NetPlayer& p : v) {
+        if (k >= 16) break;
+        std::string nick = p.local ? "You" : "Player";
+        if (!p.local) for (int i = 0; i < nm; i++) if (!std::memcmp(macs[i], p.mac, 6) && nicks[i][0]) nick = nicks[i];
+        std::snprintf(names[k], 32, "%s", nick.c_str()); chars[k] = p.n > 0 ? p.regs[0] : 0; parties[k] = static_cast<int8_t>(p.party); hosts[k] = p.host; k++;
+    }
+    return k;
+}
+void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); bp_inject_rows(); if (g_me.host) { const bool first = !g_lobby_init; lobby_init_host(); if (first) lobby_apply(); } lobby_write_round(); }   // the setup screen runs: no battle, its snapshot is over
 int dissidia_tagteam_local_regs(uint8_t out[5]) { std::memcpy(out, g_me.regs, 5); return g_me.n; }
 uint8_t dissidia_tagteam_local_cpu_mask() { return g_me.cpu_mask; }
 uint8_t dissidia_tagteam_local_own_mask() { return g_me.own_mask; }

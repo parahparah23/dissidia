@@ -35,7 +35,7 @@ void psp_adhoc_set_local_fps(int fps);
 // A game module's own bytes in the beacons (at most 24): what it wants the other players in the group to know (a mode, a checksum).
 void psp_adhoc_set_game_data(const uint8_t* d, int n);
 // The game bytes of the other players in this player's group: returns how many are in the group (0 = not in a group).
-int psp_adhoc_group_game_data(uint8_t (*out)[40], int* lens, int max, uint8_t (*macs)[6] = nullptr);   // macs: each player's MAC, same order
+int psp_adhoc_group_game_data(uint8_t (*out)[48], int* lens, int max, uint8_t (*macs)[6] = nullptr);   // macs: each player's MAC, same order
 
 /// The frame rate the whole connected group should run at: the lowest of every player's
 /// preference, or 0 when not in a group with anyone else (no limit).
