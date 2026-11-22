@@ -1,6 +1,13 @@
 # Tag team battles (2 v 2): research notes and plan
 
 ## TODO (kept up to date; newest first)
+
+- **Turned off for now, to fix (22 Nov):**
+  - **Summonstones in tag battles are off** (`sum_track`; `PSPRECOMP_TAGTEAM_SUMMONS=1` turns them on): they could be used again and again. Fix that, then also: partners (extras) summoning (the manager's other checks reject them), per-member stones (one stone per side is built at battle start by FUN_08890BB8), the big retail orb not refreshing after a swap.
+  - **Kill camera / KO without the hold is off**: the KO hold is the default again (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move (no log: the device was not reachable).
+- **New (22 Nov, not started):**
+  - When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.
+  - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
 - **Low priority (user, 22 Nov; not started):**
   - 3v3: the banter intros do not play the correct audio (maybe other 3v3 intro issues).
   - Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.

@@ -4507,7 +4507,7 @@ void hp_hit_indicator(uint32_t victim, uint32_t att, int hp_before, bool ko_hold
     if (g_log) std::fprintf(stderr, "[HPDMG] t=%.2fs %s %s > %s %s: -%d (HP %d -> %d of %d)%s\n", dissidia_battle_age() / 60.0f, h.attacker ? role_of(att) : "?", h.aname.c_str(), role_of(victim), h.vname.c_str(), dmg, hp_before, h.hp_after, h.hp_max, h.ko ? " KO" : "");
 }
 bool g_clear_surv = false;   // debug row "Lethal HP Hits Kill": clear the retail survive-at-1-HP effects of a victim that would die (Tag Team group, default OFF = retail)
-bool g_kocam = true;   // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
+bool g_kocam = false;   // off by default for now (user 22 Nov: Golbez KO -> "THE FINAL BLOW", music stopped, could not move; TODO) // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
 extern float g_callfx_rel; extern uint32_t g_callfx_gen;   // below (the call's slow motion release)
 void xkocam_start(uint32_t victim);   // below (callfx_step): the kill camera of a KO'd extra
 // The kill camera (retail finish state 2 / 3 for slot KOs, xkocam_start for extras) leaves the camera director (cam = *0x08B3D6B8 + 1872: look-at vector +64, flag word +188 bits 1 / 2 / 4,
@@ -6400,6 +6400,18 @@ void sum_track() {
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOSUMUSED") != nullptr;
     constexpr uint32_t MGR = 0x09AEE40Cu;
     static uint32_t last_bs = 0; auto& used = g_sum_used; static int last_key[2] = {-1, -1};
+    // Summonstones are off in tag battles for now (user 22 Nov: summons could be used again and again; TODO): both sides' used flags are held set and
+    // every fighter's summon request (bit 0x10 of +0x5B3) is dropped, so the manager never starts one. PSPRECOMP_TAGTEAM_SUMMONS=1 lets them run.
+    static const bool summons_on = std::getenv("PSPRECOMP_TAGTEAM_SUMMONS") && std::getenv("PSPRECOMP_TAGTEAM_SUMMONS")[0] == '1';
+    if (!summons_on && g_bs && ok(MGR, 0x400) && tag_on()) {
+        for (uint32_t k = 0; k < 2; k++) {
+            wr(MGR + 0x3C8u + 4u * k, 1u);
+            const uint32_t F = srd(g_bs + 56u + 4u * k); if (ok(F, 0x12D0)) g_ram[(F + 0x5B3u) & 0x07FFFFFFu] &= static_cast<uint8_t>(~0x10u);
+        }
+        for (int i = 0; i < g_nextra; i++) if (ok(g_extra[i].actor, 0x12D0)) g_ram[(g_extra[i].actor + 0x5B3u) & 0x07FFFFFFu] &= static_cast<uint8_t>(~0x10u);
+        static uint32_t told = 0; if (g_log && told != g_bs) { told = g_bs; std::fprintf(stderr, "[SUMUSED] summonstones are off in tag battles (PSPRECOMP_TAGTEAM_SUMMONS=1 turns them on)\n"); }
+        return;
+    }
     if (off || !g_bs || !ok(MGR, 0x400) || g_nextra == 0) return;
     if (const char* fs = std::getenv("PSPRECOMP_TAGTEAM_FORCESUMMON")) {   // test aid "<extra index>:<hframe>": that extra asks for a summon (request bit 0x10 of +0x5B3) at that controller frame
         int xi = 0, hf = 0; if (std::sscanf(fs, "%d:%d", &xi, &hf) == 2 && g_hframe == hf && xi >= 0 && xi < g_nextra && ok(g_extra[xi].actor, 0x12D0)) { g_ram[(g_extra[xi].actor + 0x5B3u) & 0x07FFFFFFu] |= 0x10u; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.1fs test: extra %d (%08X) asks for a summon\n", dissidia_battle_age() / 60.0f, xi, g_extra[xi].actor); }
@@ -10815,6 +10827,15 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
     g_oneround = !(std::getenv("PSPRECOMP_TAGTEAM_ONEROUND") && std::getenv("PSPRECOMP_TAGTEAM_ONEROUND")[0] == '0');
     g_tagin = !(std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '0');
+    {   // The KO hold is the default again for now (user 22 Nov: a mid-battle KO ran retail's finish - "THE FINAL BLOW", the music stopped, no control;
+        // TODO): a lethal hit on a slot fighter whose side goes on never starts the finish phase. PSPRECOMP_TAGTEAM_KOHOLD=0: the hold-off path + kill camera.
+        const char* h = std::getenv("PSPRECOMP_TAGTEAM_KOHOLD");
+#ifdef _WIN32
+        if (!h) _putenv_s("PSPRECOMP_TAGTEAM_KOHOLD", "1"); else if (h[0] == '0') _putenv_s("PSPRECOMP_TAGTEAM_KOHOLD", "");
+#else
+        if (!h) setenv("PSPRECOMP_TAGTEAM_KOHOLD", "1", 1); else if (h[0] == '0') unsetenv("PSPRECOMP_TAGTEAM_KOHOLD");
+#endif
+    }
     if (std::getenv("PSPRECOMP_TAGTEAM_LOADLOG") && (g_orig_filerec = psp_dispatch_probe_lookup(0x088470B8u))) { psp_dispatch_register(0x088470B8u, filerec_hook); psp_mem_watch_set(0x0880FFF0u); install_chain(std::make_integer_sequence<int, 8>{}); if ((g_orig_ld1 = psp_dispatch_probe_lookup(0x08843014u))) psp_dispatch_register(0x08843014u, ld1_hook); if ((g_orig_ld2 = psp_dispatch_probe_lookup(0x08845230u))) psp_dispatch_register(0x08845230u, ld2_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_CPUREC") && (g_orig_fa2ac = psp_dispatch_probe_lookup(0x088FA2ACu))) psp_dispatch_register(0x088FA2ACu, fa2ac_hook);
     if ((g_orig_batrec = psp_dispatch_probe_lookup(0x089132A4u))) psp_dispatch_register(0x089132A4u, batrec_hook);
