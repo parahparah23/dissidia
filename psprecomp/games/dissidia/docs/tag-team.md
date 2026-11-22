@@ -2324,7 +2324,14 @@ Communications setup screen. Without CPU rows nothing changes (1 v 2, his member
   - **A CPU partner falls**: the next CPU member comes in as the partner (the usual call-in: delay, `queue_member` / body reuse); `next_member_char(team, false)`
     for a fallen extra never returns an own member.
   - **The player's slot fighter falls**: while he has own members left, the next own member comes into his slot (the slot call-in / rebuild; the CPU partner
-    is NOT swapped in, `te` and the KO-swap delay are skipped). With no own member left (user rule, 18 Nov): the CPU partner on the stage takes the slot
+    is NOT swapped in, `te` and the KO-swap delay are skipped).
+    **Wait for a living partner (21 Nov, tree ttcam):** when a CPU partner is still fighting, the human's next own member does not come in 3.2 s later: he
+    waits like a fallen player in multiplayer (the call-in delay, 20 s, `PSPRECOMP_TAGTEAM_CALLIN_DELAY`) or until the partner falls (then the usual 3.2 s),
+    whichever is first (`SlotCallin::wait`, `[TTSP] the human waits` / `the human's wait is over`). Meanwhile the view-only chase camera
+    (`dissidia_camera_set_view_follow`, the one a human-driven extra uses online) follows the partner; the fallen slot fighter lies gated, so the pad drives
+    nothing; at the call-in the camera and control go back to him. The AI partner fights normally. No partner alive: today's 3.2 s call-in.
+    `PSPRECOMP_TAGTEAM_SPNOWAIT=1` = old behaviour. Online unchanged. Host runs (`sp_cpu_walk.txt`, `KOLIST_NAT=1 KOLIST=human:15`): `~/dissidia/tt/cam1`
+    (partner fell at 29.7 s -> Squall at 32.9 s; shots `cam1.shots`, `cam1_montage.png`) and `cam2` (`CALLIN_DELAY=6`: Squall at 21.0 s, partner alive). With no own member left (user rule, 18 Nov): the CPU partner on the stage takes the slot
     (the KO swap, `drive = 2`: AI-driven via `apply_drive`), or, with no partner standing, the next CPU member comes into the slot AI-driven; the side fights
     on until nobody is left, then `group_decided` as before. `reserve_left(0)` = members not fielded (own + CPU).
   - **HUD reserve strip** (team 0): the members not fielded, own first, CPU ones named "CPU <name>" (the strip shows portraits).

@@ -4470,7 +4470,7 @@ struct DownRec { uint32_t actor; float since; uint32_t side; };
 std::vector<DownRec> g_downrec;
 float g_side_entry[2] = {-1e9f, -1e9f};   // per side value: battle age of the last (or scheduled) member coming in; the 20 s call-in wait of that side starts again then
 void side_entry_mark(uint32_t side, float at) { if (side < 2) g_side_entry[side] = std::max(g_side_entry[side], at); }
-struct SlotCallin { uint32_t S; float due; int team; };
+struct SlotCallin { uint32_t S; float due; int team; float fall = 0.f; bool wait = false; };   // wait: single player, a CPU partner is alive: the human's next own member waits like a fallen player in multiplayer (call-in delay or until the partner falls) while the camera follows the partner
 float g_phase_hold_until = -1;   // after a KO swap: the retail finish phase (bs+72 = 4) registered from the lethal hit is taken back for this long
 std::vector<SlotCallin> g_slot_callin;   // a slot whose whole stage team is down: the next reserve member is rebuilt into it after the fall
 constexpr float kSlotCallinDelay = 3.2f;   // a slot fighter with no partner: the fall plays this long before the next member is rebuilt into the slot
@@ -5668,9 +5668,10 @@ void ko_oneround() {
         Extra* te = nullptr;
         for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != S && side_of(g_extra[i].actor) == side_of(S) && alive(g_extra[i].actor)) te = &g_extra[i];
         const bool spk = team_of(side_of(S)) == 0 && sp_cpu_battle(), sp_own = spk && sp_left(true) > 0;
+        Extra* const live_mate = te;   // the CPU partner still fighting (single player: the human waits for it, below)
         if (sp_own) te = nullptr;
         if (ffa_now() && !comms_battle() && S == ffa_human()) te = nullptr;   // single player with CPU rows: the human's own members only come into his slot (below: the slot call-in), never the CPU partner
-        if (spk) std::fprintf(stderr, "[TTSP] t=%.1fs the human's slot fighter fell: own members left %d, CPU members left %d, CPU partner on the stage %08X -> %s\n", age / 60.0f, sp_left(true), sp_left(false) - sp_left(true), te ? te->actor : 0u,
+        if (spk) std::fprintf(stderr, "[TTSP] t=%.1fs the human's slot fighter fell: own members left %d, CPU members left %d, CPU partner on the stage %08X -> %s\n", age / 60.0f, sp_left(true), sp_left(false) - sp_left(true), live_mate ? live_mate->actor : 0u,
             sp_own ? "his next own member comes into the slot" : te ? "the CPU partner takes the slot (AI-driven)" : sp_left(false) > 0 ? "the next CPU member comes into the slot (AI-driven)" : "nobody left");
         if (g_log) { const uint32_t st = rd(S + 0x52Cu); std::fprintf(stderr, "[TAGTEAM] t=%.1fs KO of slot %u fighter %08X, team mate %08X, reserve %d (down %d script %d hp %d dmg %d stock %u rev %u)\n", age / 60.0f, k, S, te ? te->actor : 0u, reserve_left(team_of(side_of(S))), is_down(S), static_cast<int16_t>(rd(S + 0x180u) & 0xFFFFu), ok(st, 0x40) ? static_cast<int>(rd(st + 0xCu)) : -1, ok(st, 0x40) ? static_cast<int>(rd(st + 0x8u)) : -1, g_ram[(S + 0x10CEu) & 0x07FFFFFFu], rd(S + 0x10D0u)); }
         if (!te && ffa_now() && ffa_keep(S)) {   // FFA: the fallen slot fighter stays down, the others fight on
@@ -5681,7 +5682,9 @@ void ko_oneround() {
         }
         if (!te) {   // nobody to take over: with reserve members left the fall plays out (the round guard holds the round) and the next member comes straight into the slot
             const int tm = team_of(side_of(S)), cid = ffa_now() ? 0 : next_member_char(tm);
-            if (cid && !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTCALLIN")) { { const float dly = slot_fall_delay(); g_slot_callin.push_back({S, age + dly * 60.f, tm}); side_entry_mark(side_of(S), age + dly * 60.f);
+            if (cid && !std::getenv("PSPRECOMP_TAGTEAM_NOSLOTCALLIN")) { { const float dly = slot_fall_delay(); const bool spw = sp_own && live_mate && !std::getenv("PSPRECOMP_TAGTEAM_SPNOWAIT");   // multiplayer rule (a fallen player's next member comes in after the call-in delay, the mate fights on): wait that long, or until the partner falls
+                g_slot_callin.push_back({S, age + (spw ? call_in_delay() : dly * 60.f), tm, age, spw}); side_entry_mark(side_of(S), age + dly * 60.f);
+                if (spw) std::fprintf(stderr, "[TTSP] t=%.1fs the human waits: CPU partner %08X is alive, his member comes in after %.1f s or when the partner falls; the camera follows the partner\n", age / 60.0f, live_mate->actor, call_in_delay() / 60.0f);
                 // the player's own fighter with no partner: the fall plays first (script 1210 + the KO line, the pose held), then the next member comes in
                 if (!std::getenv("PSPRECOMP_TAGTEAM_NODEFEAT")) { defeat_start(S); wr(S + 0x380u, rd(S + 0x380u) | 2u); g_defeat_hold[S] = 46.0f; } } if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs slot %u: nobody left on the stage, %s comes into the slot in %.1f s\n", age / 60.0f, k, char_label(cid, true).c_str(), slot_fall_delay()); }
             else { g_decided = true; g_slot_callin.clear(); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs side %u has nobody left: the battle is decided, the tag team logic stands down\n", age / 60.0f, side_of(S));
@@ -5721,9 +5724,13 @@ void ko_oneround() {
             wr(c.S + 0x10D0u, 0); if (k >= 0) g_ram[(c.S + 0x10CEu) & 0x07FFFFFFu] = lastStock[k];
             if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs slot call-in: revive word of %08X cleared, stock back to %u\n", age / 60.0f, c.S, k >= 0 ? lastStock[k] : 0u);
         }
+        if (c.wait) {   // single player: waits while the CPU partner is alive (call-in delay at most)
+            bool mate = false; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != c.S && side_of(g_extra[i].actor) == side_of(c.S) && alive(g_extra[i].actor) && !is_down(g_extra[i].actor)) mate = true;
+            if (!mate || age >= c.due) { c.wait = false; if (!mate) c.due = std::max(c.fall + slot_fall_delay() * 60.f, age + slot_fall_delay() * 60.f); std::fprintf(stderr, "[TTSP] t=%.1fs the human's wait is over (%s): his member comes in %s\n", age / 60.0f, mate ? "call-in delay" : "the partner fell", mate ? "now" : "in 3.2 s"); }
+        }
         if (age < c.due) {   // the fall is refused while the fighter is in an attack: asked again every tick until a fall script (1200-1299) runs, the AI gated
             const int sc = static_cast<int16_t>(rd(c.S + 0x180u) & 0xFFFFu);
-            if ((sc < 1200 || sc >= 1300) && age < c.due - slot_fall_delay() * 60.f + 45.f && !std::getenv("PSPRECOMP_TAGTEAM_NODEFEAT")) { wr(c.S + 0x380u, rd(c.S + 0x380u) | 2u); const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, c.S + 304u, 1210u, 0); g_ctx->r[29] = static_cast<int32_t>(sp0); }
+            if ((sc < 1200 || sc >= 1300) && age < c.fall + 45.f && !std::getenv("PSPRECOMP_TAGTEAM_NODEFEAT")) { wr(c.S + 0x380u, rd(c.S + 0x380u) | 2u); const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, c.S + 304u, 1210u, 0); g_ctx->r[29] = static_cast<int32_t>(sp0); }
             i++; continue; }
         if (exb_busy() || exb_in(c.S)) { i++; continue; }   // an EX Burst is running (or its chance / start is on): the call-in waits for its end
         if (entrance_busy()) { c.due = age + 30.f; i++; continue; }   // another entrance is running: this one waits for it
@@ -9475,6 +9482,11 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             static const bool slotcam = std::getenv("PSPRECOMP_TTLOCK_VIEW_SLOTCAM") != nullptr;
             for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && !is_down(g_extra[i].actor) && alive(g_extra[i].actor) && dissidia_ttnet_local_drives(2 + i, f)) { if (slotcam && g_extra[i].camslot >= 0) want = g_extra[i].camslot; else want_actor = g_extra[i].actor; }
         } else if (shown == -3) want = -3;
+        if (g_bs && !comms_battle() && !g_slot_callin.empty()) {   // single player: the human's next member waits for his CPU partner: the camera follows the partner (view only; the pad drives nothing meanwhile)
+            g_ram = rdram;
+            for (const SlotCallin& c : g_slot_callin) if (c.wait)
+                for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != c.S && side_of(g_extra[i].actor) == side_of(c.S) && alive(g_extra[i].actor) && !is_down(g_extra[i].actor)) { want_actor = g_extra[i].actor; break; }
+        }
         if (g_bs) {   // during an EX Burst: a fighter in it sees the burst (the game's choice: its attacker's camera slot); one outside it sees
             // the burst too under the freeze rule (it is held anyway), and keeps its own camera under the keep-fighting rule (view only)
             g_ram = rdram;
