@@ -2326,15 +2326,15 @@ Communications setup screen. Without CPU rows nothing changes (1 v 2, his member
   - **The player's slot fighter falls**: while he has own members left, the next own member comes into his slot (the slot call-in / rebuild; the CPU partner
     is NOT swapped in, `te` and the KO-swap delay are skipped).
     **Wait for a living partner (21 Nov, tree ttfa; replaces the first ttcam version):** the first version kept the fallen slot fighter lying in the KO state
-    and followed the partner with the chase camera; on the RP6 the whole battle looked frozen for the wait. Now, with a CPU partner alive, the normal KO swap
-    runs: the partner takes the slot (AI-driven, `drive = 2`, the fall plays 1.6 s first), so the world, camera and HUD are those of a normal fight and the pad
+    and followed the partner with the chase camera; on the RP6 the battle looked frozen for the wait. Now, with a CPU partner alive, the normal KO swap
+    runs: the partner takes the slot (AI-driven, `drive = 2`, the fall plays 1.6 s first), so world, camera and HUD are those of a normal fight and the pad
     drives nothing. The human's next own member waits like a fallen player in multiplayer (call-in delay, 20 s, `PSPRECOMP_TAGTEAM_CALLIN_DELAY`): then he is
-    rebuilt into the fallen body as an extra (`queue_member`), and once he stands (entrance over) the pad swap (`swap_slot_with(H, T, false)`) puts him into the
-    slot with the pad back (`drive = 1`, the AI -> pad undo of the multiplayer handover) and the partner is an AI extra again (`SpWait`, logs `[TTSP] the human waits` /
-    `the human's wait is over` / `takes the slot ... with the pad`). If the partner in the slot falls first, the slot call-in of his own member (3.2 s, now
-    with `drive = 1` when the slot was the partner's) takes over. No partner alive: the old 3.2 s call-in. `PSPRECOMP_TAGTEAM_SPNOWAIT=1`: old (no wait).
-    Host runs (`sp_cpu_walk.txt`, `KOLIST_NAT=1 KOLIST=human:15 CALLIN_DELAY=10`, `~/dissidia/tt/fa1` default, `fa2` with `NOKOHOLD=1`): Jecht falls 16.6 s,
-    Terra in the slot, Squall in at 26.6 s, in the slot with the pad at 30.3 s; shots every 2 s `fa1.shots`, `fa1_montage.png` (fighters move, BRV changes).
+    rebuilt into the fallen body as an extra (`queue_member`), and once he stands the pad swap (`swap_slot_with(H, T, false)`) puts him into the slot with the
+    pad back (`drive = 1`, the AI -> pad undo of the multiplayer handover); the partner is an AI extra again (`SpWait`; logs `[TTSP] the human waits` / `the human's
+    wait is over` / `takes the slot ... with the pad`). If the partner in the slot falls first, the slot call-in of his own member (3.2 s, with `drive = 1` when the
+    slot was the partner's) takes over. No partner alive: the old 3.2 s call-in. `PSPRECOMP_TAGTEAM_SPNOWAIT=1`: old (no wait).
+    Host runs (`sp_cpu_walk.txt`, `KOLIST_NAT=1 KOLIST=human:15 CALLIN_DELAY=10`, `~/dissidia/tt/fa1` default, `fa2` with `NOKOHOLD=1`): Jecht falls 16.6 s, Terra in
+    the slot, Squall in at 26.6 s, in the slot with the pad at 30.3 s; shots every 2 s `fa1.shots`, `fa1_montage.png` (fighters move, BRV changes). With no own member left (user rule, 18 Nov): the CPU partner on the stage takes the slot
     (the KO swap, `drive = 2`: AI-driven via `apply_drive`), or, with no partner standing, the next CPU member comes into the slot AI-driven; the side fights
     on until nobody is left, then `group_decided` as before. `reserve_left(0)` = members not fielded (own + CPU).
   - **HUD reserve strip** (team 0): the members not fielded, own first, CPU ones named "CPU <name>" (the strip shows portraits).
@@ -3045,6 +3045,14 @@ User freeze (desktop, `rp6logs/desk_1119_freeze.log` + `.bin`): game thread 100 
 User wish: "Partners should have assists." Every started extra (start-of-battle partners, the enemy's second fighter, call-ins) now has its own assist actor, its own assist
 gauge that fills, and calls it (CPU extras on their own, human-driven extras through the same +0x5B6 bits). Switch: `PSPRECOMP_TAGTEAM_XASSIST=0` = the old behaviour (extras without
 an assist); default ON. Code: `tagteam.cpp`, block "Own assists for extras" (`xas_*`, before `fix_assist`).
+- **2nd / 3rd battle of one program run (21 Nov, user: "Jecht's cpu assist isn't working", Assists OFF):** `xas_frame`'s retry timer (`last_try[]`, a function-static, compared with
+  the battle age) was never reset between battles. The age restarts at 0 each battle, so `age - last_try < 120` held until the new battle's age passed the stale value of the old one
+  (the last try of battle 1: a few seconds after a plain spawn, minutes after a release / respawn cycle): no `xas_spawn` at all, no `[XAS]` line, and every call of the partner logged
+  `has no assist actor ready (none): the round 7 attack` (the teleport + plain attack). Now `last_try` (and the new skip-log throttle) are reset per `g_battle_gen`. New log lines
+  (`TAGTEAM_LOG`): `[XAS] extra X: xas_spawn skipped (no camera manager / no file manager / no retail assist manager seen yet)` and, every 5 s,
+  `[XAS] t=..: extra X: xas_spawn skipped (dead / down / exb running / assist move off)`. Test aid: `PSPRECOMP_TTLOCK_FORCECALL` fires again in every battle (its done-set is per battle).
+  Repro: the quick-battle walk + CROSS mash (rematches) with `TAGTEAM_ASSIST=0`, `FORCECALL=0:10`, `KOLIST=cpu:20,enemy2:21`: before, battle 2's assists came at 9.83 s instead of 7.83 s
+  (stale timer 7.83 s from battle 1) and the call at 10.0 s found `(still loading)`; after, every battle: `got assist actor` at 7.83 s.
 - **The actor** (`xas_spawn`, from `xas_frame` at the scene tick, extra standing, battle age > 4 s, retried every 2 s): mirrors `FUN_08888354` for one assist: alloc 0x12D0 (zeroed,
   ownership tracked like an extra's), `FUN_08A61C3C(mem, FUN_08872B48(0), row, side + 2)` with the camera slot `side + 2` hidden from the constructor (`camslot_hide`; the retail assist's lock
   block lives there), the 1912-byte init record (`FUN_088CB9E8 / 088CBA10 / 088CBA54`, level byte of the side record, `FUN_088BCA50 -> FUN_088BC17C`, costume), vtable +256 init, foe =
