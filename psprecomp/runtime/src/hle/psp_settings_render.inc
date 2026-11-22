@@ -1186,6 +1186,158 @@ struct SettingsDraw {
         for (int i = 0; i < 3; ++i) P.ring(cx, cy, R / 1.f * (1.f - 0.012f * float(i)), 1.4f - 0.4f * float(i), rgb(250, 220, 130, 0.65f * ra / float(i + 1)));
     }
 
+
+    // -- Test Controls: a PSP drawn with shapes; each control lights while the input reads it ---------------------------------
+    void draw_test() {
+        const SetTest& T_ = S.test;
+        P.ga = 1.f;
+        V.g_.test_tabs.clear();
+        const float dh = float(c.dh), oy = (dh - float(SCREEN_H)) / 2.f;   // a tall canvas: the drawing stays centred
+        const Col off = rgb(58, 62, 92), edge = rgb(150, 158, 206), glow = rgb(255, 214, 92), lit_txt = rgb(30, 30, 60);
+        auto pressed = [&](uint32_t bit) { return (T_.buttons & bit) != 0; };
+        // header: title, the player tabs, Exit
+        P.rrect(0, 0, float(SCREEN_W), 30.f + oy * 0.f, 0.f, rgb(26, 28, 88, 0.92f));
+        P.text(cinzel, 12.f * fs, 14.f, 20.f, "Test Controls", C_WHITE, 0, 0);
+        {
+            const SetRect ex{392.f, 6.f, 78.f, 19.f};
+            V.g_.test_exit = ex;
+            P.rrect(ex.x, ex.y, ex.w, ex.h, 5.f, rgb(214, 218, 240));
+            P.text(bodyb, 9.f * fs, ex.x + ex.w / 2.f, ex.y + 13.f, "Exit", C_INK, ex.w - 6.f, 2);
+        }
+        const int n = int(T_.players.size());
+        const float tw = 92.f, tg = 8.f, tx0 = (float(SCREEN_W) - (float(n) * tw + float(n - 1) * tg)) / 2.f, ty = 36.f;
+        for (int i = 0; i < n; ++i) {
+            const SetRect r{tx0 + float(i) * (tw + tg), ty, tw, 17.f};
+            V.g_.test_tabs.push_back(r);
+            const bool sel = i == T_.player;
+            P.rrect(r.x, r.y, r.w, r.h, 6.f, sel ? rgb(40, 52, 222) : rgb(208, 212, 238));
+            P.text(bodyb, 9.f * fs, r.x + r.w / 2.f, r.y + 12.f, T_.players[size_t(i)], sel ? C_WHITE : C_INK, r.w - 8.f, 2);
+        }
+        // the PSP: shoulders, body, screen
+        const float bx = 62.f, by = 82.f + oy * 0.5f, bw = 356.f, bh = 140.f;
+        auto shoulder = [&](float x, uint32_t bit, const char* name) {
+            const bool on = pressed(bit);
+            P.rrect(x, by - 12.f, 84.f, 16.f, 7.f, on ? glow : edge);
+            P.rrect(x + 1.5f, by - 10.5f, 81.f, 13.f, 6.f, on ? glow : rgb(44, 46, 76));
+            P.text(bodyb, 9.f * fs, x + 42.f, by - 0.5f, name, on ? lit_txt : C_SILVER, 0, 2);
+        };
+        shoulder(bx + 8.f, 0x0100, "L");
+        shoulder(bx + bw - 92.f, 0x0200, "R");
+        P.shadow(bx, by, bw, bh, 26.f, 8.f, 0.40f);
+        P.rrect(bx, by, bw, bh, 26.f, edge);
+        P.rrect(bx + 2.f, by + 2.f, bw - 4.f, bh - 4.f, 24.f, Ramp(rgb(52, 56, 98), rgb(30, 32, 62), by, by + bh));
+        // screen with the live numbers
+        const SetRect sc{bx + 82.f, by + 14.f, 192.f, 108.f};
+        P.rrect(sc.x - 2.f, sc.y - 2.f, sc.w + 4.f, sc.h + 4.f, 6.f, rgb(110, 116, 170));
+        P.rrect(sc.x, sc.y, sc.w, sc.h, 5.f, rgb(14, 16, 36));
+        const float cxm = sc.x + sc.w / 2.f;
+        P.text(bodyb, 9.f * fs, cxm, sc.y + 14.f, T_.players.empty() ? "" : T_.players[size_t(T_.player)], rgb(150, 190, 255), sc.w - 10.f, 2);
+        P.text(body, 7.4f * fs, cxm, sc.y + 25.f, T_.device, rgb(150, 156, 200), sc.w - 10.f, 2);
+        if (T_.present) {
+            char b[64];
+            std::snprintf(b, sizeof b, "Stick  X %3d   Y %3d", T_.lx, T_.ly);
+            P.text(bodyb, 9.f * fs, cxm, sc.y + 44.f, b, C_WHITE, sc.w - 8.f, 2);
+            const float dx = (float(T_.lx) - 128.f) / 128.f, dy = (float(T_.ly) - 128.f) / 128.f;
+            std::snprintf(b, sizeof b, "%+.2f  %+.2f", dx, dy);
+            P.text(body, 8.f * fs, cxm, sc.y + 56.f, b, rgb(190, 196, 236), sc.w - 8.f, 2);
+            static const struct { uint32_t bit; const char* n; } names[] = {{0x0100, "L"}, {0x0200, "R"}, {0x0010, "Up"}, {0x0040, "Down"}, {0x0080, "Left"}, {0x0020, "Right"},
+                {0x4000, "Cross"}, {0x2000, "Circle"}, {0x8000, "Square"}, {0x1000, "Triangle"}, {0x0008, "Start"}, {0x0001, "Select"}};
+            std::string list;
+            for (auto& nm : names) if (pressed(nm.bit)) { if (!list.empty()) list += "  "; list += nm.n; }
+            if (list.empty()) list = "(no button)";
+            P.text(bodyb, 8.4f * fs, cxm, sc.y + 76.f, list, glow, sc.w - 8.f, 2);
+            P.text(body, 7.2f * fs, cxm, sc.y + 98.f, "PSP input after the game's mapping", rgb(120, 126, 170), sc.w - 8.f, 2);
+        } else {
+            P.text(bodyb, 8.6f * fs, cxm, sc.y + 62.f, "No controller for this player", rgb(255, 150, 150), sc.w - 8.f, 2);
+            P.text(body, 7.4f * fs, cxm, sc.y + 76.f, "Connect one (a second pad", rgb(150, 156, 200), sc.w - 8.f, 2);
+            P.text(body, 7.4f * fs, cxm, sc.y + 86.f, "stands in for split screen)", rgb(150, 156, 200), sc.w - 8.f, 2);
+        }
+        // d-pad
+        {
+            const float cx = bx + 44.f, cy = by + 46.f;
+            struct Arm { float x, y, w, h; uint32_t bit; };
+            const Arm arms[4] = {{cx - 8.f, cy - 25.f, 16.f, 19.f, 0x0010}, {cx - 8.f, cy + 6.f, 16.f, 19.f, 0x0040},
+                                 {cx - 25.f, cy - 8.f, 19.f, 16.f, 0x0080}, {cx + 6.f, cy - 8.f, 19.f, 16.f, 0x0020}};
+            P.rrect(cx - 9.f, cy - 9.f, 18.f, 18.f, 2.f, edge);
+            for (const Arm& a : arms) {
+                const bool on = pressed(a.bit);
+                P.rrect(a.x - 1.f, a.y - 1.f, a.w + 2.f, a.h + 2.f, 4.f, on ? glow : edge);
+                P.rrect(a.x, a.y, a.w, a.h, 3.f, on ? glow : off);
+            }
+            P.rrect(cx - 7.f, cy - 7.f, 14.f, 14.f, 2.f, off);
+            auto tri = [&](float x, float y, float dx, float dy, bool on) {   // an arrow head on an arm
+                const Col k = on ? lit_txt : C_SILVER;
+                P.segment(x + dy * 4.f - dx * 3.f, y + dx * 4.f + dy * 3.f, x + dx * 3.f, y + dy * 3.f, 1.f, k);
+                P.segment(x - dy * 4.f - dx * 3.f, y - dx * 4.f + dy * 3.f, x + dx * 3.f, y + dy * 3.f, 1.f, k);
+            };
+            tri(cx, cy - 16.f, 0, -1, pressed(0x0010)); tri(cx, cy + 16.f, 0, 1, pressed(0x0040));
+            tri(cx - 16.f, cy, -1, 0, pressed(0x0080)); tri(cx + 16.f, cy, 1, 0, pressed(0x0020));
+        }
+        // analog stick (the nub moves with the left stick; it lights while off centre)
+        {
+            const float cx = bx + 44.f, cy = by + 108.f, R = 17.f;
+            P.ring(cx, cy, R + 2.f, 2.f, edge);
+            P.rrect(cx - R, cy - R, 2.f * R, 2.f * R, R, rgb(22, 24, 48));
+            const float dx = (float(T_.lx) - 128.f) / 128.f, dy = (float(T_.ly) - 128.f) / 128.f;
+            const float mag = std::sqrt(dx * dx + dy * dy), cl = mag > 1.f ? 1.f / mag : 1.f;
+            const float nx = cx + dx * cl * (R - 5.f), ny = cy + dy * cl * (R - 5.f);
+            const bool moved = T_.lx != 128 || T_.ly != 128;
+            P.ring(cx, cy, R * 0.5f, 0.8f, rgb(70, 74, 110));
+            if (moved) P.segment(cx, cy, nx, ny, 1.2f, rgb(255, 214, 92, 0.7f));
+            P.rrect(nx - 7.f, ny - 7.f, 14.f, 14.f, 7.f, moved ? glow : edge);
+            P.rrect(nx - 5.5f, ny - 5.5f, 11.f, 11.f, 5.5f, moved ? rgb(255, 232, 150) : off);
+        }
+        // face buttons
+        {
+            const float cx = bx + bw - 44.f, cy = by + 46.f, d = 19.f, r = 9.5f;
+            struct Fb { float x, y; uint32_t bit; int kind; Col col; };
+            const Fb fb[4] = {{cx, cy - d, 0x1000, 0, rgb(72, 214, 130)}, {cx + d, cy, 0x2000, 1, rgb(240, 90, 96)},
+                              {cx, cy + d, 0x4000, 2, rgb(96, 150, 255)}, {cx - d, cy, 0x8000, 3, rgb(240, 150, 220)}};
+            for (const Fb& f : fb) {
+                const bool on = pressed(f.bit);
+                const Col sym = on ? lit_txt : f.col;
+                P.rrect(f.x - r - 1.f, f.y - r - 1.f, 2.f * r + 2.f, 2.f * r + 2.f, r + 1.f, on ? glow : edge);
+                P.rrect(f.x - r, f.y - r, 2.f * r, 2.f * r, r, on ? glow : off);
+                switch (f.kind) {
+                case 0: P.segment(f.x, f.y - 4.6f, f.x - 4.2f, f.y + 3.2f, 0.9f, sym); P.segment(f.x, f.y - 4.6f, f.x + 4.2f, f.y + 3.2f, 0.9f, sym); P.segment(f.x - 4.2f, f.y + 3.2f, f.x + 4.2f, f.y + 3.2f, 0.9f, sym); break;
+                case 1: P.ring(f.x, f.y, 4.4f, 1.8f, sym); break;
+                case 2: P.segment(f.x - 3.8f, f.y - 3.8f, f.x + 3.8f, f.y + 3.8f, 0.95f, sym); P.segment(f.x - 3.8f, f.y + 3.8f, f.x + 3.8f, f.y - 3.8f, 0.95f, sym); break;
+                default: P.segment(f.x - 3.8f, f.y - 3.8f, f.x + 3.8f, f.y - 3.8f, 0.9f, sym); P.segment(f.x - 3.8f, f.y + 3.8f, f.x + 3.8f, f.y + 3.8f, 0.9f, sym);
+                         P.segment(f.x - 3.8f, f.y - 3.8f, f.x - 3.8f, f.y + 3.8f, 0.9f, sym); P.segment(f.x + 3.8f, f.y - 3.8f, f.x + 3.8f, f.y + 3.8f, 0.9f, sym); break;
+                }
+            }
+        }
+        // Select / Start
+        {
+            const float y = by + 118.f;
+            auto pill = [&](float cx, uint32_t bit, const char* name) {
+                const bool on = pressed(bit);
+                P.rrect(cx - 15.f, y - 5.f, 30.f, 10.f, 5.f, on ? glow : edge);
+                P.rrect(cx - 14.f, y - 4.f, 28.f, 8.f, 4.f, on ? glow : off);
+                P.text(body, 6.4f * fs, cx, y + 13.f, name, C_SILVER, 0, 2);
+            };
+            pill(bx + bw - 96.f, 0x0001, "SELECT");
+            pill(bx + bw - 50.f, 0x0008, "START");
+        }
+        // hints
+        {
+            const float hy = dh - 22.f;
+            const std::string k1 = T_.keyboard ? "Esc / Back: leave" : "";
+            P.text(body, 7.8f * fs, float(SCREEN_W) / 2.f, hy - 8.f,
+                   "Hold START + SELECT for 2 s to leave" + (k1.empty() ? std::string() : "   |   " + k1), rgb(48, 54, 130), float(SCREEN_W) - 20.f, 2);
+            P.text(body, 7.8f * fs, float(SCREEN_W) / 2.f, hy + 4.f,
+                   std::string("Switch player: hold L + R for 1 s") + (T_.keyboard ? ",  PageUp / PageDown,  or click a tab" : ""), rgb(48, 54, 130), float(SCREEN_W) - 20.f, 2);
+            auto bar = [&](float y, float f, Col k) {
+                if (f <= 0.f) return;
+                const float w = 200.f, x = (float(SCREEN_W) - w) / 2.f;
+                P.rrect(x, y, w, 3.f, 1.5f, rgb(190, 196, 228));
+                P.rrect(x, y, std::max(3.f, w * std::min(1.f, f)), 3.f, 1.5f, k);
+            };
+            bar(dh - 40.f, T_.exit_frac, rgb(230, 90, 100));
+            bar(dh - 44.f + 0.f, T_.next_frac > 0.f && T_.exit_frac <= 0.f ? T_.next_frac : 0.f, rgb(60, 80, 230));
+        }
+    }
+
     float lastdt = 0.016f;
     void draw_all() {
         using Clk = std::chrono::steady_clock;
@@ -1193,6 +1345,8 @@ struct SettingsDraw {
         auto tick = [&](int i, Clk::time_point& t0) { const auto t1 = Clk::now(); acc[i] += std::chrono::duration<double, std::milli>(t1 - t0).count(); t0 = t1; };
         auto t0 = Clk::now();
         V.g_.back = SetRect{};
+        if (S.test.active) { draw_background(); draw_test(); V.animating_ = true; return; }
+        V.g_.test_tabs.clear(); V.g_.test_exit = SetRect{};
         draw_background(); tick(0, t0);
         draw_header(); tick(1, t0);
         V.g_.back = back;

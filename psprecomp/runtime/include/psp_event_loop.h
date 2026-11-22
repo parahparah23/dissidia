@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 
 /// SDL2+GL initialization: creates window, GL context, loads GLAD.
 /// Must be called from main thread before any GL calls.
@@ -27,3 +28,17 @@ SDL_Window* psp_get_sdl_window();
 void psp_set_window_title(const char* title);
 // A game module gives its window an icon: w x h RGBA8 pixels (copied). Applied now if the window exists, else when it is created.
 void psp_set_window_icon(const unsigned char* rgba, int w, int h);
+
+/// Test Controls (Settings > Controls): one player's input as the game would read it. Main thread.
+/// Player 0 = player 1: keyboard, the controllers "Player 1 Controller" allows, touch controls (and the debug socket's injections),
+/// kept up to date even while the settings menu hides the input from the game. Player 1 = a placeholder for split screen: the second
+/// connected controller. Buttons are PSP bits (SceCtrl: Select 1, Start 8, Up 0x10, Right 0x20, Down 0x40, Left 0x80, L 0x100,
+/// R 0x200, Triangle 0x1000, Circle 0x2000, Cross 0x4000, Square 0x8000); lx / ly 0..255, 128 = centre.
+struct PspInputSample {
+    uint32_t buttons = 0;
+    uint8_t lx = 128, ly = 128;
+    bool present = false;       // false: no device for this player
+    std::string name;           // what feeds this player
+};
+int psp_input_sample_players();
+bool psp_input_sample(int player, PspInputSample* out);

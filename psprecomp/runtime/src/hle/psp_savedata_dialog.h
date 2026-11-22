@@ -231,6 +231,17 @@ struct SetDialog {                            // a question over the settings sc
     int sel = 0;
     int hover = -1;
 };
+struct SetTest {                              // the Test Controls screen (full screen, replaces the settings list)
+    bool active = false;
+    int player = 0;                           // the selected player tab
+    std::vector<std::string> players;         // tab labels
+    uint32_t buttons = 0;                     // PSP bits (SceCtrl) pressed now
+    int lx = 128, ly = 128;                   // left stick as the game reads it, 0..255
+    bool present = true;                      // the player has a device
+    std::string device;                       // what feeds the player
+    float exit_frac = 0, next_frac = 0;       // progress of the Start+Select hold (leave) and the L+R hold (next player)
+    bool keyboard = true;                     // hints name keys (else pad)
+};
 struct SetScene {
     std::string title = "Settings";
     std::vector<std::string> crumbs;          // breadcrumb after the title, e.g. {"Image", "HDR"}
@@ -250,6 +261,7 @@ struct SetScene {
     std::string brand = "Dissidia 012 Recompiled";   // the plate in the top right corner (a Back button inside a sub-menu)
     SetKeyboardState kb;
     SetDialog dlg;
+    SetTest test;
 };
 struct SetRect {
     float x = 0, y = 0, w = 0, h = 0;
@@ -259,6 +271,8 @@ struct SetKey { std::string label; int kind = 0; char ch = 0; SetRect r; };   //
 struct SetGeom {
     SetRect back, list, scroll_track, scroll_thumb, detail, side;
     std::vector<SetRect> dlg_btns;            // the dialog's buttons while it is open
+    std::vector<SetRect> test_tabs;           // Test Controls: the player tabs
+    SetRect test_exit;                        // Test Controls: the Exit button
     std::vector<SetRect> cats;
     struct Row { int idx = 0; SetRect r, dec, inc, track; };
     std::vector<Row> rows;                    // the rows at least partly inside the list

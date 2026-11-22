@@ -34,6 +34,17 @@ the shoulder buttons press L and R and so do the triggers. Triggers: only the tr
 prompts name the triggers (LT / RT, L2 / R2, ZL / ZR). **Player 1 Controller** (`p1_controller`, `PSPRECOMP_P1_CONTROLLER=any|keyboard|<GUID>`):
 Any Controller (the default), one connected controller by name (the others are ignored: a Steam Deck with a pad plugged in, a pad
 someone else holds), or Keyboard Only. A saved controller that is not connected stays a choice, marked "(not connected)".
+**Controls > Test Controls** (generic runtime, `psp_settings.cpp` / `psp_settings_render.inc`; no setting is saved): a full-screen PSP
+drawn with shapes (no image assets): D-pad, Cross / Circle / Square / Triangle, L, R, Start, Select and the analog stick, each lit
+while the PSP input reads it pressed, the stick nub following the live position, and the raw stick values (0..255, 128 = centre) with the
+list of pressed buttons on its screen. It shows the input after the game's mapping: keyboard (move keys press two buttons), controllers
+(Player 1 Controller, L / R Buttons, A / B swap), the on-screen touch controls (they stay live over the screen; Start + Select touches
+leave) and, for player 1, debug-socket injections. A tab per player: Player 1 is what the game reads for player 1; Player 2 is a
+placeholder for split screen that reads the second connected controller (the first one Player 1 does not use; "No controller" if none).
+Switch with a click or touch on a tab, PageUp / PageDown / F2, or by holding L + R for 1 s on a pad. Leave with Esc, F1, Android Back,
+the Exit button (click / touch), right click, or by holding Start + Select for 2 s (from any player's input; a bar shows the hold); all
+other keys and buttons are the buttons under test and do nothing to the menu. `psp_input_sample(player, &sample)` (`psp_event_loop.h`)
+is the API a split-screen mode can reuse; the pre-menu-gate state is kept by `publish_input` even while the menu hides it.
 **Keyboard > Move Keys**: one key for each move that takes two buttons, both going down in the same pad read as the game needs
 (R held first makes a block instead): D dodge (R + Cross), F dash (R + Triangle), E EX Mode (R + Square), V summon (R + Circle),
 1 Brave assist (L + Circle), 2 HP assist (L + Square). Holding R or L and pressing the face button still works. (VCKing101's idea,

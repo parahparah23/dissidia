@@ -96,6 +96,9 @@ void psp_settings_tick();
 
 bool psp_settings_menu_open();
 
+/// True while Settings > Controls > Test Controls is showing: the on-screen touch controls then stay live over it (they are under test).
+bool psp_settings_test_open();
+
 /// Any thread: ask for the menu to open (the game's own menu entries - title screen, main menu, pause menu - call this). Takes effect
 /// on the main thread's next tick; does nothing while the menu is already open or in a multiplayer session.
 void psp_settings_request_open();

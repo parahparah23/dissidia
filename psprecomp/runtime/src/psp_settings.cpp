@@ -193,7 +193,7 @@ bool texpack_download_wanted();
 void texpack_download_start();
 void texpack_install_tick();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_TEST_CTRL, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_DELAY, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -1004,6 +1004,10 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = "D F E V 1 2";
             m.help = "Keyboard keys for moves that take two buttons\nD: dodge (R + Cross). F: dash (R + Triangle). E: EX Mode (R + Square). V: summon (R + Circle). 1: Brave assist (L + Circle). 2: HP assist (L + Square). Both buttons go down together, as the game needs. The rest: arrows, X / Z / A / S for Cross / Circle / Square / Triangle, Q / W for L / R, Space START, Tab SELECT.";
             break;
+        case ROW_TEST_CTRL:
+            m.label = "Test Controls";
+            m.help = "Check every button\nA PSP on screen lights each button, the D-pad and the analog stick as the game reads them (keyboard, controller, touch), for each player. Press Cross to open it. Leave with Esc, Back, or by holding Start and Select for 2 seconds.";
+            break;
         case ROW_TOUCH_EDIT:
             m.label = "Edit Touch Controls";
             m.help = "Touch layout editor\nMove, resize or hide each on-screen control and add combination buttons (for example L+R, or R+Triangle). Press Cross to open it; the layout is saved.";
@@ -1611,7 +1615,7 @@ psp_sddialog::SetKind row_kind(Row r) {
     case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9:
         return K::Toggle;
     case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
-    case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: case ROW_TEXPACK_INSTALL: case ROW_TEXPACK_DOWNLOAD: return K::Action;
+    case ROW_TEST_CTRL: case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: case ROW_TEXPACK_INSTALL: case ROW_TEXPACK_DOWNLOAD: return K::Action;
     case ROW_MOD_UNINSTALL: case ROW_TEXPACK_DEL: case ROW_TEXPACK: return K::Choice;
     case ROW_QUIT: return K::Danger;
     case ROW_SUB_HDR: case ROW_SUB_RT: return K::Submenu;
@@ -2441,7 +2445,7 @@ void build_rows() {
         add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_CHAR); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
         break;
     case PAGE_CONTROLS:
-        add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_P1_PAD);
+        add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_P1_PAD); add(ROW_TEST_CTRL);
         add(ROW_SEC_KEYBOARD); add(ROW_KEYS_INFO);
         if (g_touch_ui) { add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT); }
         break;
@@ -2537,6 +2541,47 @@ std::atomic<unsigned> g_open_serial{0};
 std::atomic<bool> g_gate_dirty{false};
 
 void set_open(bool open);
+// ---- Test Controls: a full-screen PSP that lights what the input reads (SetTest, draw_test in psp_settings_render.inc) ----
+struct TestState {
+    std::atomic<bool> active{false};
+    int player = 0;
+    int64_t exit_t0 = 0, next_t0 = 0;     // when the Start+Select / L+R hold began (0 = not held)
+    bool next_done = false;               // the L+R hold already switched; wait for a release
+    PspInputSample sample;
+} g_test;
+constexpr uint32_t T_SELECT = 0x0001, T_START = 0x0008, T_L = 0x0100, T_R = 0x0200;
+void test_begin() {
+    g_test.player = 0; g_test.exit_t0 = g_test.next_t0 = 0; g_test.next_done = false;
+    g_test.sample = PspInputSample{};
+    g_test.active = true;
+    g_dirty = true;
+    std::fprintf(stderr, "[SETTINGS] test controls open\n");
+}
+void test_end() {
+    if (!g_test.active.exchange(false)) return;
+    g_dirty = true;
+    std::fprintf(stderr, "[SETTINGS] test controls closed\n");
+}
+void test_set_player(int p) {
+    const int n = psp_input_sample_players();
+    g_test.player = ((p % n) + n) % n;
+    g_test.exit_t0 = g_test.next_t0 = 0;
+    g_dirty = true;
+}
+void test_tick(int64_t t) {   // the holds: Start + Select 2 s leaves, L + R 1 s is the next player
+    psp_input_sample(g_test.player, &g_test.sample);
+    const uint32_t b = g_test.sample.buttons;
+    uint32_t any = 0;   // leaving works from any player's input (a player with no device cannot press anything)
+    for (int i = 0; i < psp_input_sample_players(); ++i) { PspInputSample o; psp_input_sample(i, &o); any |= o.buttons; }
+    if ((b & (T_START | T_SELECT)) == (T_START | T_SELECT) || (any & (T_START | T_SELECT)) == (T_START | T_SELECT)) {
+        if (!g_test.exit_t0) g_test.exit_t0 = t;
+        if (t - g_test.exit_t0 >= 2000) { g_test.exit_t0 = 0; test_end(); return; }
+    } else g_test.exit_t0 = 0;
+    if ((b & (T_L | T_R)) == (T_L | T_R) && !g_test.exit_t0) {
+        if (!g_test.next_t0) g_test.next_t0 = t;
+        if (!g_test.next_done && t - g_test.next_t0 >= 1000) { g_test.next_done = true; test_set_player(g_test.player + 1); }
+    } else { g_test.next_t0 = 0; g_test.next_done = false; }
+}
 bool restart_supported() {
 #if defined(_WIN32) || defined(__ANDROID__)
     return false;
@@ -2720,6 +2765,7 @@ void set_open(bool open) {
         g_sel_page[page_id()] = g_sel;
         if (g_edit.active) edit_end();
         if (g_saves_env) { if (page_id() == PAGE_SAVES) g_saves.set_sel(g_sel); g_saves.reset(); }   // closes a file window, drops unpacked archives
+        g_test.active = false;
         g_closing = true;
         g_view.set_open(false);
         std::fprintf(stderr, "[SETTINGS] menu closing\n");
@@ -2933,6 +2979,7 @@ void confirm_row() {
     case ROW_LR_BUTTONS: change(psp_input_lr_triggers() ? -1 : 1); return;
     case ROW_P1_PAD: { const auto v = p1_choices(); change(p1_index(v) + 1 >= int(v.size()) ? -p1_index(v) : 1); return; }
     case ROW_KEYS_INFO: break;
+    case ROW_TEST_CTRL: test_begin(); return;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
     case ROW_NET_MODE: change(g_net_internet ? 1 : -1); return;
     case ROW_NET_SERVER: edit_begin(0); return;
@@ -3340,6 +3387,7 @@ void psp_settings_load_early() {
 }
 
 bool psp_settings_menu_open() { return g_open.load(); }
+bool psp_settings_test_open() { return g_test.active.load(); }
 
 void psp_settings_request_open() { g_request_open.store(true); }
 void psp_settings_request_open_saves() { g_request_saves.store(true); }
@@ -3352,6 +3400,12 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
     switch (ev.type) {
     case SDL_KEYDOWN: {
         const SDL_Keycode k = ev.key.keysym.sym;
+        if (open && g_test.active) {   // the test screen: only these keys are the menu's (everything else is a button under test)
+            if (k == SDLK_ESCAPE || k == SDLK_F1 || k == SDLK_AC_BACK) { if (!ev.key.repeat) test_end(); return true; }
+            if (k == SDLK_PAGEDOWN || k == SDLK_F2) { if (!ev.key.repeat) test_set_player(g_test.player + 1); }
+            else if (k == SDLK_PAGEUP) { if (!ev.key.repeat) test_set_player(g_test.player - 1); }
+            return false;
+        }
         if (k == SDLK_ESCAPE || k == SDLK_F1) {
             if (ev.key.repeat) return true;
             if (!open) { g_device = 1; set_open(true); return true; }
@@ -3411,6 +3465,7 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
         if (const uint32_t d = dpad_bit(b)) {
             if (down) g_pad_dpad = d; else if (g_pad_dpad == d) g_pad_dpad = 0;
         }
+        if (open && g_test.active) return false;   // every pad button is under test: the menu does not take any
         if (!open || g_closing || !down) return false;
         g_device = ev.cbutton.which == PSP_TOUCH_PAD_ID ? 2 : 0;
         const uint8_t ok = g_confirm_cross ? SDL_CONTROLLER_BUTTON_A : SDL_CONTROLLER_BUTTON_B;
@@ -3442,6 +3497,18 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
         return false;
     case SDL_MOUSEMOTION: case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: case SDL_MOUSEWHEEL: {
         if (!open || g_closing) return false;
+        if (g_test.active) {   // the test screen: click a player tab or Exit, right click leaves
+            if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.which != SDL_TOUCH_MOUSEID) {
+                float ux = 0, uy = 0;
+                if (ev.button.button == SDL_BUTTON_RIGHT) test_end();
+                else if (ev.button.button == SDL_BUTTON_LEFT && mouse_to_canvas(ev.button.x, ev.button.y, &ux, &uy)) {
+                    const auto& g = g_view.geom();
+                    if (g.test_exit.has(ux, uy)) test_end();
+                    for (size_t i = 0; i < g.test_tabs.size(); ++i) if (g.test_tabs[i].has(ux, uy)) test_set_player(int(i));
+                }
+            }
+            return false;
+        }
         if (ev.type == SDL_MOUSEWHEEL) {
             if (ev.wheel.which == SDL_TOUCH_MOUSEID || g_edit.active) return false;
             g_device = 1;
@@ -3471,6 +3538,14 @@ bool psp_settings_handle_event(const SDL_Event& ev) {
         if (!open || g_closing || psp_touch_editing()) return false;
         float ux = 0, uy = 0;
         if (!to_canvas(ev.tfinger.x, ev.tfinger.y, &ux, &uy)) return false;
+        if (g_test.active) {   // the on-screen controls are under test: a touch on a tab or Exit is the menu's, the rest goes to the controls
+            if (ev.type == SDL_FINGERDOWN) {
+                const auto& g = g_view.geom();
+                if (g.test_exit.has(ux, uy)) { test_end(); return true; }
+                for (size_t i = 0; i < g.test_tabs.size(); ++i) if (g.test_tabs[i].has(ux, uy)) { test_set_player(int(i)); return true; }
+            }
+            return false;
+        }
         if (ev.type == SDL_FINGERDOWN) {
             if (g_ptr.mode != 0 && g_ptr.touch) return true;   // one finger drives the menu
             pointer_press(ux, uy, true);
@@ -3524,7 +3599,8 @@ void psp_settings_tick() {
         std::fprintf(stderr, "[SETTINGS] closing: multiplayer session started\n");
         set_open(false);
     }
-    if (!g_closing) held_dir_update();
+    if (g_test.active) test_tick(now_ms());
+    else if (!g_closing) held_dir_update();
     // A render scale change waits until the game has parked (no display list in flight).
     if (g_pending_wide >= 0 && g_parked.load() > 0) {
         ge_draw_set_widescreen(g_pending_wide != 0);
@@ -3647,6 +3723,20 @@ void psp_settings_tick() {
         sc.kb.secret = g_edit.field == 6;
         sc.kb.shift = g_edit.shift; sc.kb.symbols = g_edit.symbols;
         sc.kb.row = g_edit.row; sc.kb.col = g_edit.col;
+    }
+    if (g_test.active) {
+        psp_sddialog::SetTest& tt = sc.test;
+        tt.active = true;
+        tt.player = g_test.player;
+        for (int i = 0; i < psp_input_sample_players(); ++i) tt.players.push_back("Player " + std::to_string(i + 1));
+        tt.buttons = g_test.sample.buttons;
+        tt.lx = g_test.sample.lx; tt.ly = g_test.sample.ly;
+        tt.present = g_test.sample.present;
+        tt.device = g_test.sample.name;
+        const int64_t tn = now_ms();
+        tt.exit_frac = g_test.exit_t0 ? float(tn - g_test.exit_t0) / 2000.f : 0.f;
+        tt.next_frac = g_test.next_t0 && !g_test.next_done ? float(tn - g_test.next_t0) / 1000.f : 0.f;
+        tt.keyboard = true;
     }
     static std::unique_ptr<psp_sddialog::Canvas> canvas;
     const int scale = std::max(1, std::min(psp_sddialog::output_scale(), g_ui_cap));

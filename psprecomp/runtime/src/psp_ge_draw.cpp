@@ -6051,7 +6051,7 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
     present_game_layer(cpr);
     if (std::strcmp(why, "menu") != 0) { present_game_overlay(cpr); present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
     present_dialog_overlay(cpr, pr);
-    if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)
+    if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing() || psp_settings_test_open())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)
         int tw = 0, th = 0;
         psp_gl_drawable_size(window, &tw, &th);
         psp_touch_draw(tw, th);

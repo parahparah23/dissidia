@@ -591,7 +591,7 @@ void psp_touch_event(const SDL_Event& ev) {
     // While the settings menu is open it takes the touches itself (tap, drag, sliders); the on-screen controls are hidden and let go.
     {
         static bool gated = false;
-        if (psp_settings_menu_open() && !g_edit) {
+        if (psp_settings_menu_open() && !g_edit && !psp_settings_test_open()) {
             if (!gated) { gated = true; release_all(); }
             return;
         }
