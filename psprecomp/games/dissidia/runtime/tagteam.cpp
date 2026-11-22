@@ -7535,6 +7535,17 @@ uint32_t booked_extra_victim(uint32_t vowner) {
         // the enemy's panel and every later hit broke the mate again (18 Nov desktop, Jecht hitting Terra). The reaction goes to the mate's own handler.
         if (v && v != vowner && side_of(v) == side_of(f[i]) && g_extra_hdl.count(v) && !std::getenv("PSPRECOMP_TAGTEAM_NOFRIENDLYREACT")) return v;
     }
+    // Second pass (21 Nov, RP6 "Feral Chaos cannot be BRV broken": the human's BRV hit on an extra that was at BRV 0 played the BREAK in the enemy SLOT fighter's handler, slotC at BRV 1386, no HITREACT
+    // line): the reaction came later than the 2-frame age of hit_victim_of (the break of a BRV-0 victim is queued behind the hit), so the lookup found nothing and the retail handler (the attacker's slot
+    // opponent) took it. Within PSPRECOMP_TAGTEAM_XHITAGE frames (8) of the attacker's last registered hit on an extra of this side, and when no registered hit of the other side landed on
+    // `vowner` itself in that time, the reaction still belongs to that extra. PSPRECOMP_TAGTEAM_XHITAGE=2 = old.
+    {   static const int maxage = std::getenv("PSPRECOMP_TAGTEAM_XHITAGE") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_XHITAGE")) : 8;
+        if (maxage > 2 && !g_xstep_att) {
+            uint32_t best = 0, batt = 0; int bage = 1 << 30; bool on_slot = false;
+            for (int i = 0; i < nf; i++) { if (side_of(f[i]) == side_of(vowner)) continue; uint32_t vv = 0; int ag = -1; hit_last(f[i], vv, ag); if (ag < 0 || ag > maxage) continue;
+                if (vv == vowner) on_slot = true; else if (vv && side_of(vv) == side_of(vowner) && g_extra_hdl.count(vv) && ag < bage) { best = vv; batt = f[i]; bage = ag; } }
+            if (best && !on_slot) { if (g_log) { static int c = 0; if (c++ < 40) std::fprintf(stderr, "[HITREACT] t=%.2fs late reaction (hit on %s %d frames ago) booked on it, not on %s\n", dissidia_battle_age() / 60.0f, role_of(best), bage, role_of(vowner)); } g_react_att = batt; return best; } }
+    }
     g_react_att = 0;
     return 0;
 }
@@ -7603,6 +7614,7 @@ void hitreact2_hook(uint8_t* rdram, recomp_context* ctx) {
             return;
         }
     }
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HITREACTLOG") && ok(h, 0x310) && g_bs) { const uint32_t vo = rd(h + 16u); if (vo == srd(g_bs + 56u) || vo == srd(g_bs + 60u)) { static int c = 0; if (c++ < 200) { std::fprintf(stderr, "[HITREACT0] t=%.2fs reaction in %s's own handler (no extra victim found), last hits:", dissidia_battle_age() / 60.0f, role_of(vo)); uint32_t f[8]; const int nf = hit_attackers(f); for (int i = 0; i < nf; i++) { uint32_t vv = 0; int ag = -1; hit_last(f[i], vv, ag); if (ag >= 0 && ag < 30) std::fprintf(stderr, " %s->%s(%d)", role_of(f[i]), ok(vv, 0x12D0) ? role_of(vv) : "?", ag); } std::fprintf(stderr, " step %08X\n", g_xstep_att); } } }
     g_orig_hitreact2(rdram, ctx);
 }
 void hitreact_hook(uint8_t* rdram, recomp_context* ctx) {
@@ -7611,7 +7623,11 @@ void hitreact_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t vh = static_cast<uint32_t>(ctx->r[4]) - 0x2A8u, ah = static_cast<uint32_t>(ctx->r[5]);
     if (!off && g_bs && g_nextra && ok(vh, 0x310) && ok(ah, 0x20)) {
         const uint32_t vowner = rd(vh + 16u), att = rd(ah + 16u);
-        const uint32_t real = ok(att, 0x12D0) ? hit_victim_of(att) : 0u;
+        uint32_t real = ok(att, 0x12D0) ? hit_victim_of(att) : 0u;
+        if (!real && ok(att, 0x12D0) && ok(vowner, 0x12D0) && !g_xstep_att) {   // (the same late reaction as booked_extra_victim's second pass: the attacker's last registered hit on an extra of the victim's side, <= 8 frames ago; PSPRECOMP_TAGTEAM_XHITAGE=2: off)
+            static const int maxage = std::getenv("PSPRECOMP_TAGTEAM_XHITAGE") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_XHITAGE")) : 8;
+            uint32_t vv = 0; int ag = -1; hit_last(att, vv, ag);
+            if (maxage > 2 && ag >= 0 && ag <= maxage && vv && vv != vowner && side_of(vv) == side_of(vowner) && g_extra_hdl.count(vv)) real = vv; }
         auto it = g_extra_hdl.find(real);
         if (real && real != vowner && it != g_extra_hdl.end() && ok(vowner, 0x12D0) && (side_of(real) == side_of(vowner) || (side_of(real) == side_of(att) && !std::getenv("PSPRECOMP_TAGTEAM_NOFRIENDLYREACT")))) {
             if (g_log) std::fprintf(stderr, "[HITREACT] t=%.2fs %s hit %s: reaction in its own handler %08X (not %s's %08X)\n", dissidia_battle_age() / 60.0f, role_of(att), role_of(real), it->second, role_of(vowner), vh);
@@ -9793,11 +9809,13 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static bool done = false; char who[16] = {}; float at = 0; unsigned v = 0;
         static bool hold = std::getenv("PSPRECOMP_TAGTEAM_SETBRV_HOLD") != nullptr; static uint32_t held = 0;   // _HOLD: keep it there until a hit takes it to 0
         if (hold && held) { const uint32_t st = rd(held + 0x52Cu); if (ok(st, 0x20)) { const uint32_t b = rd(st + 0x14u) & 0xFFFFu; bool hit = false; { uint32_t f[8]; const int nf = all_fighters(f); for (int i = 0; i < nf; i++) if (hit_victim_of(f[i]) == held) hit = true; }
-            if (hit) { hold = false; std::fprintf(stderr, "[SETBRV] t=%.2fs %s hit at brv %u, hold off\n", dissidia_battle_age() / 60.0f, role_of(held), b); } else if (b != v) wr(st + 0x14u, (rd(st + 0x14u) & 0xFFFF0000u) | (v & 0xFFFFu)); } }
+            if (hit) { hold = false; std::fprintf(stderr, "[SETBRV] t=%.2fs %s hit at brv %u, hold off\n", dissidia_battle_age() / 60.0f, role_of(held), b); } else { if (b != v) wr(st + 0x14u, (rd(st + 0x14u) & 0xFFFF0000u) | (v & 0xFFFFu));
+                if (const char* sst = std::getenv("PSPRECOMP_TAGTEAM_SETBRV_STATE")) { auto hh = g_extra_hdl.find(held); if (hh != g_extra_hdl.end() && ok(hh->second, 0x310) && rd(hh->second + 8u) != static_cast<uint32_t>(std::atoi(sst)) && rd(hh->second + 8u) <= 2u) wr(hh->second + 8u, static_cast<uint32_t>(std::atoi(sst))); } } } }
         if (!done && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_SETBRV"), "%15[^:]:%f:%u", who, &at, &v) == 3 && dissidia_battle_age() / 60.0f >= at) {
             done = true; uint32_t f[6]; const int n = all_fighters(f);
             for (int i = 0; i < n; i++) if (std::strcmp(role_of(f[i]), who) == 0 || (std::strcmp(who, "enemy2") == 0 && std::strcmp(role_of(f[i]), "extraE") == 0) || (std::strcmp(who, "partner") == 0 && std::strcmp(role_of(f[i]), "extraP") == 0)) {
-                const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x20)) { wr(st + 0x14u, (rd(st + 0x14u) & 0xFFFF0000u) | (v & 0xFFFFu)); std::fprintf(stderr, "[SETBRV] %s %08X brv -> %u\n", role_of(f[i]), f[i], v); held = f[i]; } break; }
+                const uint32_t st = rd(f[i] + 0x52Cu); if (ok(st, 0x20)) { wr(st + 0x14u, (rd(st + 0x14u) & 0xFFFF0000u) | (v & 0xFFFFu)); std::fprintf(stderr, "[SETBRV] %s %08X brv -> %u\n", role_of(f[i]), f[i], v); held = f[i];
+                    if (const char* sst = std::getenv("PSPRECOMP_TAGTEAM_SETBRV_STATE")) { auto hh = g_extra_hdl.find(f[i]); if (hh != g_extra_hdl.end() && ok(hh->second, 0x310)) { wr(hh->second + 8u, static_cast<uint32_t>(std::atoi(sst))); std::fprintf(stderr, "[SETBRV] handler %08X state -> %s (test: an extra after its own HP attack = 1)\n", hh->second, sst); } } } break; }
         }
     }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_SLOTDMG")) {   // debug: "<slotC|slotH|enemy2|partner>:<s>:<dmg>": once at battle age s, that fighter takes dmg HP like a natural hit (status +0x8, +0x20, high half of +0x0)
