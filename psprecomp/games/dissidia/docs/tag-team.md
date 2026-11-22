@@ -4587,3 +4587,18 @@ burster's foe word, which in a 2v2 is the enemy slot fighter, not the fighter th
   `s0:20:s1` seeded `s0=x0` -> in it slotH,extraE. Bursts end normally (`EX Burst over`). `tagteam_test.py --baseline` PASS. Two-copy `mp_test.py` 150 s (burst x0 routed + refused burst):
   `[NETSYNC]` 2400 frames compared, 0 mismatched, both copies log the same burst pair.
 - Not checked: a natural EX-mode HP hit by retail's AI / the human pad on a partner (the aids seed the hit); the burst chance prompt after a refused start (retail's own timeout ends it, not verified); devices.
+
+## Kill camera: camera work only, for every KO (22 Nov, tree ttx; host-only)
+User after play: the retail finish for a mid-battle KO changed the music (defeat jingle looping), played the loser's KO line with subtitles, hid the HUD, and only ran for the human's own deaths.
+- **Retail's finish machine** (object `*0x08B0CF20` = 09AEA320, per-frame `FUN_08B05DEC` from the phase update `FUN_08888AC0`, started by `FUN_08B09D88(machine, 0, 0, 1)` from `FUN_0888C048` with bs+72 = 4):
+  state 1 `08B060D0` waits, state 2 `08B0618C` = slow motion channel 0 = 0.02 + camera director program 0x898 on the loser (`08B082B4`, `0880FE58 / FEA0 / FD34`) + UI calls, state 3 `08B06648` = 0.20 + camera again,
+  `08B06370` = the loser's KO line (`08B33F8C(loser, +0x7C line)`, ra `08B064D4`) with its subtitle; `08B0998C` (per frame, from `08B097C0`) fades the battle BGM (`0889F280`) and starts the defeat BGM (`0889F3E4(obj, 0x40/0x41)`).
+  Logged with `PSPRECOMP_TAGTEAM_FNLOG=<hex>,...` (args / caller / bs+72; `FNSKIP=` also skips while bs+72 == 4), `FINGATE` + `PSPRECOMP_FIRSTCALL` (function sets of the finish phase), `SLOWCHLOG`.
+- **Slot fighters (either side, called-in members):** `hpstep_hook` flags a lethal HP hit whose side goes on (`g_midfin_gen`, `[KOCAM] mid-battle KO of ...`); while that finish phase runs `finbgm_hook` (08B0998C) and `finvoice_hook`
+  (08B33F8C with ra 08B064D4) do nothing: no BGM fade / defeat music, no finish KO line / subtitle; the camera, slow motion and the on-screen "THE FINAL BLOW!" text run as retail; the HUD stays up in the shots. The KO
+  flow waits for the presentation (`finish_busy`) and the phase goes back to 3 afterwards. The match-ending KO is not flagged (full retail finish). `PSPRECOMP_TAGTEAM_FULLFINISH=1`: whole retail finish.
+  Log check (NATKO human mid-battle KO): after the hit no `0889F234` / `0889F3E4` call (the BGM stays), `retail finish KO line ... skipped`. Shots: `~/dissidia/tt/ttx_killcam2_slot_montage.png`.
+- **Extras (no retail finish phase):** `xkocam_start` (at a lethal HP hit on an extra) runs state 2's camera work by hand: slow motion channel 0 0.02, `0883820C` position, `08B082B4(machine, cam, extra, 0x898, 0)`, camera program 0x898
+  (cam = `*0x08B3D6B8 + 1872`), then 0.20 after 140 ticks and release after 210 (`[KOCAM] extra ... kill camera started / over`). The camera returns to normal by itself (shots `~/dissidia/tt/ttx_killcam2_extra_montage.png`:
+  the camera frames the KO'd enemy extra, then the normal view). `PSPRECOMP_TAGTEAM_NOXKOCAM=1` off. The "KO Kill Camera" row switches both (off: no wait / no camera).
+- Not done / unverified: the fade to black seen near the end of the retail slot presentation (state 3) is still there; the camera of an extra KO online (view only, the slow motion is battle state); EX Burst KO; subtitles of our own KO line.

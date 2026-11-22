@@ -4325,6 +4325,8 @@ void hp_hit_indicator(uint32_t victim, uint32_t att, int hp_before, bool ko_hold
 bool g_clear_surv = false;   // debug row "Lethal HP Hits Kill": clear the retail survive-at-1-HP effects of a victim that would die (Tag Team group, default OFF = retail)
 bool g_kocam = true;   // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
 extern float g_callfx_rel; extern uint32_t g_callfx_gen;   // below (the call's slow motion release)
+void xkocam_start(uint32_t victim);   // below (callfx_step): the kill camera of a KO'd extra
+uint32_t g_midfin_gen = ~0u;   // battle generation whose retail finish phase (bs+72 == 4) was caused by a mid-battle KO: only its camera work and slow motion play (music / KO line / subtitle blocked)
 void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_BS72WATCH")) { static uint32_t wg = 0xFFFFFFFFu; if (wg != g_battle_gen) { wg = g_battle_gen; psp_mem_watch_set(g_bs + 72u); std::fprintf(stderr, "[BS72] watching bs+72 at %08X\n", g_bs + 72u); } }   // debug: who writes the battle phase
@@ -4395,6 +4397,13 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
             if (ok(sm, 0x40)) { g_ctx->f[12] = 0.3f; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + 70.f; g_callfx_gen = g_battle_gen; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs KO kill camera: slow motion 0.3 for 70 ticks on %s %08X\n", dissidia_battle_age() / 60.0f, role_of(a), a); }
             g_ctx->r[29] = static_cast<int32_t>(sp1);
         }
+    }
+    // KO of an extra (no retail finish phase for extras): the kill camera is driven here (slow motion + the finish camera program, see xkocam_start).
+    if (g_oneround && g_tagin && g_nextra && g_kocam && ok(a, 0x12D0) && dmg_hp0 > 0 && hp_eff(a) <= 0 && extra_of(a) && a != srd(g_bs + 56u) && a != srd(g_bs + 60u) && !std::getenv("PSPRECOMP_TAGTEAM_NOXKOCAM") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) xkocam_start(a);
+    // Mid-battle KO of a slot fighter (its side goes on): retail's finish phase runs for the camera and slow motion only (see finish_side_effects_hooks): flag it.
+    if (g_oneround && g_tagin && g_nextra && g_kocam && ok(a, 0x12D0) && dmg_hp0 > 0 && hp_eff(a) <= 0 && (a == srd(g_bs + 56u) || a == srd(g_bs + 60u)) && !std::getenv("PSPRECOMP_TAGTEAM_FULLFINISH") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) {
+        bool mate = false; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != a && side_of(g_extra[i].actor) == side_of(a) && alive(g_extra[i].actor)) mate = true;
+        if (ffa_now() ? ffa_keep(a) : (mate || reserve_left(team_of(side_of(a))) > 0)) { g_midfin_gen = g_battle_gen; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs mid-battle KO of %s %08X: retail finish camera + slow motion only (no music / KO line / subtitle)\n", dissidia_battle_age() / 60.0f, role_of(a), a); }
     }
     ledger_hp_hit(a, ratt);   // the KO ledger: who hit whom last (the extra itself inside its own step, not the module's slot fighter)
     if (hold) {
@@ -5802,7 +5811,7 @@ void ko_oneround() {
         static uint32_t fin_gen = 0xFFFFFFFFu; static float fin_since = 0.f; if (fin_gen != g_battle_gen) { fin_gen = g_battle_gen; fin_since = 0.f; }
         if (!ko_any) { if (fin_since == 0.f) fin_since = age; if (age - fin_since >= 5.f) {
             { const uint32_t mg = rd(0x08A62280u); if (ok(mg, 0x40) && rdf(mg + 4u) < 1.99f) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, mg, 0u); g_ctx->r[29] = static_cast<int32_t>(sp1); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs finish slow motion (channel 0) released by hand\n", age / 60.0f); } }
-            wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
+            g_midfin_gen = ~0u; wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
             fin_since = 0.f; if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs KO flow done: battle phase 4 (finish) put back to 3\n", age / 60.0f); } }
         else fin_since = 0.f;
     }
@@ -5965,6 +5974,44 @@ template <int... I> void install_end_log(std::integer_sequence<int, I...>) {
     ((g_end_orig[I] = psp_dispatch_probe_lookup(kEndFns[I]), g_end_orig[I] ? psp_dispatch_register(kEndFns[I], end_log_hook<I>) : void()), ...);
 }
 
+// debug (PSPRECOMP_TAGTEAM_FNLOG=<hex>,<hex>,...): log the calls of up to 24 functions (args r4..r7, caller, bs+72); PSPRECOMP_TAGTEAM_FNSKIP=<hex>,... also skips them while bs+72 == 4
+FuncPtr g_fnl_orig[24] = {}; uint32_t g_fnl_addr[24] = {}; bool g_fnl_skip[24] = {};
+template <int N> void fnlog_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    std::fprintf(stderr, "[FNLOG] t=%.2fs %08X(%08X, %08X, %08X, %08X) ra %08X bs72 %u%s\n", dissidia_battle_age() / 60.0f, g_fnl_addr[N], static_cast<uint32_t>(ctx->r[4]), static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]), static_cast<uint32_t>(ctx->r[31]), g_bs ? rd(g_bs + 72u) : 99u, (g_fnl_skip[N] && g_bs && rd(g_bs + 72u) == 4u) ? " SKIPPED" : "");
+    if (g_fnl_skip[N] && g_bs && rd(g_bs + 72u) == 4u) { ctx->r[2] = 0; return; }
+    g_fnl_orig[N](rdram, ctx);
+}
+template <int... I> void fnlog_install_n(std::integer_sequence<int, I...>, const std::vector<uint32_t>& addrs, const std::vector<bool>& skip) {
+    ((I < static_cast<int>(addrs.size()) ? (g_fnl_addr[I] = addrs[I], g_fnl_skip[I] = skip[I], g_fnl_orig[I] = fn(addrs[I]), g_fnl_orig[I] ? psp_dispatch_register(addrs[I], fnlog_hook<I>) : void()) : void()), ...);
+}
+// Retail's finish phase (bs+72 == 4) is the end-of-match presentation: its state machine (obj 09AEA320) starts the slow motion (08B0618C: channel 0 = 0.02) and the camera, and also
+// fades the battle BGM and plays the defeat jingle (BGM id 0x40: 08B0998C -> 0889F280 / 0889F3E4), plays the loser's KO line with its subtitle (08B06370 -> 08B33F8C, ra 08B064D4), ...
+// For a mid-battle KO (g_midfin_gen) the BGM controller step and that voice call are skipped; everything else of the presentation (camera, slow motion) runs.
+// PSPRECOMP_TAGTEAM_FULLFINISH=1: the whole retail finish (old).
+bool mid_finish() { return g_midfin_gen == g_battle_gen && g_bs && !g_decided && rd(g_bs + 72u) == 4u; }
+FuncPtr g_orig_finbgm = nullptr, g_orig_finvoice = nullptr;
+void finbgm_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (g_log && g_bs && rd(g_bs + 72u) == 4u) { static uint32_t dg = ~0u; if (dg != g_battle_gen) { dg = g_battle_gen; const uint32_t o = static_cast<uint32_t>(ctx->r[4]) - 0xA4u; std::fprintf(stderr, "[FINOBJ] finish machine %08X words:", o); for (uint32_t k = 0; k < 0x60u; k += 4) std::fprintf(stderr, " +%02X=%08X", k, rd(o + k)); std::fprintf(stderr, "\n"); } }
+    if (mid_finish()) { static int n = 0; if (g_log && n++ < 3) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish BGM step skipped (mid-battle KO)\n", dissidia_battle_age() / 60.0f); ctx->r[2] = 0; return; }
+    g_orig_finbgm(rdram, ctx);
+}
+void finvoice_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (static_cast<uint32_t>(ctx->r[31]) == 0x08B064D4u && mid_finish()) { if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish KO line %08X skipped (mid-battle KO)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[5])); ctx->r[2] = 0; return; }
+    g_orig_finvoice(rdram, ctx);
+}
+void finish_hooks_install() {
+    if (!g_orig_finbgm) { g_orig_finbgm = fn(0x08B0998Cu); if (g_orig_finbgm) psp_dispatch_register(0x08B0998Cu, finbgm_hook); }
+    if (!g_orig_finvoice) { g_orig_finvoice = fn(0x08B33F8Cu); if (g_orig_finvoice) psp_dispatch_register(0x08B33F8Cu, finvoice_hook); }
+}
+void fnlog_install() {
+    std::vector<uint32_t> a; std::vector<bool> sk;
+    for (const char* env : {"PSPRECOMP_TAGTEAM_FNLOG", "PSPRECOMP_TAGTEAM_FNSKIP"}) if (const char* e = std::getenv(env)) {
+        std::string t(e); size_t p0 = 0; while (p0 < t.size() && a.size() < 24) { size_t c = t.find(',', p0); if (c == std::string::npos) c = t.size(); const uint32_t v = static_cast<uint32_t>(std::strtoul(t.substr(p0, c - p0).c_str(), nullptr, 16)); if (v) { a.push_back(v); sk.push_back(env[20] == 'S'); } p0 = c + 1; } }
+    if (!a.empty()) fnlog_install_n(std::make_integer_sequence<int, 24>{}, a, sk);
+}
 // debug (PSPRECOMP_TAGTEAM_HITLOG=1): FUN_08AEF284(event, attacker, victim) builds a hit event
 FuncPtr g_orig_hit = nullptr;
 const char* role_of(uint32_t a) {
@@ -8667,6 +8714,36 @@ bool appear_fx_start(uint32_t k, uint32_t P, uint32_t M) {   // true: the game's
     return f.h != 0;
 }
 float g_callfx_rel = -1.f; uint32_t g_callfx_gen = 0;   // round 5: the call's slow-motion channel 6 is given back (round 4 never did: the whole battle then ran at 0.4 / 2.0 = 1/5 speed)
+// Kill camera of a KO'd extra: what retail's finish state 2 (FUN_08B0618C) does for a slot fighter, without its HUD / music / voice parts: slow motion channel 0 = 0.02 (then 0.20), the loser's position as the
+// look-at target (FUN_0883820C), the camera director's program 0x898 (FUN_08B082B4(machine, cam, loser, 0x898, 0), FUN_0880FE58 / FEA0 / FD34(cam, 0x898, 0)). machine = *0x08B0CF20, cam = machine + 0x28.
+struct XKo { uint32_t gen = ~0u; float t0 = -1.f; int stage = 0; uint32_t victim = 0; } g_xko;
+void xkocam_start(uint32_t victim) {
+    if (g_xko.gen == g_battle_gen && g_xko.t0 >= 0.f) return;   // one at a time
+    if (g_callfx_rel >= 0.f || (g_bs && rd(g_bs + 72u) == 4u)) return;   // an assist call's slow motion / a retail finish is running
+    const uint32_t sm = rd(0x08A62280u), mach = rd(0x08B0CF20u), cam = ok(rd(0x08B3D6B8u), 0x100) ? rd(0x08B3D6B8u) + 1872u : 0u;   // (machine + 0x28 once a finish started: FUN_08B09D88 stores *0x08B3D738 + 1872 there)
+    if (!ok(sm, 0x40) || !ok(cam, 0x100)) { if (g_log) std::fprintf(stderr, "[KOCAM] extra KO camera: no camera director (machine %08X cam %08X)\n", mach, cam); return; }
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x200u);
+    const uint32_t buf = static_cast<uint32_t>(g_ctx->r[29]) + 0x40u, vec = buf + 0x20u;
+    g_ctx->f[12] = 0.02f; call(0x08A62020u, sm, 0u);
+    call(0x0883820Cu, victim, buf);
+    call(0x08B082B4u, mach, cam, victim, 0x898u, 0u);
+    wrf(vec, rdf(buf)); wrf(vec + 4u, rdf(buf + 4u)); wrf(vec + 8u, rdf(buf + 8u)); wrf(vec + 12u, 1.0f);
+    call(0x0880FE58u, cam, vec); call(0x0880FEA0u, cam, 2u, 1u); call(0x0880FEA0u, cam, 4u, 1u);
+    g_ctx->f[12] = 0.0f; call(0x0880FD34u, cam, 0x898u, 0u);
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+    g_xko.gen = g_battle_gen; g_xko.t0 = dissidia_battle_age(); g_xko.stage = 1; g_xko.victim = victim;
+    if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra %s %08X KO: kill camera started (slow motion 0.02, camera program 0x898 on it)\n", dissidia_battle_age() / 60.0f, role_of(victim), victim);
+}
+void xkocam_step() {
+    if (g_xko.t0 < 0.f) return;
+    if (g_xko.gen != g_battle_gen) { g_xko = XKo(); return; }
+    const float age = dissidia_battle_age() - g_xko.t0; const uint32_t sm = rd(0x08A62280u);
+    if (!ok(sm, 0x40)) return;
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+    if (g_xko.stage == 1 && age >= 140.f) { g_xko.stage = 2; g_ctx->f[12] = 0.20f; call(0x08A62020u, sm, 0u); }
+    else if (g_xko.stage == 2 && age >= 210.f) { g_xko.stage = 3; call(0x08A620B0u, sm, 0u); g_xko.t0 = -1.f; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra kill camera over (slow motion released)\n", dissidia_battle_age() / 60.0f); }
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+}
 void callfx_step() {
     if (g_callfx_rel < 0.f) return;
     if (g_callfx_gen != g_battle_gen) { g_callfx_rel = -1.f; return; }
@@ -9462,7 +9539,7 @@ void actl_hook(uint8_t* rdram, recomp_context* ctx) {
         while (next < at.size() && age >= at[next]) { char path[512]; std::snprintf(path, sizeof path, "%s/shot_%06.2f.tga", dir.c_str(), static_cast<double>(at[next])); std::string ps(path);
             std::thread([ps] { ::ge_draw_capture_screenshot(ps.c_str(), 3000); }).detach(); std::fprintf(stderr, "[SHOTAT] t=%.2fs %s\n", age, path); next++; }
     }
-    air_learn_step(); own_learn_step(); callfx_step(); atk_pad_step(); atk_due_step(); appear_fx_step(); if (g_log) atk_watch_step(); aohit_step(); ao_busy_step(); ao_combo_step();
+    air_learn_step(); own_learn_step(); callfx_step(); xkocam_step(); atk_pad_step(); atk_due_step(); appear_fx_step(); if (g_log) atk_watch_step(); aohit_step(); ao_busy_step(); ao_combo_step();
     if (aohit_on() && !assist_off_now() && ok(ctl, 0x80) && g_bs) for (uint32_t k = 0; k < 2; k++) if (rd(ctl + 8u + 24u * k) == 0u) {   // (measurement) a retail call starts now
         const uint32_t M = srd(g_bs + 56u + 4u * k); const char* w = ""; if (ok(M, 0x12D0)) aohit_start(k, M, 0u, ao_pick_foe(M, 0, &w), false); }
     if (g_log && g_bs && std::getenv("PSPRECOMP_TTLOCK_AGAUGELOG")) {   // test: the two slot fighters' assist gauge (+0x1C) and the call request words
@@ -9988,6 +10065,10 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                       if (g_hud && a >= g_hud && a < g_hud + 0x2000u) std::fprintf(stderr, " hud+%X", a - g_hud); for (const auto& kv : g_extra_hdl) if (a >= kv.second && a < kv.second + 0x310u) std::fprintf(stderr, " hdlcopy(%s)+%X", role_of(kv.first), a - kv.second); }
                     std::fprintf(stderr, "\n"); if (i == k) { psp_mem_watch_set(a & ~3u); std::fprintf(stderr, "[VALSCAN] watching %08X\n", a & ~3u); } i++; } }
         } }
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_FINGATE")) {   // debug (with PSPRECOMP_FIRSTCALL=0BFFF000:<file>): phase 2 = battle age [6, 9) s (plain play), phase 1 = the first 4 s of the finish phase (bs+72 == 4)
+        static float t4 = -1.f; static uint32_t gen = ~0u; const float age = dissidia_battle_age(); if (gen != g_battle_gen) { gen = g_battle_gen; t4 = -1.f; }
+        if (rd(g_bs + 72u) == 4u && t4 < 0.f) t4 = age;
+        g_ram[0x0BFFF000u & 0x07FFFFFFu] = (t4 >= 0.f && age - t4 < 240.f) ? 1 : (age >= 360.f && age < 540.f && t4 < 0.f) ? 2 : 0; }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_HUDGATE")) {   // debug (with PSPRECOMP_FIRSTCALL=0BFFF000:<file>): "<a>:<b>:<c>:<d>" FIRSTCALL phase 1 = battle age [a, b) s, phase 2 = [c, d) s
         float a = 0, b = 0, c = 0, d = 0; if (std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_HUDGATE"), "%f:%f:%f:%f", &a, &b, &c, &d) == 4) { const float t = dissidia_battle_age() / 60.0f; g_ram[0x0BFFF000u & 0x07FFFFFFu] = (t >= a && t < b) ? 1 : (t >= c && t < d) ? 2 : 0; } }
     if (g_bs && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_XHSTATE")) {   // debug: "<partner|enemy2>:<s>:<state>": write that extra's damage handler copy state (+8) once at battle age s, its BRV 0
@@ -10502,6 +10583,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_brkshow) { g_orig_brkshow = fn(0x08ADFC84u); g_orig_brkhide = fn(0x08ADFCC4u); if (g_orig_brkshow && g_orig_brkhide) { psp_dispatch_register(0x08ADFC84u, brkshow_hook); psp_dispatch_register(0x08ADFCC4u, brkhide_hook); } }
     if (!g_orig_sideflag && !std::getenv("PSPRECOMP_TTCAM_NOSIDEFLAG")) { g_orig_sideflag = fn(0x08889F70u); if (g_orig_sideflag) psp_dispatch_register(0x08889F70u, sideflag_hook); }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOCTRL")) { g_orig_ctrl = fn(0x08886C88u); if (g_orig_ctrl) psp_dispatch_register(0x08886C88u, ctrl_hook); }
+    fnlog_install(); finish_hooks_install();
     if (std::getenv("PSPRECOMP_TAGTEAM_ENDLOG")) install_end_log(std::make_integer_sequence<int, 16>{});
     g_orig_rel1 = psp_dispatch_probe_lookup(0x0886CAA0u); g_orig_rel2 = psp_dispatch_probe_lookup(0x0886A140u);
     if (!g_orig_fileunload) { g_orig_fileunload = fn(0x08844520u); if (g_orig_fileunload) psp_dispatch_register(0x08844520u, fileunload_hook); }
