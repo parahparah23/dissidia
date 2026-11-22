@@ -84,7 +84,7 @@ void worker() {
 }  // namespace
 
 // An event (break / an extra's BRV 0): three shots at age, +0.5 s, +1.5 s. age_s = battle age in seconds.
-void tagteam_breakshot_event(float age_s, unsigned battle_no, const char* role, int chr, const char* kind) {
+void tagteam_breakshot_event(float age_s, unsigned battle_no, const char* role, int chr, const char* kind, const char* brv) {
     if (!enabled() || g_scheduled >= kMaxShots) return;
     const std::string dir = shot_dir();
     { static std::string made; if (made != dir) { mkdir(dir.c_str(), 0775); made = dir; } }
@@ -93,7 +93,7 @@ void tagteam_breakshot_event(float age_s, unsigned battle_no, const char* role, 
         char what[160]; std::snprintf(what, sizeof what, "t=%.2f %s %d %s #%d", age_s + kOffsets[n], role, chr, kind, n);
         g_due.push_back({age_s + kOffsets[n], dir + name, what});
     }
-    std::fprintf(stderr, "[BREAKSHOT] t=%.2f %s char %d %s: 3 shots scheduled (%d of %d this run)\n", age_s, role, chr, kind, g_scheduled, kMaxShots);
+    std::fprintf(stderr, "[BREAKSHOT] t=%.2f %s char %d %s: 3 shots scheduled (%d of %d this run) {%s}\n", age_s, role, chr, kind, g_scheduled, kMaxShots, brv ? brv : "");
 }
 // Every game frame: hand the due shots to the worker (never blocks the game thread). age_s < 0: no battle (pending shots dropped).
 void tagteam_breakshot_frame(float age_s) {
