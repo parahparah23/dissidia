@@ -4868,3 +4868,10 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   the resources loaded, e.g. during the call-in's loading); a real partner AUTO summon from his own AI conditions and an enemy-extra AI summon were not seen in the runs.
 - Regression `tagteam_test.py --baseline` PASS (`/tmp/ttcam_sm/reg7`); two-copy `mp_test.py` 120 s (clones): `frames compared 3901 / 3900, mismatched 0`. (`mp_test.py` on the plain `work_*_mpA/B` dirs timed out at the debug socket: another session kills
   processes named `psprecomp_runtime`; use renamed copies of the runtime like `mkx.sh` does.)
+
+### Summonstones, eleventh round (22 Nov): CORRECTION - an extra's summon through the manager step does NOT work
+- The "extra ... summon used" line of the tenth round was an artefact of the Quick Battle clones: a clone shares its slot fighter's character id, so its used booking (the key is (side, character id)) was already set and the flag read back non-zero.
+- Dense game-time shots (every 0.3 s from 8 s to 36 s of game time, `/tmp/ttcam_sm/fsg_all.png`) after `PSPRECOMP_TAGTEAM_FORCESUMMON=0:700` show no summon cut-in (only an EX Core flash and the human's own early "Concentration activated").
+- gdb counts of `FUN_088A9DE8` (effect start) and `FUN_08AE3E34` (cut-in message) with and without the forced request are identical (4 / 0 with clones; 5 / 0 with `ENEMY2_CHAR=11 PARTNER_CHAR=7`), and with the real Terra extra the step logs "presented"
+  but never "summon used". So handing an extra to `FUN_08A22C78` for the step is not enough: the step's other predicates (`FUN_08A23488` / `08A23AEC` / `08A23BB8`, `FUN_0889120C` -> `FUN_08A22C78(entry side)` + `FUN_08B3390C`, the per-side rule records) do not accept
+  him. The extras-summon code (`PSPRECOMP_TAGTEAM_NOXSUMMON=1` turns it off) is therefore inert, not harmful; treat extras as unable to summon. Per-member stones and the big orb's refresh were not attempted.
