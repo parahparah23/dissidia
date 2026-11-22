@@ -137,3 +137,6 @@ menu / title rows then overlap the retail rows; the pause menu row does not depe
   lists a row right below the FX Shaders row; the Jecht Combo Timing helper uses it.
 - Controls > L / R Buttons (Shoulders / Triggers) is a value selector (< value >), not an On / Off switch.
 - Controls > Keyboard Controls opens the Keyboard Controls sub-page (read-only lines: key, move, PSP buttons).
+- Debug > **Button Chord Window (ms)** (Off, 10 to 200 ms in steps of 10): the fine version of Controls > Button Chord Window, the same saved `chord_ms` (default 70), applied at once. The Controls row shows "Custom (N ms)" when the value is none of its presets (Off / Short 70 / Medium 110).
+- `PspDebugToggle` has `def` (the value Reset All sets) and `group`: rows with the same group name are listed on a submenu row of the Debug page (Cross opens, Back returns; the row shows "N of M on"). The Dissidia tag team rows use group "Tag Team". Generic code only: `g_dbg_groups`, `PAGE_DBGGRP`, `ROW_GRP0..`.
+- Debug > **Reset All** (last row, asks Yes / No, No pre-selected): Performance Overlay off, FX Shaders on, GPU Sync off, Vertex Upload Sub, Glow Softening / Passes on, Effect Light sliders 2.5 / 1.5, chord window 70 ms, every game toggle to its `def`, and every developer option back to its default (those apply at the next start). Saved.

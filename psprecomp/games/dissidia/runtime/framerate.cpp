@@ -2654,10 +2654,10 @@ void dissidia_framerate_install(uint8_t* rdram) {
     else std::fprintf(stderr, "[FPS] CPU brain tick not found: no Enemy AI option\n");
     if (g_orig_cpu_tick) {
         psp_settings_add_debug_toggle({"Enemy AI", "Enemy AI (debug)\nOff: the CPU fighter never chooses an action; it stands and takes hits. Starts to apply about 7 s into a fight. This session only.",
-                                       +[]() { return !g_dbg_no_ai; }, +[](bool on) { g_dbg_no_ai = !on; }});
+                                       +[]() { return !g_dbg_no_ai; }, +[](bool on) { g_dbg_no_ai = !on; }, false, true});
     }
     psp_settings_add_debug_toggle({"Jecht Combo Timing", "Jecht combo helper (debug)\nThe screen edge flashes green when the window for his next chain press opens, and a press says GOOD, TOO EARLY or TOO LATE with the milliseconds off. Rush, Neutral / Up 2 and 3, HP. This session only.",
-                                   +[]() { return g_dbg_combo; }, +[](bool on) { g_dbg_combo = on; }, true});
+                                   +[]() { return g_dbg_combo; }, +[](bool on) { g_dbg_combo = on; }, true, false});
     if ((g_orig_pad_set_state = dissidia_ovl_battle_lookup(PAD_SET_STATE)) && (g_orig_pad_set_pending = dissidia_ovl_battle_lookup(PAD_SET_PENDING))) {   // always: the tag team blocks pads too
         psp_dispatch_register(PAD_SET_STATE, pad_set_state_hook); psp_dispatch_register(PAD_SET_PENDING, pad_set_pending_hook);
         if (g_test_ai_off) std::fprintf(stderr, "[FPS] test: CPU AI input off\n");

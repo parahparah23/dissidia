@@ -10316,27 +10316,27 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_fileunload) { g_orig_fileunload = fn(0x08844520u); if (g_orig_fileunload) psp_dispatch_register(0x08844520u, fileunload_hook); }
     if (g_orig_rel1 && g_orig_rel2) { psp_dispatch_register(0x0886CAA0u, rel1_hook); psp_dispatch_register(0x0886A140u, rel2_hook); }
     psp_settings_add_debug_toggle({"Tag Team (2v2)", "Tag team battle (experimental)\nOn: the next battle adds a partner for you and a second fighter to the CPU's team (2 v 2), L cycles the lock between the two enemies.\nAffects the next battle that starts.",
-                                   +[]() { return g_enabled; }, +[](bool on) { g_enabled = on; }});
+                                   +[]() { return g_enabled; }, +[](bool on) { g_enabled = on; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Tag Team 2v1", "Tag team 2 v 1 (experimental)\nWith Tag Team on: only your partner is added, so you and the partner fight one enemy. Off: 2 v 2.\nAffects the next battle that starts.",
-                                   +[]() { return g_two_v_one; }, +[](bool on) { g_two_v_one = on; }});
+                                   +[]() { return g_two_v_one; }, +[](bool on) { g_two_v_one = on; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Tag Team 1v2", "Tag team 1 v 2 (experimental)\nWith Tag Team on: you alone fight the CPU's two fighters (no partner for you). Off: 2 v 2.\nAffects the next battle that starts.",
-                                   +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }});
+                                   +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Tag Team 3v3", "Tag team 3 v 3 (experimental)\nWith Tag Team on: two partners per side instead of one, three fighters on each team. L cycles the lock through every enemy. A fallen fighter's place is taken by a team mate still standing; a team with nobody left loses. Online the host's setting decides.\nAffects the next battle that starts.",
-                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on) overhead_default_on(false); }});
+                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on) overhead_default_on(false); }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Free-for-all (3)", "Tag team free-for-all, 3 fighters (experimental)\nWith Tag Team on: you, the CPU and a second CPU fighter, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
-                                   +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on) overhead_default_on(); }});
+                                   +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on) overhead_default_on(); }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Free-for-all (4)", "Tag team free-for-all, 4 fighters (experimental)\nWith Tag Team on: you and three CPU fighters, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
-                                   +[]() { return g_ffa == 4; }, +[](bool on) { g_ffa = on ? 4 : 0; if (on) overhead_default_on(); }});
+                                   +[]() { return g_ffa == 4; }, +[](bool on) { g_ffa = on ? 4 : 0; if (on) overhead_default_on(); }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead HP Bars", "Tag team: HP bars over the enemies' heads\nOn: a thin HP bar over each enemy; the one you are locked on to is brighter and shows its Bravery. Only on your screen. This session only.",
-                                   +[]() { return g_overhead == 1; }, +[](bool on) { g_overhead = on ? 1 : 0; }});
+                                   +[]() { return g_overhead == 1; }, +[](bool on) { g_overhead = on ? 1 : 0; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead Mini Panels", "Tag team: mini status panels over the enemies' heads\nOn: a small panel (name, Bravery, HP bar and number) over each enemy, see-through; the one you are locked on to is stronger. Replaces the other overhead styles. Only on your screen. This session only.",
-                                   +[]() { return g_overhead == 2; }, +[](bool on) { g_overhead = on ? 2 : 0; }});
+                                   +[]() { return g_overhead == 2; }, +[](bool on) { g_overhead = on ? 2 : 0; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead PPSSPP HUD", "Tag team: the HUD of the PPSSPP plugin\nOn: half-size panels (face, Bravery, HP) over the enemies' heads, the one you are locked on to stronger(the bottom panels and our side panels are separate options below). Replaces the other overhead styles. Only on your screen. This session only.",
-                                   +[]() { return g_overhead == 3; }, +[](bool on) { g_overhead = on ? 3 : 0; }});
+                                   +[]() { return g_overhead == 3; }, +[](bool on) { g_overhead = on ? 3 : 0; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead: Assist Bar", "Tag team: the assist bar change (for the overhead HUDs)\nOn: the ally and the other enemy get small panels at the bottom of the screen under the HP bars, the assist gauges move beside the Bravery numbers and the summon orbs above the portrait badges (the PPSSPP plugin's layout). Off: the game's own bottom bar. Works with or without an overhead style. This session only.",
-                                   +[]() { return g_oh_assist; }, +[](bool on) { g_oh_assist = on; }});
+                                   +[]() { return g_oh_assist; }, +[](bool on) { g_oh_assist = on; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Hide Tag Team UI", "Tag team: hide the side panels\nOn: our small status panels at the screen edges are not drawn (the overhead styles show the same). Off: they are drawn next to any overhead style. This session only.",
-                                   +[]() { return g_hide_ui; }, +[](bool on) { g_hide_ui = on; }});
+                                   +[]() { return g_hide_ui; }, +[](bool on) { g_hide_ui = on; }, false, false, "Tag Team"});
     if (!std::getenv("PSPRECOMP_SOUNDHEAP_RETAIL")) psp_dispatch_register(0x088A0C10u, soundheap_hook);
     std::fprintf(stderr, "[TAGTEAM] installed (%s)\n", g_enabled ? "on" : "off, Settings > Debug > Tag Team (2v2)");
 }

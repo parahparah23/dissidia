@@ -80,6 +80,8 @@ struct PspDebugToggle {
     bool (*get)();
     void (*set)(bool on);
     bool under_fx = false;
+    bool def = false;            // the value Debug > Reset All sets
+    const char* group = nullptr; // not null: the row is on a submenu of the Debug page with this name (rows with the same name share one submenu)
 };
 void psp_settings_add_debug_toggle(const PspDebugToggle& toggle);
 

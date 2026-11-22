@@ -199,6 +199,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
+           ROW_DBG_CHORD, ROW_RESET_ALL, ROW_GRP0, ROW_GRP_END = ROW_GRP0 + 15,   // Debug page: chord window in ms, Reset All, one submenu row per game toggle group
            ROW_DBG0, ROW_DBG_END = ROW_DBG0 + 255,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
            ROW_GPU, ROW_GPU_GET, ROW_GPU_DEL,   // custom GPU drivers (Android, Adreno): Drivers page
            ROW_SUB_HDR, ROW_SUB_RT,             // rows that open a sub-menu
@@ -231,10 +232,10 @@ int p1_index(const std::vector<std::pair<std::string, std::string>>& v);
 int g_sel = 0;
 // Pages: the categories shown in the sidebar, and the sub-menus a row can open (PAGE_HDR under Image, PAGE_RT under Effects).
 enum Page { PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS, PAGE_CONTROLS, PAGE_NETWORK, PAGE_CLOUD, PAGE_SYSTEM, PAGE_GPU, PAGE_DEBUG, PAGE_MODS,
-            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_KEYS, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
+            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_KEYS, PAGE_DBGGRP, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
 constexpr int k_env_cats = 11;   // = EC_COUNT (psp_env_options.inc)
 const char* const k_page_names[PAGES] = {"Display", "Graphics", "Image", "Effects", "Controls", "Network", "Cloud", "System", "Drivers", "Debug", "Mods", "Saves",
-                                         "HDR", "Ray Tracing", "Keyboard Controls",
+                                         "HDR", "Ray Tracing", "Keyboard Controls", "Group",
                                          "Camera", "Input", "Timing", "Graphics", "Effects tuning", "Vulkan", "Textures", "Audio / video", "Game data", "Game logs", "Engine logs"};
 int g_page = 0;                        // the category (an index into page_list()): L / R, Q / E or Tab, the sidebar
 int g_sub = -1;                        // the open sub-menu page, -1 = none
@@ -243,6 +244,9 @@ bool g_touch_ui = false;               // a touch screen is present (or the on-s
 // The categories this device shows: Drivers (custom GPU drivers) only where they can be used (an Adreno phone with the Android build),
 // Controls on every device (its touch section only with a touch screen).
 std::vector<int> g_pages;
+std::vector<std::string> g_dbg_groups;   // the distinct PspDebugToggle::group names, in registration order (the Debug page's submenus)
+int g_dbg_group = 0;                     // the group the PAGE_DBGGRP page shows
+std::string page_title(int page) { return page == PAGE_DBGGRP && g_dbg_group >= 0 && g_dbg_group < int(g_dbg_groups.size()) ? g_dbg_groups[size_t(g_dbg_group)] : std::string(k_page_names[page]); }
 const std::vector<int>& page_list() {
     if (g_pages.empty()) {
         g_pages = {PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS};
@@ -255,7 +259,7 @@ const std::vector<int>& page_list() {
 }
 int page_id() { return g_sub >= 0 ? g_sub : page_list()[size_t(g_page)]; }
 // Sidebar icon of a page (settings_render.inc draw_icon).
-int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page == PAGE_KEYS ? PAGE_CONTROLS : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
+int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page == PAGE_KEYS ? PAGE_CONTROLS : page == PAGE_DBGGRP ? PAGE_DEBUG : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
 int g_ring_next = -1;                  // vertex upload mode saved for the next launch (-1 = unchanged)
 bool g_quit_armed = false;
 bool g_dirty = true;
@@ -809,6 +813,18 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             out.push_back(std::move(m));
             continue;
         }
+        if (r >= ROW_GRP0 && r <= ROW_GRP_END) {   // a submenu of game toggles
+            const size_t k = size_t(r - ROW_GRP0);
+            if (k < g_dbg_groups.size()) {
+                int on = 0, n = 0;
+                for (const PspDebugToggle& t : g_dbg_toggles) if (t.group && g_dbg_groups[k] == t.group) { n++; on += t.get() ? 1 : 0; }
+                m.label = g_dbg_groups[k];
+                m.value = std::to_string(on) + " of " + std::to_string(n) + " on";
+                m.help = g_dbg_groups[k] + "\nThe " + g_dbg_groups[k] + " switches (debug). Press Cross to open.";
+            }
+            out.push_back(std::move(m));
+            continue;
+        }
         if (r >= ROW_DBG0 && r <= ROW_DBG_END) {   // a game's debug toggle (any number of them)
             const size_t i = size_t(r - ROW_DBG0);
             if (i < g_dbg_toggles.size()) {
@@ -1022,7 +1038,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             static const char* const names[3] = {"Off", "Short", "Medium"};
             const int v = chord_level();
             m.label = "Button Chord Window";
-            m.value = names[v];
+            { const int ms = psp_ctrl_chord_ms(); m.value = (ms == 0 || ms == 70 || ms == 110) ? std::string(names[v]) : "Custom (" + std::to_string(ms) + " ms)"; }
             m.can_dec = v > 0;
             m.can_inc = v < 2;
             m.help = "Button chord window\nIn battle, a face button pressed on its own is held back a moment so that R or L pressed just after it still counts as one chord (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists). Without it a Cross that lands a frame before R starts a Chase or a jump instead of the dodge. Off: buttons act at once. Short: 70 ms (the default). Medium: 110 ms. A lone button is that much later. Saved.";
@@ -1304,6 +1320,19 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_SEC_SYNC: m.label = "Sync"; break;
         case ROW_SEC_DRIVER: m.label = "Driver"; break;
         case ROW_COUNT: break;
+        case ROW_DBG_CHORD: {
+            const int ms = psp_ctrl_chord_ms();
+            m.label = "Button Chord Window (ms)";
+            m.value = ms <= 0 ? "Off" : std::to_string(ms) + " ms";
+            m.can_dec = ms > 0; m.can_inc = ms < 200;
+            m.help = "Button chord window, fine (debug)\nHow long a face button pressed alone in battle is held back so that R or L pressed just after it still counts as one chord (R + Cross dodge, R + Square EX Mode ...). Off, or 10 to 200 ms in steps of 10. The same saved setting as Controls > Button Chord Window (70 ms by default); it applies at once.";
+            break;
+        }
+        case ROW_RESET_ALL:
+            m.label = "Reset All";
+            m.value = "";
+            m.help = "Reset all Debug settings\nPress Cross to set every setting on this page to its default: the rows above, the Tag Team submenu and the other game switches, the effect light sliders, the chord window and the developer options. Asks first. Saved.";
+            break;
         case ROW_QUIT:
             m.label = "Quit Game";
             m.value = g_quit_armed ? "Press again to quit" : "";
@@ -1642,6 +1671,9 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (r >= ROW_SUB_ENV0 && r <= ROW_SUB_ENV_END) return K::Submenu;
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     if (r >= ROW_DBG0 && r <= ROW_DBG_END) return K::Toggle;
+    if (r >= ROW_GRP0 && r <= ROW_GRP_END) return K::Submenu;
+    if (r == ROW_RESET_ALL) return K::Action;
+    if (r == ROW_DBG_CHORD) return K::Choice;
     switch (r) {
     case ROW_RT_REFL_FX:
     case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_UPDATES: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
@@ -2186,6 +2218,12 @@ void change(int d) {   // left / right on the selected row
     case ROW_LR_BUTTONS:
         if ((d > 0) != psp_input_lr_triggers()) { psp_input_set_lr_triggers(d > 0); save("lr_buttons", d > 0 ? "triggers" : "shoulders"); }
         break;
+    case ROW_DBG_CHORD: {
+        const int cur = psp_ctrl_chord_ms();
+        const int nv = d > 0 ? std::min(200, (cur / 10 + 1) * 10) : std::max(0, ((cur + 9) / 10 - 1) * 10);
+        if (nv != cur) { psp_ctrl_set_chord_ms(nv); save("chord_ms", std::to_string(nv)); }
+        break;
+    }
     case ROW_CHORD: {
         const int v = std::clamp(chord_level() + d, 0, 2);
         static const int ms[3] = {0, 70, 110};
@@ -2548,9 +2586,16 @@ void build_rows() {
         add(ROW_PERF); add(ROW_FX);
         for (size_t i = 0; i < g_dbg_toggles.size(); i++) if (g_dbg_toggles[i].under_fx) g_rows.push_back(Row(ROW_DBG0 + int(i)));   // (the Jecht combo helper)
         add(ROW_SYNC); add(ROW_RING); add(ROW_GLOWSOFT); add(ROW_GLOWPASS); add(ROW_FXL_INT); add(ROW_FXL_RAD);
-        for (size_t i = 0; i < g_dbg_toggles.size(); i++) if (!g_dbg_toggles[i].under_fx) g_rows.push_back(Row(ROW_DBG0 + int(i)));
+        add(ROW_DBG_CHORD);
+        for (size_t i = 0; i < g_dbg_toggles.size(); i++) if (!g_dbg_toggles[i].under_fx && !g_dbg_toggles[i].group) g_rows.push_back(Row(ROW_DBG0 + int(i)));
+        for (size_t k = 0; k < g_dbg_groups.size(); k++) g_rows.push_back(Row(ROW_GRP0 + int(k)));
         add(ROW_SEC_DEV);
         for (int c = 0; c < EC_COUNT; c++) g_rows.push_back(Row(ROW_SUB_ENV0 + c));
+        add(ROW_RESET_ALL);
+        break;
+    case PAGE_DBGGRP:
+        for (size_t i = 0; i < g_dbg_toggles.size(); i++)
+            if (g_dbg_toggles[i].group && g_dbg_group < int(g_dbg_groups.size()) && g_dbg_groups[size_t(g_dbg_group)] == g_dbg_toggles[i].group) g_rows.push_back(Row(ROW_DBG0 + int(i)));
         break;
     case PAGE_ENV0: case PAGE_ENV0 + 1: case PAGE_ENV0 + 2: case PAGE_ENV0 + 3: case PAGE_ENV0 + 4: case PAGE_ENV0 + 5:
     case PAGE_ENV0 + 6: case PAGE_ENV0 + 7: case PAGE_ENV0 + 8: case PAGE_ENV0 + 9: case PAGE_ENV0 + 10: {
@@ -2579,6 +2624,7 @@ int64_t g_rows_next = 0;
 int g_device = 0;                      // 0 pad, 1 keyboard / mouse, 2 touch: what the hints show
 int g_hover_row = -1, g_hover_cat = -1, g_hover_part = 0, g_press_row = -1;
 bool g_hover_back = false;
+int g_dlg_kind = 0;                    // 0: the restart question, 1: Debug > Reset All (Yes / No)
 bool g_dlg_open = false;               // the "restart now?" question is showing
 int g_dlg_sel = 0, g_dlg_hover = -1;
 bool g_focus_tabs = true;              // the category list (left) has the focus; Confirm / Right open the category, Back returns here
@@ -2663,7 +2709,21 @@ void restart_now() {
     ge_draw_toast("Could not restart: start the game again by hand", 3500);
 #endif
 }
+void reset_all_debug() {   // Debug > Reset All: every setting of the Debug page back to its default, saved
+    ge_draw_set_perf_overlay(false); save("perf_overlay", "0");
+    if (ge_draw_fx_available()) ge_draw_set_fx_shaders(true);
+    ge_draw_set_sync_mode(0);
+    g_ring_next = 0; save("ge_ring", "sub");
+    ge_draw_set_fb_prefilter(true); ge_draw_set_fb_snapshot(true);
+    psp_fx_light_set_scale(0, 2.5f); save("env.FX_LIGHT_INTENSITY", "2.5");
+    psp_fx_light_set_scale(1, 1.5f); save("env.FX_LIGHT_RADIUS", "1.5");
+    psp_ctrl_set_chord_ms(70); save("chord_ms", "70");
+    for (const PspDebugToggle& t : g_dbg_toggles) if (t.get() != t.def) t.set(t.def);
+    for (int c = 0; c < EC_COUNT; c++) for (const EnvOpt* o : env_cat_opts(c)) if (!env_current(*o).empty()) { env_set(*o, ""); g_restart_pending = true; }
+    ge_draw_toast("Debug settings reset", 2000);
+}
 std::vector<std::string> dialog_buttons() {
+    if (g_dlg_kind == 1) return {"Yes", "No"};
     if (restart_supported()) return {"Restart now", "Later"};
     return {"OK"};
 }
@@ -2671,6 +2731,7 @@ void dialog_choose(int i) {
     const std::vector<std::string> b = dialog_buttons();
     g_dlg_open = false;
     g_dlg_hover = -1;
+    if (g_dlg_kind == 1) { g_dlg_kind = 0; if (i == 0) reset_all_debug(); g_dirty = true; return; }
     if (restart_supported() && i == 0) { restart_now(); return; }   // only returns when it failed
     (void)b;
     g_restart_pending = false;   // asked once
@@ -2793,7 +2854,7 @@ void set_open(bool open) {
         g_page = std::clamp(g_page, 0, int(page_list().size()) - 1);
         g_sub = -1;
         g_focus_tabs = true;
-        g_dlg_open = false;
+        g_dlg_open = false; g_dlg_kind = 0;
         g_built_page = -1;
         if (g_saves_env) g_saves.reset();
         g_saves_depth = 0;
@@ -2971,10 +3032,12 @@ void confirm_row() {
         if (i < g_dbg_toggles.size()) change(g_dbg_toggles[i].get() ? -1 : 1);
         return;
     }
+    if (g_rows[size_t(g_sel)] >= ROW_GRP0 && g_rows[size_t(g_sel)] <= ROW_GRP_END) { g_dbg_group = int(g_rows[size_t(g_sel)] - ROW_GRP0); enter_sub(PAGE_DBGGRP); return; }
     switch (g_rows[size_t(g_sel)]) {
     case ROW_SUB_HDR: enter_sub(PAGE_HDR); return;
     case ROW_SUB_RT: enter_sub(PAGE_RT); return;
     case ROW_KEYS_INFO: enter_sub(PAGE_KEYS); return;
+    case ROW_RESET_ALL: g_dlg_kind = 1; g_dlg_open = true; g_dlg_sel = 1; g_dlg_hover = -1; g_dirty = true; return;   // No is pre-selected
     case ROW_QUIT:
         if (!g_quit_armed) { g_quit_armed = true; g_dirty = true; return; }
         std::fprintf(stderr, "[SETTINGS] quit from the settings menu\n");
@@ -3341,7 +3404,10 @@ void pointer_release(float ux, float uy) {
 
 void psp_settings_set_frame_rate_hook(const PspFrameRateHook& hook) { g_fps = hook; }
 void psp_settings_set_voice_hook(const PspVoiceHook& hook) { g_voice = hook; }
-void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (true) g_dbg_toggles.push_back(t); }
+void psp_settings_add_debug_toggle(const PspDebugToggle& t) {
+    g_dbg_toggles.push_back(t);
+    if (t.group && std::find(g_dbg_groups.begin(), g_dbg_groups.end(), t.group) == g_dbg_groups.end() && g_dbg_groups.size() < size_t(ROW_GRP_END - ROW_GRP0 + 1)) g_dbg_groups.push_back(t.group);
+}
 void psp_settings_set_texpack_hook(const PspTexPackHook& hook) { g_texpack = hook; }
 void psp_settings_set_mod_installer(const PspModInstaller& inst) { g_installer = inst; }
 
@@ -3755,7 +3821,7 @@ void psp_settings_tick() {
     for (int id : page_list()) sc.cats.push_back({k_page_names[id], page_icon(id)});
     sc.cat = g_page;
     sc.crumbs.push_back(k_page_names[page_list()[size_t(g_page)]]);
-    if (g_sub >= 0) sc.crumbs.push_back(k_page_names[g_sub]);
+    if (g_sub >= 0) sc.crumbs.push_back(page_title(g_sub));
     sc.in_sub = g_sub >= 0;
     if (page_id() == PAGE_SAVES && g_saves_env) {
         for (const std::string& c : g_saves.crumbs()) sc.crumbs.push_back(c);
@@ -3764,8 +3830,9 @@ void psp_settings_tick() {
     sc.focus_tabs = g_focus_tabs && g_sub < 0;
     sc.dlg.active = g_dlg_open;
     if (g_dlg_open) {
-        sc.dlg.title = "Restart required";
-        sc.dlg.text = restart_supported() ? "Some of the changes only apply the next time the game starts.\nRestart now? Anything not saved in the game is lost."
+        sc.dlg.title = g_dlg_kind == 1 ? "Reset all Debug settings" : "Restart required";
+        sc.dlg.text = g_dlg_kind == 1 ? "Set every setting on the Debug page back to its default?\nThe Tag Team switches and the developer options too."
+                    : restart_supported() ? "Some of the changes only apply the next time the game starts.\nRestart now? Anything not saved in the game is lost."
                                           : "Some of the changes only apply the next time the game starts.\nStart the game again to use them.";
         sc.dlg.buttons = dialog_buttons();
         sc.dlg.sel = g_dlg_sel; sc.dlg.hover = g_dlg_hover;
