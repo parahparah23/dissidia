@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <mutex>
 
 // ---- Right stick (host pad, or debug-socket `A2` injection) ----
 static void read_right_raw(int* rx, int* ry) {
@@ -85,6 +86,60 @@ void psp_ctrl_last_sample(uint32_t* buttons, uint32_t* analog) {
     *analog = g_last_analog.load(std::memory_order_relaxed);
 }
 
+
+// ---- Button chord window (Settings > Controls > Button Chord Window, PSPRECOMP_CHORD_MS) ----
+// A chord (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists) is pressed by a person
+// within a few frames, and the face button often lands first. The PSP read the pad once per 60 Hz frame with the same spread, but a face
+// button that arrives alone is a different move (Cross = jump / Chase start). A face button that goes down with no L / R held is held back
+// for the window: if L or R comes down in it both are handed over in one read, else the button is handed over late by the window (a tap
+// shorter than the window is still handed over, for 34 ms). Applied before the game's read, so what an online battle sends is what runs.
+static std::atomic<int> g_chord_ms{-1};   // -1: not read from the environment yet
+static std::atomic<bool (*)()> g_chord_gate{nullptr};
+void psp_ctrl_set_chord_ms(int ms) { g_chord_ms.store(ms < 0 ? 0 : ms > 200 ? 200 : ms, std::memory_order_relaxed); }
+int psp_ctrl_chord_ms() {
+    int v = g_chord_ms.load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char* e = std::getenv("PSPRECOMP_CHORD_MS");
+        v = (e && e[0]) ? std::atoi(e) : 40;
+        psp_ctrl_set_chord_ms(v);
+        v = g_chord_ms.load(std::memory_order_relaxed);
+    }
+    return v;
+}
+void psp_ctrl_set_chord_gate(bool (*gate)()) { g_chord_gate.store(gate, std::memory_order_relaxed); }
+
+static uint32_t chord_apply(uint32_t raw, int64_t now_us) {
+    static std::mutex mu;
+    static uint32_t prev = 0, pend = 0;
+    static int64_t pend_t[4] = {}, tap_until[4] = {};
+    static uint32_t tap_mod[4] = {};
+    static const uint32_t FACE[4] = {0x1000u, 0x2000u, 0x4000u, 0x8000u}, MOD = 0x0300u;   // triangle circle cross square, L R
+    std::lock_guard<std::mutex> lk(mu);
+    const int64_t win = int64_t(psp_ctrl_chord_ms()) * 1000;
+    auto gate = g_chord_gate.load(std::memory_order_relaxed);
+    if (win <= 0 || (gate && !gate())) { prev = raw; pend = 0; for (int i = 0; i < 4; i++) tap_until[i] = 0; return raw; }
+    uint32_t out_extra = 0;
+    for (int i = 0; i < 4; i++) {
+        const uint32_t bit = FACE[i];
+        const bool held = raw & bit;
+        if (pend & bit) {
+            if (raw & MOD) { pend &= ~bit; if (!held) { tap_until[i] = now_us + 34000; tap_mod[i] = raw & MOD; } }
+            else if (now_us - pend_t[i] >= win) { pend &= ~bit; if (!held) { tap_until[i] = now_us + 34000; tap_mod[i] = 0; } }
+        } else if (held && !(prev & bit) && !(raw & MOD)) {
+            pend |= bit; pend_t[i] = now_us; tap_until[i] = 0;
+        }
+        if (!(pend & bit) && !held && now_us < tap_until[i]) out_extra |= bit | tap_mod[i];
+    }
+    prev = raw;
+    const uint32_t out = (raw & ~pend) | out_extra;
+    static const bool lg = std::getenv("PSPRECOMP_CHORD_LOG") != nullptr;   // every change of what the game is handed vs the raw pad
+    if (lg) {
+        static uint32_t lraw = 0, lout = 0;
+        if (raw != lraw || out != lout) { std::fprintf(stderr, "[CHORD] %.1f ms raw %04X -> game %04X%s\n", double(now_us) / 1000.0, raw, out, pend ? " (held back)" : ""); lraw = raw; lout = out; }
+    }
+    return out;
+}
+
 // The pad as a read now would give it (buttons, analog x | y << 8), without writing a sample: the same sources and order
 // as write_ctrl_data (host pad / keyboard, debug-socket injections, right-stick D-pad, test script, button filter).
 static void current_pad(uint32_t* out_buttons, uint32_t* out_analog) {
@@ -102,6 +157,7 @@ static void current_pad(uint32_t* out_buttons, uint32_t* out_analog) {
     buttons |= right_stick_dpad_bits();
     const bool scripted = g_script_on.load(std::memory_order_relaxed);
     if (scripted) buttons = g_script_buttons.load(std::memory_order_relaxed);
+    buttons = chord_apply(buttons, std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
     if (auto f = g_button_filter.load(std::memory_order_relaxed)) buttons = f(buttons);
 
     // Analog stick: host pad/keyboard stick (128 = centre)

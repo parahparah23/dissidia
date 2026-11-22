@@ -2632,6 +2632,7 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (g_orig_pressed) psp_dispatch_register(PRESSED, pressed_hook);
     if (const char* g = std::getenv("PSPRECOMP_JECHT_GRID"); g && g[0] == '0') g_jecht_grid = false;
     psp_ctrl_set_filter(jecht_grid_filter);
+    psp_ctrl_set_chord_gate([]() -> bool { return overlay_id() == 1; });   // button chord window: battles only (menus keep their immediate buttons)
     if ((g_orig_chain_check = dissidia_ovl_battle_lookup(CHAIN_CHECK))) psp_dispatch_register(CHAIN_CHECK, chain_check_hook);
     if ((g_orig_gate_37 = dissidia_ovl_battle_lookup(GATE_37))) psp_dispatch_register(GATE_37, gate_37_hook);
     if ((g_orig_gate_36 = dissidia_ovl_battle_lookup(GATE_36))) psp_dispatch_register(GATE_36, gate_36_hook);

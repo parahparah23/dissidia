@@ -227,6 +227,28 @@ harder to hit at 120 Hz. The hook in `runtime/framerate.cpp` reports a press as 
 ending early when the fighter starts another action (script id changes), so the press that starts a move cannot also trip that move's
 early-press lockout (event 0x004C). `PSPRECOMP_PRESS_LATCH=<ms>` changes the time (0 turns it off); the `[FPS]` log line shows the counts.
 
+### Button chord window (R + Cross vs Cross)
+
+Reported: with the Chase prompt up (the attacker's Cross press right after a blow-away hit, `chase_window` 0x0120; retail
+`FUN_08B3526C` starts the Chase on the press, `FUN_08AB6348`) pressing R + Cross to dodge started the Chase: Cross reached the game one
+pad read before R. The game reads the pad once per update (33 ms, a read each logic tick at any display rate), so a chord whose buttons
+land in two reads is two inputs; a person pressing two buttons "together" is easily 1 to 3 frames apart. Our 30 Hz logic reads the pad as
+often as the PSP did (it is not worse than retail), but the split is just as likely, and Cross alone is a jump / Chase start, R held
+first only blocks.
+
+`psp_hle_ctrl.cpp` `chord_apply` (before the game's filter, in `current_pad`, so every reader sees it: the sceCtrl HLE, the online
+battle's `psp_ctrl_sample_now` pad exchange, Android and desktop, the test script; the delayed state is what is sent and applied, so
+lock-step is unchanged): a face button newly pressed with no L / R held is held back for `PSPRECOMP_CHORD_MS` (default 40; Settings >
+Controls > Button Chord Window Off / Short 40 / Medium 80); L or R coming down in the window releases it together with the modifier,
+else it goes through when the window ends. Only while the battle overlay runs (`psp_ctrl_set_chord_gate`, framerate.cpp), so menus keep
+immediate buttons. Chords where L / R is down first or in the same read (keyboard Move Keys D / F / E / V / 1 / 2 send both bits in one
+read) are untouched. A lone Cross, Square etc. is that much later (~40 to 70 ms with the 33 ms read grid). The window is wall-clock, so
+test scripts must run at 1x (no `--ff`). `PSPRECOMP_CHORD_LOG=1` prints `[CHORD]` for every change raw vs handed over.
+
+Measured (headless, Squall, `action 72` NEAR_COMBO4 then Cross in its chase window, 30 fps, 1x): Cross, then R + Cross one tick (33 ms)
+later: off = Chase starts; 40 ms = no Chase. Two ticks (67 ms): off and 40 = Chase, 80 = no Chase. Cross alone: Chase in all three.
+R first: no Chase. Idle fighter, same one-tick chord: off = script 100 (jump) then 400 (dodge); 40 ms = 400 straight away.
+
 ### Jecht chain windows at 30 vs 120 Hz (measured 11 Nov, not fixed yet)
 
 `tools/combo_timing.py combos` (docs/testing.md) presses the next chain input D ms after the previous move's script id first appears and records

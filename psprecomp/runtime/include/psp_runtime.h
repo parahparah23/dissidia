@@ -36,6 +36,12 @@ void psp_ctrl_sample_now(uint32_t* buttons, uint32_t* analog);
 /// A game module can reshape the button state the game is handed (after keyboard / pad / script input): called for every pad poll with the PSP button
 /// mask, returns the mask to give the game. Any thread that polls (the game's). nullptr removes it.
 void psp_ctrl_set_filter(uint32_t (*filter)(uint32_t buttons));
+/// Button chord window (Settings > Controls > Button Chord Window, PSPRECOMP_CHORD_MS, default 40): a face button pressed with no L / R held is held
+/// back this many ms; if L or R comes down meanwhile both reach the game in one read (R + Cross dodge, not Cross). 0 = off. The gate, when set,
+/// says whether it applies now (the game module: in battle only).
+void psp_ctrl_set_chord_ms(int ms);
+int psp_ctrl_chord_ms();
+void psp_ctrl_set_chord_gate(bool (*gate)());
 
 /// Debug-socket injected button mask + expiry (steady_clock milliseconds).
 /// Set by the `B <hexmask> <ms>` debug-socket command; the sceCtrl HLE ORs

@@ -83,6 +83,7 @@ void read_file() {
     }
 }
 void write_file(const char* key, const std::string& value);
+int chord_level() { const int ms = psp_ctrl_chord_ms(); return ms <= 0 ? 0 : ms <= 55 ? 1 : 2; }   // Controls > Button Chord Window: Off / Short (40 ms) / Medium (80 ms)
 void save(const char* key, const std::string& value) {
     g_saved[key] = value;
     write_file(key, value);
@@ -193,7 +194,7 @@ bool texpack_download_wanted();
 void texpack_download_start();
 void texpack_install_tick();
 
-enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_P1_PAD, ROW_TEST_CTRL, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
+enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, ROW_WIDE, ROW_TALL, ROW_FOV, ROW_SOFT, ROW_RENDERER, ROW_AA, ROW_SHARP, ROW_BRIGHT, ROW_CONTRAST, ROW_SAT, ROW_HDR, ROW_HDR_BOOST, ROW_HDR_GAMUT, ROW_HDR_PEAK, ROW_HDR_PAPER, ROW_HDR_SCENE, ROW_SSAO, ROW_CONTACT, ROW_RT, ROW_RT_SOFT, ROW_RT_CHAR, ROW_RT_REFL, ROW_RT_REFL_FX, ROW_SSR, ROW_ANISO, ROW_UPSCALE, ROW_VOICE, ROW_TEXPACK, ROW_TOUCH, ROW_TOUCH_EDIT, ROW_PROMPTS, ROW_LR_BUTTONS, ROW_CHORD, ROW_P1_PAD, ROW_TEST_CTRL, ROW_KEYS_INFO, ROW_UPDATES, ROW_QUIT,
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_DELAY, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
@@ -1005,6 +1006,16 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "L and R on the controller\nShoulders: the shoulder buttons (LB / RB, L1 / R1) press the PSP's L and R, as the triggers do. Triggers: the triggers (LT / RT, L2 / R2) press L and R and the shoulders do nothing; the game's prompts then show the triggers. Saved.";
             break;
         }
+        case ROW_CHORD: {
+            static const char* const names[3] = {"Off", "Short", "Medium"};
+            const int v = chord_level();
+            m.label = "Button Chord Window";
+            m.value = names[v];
+            m.can_dec = v > 0;
+            m.can_inc = v < 2;
+            m.help = "Button chord window\nIn battle, a face button pressed on its own is held back a moment so that R or L pressed just after it still counts as one chord (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists). Without it a Cross that lands a frame before R starts a Chase or a jump instead of the dodge. Off: buttons act at once. Short: 40 ms (the default). Medium: 80 ms. A lone button is that much later. Saved.";
+            break;
+        }
         case ROW_P1_PAD: {
             const auto v = p1_choices();
             const int i = p1_index(v);
@@ -1615,6 +1626,7 @@ bool slider_of(Row r, int* steps, int* cur) {
     case ROW_SYNC: *steps = 5; *cur = std::clamp(ge_draw_sync_mode(), 0, 4); return true;
     case ROW_TOUCH: *steps = 3; *cur = std::clamp(psp_touch_mode(), 0, 2); return true;
     case ROW_PROMPTS: *steps = 6; *cur = std::clamp(psp_input_prompt_setting() + 1, 0, 5); return true;
+    case ROW_CHORD: *steps = 3; *cur = chord_level(); return true;
     case ROW_P1_PAD: { const auto v = p1_choices(); *steps = int(v.size()); *cur = p1_index(v); return true; }
     default: return false;
     }
@@ -2167,6 +2179,13 @@ void change(int d) {   // left / right on the selected row
     case ROW_LR_BUTTONS:
         if ((d > 0) != psp_input_lr_triggers()) { psp_input_set_lr_triggers(d > 0); save("lr_buttons", d > 0 ? "triggers" : "shoulders"); }
         break;
+    case ROW_CHORD: {
+        const int v = std::clamp(chord_level() + d, 0, 2);
+        static const int ms[3] = {0, 40, 80};
+        psp_ctrl_set_chord_ms(ms[v]);
+        save("chord_ms", std::to_string(ms[v]));
+        break;
+    }
     case ROW_P1_PAD: {
         const auto v = p1_choices();
         const int i = std::clamp(p1_index(v) + d, 0, int(v.size()) - 1);
@@ -2470,7 +2489,7 @@ void build_rows() {
         add(ROW_RT); add(ROW_RT_SOFT); add(ROW_RT_CHAR); add(ROW_RT_REFL); add(ROW_RT_REFL_FX);
         break;
     case PAGE_CONTROLS:
-        add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_P1_PAD); add(ROW_TEST_CTRL);
+        add(ROW_SEC_PAD); add(ROW_PROMPTS); add(ROW_LR_BUTTONS); add(ROW_CHORD); add(ROW_P1_PAD); add(ROW_TEST_CTRL);
         add(ROW_SEC_KEYBOARD); add(ROW_KEYS_INFO);
         if (g_touch_ui) { add(ROW_SEC_TOUCH); add(ROW_TOUCH); add(ROW_TOUCH_EDIT); }
         break;
@@ -3005,6 +3024,7 @@ void confirm_row() {
     case ROW_TOUCH: change(psp_touch_mode() >= 2 ? -2 : 1); return;
     case ROW_PROMPTS: change(psp_input_prompt_setting() >= PSP_PROMPT_KEYBOARD ? -5 : 1); return;
     case ROW_LR_BUTTONS: change(psp_input_lr_triggers() ? -1 : 1); return;
+    case ROW_CHORD: change(chord_level() >= 2 ? -2 : 1); return;
     case ROW_P1_PAD: { const auto v = p1_choices(); change(p1_index(v) + 1 >= int(v.size()) ? -p1_index(v) : 1); return; }
     case ROW_TEST_CTRL: test_begin(); return;
     case ROW_TOUCH_EDIT: psp_touch_edit_begin(); return;
@@ -3389,6 +3409,7 @@ void psp_settings_load_early() {
     }
     if ((it = g_saved.find("button_prompts")) != g_saved.end()) put("PSPRECOMP_BUTTON_PROMPTS", it->second);
     if ((it = g_saved.find("lr_buttons")) != g_saved.end()) put("PSPRECOMP_LR_TRIGGERS", it->second == "triggers" ? "1" : "0");
+    if ((it = g_saved.find("chord_ms")) != g_saved.end() && !it->second.empty()) put("PSPRECOMP_CHORD_MS", it->second);
     if ((it = g_saved.find("p1_controller")) != g_saved.end()) put("PSPRECOMP_P1_CONTROLLER", it->second);
     if ((it = g_saved.find("touch")) != g_saved.end() && (it->second == "auto" || it->second == "on" || it->second == "off"))
         put("PSPRECOMP_TOUCH", it->second);

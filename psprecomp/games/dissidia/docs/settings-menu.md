@@ -29,6 +29,11 @@ VCKing101's, MIT), through the runtime's texture editor (`psp_texpack_set_editor
 pack's own image for the same texture overrides). `PSPRECOMP_NO_TEXTURE_EDITS=1` keeps the PSP's symbols, `PSPRECOMP_PROMPTS_LOG=1`
 logs each redraw. The Controls page is now on every device; its Touch screen rows only with a touch screen.
 
+**Controls > Button Chord Window** (Off, Short, Medium; `chord_ms`, `PSPRECOMP_CHORD_MS=<ms>`, default Short = 40 ms, Medium = 80 ms, 0 = off):
+in battle a face button pressed with no L / R held is held back for the window; if L or R comes down in it both reach the game in one
+pad read (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists), otherwise the button
+arrives that much late (a tap shorter than the window is still delivered, for 34 ms). See frame-rate.md "Button chord window".
+
 **Controls > L / R Buttons** (Shoulders, Triggers; `lr_buttons`, `PSPRECOMP_LR_TRIGGERS=1`): Shoulders (the default) is as before,
 the shoulder buttons press L and R and so do the triggers. Triggers: only the triggers press L and R, the shoulders nothing, and the
 prompts name the triggers (LT / RT, L2 / R2, ZL / ZR). **Player 1 Controller** (`p1_controller`, `PSPRECOMP_P1_CONTROLLER=any|keyboard|<GUID>`):
