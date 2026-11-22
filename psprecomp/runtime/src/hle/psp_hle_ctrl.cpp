@@ -100,13 +100,29 @@ int psp_ctrl_chord_ms() {
     int v = g_chord_ms.load(std::memory_order_relaxed);
     if (v < 0) {
         const char* e = std::getenv("PSPRECOMP_CHORD_MS");
-        v = (e && e[0]) ? std::atoi(e) : 40;
+        v = (e && e[0]) ? std::atoi(e) : 70;
         psp_ctrl_set_chord_ms(v);
         v = g_chord_ms.load(std::memory_order_relaxed);
     }
     return v;
 }
 void psp_ctrl_set_chord_gate(bool (*gate)()) { g_chord_gate.store(gate, std::memory_order_relaxed); }
+
+// [CHORD] log: PSPRECOMP_CHORD_LOG=1, or on with PSPRECOMP_TAGTEAM_LOG=1. Every change of the face / L / R bits of the raw pad or of what the game is
+// handed, with the time in ms, rate limited (20 lines a second, 3000 in all) so a play session shows when each real press and release came.
+static void chord_log(uint32_t raw, uint32_t out, bool held_back, bool window_on, int64_t now_us) {
+    static const bool lg = std::getenv("PSPRECOMP_CHORD_LOG") || std::getenv("PSPRECOMP_TAGTEAM_LOG");
+    if (!lg) return;
+    static const uint32_t M = 0xF300u;   // face buttons, L, R
+    static uint32_t lraw = 0, lout = 0; static int total = 0, in_sec = 0; static int64_t sec0 = 0;
+    if ((raw & M) == (lraw & M) && (out & M) == (lout & M)) return;
+    lraw = raw; lout = out;
+    if (now_us - sec0 >= 1000000) { sec0 = now_us; in_sec = 0; }
+    if (in_sec >= 20 || total >= 3000) return;
+    in_sec++; total++;
+    std::fprintf(stderr, "[CHORD] %.1f ms raw %04X -> game %04X%s%s (window %d ms)\n", double(now_us) / 1000.0, raw & M, out & M,
+                 held_back ? " held back" : "", window_on ? "" : " [window off: not in battle or setting Off]", psp_ctrl_chord_ms());
+}
 
 static uint32_t chord_apply(uint32_t raw, int64_t now_us) {
     static std::mutex mu;
@@ -117,7 +133,7 @@ static uint32_t chord_apply(uint32_t raw, int64_t now_us) {
     std::lock_guard<std::mutex> lk(mu);
     const int64_t win = int64_t(psp_ctrl_chord_ms()) * 1000;
     auto gate = g_chord_gate.load(std::memory_order_relaxed);
-    if (win <= 0 || (gate && !gate())) { prev = raw; pend = 0; for (int i = 0; i < 4; i++) tap_until[i] = 0; return raw; }
+    if (win <= 0 || (gate && !gate())) { prev = raw; pend = 0; for (int i = 0; i < 4; i++) tap_until[i] = 0; chord_log(raw, raw, false, false, now_us); return raw; }
     uint32_t out_extra = 0;
     for (int i = 0; i < 4; i++) {
         const uint32_t bit = FACE[i];
@@ -132,11 +148,7 @@ static uint32_t chord_apply(uint32_t raw, int64_t now_us) {
     }
     prev = raw;
     const uint32_t out = (raw & ~pend) | out_extra;
-    static const bool lg = std::getenv("PSPRECOMP_CHORD_LOG") != nullptr;   // every change of what the game is handed vs the raw pad
-    if (lg) {
-        static uint32_t lraw = 0, lout = 0;
-        if (raw != lraw || out != lout) { std::fprintf(stderr, "[CHORD] %.1f ms raw %04X -> game %04X%s\n", double(now_us) / 1000.0, raw, out, pend ? " (held back)" : ""); lraw = raw; lout = out; }
-    }
+    chord_log(raw, out, pend != 0, true, now_us);
     return out;
 }
 

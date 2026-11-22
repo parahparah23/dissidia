@@ -4482,5 +4482,5 @@ Not verified: a CPU enemy hitting a running assist (round 10 swap) in a lock-ste
 - Overhead rows (HP Bars / Mini Panels / PPSSPP HUD) now only control the overheads.
 - **Overhead: Assist Bar** (`g_oh_assist`): the bottom ally / other-enemy panels, the moved gauges and orbs (used to come with every overhead style). Default off; works without an overhead style.
 - **Hide Tag Team UI** (`g_hide_ui`): our side panels are not drawn (used to be implied by any overhead style). Default off.
-- With overhead off and both options off the look is as before. Turning on 3v3 / FFA (switch or env) when no style is on still picks style 1 AND turns both options on (`overhead_default_on()`), as before.
+- With overhead off and both options off the look is as before. Turning on 3v3 / FFA (switch or env) when no style is on still picks style 1 and turns on Assist Bar (`overhead_default_on()`); free-for-all also turns on Hide Tag Team UI as before, 3v3 does not (user, 21 Nov).
 - `PSPRECOMP_TAGTEAM_OVERHEAD=N` (N > 0) turns both options on too (existing test scripts); `PSPRECOMP_TAGTEAM_OH_ASSIST=0|1` and `PSPRECOMP_TAGTEAM_HIDE_UI=0|1` set them alone.

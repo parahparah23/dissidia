@@ -238,12 +238,17 @@ first only blocks.
 
 `psp_hle_ctrl.cpp` `chord_apply` (before the game's filter, in `current_pad`, so every reader sees it: the sceCtrl HLE, the online
 battle's `psp_ctrl_sample_now` pad exchange, Android and desktop, the test script; the delayed state is what is sent and applied, so
-lock-step is unchanged): a face button newly pressed with no L / R held is held back for `PSPRECOMP_CHORD_MS` (default 40; Settings >
-Controls > Button Chord Window Off / Short 40 / Medium 80); L or R coming down in the window releases it together with the modifier,
+lock-step is unchanged): a face button newly pressed with no L / R held is held back for `PSPRECOMP_CHORD_MS` (default 70; Settings >
+Controls > Button Chord Window Off / Short 70 / Medium 110); L or R coming down in the window releases it together with the modifier,
 else it goes through when the window ends. Only while the battle overlay runs (`psp_ctrl_set_chord_gate`, framerate.cpp), so menus keep
-immediate buttons. Chords where L / R is down first or in the same read (keyboard Move Keys D / F / E / V / 1 / 2 send both bits in one
-read) are untouched. A lone Cross, Square etc. is that much later (~40 to 70 ms with the 33 ms read grid). The window is wall-clock, so
+immediate buttons. Chords where L / R is down first or in the same read (the Keyboard Controls keys D / F / E / V / 1 / 2 send both bits in one
+read) are untouched. A lone Cross, Square etc. is that much later (the window is only checked at pad reads, 33 ms apart, so the real hold is the window up to one read longer). The window is wall-clock, so
 test scripts must run at 1x (no `--ff`). `PSPRECOMP_CHORD_LOG=1` prints `[CHORD]` for every change raw vs handed over.
+
+Follow-up (21 Nov, user: "R+Square for EX mode still sometimes gives Square / HP move" at 40 ms): the desktop log has no [CHORD] lines, his pad is an Xbox
+controller with digital shoulders (no trigger lag), so the likeliest cause is Square landing more than 40 ms (+ one read) before R. Default raised to 70 ms
+(Medium 110). `[CHORD]` lines (raw and handed-over face / L / R bits with ms times, 20 a second, 3000 in all, plus a "window off" tag when not in battle) now
+also print with `PSPRECOMP_TAGTEAM_LOG=1`. Headless Square then R+Square at 33 / 67 / 100 ms: 40 ms window merges only the first; 70 ms merges all three (reads fall on a 33 ms grid).
 
 Measured (headless, Squall, `action 72` NEAR_COMBO4 then Cross in its chase window, 30 fps, 1x): Cross, then R + Cross one tick (33 ms)
 later: off = Chase starts; 40 ms = no Chase. Two ticks (67 ms): off and 40 = Chase, 80 = no Chase. Cross alone: Chase in all three.

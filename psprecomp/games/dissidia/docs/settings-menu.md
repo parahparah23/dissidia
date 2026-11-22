@@ -29,7 +29,7 @@ VCKing101's, MIT), through the runtime's texture editor (`psp_texpack_set_editor
 pack's own image for the same texture overrides). `PSPRECOMP_NO_TEXTURE_EDITS=1` keeps the PSP's symbols, `PSPRECOMP_PROMPTS_LOG=1`
 logs each redraw. The Controls page is now on every device; its Touch screen rows only with a touch screen.
 
-**Controls > Button Chord Window** (Off, Short, Medium; `chord_ms`, `PSPRECOMP_CHORD_MS=<ms>`, default Short = 40 ms, Medium = 80 ms, 0 = off):
+**Controls > Button Chord Window** (Off, Short, Medium; `chord_ms`, `PSPRECOMP_CHORD_MS=<ms>`, default Short = 70 ms, Medium = 110 ms, 0 = off):
 in battle a face button pressed with no L / R held is held back for the window; if L or R comes down in it both reach the game in one
 pad read (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists), otherwise the button
 arrives that much late (a tap shorter than the window is still delivered, for 34 ms). See frame-rate.md "Button chord window".
@@ -60,7 +60,7 @@ Switch with a click or touch on a tab, PageUp / PageDown / F2, or by holding L +
 the Exit button (click / touch), right click, or by holding Start + Select for 2 s (from any player's input; a bar shows the hold); all
 other keys and buttons are the buttons under test and do nothing to the menu. `psp_input_sample(player, &sample)` (`psp_event_loop.h`)
 is the API a split-screen mode can reuse; the pre-menu-gate state is kept by `publish_input` even while the menu hides it.
-**Keyboard > Move Keys** (a row that opens a list page: Cross opens, Back returns; two-button moves first, then the other keys): one key for each move that takes two buttons, both going down in the same pad read as the game needs
+**Keyboard > Keyboard Controls** (a row that opens a list page: Cross opens, Back returns; two-button moves first, then the other keys): one key for each move that takes two buttons, both going down in the same pad read as the game needs
 (R held first makes a block instead): D dodge (R + Cross), F dash (R + Triangle), E EX Mode (R + Square), V summon (R + Circle),
 1 Brave assist (L + Circle), 2 HP assist (L + Square). Holding R or L and pressing the face button still works. (VCKing101's idea,
 `docs/port/keyboard-controls.md`; our keys, as our keyboard layout is fixed.) `PSPRECOMP_KEY_LOG=1` logs every change of the buttons
@@ -133,7 +133,7 @@ A loose-file mod that replaces one of the two layout files keeps its own layout 
 menu / title rows then overlap the retail rows; the pause menu row does not depend on files.
 
 ## Debug page notes (21 Nov)
-- `psp_settings_add_debug_toggle` takes up to 16 rows (was 10: the Jecht Combo Timing row, registered third, was dropped once the tag team added rows). `PspDebugToggle::under_fx`
+- `psp_settings_add_debug_toggle` has no small cap any more (it was 10: the Jecht Combo Timing row, registered third, was dropped once the tag team added rows). The rows are a range of 256 row ids (`ROW_DBG0..ROW_DBG_END`, ids are per-row animation slots, `SET_MAX_IDS` = 1024) and the page scrolls.
   lists a row right below the FX Shaders row; the Jecht Combo Timing helper uses it.
 - Controls > L / R Buttons (Shoulders / Triggers) is a value selector (< value >), not an On / Off switch.
-- Controls > Move Keys opens the Move Keys sub-page (read-only lines: key, move, PSP buttons).
+- Controls > Keyboard Controls opens the Keyboard Controls sub-page (read-only lines: key, move, PSP buttons).

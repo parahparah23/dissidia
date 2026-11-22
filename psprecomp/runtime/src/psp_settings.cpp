@@ -83,7 +83,7 @@ void read_file() {
     }
 }
 void write_file(const char* key, const std::string& value);
-int chord_level() { const int ms = psp_ctrl_chord_ms(); return ms <= 0 ? 0 : ms <= 55 ? 1 : 2; }   // Controls > Button Chord Window: Off / Short (40 ms) / Medium (80 ms)
+int chord_level() { const int ms = psp_ctrl_chord_ms(); return ms <= 0 ? 0 : ms <= 90 ? 1 : 2; }   // Controls > Button Chord Window: Off / Short (70 ms) / Medium (110 ms)
 void save(const char* key, const std::string& value) {
     g_saved[key] = value;
     write_file(key, value);
@@ -199,7 +199,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
-           ROW_DBG0, ROW_DBG1, ROW_DBG2, ROW_DBG3, ROW_DBG4, ROW_DBG5, ROW_DBG6, ROW_DBG7, ROW_DBG8, ROW_DBG9, ROW_DBG10, ROW_DBG11, ROW_DBG12, ROW_DBG13, ROW_DBG14, ROW_DBG15,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
+           ROW_DBG0, ROW_DBG_END = ROW_DBG0 + 255,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
            ROW_GPU, ROW_GPU_GET, ROW_GPU_DEL,   // custom GPU drivers (Android, Adreno): Drivers page
            ROW_SUB_HDR, ROW_SUB_RT,             // rows that open a sub-menu
            ROW_SUB_ENV0, ROW_SUB_ENV_END = ROW_SUB_ENV0 + 15,   // Debug page: one row per developer-options category (psp_env_options.inc)
@@ -212,7 +212,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_TEXPACK_DOWNLOAD,                                    // Graphics page: download the game's own pack (PspTexPackHook::download)
            ROW_CLOUD_CONFLICTS,                 // Cloud page: saves waiting for a choice (opens Saves)
            ROW_EXT0, ROW_EXT_END = ROW_EXT0 + 219,   // Saves page: the rows psp_saves::Page builds (headers included)
-           ROW_KEYMAP0, ROW_KEYMAP_END = ROW_KEYMAP0 + 31,   // Move Keys sub-menu: one read-only line per key
+           ROW_KEYMAP0, ROW_KEYMAP_END = ROW_KEYMAP0 + 31,   // Keyboard Controls sub-menu: one read-only line per key
            ROW_SEC_WINDOW, ROW_SEC_PERF, ROW_SEC_QUALITY, ROW_SEC_AA, ROW_SEC_TEX, ROW_SEC_ENGINE, ROW_SEC_COLOUR, ROW_SEC_HDR, ROW_SEC_LIGHT,
            ROW_SEC_RT, ROW_SEC_TOUCH, ROW_SEC_GAME, ROW_SEC_SESSION, ROW_SEC_REFL, ROW_SEC_SERVER, ROW_SEC_SYNC, ROW_SEC_DRIVER, ROW_SEC_MODS, ROW_SEC_DEV, ROW_SEC_DISCORD, ROW_SEC_PAD, ROW_SEC_KEYBOARD, ROW_SEC_KEYS_MOVE, ROW_SEC_KEYS_BASIC,   // section captions (not selectable)
            ROW_COUNT };
@@ -234,7 +234,7 @@ enum Page { PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS, PAGE_CONTROLS
             PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_KEYS, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
 constexpr int k_env_cats = 11;   // = EC_COUNT (psp_env_options.inc)
 const char* const k_page_names[PAGES] = {"Display", "Graphics", "Image", "Effects", "Controls", "Network", "Cloud", "System", "Drivers", "Debug", "Mods", "Saves",
-                                         "HDR", "Ray Tracing", "Move Keys",
+                                         "HDR", "Ray Tracing", "Keyboard Controls",
                                          "Camera", "Input", "Timing", "Graphics", "Effects tuning", "Vulkan", "Textures", "Audio / video", "Game data", "Game logs", "Engine logs"};
 int g_page = 0;                        // the category (an index into page_list()): L / R, Q / E or Tab, the sidebar
 int g_sub = -1;                        // the open sub-menu page, -1 = none
@@ -693,7 +693,7 @@ bool mod_set_enabled(size_t i, bool on) {
     std::fprintf(stderr, "[SETTINGS] mod %s %s (next start)\n", g_mods[i].dir.c_str(), on ? "enabled" : "disabled");
     return true;
 }
-// The keyboard map the Move Keys page lists (keys of psp_event_loop.cpp key_to_psp_button): { key, what it does, the PSP buttons }, moves first.
+// The keyboard map the Keyboard Controls page lists (keys of psp_event_loop.cpp key_to_psp_button): { key, what it does, the PSP buttons }, moves first.
 struct KeyLine { const char* key; const char* what; const char* btn; };
 const KeyLine k_key_moves[] = {{"D", "Dodge", "R + Cross"}, {"F", "Dash", "R + Triangle"}, {"E", "EX Mode (EX Revenge when hit)", "R + Square"}, {"V", "Summon", "R + Circle"},
                                {"1", "Brave assist", "L + Circle"}, {"2", "HP assist", "L + Square"}};
@@ -759,7 +759,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
     char buf[96];
     for (Row r : g_rows) {
         psp_sddialog::MenuRow m;
-        if (r >= ROW_KEYMAP0 && r <= ROW_KEYMAP_END) {   // Move Keys page
+        if (r >= ROW_KEYMAP0 && r <= ROW_KEYMAP_END) {   // Keyboard Controls page
             const int i = int(r - ROW_KEYMAP0);
             const KeyLine& k = i < k_nmoves ? k_key_moves[i] : k_key_basic[i - k_nmoves];
             m.label = std::string(k.key) + (k.what[0] ? "   " : "") + k.what;
@@ -805,6 +805,18 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
                 m.label = k_env_cat_names[cat];
                 m.value = on ? std::to_string(on) + " changed" : std::to_string(n) + " options";
                 m.help = std::string(k_env_cat_names[cat]) + "\n" + k_env_cat_help[cat] + " One row for each environment variable; the choice is saved and applied the next time the game starts. Press Cross to open.";
+            }
+            out.push_back(std::move(m));
+            continue;
+        }
+        if (r >= ROW_DBG0 && r <= ROW_DBG_END) {   // a game's debug toggle (any number of them)
+            const size_t i = size_t(r - ROW_DBG0);
+            if (i < g_dbg_toggles.size()) {
+                const bool on = g_dbg_toggles[i].get();
+                m.label = g_dbg_toggles[i].label;
+                m.value = on ? "On" : "Off";
+                m.can_dec = on; m.can_inc = !on;
+                m.help = g_dbg_toggles[i].help;
             }
             out.push_back(std::move(m));
             continue;
@@ -1013,7 +1025,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.value = names[v];
             m.can_dec = v > 0;
             m.can_inc = v < 2;
-            m.help = "Button chord window\nIn battle, a face button pressed on its own is held back a moment so that R or L pressed just after it still counts as one chord (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists). Without it a Cross that lands a frame before R starts a Chase or a jump instead of the dodge. Off: buttons act at once. Short: 40 ms (the default). Medium: 80 ms. A lone button is that much later. Saved.";
+            m.help = "Button chord window\nIn battle, a face button pressed on its own is held back a moment so that R or L pressed just after it still counts as one chord (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists). Without it a Cross that lands a frame before R starts a Chase or a jump instead of the dodge. Off: buttons act at once. Short: 70 ms (the default). Medium: 110 ms. A lone button is that much later. Saved.";
             break;
         }
         case ROW_P1_PAD: {
@@ -1027,7 +1039,7 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             break;
         }
         case ROW_KEYS_INFO:
-            m.label = "Move Keys";
+            m.label = "Keyboard Controls";
             m.value = "D F E V 1 2   >";
             m.help = "Press Cross to open the full list of keyboard keys.\nKeyboard keys for moves that take two buttons\nD: dodge (R + Cross). F: dash (R + Triangle). E: EX Mode (R + Square). V: summon (R + Circle). 1: Brave assist (L + Circle). 2: HP assist (L + Square). Both buttons go down together, as the game needs. The rest: arrows, X / Z / A / S for Cross / Circle / Square / Triangle, Q / W for L / R, Space START, Tab SELECT.";
             break;
@@ -1570,16 +1582,6 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
                        : "Effect lights (debug)\nHow bright the light from glowing attack effects is (PSPRECOMP_FX_LIGHT_INTENSITY); x0 = off, default x2.5. Needs Ray-Traced Shadows. Saved.";
             break;
         }
-        case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15: {
-            const size_t i = size_t(r - ROW_DBG0);
-            if (i >= g_dbg_toggles.size()) break;
-            const bool on = g_dbg_toggles[i].get();
-            m.label = g_dbg_toggles[i].label;
-            m.value = on ? "On" : "Off";
-            m.can_dec = on; m.can_inc = !on;
-            m.help = g_dbg_toggles[i].help;
-            break;
-        }
         case ROW_RING: {
             const int cur = ge_draw_ring_mode(), nx = g_ring_next >= 0 ? g_ring_next : cur;
             m.label = "Vertex Upload";
@@ -1639,12 +1641,11 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (is_mod_row(r)) return K::Toggle;
     if (r >= ROW_SUB_ENV0 && r <= ROW_SUB_ENV_END) return K::Submenu;
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
+    if (r >= ROW_DBG0 && r <= ROW_DBG_END) return K::Toggle;
     switch (r) {
     case ROW_RT_REFL_FX:
     case ROW_FPSCOUNT: case ROW_VSYNC: case ROW_WIDE: case ROW_TALL: case ROW_SOFT: case ROW_UPDATES: case ROW_NET_UPNP: case ROW_NET_PING: case ROW_DISCORD: case ROW_HDR: case ROW_HDR_SCENE: case ROW_CLOUD_AUTO:
     case ROW_CLOUD_REPLAYS: case ROW_PERF: case ROW_FX: case ROW_GLOWSOFT: case ROW_GLOWPASS:
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15:
-        return K::Toggle;
     case ROW_FXL_INT: case ROW_FXL_RAD: case ROW_RT_CHAR: case ROW_LR_BUTTONS: return K::Choice;   // Character Shadows: Off / Soft (named values, not a switch)
     case ROW_TEST_CTRL: case ROW_TOUCH_EDIT: case ROW_CLOUD_NOW: case ROW_CLOUD_GOOGLE: case ROW_GPU_DEL: case ROW_MOD_INSTALL: case ROW_TEXPACK_INSTALL: case ROW_TEXPACK_DOWNLOAD: return K::Action;
     case ROW_MOD_UNINSTALL: case ROW_TEXPACK_DEL: case ROW_TEXPACK: return K::Choice;
@@ -2115,6 +2116,12 @@ void change(int d) {   // left / right on the selected row
     }
     if (is_mod_row(g_rows[size_t(g_sel)])) { const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_MOD0); if (i < g_mods.size() && g_mods[i].on != (d > 0)) mod_set_enabled(i, d > 0); return; }
     if (const EnvOpt* o = env_row_opt(g_rows[size_t(g_sel)])) { env_change(*o, d, false); g_dirty = true; return; }
+    if (g_rows[size_t(g_sel)] >= ROW_DBG0 && g_rows[size_t(g_sel)] <= ROW_DBG_END) {
+        const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
+        if (i < g_dbg_toggles.size() && g_dbg_toggles[i].get() != (d > 0)) g_dbg_toggles[i].set(d > 0);
+        g_dirty = true;
+        return;
+    }
     switch (g_rows[size_t(g_sel)]) {
     case ROW_DISPLAY:
         {
@@ -2181,7 +2188,7 @@ void change(int d) {   // left / right on the selected row
         break;
     case ROW_CHORD: {
         const int v = std::clamp(chord_level() + d, 0, 2);
-        static const int ms[3] = {0, 40, 80};
+        static const int ms[3] = {0, 70, 110};
         psp_ctrl_set_chord_ms(ms[v]);
         save("chord_ms", std::to_string(ms[v]));
         break;
@@ -2419,11 +2426,6 @@ void change(int d) {   // left / right on the selected row
         psp_fx_light_set_scale(w, nv);
         char b[16]; std::snprintf(b, sizeof b, "%g", nv);
         save(w ? "env.FX_LIGHT_RADIUS" : "env.FX_LIGHT_INTENSITY", b);   // exported as PSPRECOMP_FX_LIGHT_* at the next start
-        break;
-    }
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15: {
-        const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
-        if (i < g_dbg_toggles.size() && g_dbg_toggles[i].get() != (d > 0)) g_dbg_toggles[i].set(d > 0);
         break;
     }
     case ROW_RING: {
@@ -2964,6 +2966,11 @@ void confirm_row() {
         g_dirty = true;
         return;
     }
+    if (g_rows[size_t(g_sel)] >= ROW_DBG0 && g_rows[size_t(g_sel)] <= ROW_DBG_END) {
+        const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
+        if (i < g_dbg_toggles.size()) change(g_dbg_toggles[i].get() ? -1 : 1);
+        return;
+    }
     switch (g_rows[size_t(g_sel)]) {
     case ROW_SUB_HDR: enter_sub(PAGE_HDR); return;
     case ROW_SUB_RT: enter_sub(PAGE_RT); return;
@@ -3088,11 +3095,6 @@ void confirm_row() {
     case ROW_GLOWSOFT: change(ge_draw_fb_prefilter() ? -1 : 1); return;
     case ROW_GLOWPASS: change(ge_draw_fb_snapshot() ? -1 : 1); return;
     case ROW_FXL_INT: case ROW_FXL_RAD: change(1); return;
-    case ROW_DBG0: case ROW_DBG1: case ROW_DBG2: case ROW_DBG3: case ROW_DBG4: case ROW_DBG5: case ROW_DBG6: case ROW_DBG7: case ROW_DBG8: case ROW_DBG9: case ROW_DBG10: case ROW_DBG11: case ROW_DBG12: case ROW_DBG13: case ROW_DBG14: case ROW_DBG15: {
-        const size_t i = size_t(g_rows[size_t(g_sel)] - ROW_DBG0);
-        if (i < g_dbg_toggles.size()) change(g_dbg_toggles[i].get() ? -1 : 1);
-        return;
-    }
     default: break;
     }
     g_dirty = true;
@@ -3339,7 +3341,7 @@ void pointer_release(float ux, float uy) {
 
 void psp_settings_set_frame_rate_hook(const PspFrameRateHook& hook) { g_fps = hook; }
 void psp_settings_set_voice_hook(const PspVoiceHook& hook) { g_voice = hook; }
-void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (g_dbg_toggles.size() < 16) g_dbg_toggles.push_back(t); }
+void psp_settings_add_debug_toggle(const PspDebugToggle& t) { if (true) g_dbg_toggles.push_back(t); }
 void psp_settings_set_texpack_hook(const PspTexPackHook& hook) { g_texpack = hook; }
 void psp_settings_set_mod_installer(const PspModInstaller& inst) { g_installer = inst; }
 

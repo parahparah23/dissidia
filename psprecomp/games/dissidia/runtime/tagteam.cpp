@@ -2068,7 +2068,7 @@ int g_overhead = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD");
 // g_hide_ui = hide our side panels. Both default off; the env override (the test scripts) and the 3v3 / FFA switches turn them on with the style.
 bool g_oh_assist = [] { const char* a = std::getenv("PSPRECOMP_TAGTEAM_OH_ASSIST"); if (a) return std::atoi(a) != 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e && std::atoi(e) != 0; }();   // PSPRECOMP_TAGTEAM_OH_ASSIST=0|1 and _HIDE_UI=0|1 set them alone
 bool g_hide_ui = [] { const char* a = std::getenv("PSPRECOMP_TAGTEAM_HIDE_UI"); if (a) return std::atoi(a) != 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e && std::atoi(e) != 0; }();
-void overhead_default_on() { if (g_overhead == 0) { g_overhead = 1; g_oh_assist = true; g_hide_ui = true; } }   // 3v3 / free-for-all: the side panels cover only two foes
+void overhead_default_on(bool hide_ui = true) { if (g_overhead == 0) { g_overhead = 1; g_oh_assist = true; g_hide_ui = hide_ui; } }   // 3v3 / free-for-all: the side panels cover only two foes
 void overhead_update() {
     std::vector<TagHudOverhead> bars;
     if (g_overhead && g_bs && !exb_running()) {
@@ -10218,7 +10218,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_enabled = e && e[0] && e[0] != '0';
     g_log = std::getenv("PSPRECOMP_TAGTEAM_LOG") != nullptr;
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_EXTRAS")) g_mask = std::atoi(m);
-    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_3V3")) { g_three = (m[0] == '1') ? 1 : 0; if (g_three && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) overhead_default_on(); }
+    if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_3V3")) { g_three = (m[0] == '1') ? 1 : 0; if (g_three && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) overhead_default_on(false); }
     if (const char* m = std::getenv("PSPRECOMP_TAGTEAM_FFA")) { g_ffa = std::atoi(m) == 3 ? 3 : (std::atoi(m) == 4 ? 4 : 0); if (g_ffa && !std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD")) overhead_default_on(); }
     g_one_v_two = std::getenv("PSPRECOMP_TAGTEAM_1V2") && std::getenv("PSPRECOMP_TAGTEAM_1V2")[0] == '1';
     g_two_v_one = std::getenv("PSPRECOMP_TAGTEAM_2V1") && std::getenv("PSPRECOMP_TAGTEAM_2V1")[0] == '1';
@@ -10302,7 +10302,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     psp_settings_add_debug_toggle({"Tag Team 1v2", "Tag team 1 v 2 (experimental)\nWith Tag Team on: you alone fight the CPU's two fighters (no partner for you). Off: 2 v 2.\nAffects the next battle that starts.",
                                    +[]() { return g_one_v_two; }, +[](bool on) { g_one_v_two = on; }});
     psp_settings_add_debug_toggle({"Tag Team 3v3", "Tag team 3 v 3 (experimental)\nWith Tag Team on: two partners per side instead of one, three fighters on each team. L cycles the lock through every enemy. A fallen fighter's place is taken by a team mate still standing; a team with nobody left loses. Online the host's setting decides.\nAffects the next battle that starts.",
-                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on) overhead_default_on(); }});
+                                   +[]() { return g_three != 0; }, +[](bool on) { g_three = on ? 1 : 0; if (on) overhead_default_on(false); }});
     psp_settings_add_debug_toggle({"Free-for-all (3)", "Tag team free-for-all, 3 fighters (experimental)\nWith Tag Team on: you, the CPU and a second CPU fighter, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
                                    +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on) overhead_default_on(); }});
     psp_settings_add_debug_toggle({"Free-for-all (4)", "Tag team free-for-all, 4 fighters (experimental)\nWith Tag Team on: you and three CPU fighters, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",

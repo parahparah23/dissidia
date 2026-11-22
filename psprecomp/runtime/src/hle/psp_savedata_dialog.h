@@ -216,7 +216,7 @@ struct SetRow {
     int steps = 0, cur = 0;     // Slider: number of positions (>= 2) and the current one
     bool selectable() const { return kind != SetKind::Header; }
 };
-constexpr int SET_MAX_IDS = 640;
+constexpr int SET_MAX_IDS = 1024;
 struct SetCat { std::string name; int icon = 0; };   // icon: see settings_icon()
 struct SetKeyboardState {    // the text-entry modal
     bool active = false;
