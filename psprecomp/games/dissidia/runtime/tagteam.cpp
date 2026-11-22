@@ -2197,6 +2197,32 @@ int hp_eff(uint32_t a) { const uint32_t st = rd(a + 0x52Cu); if (!ok(st, 0x40)) 
 // removed (fall / swap / park / call-in) until the burst is over, even at 0 HP. Battle state only: the same on every machine.
 bool exb_in(uint32_t a) { const uint32_t c = rd(0x08A405E0u); return a && ok(c, 0x300) && rd(c + 0x278u) != 0 && (rd(c + 0x26Cu) == a || rd(c + 0x270u) == a) && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBDEFER"); }
 bool exb_running() { const uint32_t c = rd(0x08A405E0u); return ok(c, 0x300) && rd(c + 0x278u) != 0 && !std::getenv("PSPRECOMP_TAGTEAM_NOEXBDEFER"); }
+// Every tag-in (call-in, slot call-in, KO swap, pad swap, rebuild, entrance start) waits while an EX Burst runs AND while one is about to: a fighter
+// in the EX Burst chance (flag +0x5B2 bit 0x10, slow motion) or entering EX Mode / the burst (EX controller +0x784 owner == fighter, state at +4 = 1, 5, 7).
+// The controller's running word (+0x278) only turns on at the burst's start, ~0.5 s after the chance is taken (desktop 21 Nov: Kuja's call-in began
+// in that gap and his entrance played under the burst). All of it is battle memory, the same on every machine (online lock-step). The "about to"
+// part is dropped after kExbBusyMax ticks of battle time so nothing is held forever; a running burst is held as before.
+// PSPRECOMP_TAGTEAM_NOEXBBUSY=1: only the running burst (old).
+bool exb_busy() {
+    if (exb_running()) return true;
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOEXBBUSY") != nullptr; if (off || !g_bs) return false;
+    static uint32_t gen = ~0u; static float since = -1.f;
+    const float age = dissidia_battle_age();
+    if (gen != g_battle_gen) { gen = g_battle_gen; since = -1.f; }
+    bool pre = false;
+    if (const char* fk = std::getenv("PSPRECOMP_TAGTEAM_EXBFAKE")) { float f0 = 0, f1 = 0; if (std::sscanf(fk, "%f:%f", &f0, &f1) == 2 && age >= f0 * 60.f && age < f1 * 60.f) { pre = true; static bool lg = false; if (!lg && g_log) { lg = true; std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst window (debug EXBFAKE) on\n", age / 60.0f); } } }   // debug: "<from s>:<to s>" = the chance / start window is on (tests the gates)
+    auto chk = [&](uint32_t a) {
+        if (!ok(a, 0x12D0) || !alive(a)) return;
+        if (g_ram[(a + 0x5B2u) & 0x07FFFFFFu] & 0x10u) pre = true;
+        const uint32_t exs = rd(a + 0x784u + 4u); if (rd(a + 0x784u) == a && (exs == 1u || exs == 5u || exs == 7u)) pre = true;
+    };
+    for (uint32_t k = 0; k < 2; k++) chk(srd(g_bs + 56u + 4u * k));
+    for (int i = 0; i < g_nextra; i++) if (g_extra[i].started) chk(g_extra[i].actor);
+    if (!pre) { since = -1.f; return false; }
+    if (since < 0.f) since = age;
+    static const float kExbBusyMax = 660.f;   // ticks: longer than the CPU chance's own safety cut (600)
+    return age - since < kExbBusyMax;
+}
 // The EX Burst rule of the tag battle: "freeze" (default: the fighters outside the burst are held under the stage until it ends, as
 // retail hides them) or "fight" (they play on, on the stage). A battle-wide rule: in a lock-step battle every machine must use the
 // same one (the host's), or the simulations part. Read once per program run: PSPRECOMP_TAGTEAM_EXBURST=freeze|fight.
@@ -3502,6 +3528,7 @@ bool swap_slot_with(uint32_t S, uint32_t T, bool ko) {
 
 void swap_content() {
     if (!g_bs) return;
+    if (exb_busy()) { if (g_log) std::fprintf(stderr, "[TAGTEAM] swap: refused, an EX Burst is on\n"); return; }
     const uint32_t hs = rd(g_bs + 84u), H = srd(g_bs + 56u + 4u * hs);
     Extra* pe = nullptr;
     for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].side == side_of(H) && alive(g_extra[i].actor)) pe = &g_extra[i];
@@ -3962,6 +3989,8 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     {   // start the extras once all of them are loaded; the registrations are taken back in reverse spawn order
         bool pending = false, all_ready = true;
+        bool only_callin = true; for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started && !g_extra[i].callin) only_callin = false;
+        if (!(only_callin && exb_busy()))   // a called-in member's entrance waits for any EX Burst
         for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) { pending = true; if (!call(FIGHTER_READY, g_extra[i].actor)) all_ready = false; }
         if (pending && all_ready && g_bs && rd(g_bs + 72) != 0) {
             for (int i = g_nextra - 1; i >= 0; i--) if (!g_extra[i].started) apply_undo(g_extra[i]);
@@ -5616,8 +5645,10 @@ void ko_oneround() {
                     if ((sc < 1200 || sc >= 1300) && !std::getenv("PSPRECOMP_TAGTEAM_NODEFEAT")) { wr(S + 0x380u, rd(S + 0x380u) | 2u); const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, S + 304u, 1210u, 0); g_ctx->r[29] = static_cast<int32_t>(sp0); }
                     continue;
                 }
+                if (exb_busy()) continue;   // a tag-in waits for any EX Burst (the fall keeps playing, the AI gated)
                 g_ko_swap_at.erase(it);
             }
+            else if (exb_busy()) continue;
         }
         handled[k] = true;
         // Forfeit (pause > Forfeit > YES): retail runs the fall script (1210) on the human's slot fighter and the finish phase (bs+72 = 4) with the HP untouched
@@ -5689,7 +5720,7 @@ void ko_oneround() {
             const int sc = static_cast<int16_t>(rd(c.S + 0x180u) & 0xFFFFu);
             if ((sc < 1200 || sc >= 1300) && age < c.due - slot_fall_delay() * 60.f + 45.f && !std::getenv("PSPRECOMP_TAGTEAM_NODEFEAT")) { wr(c.S + 0x380u, rd(c.S + 0x380u) | 2u); const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, c.S + 304u, 1210u, 0); g_ctx->r[29] = static_cast<int32_t>(sp0); }
             i++; continue; }
-        if (exb_running() || exb_in(c.S)) { i++; continue; }   // an EX Burst is running: the call-in waits for its end
+        if (exb_busy() || exb_in(c.S)) { i++; continue; }   // an EX Burst is running (or its chance / start is on): the call-in waits for its end
         if (entrance_busy()) { c.due = age + 30.f; i++; continue; }   // another entrance is running: this one waits for it
         g_defeat_hold.erase(c.S);
         side_entry_mark(side_of(c.S), age);
@@ -5759,7 +5790,7 @@ void ko_oneround() {
     if (comms_handover()) tagin_notice(age);   // view-only, this machine: "you're up next" before a handover of its player
     for (size_t i = 0; i < g_downrec.size();) {
         DownRec& d = g_downrec[i];
-        if (!exb_running() && age - std::max(d.since, g_side_entry[d.side & 1u]) >= call_in_delay() && reserve_left(team_of(d.side)) > 0 && !entrance_busy()) {   // somebody came in meanwhile: the wait started again; never during another entrance
+        if (!exb_busy() && age - std::max(d.since, g_side_entry[d.side & 1u]) >= call_in_delay() && reserve_left(team_of(d.side)) > 0 && !entrance_busy()) {   // somebody came in meanwhile: the wait started again; never during another entrance
             const int cid = g_nextra < 10 ? next_member_char(team_of(d.side), false) : 0;
             if (cid) queue_member(d, cid); else if (clones_allowed()) call_in(d, 0);   // a party member of his own: loaded and spawned; (test setups only) the clone comes back
             else if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs no loadable reserve member for side %u: nobody comes in\n", age / 60.0f, d.side);

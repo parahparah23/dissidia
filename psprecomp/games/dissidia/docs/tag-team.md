@@ -2028,6 +2028,24 @@ Model pool per load with unloading: 7.9 / 9.7 / 10.1 / 12.0 / 12.0 / 12.2 / 12.0
   Note: the burst picks its own victim (EXBAT's foe is only a hint); use E2NEAR to make an extra the victim.
 
 
+## Tag-ins wait for the EX Burst chance / start too (21 Nov, desktop report "a tag-in happened during an EX Burst")
+- **Log** (`desk_logs/exburst_tagin_1923.log`, 21 Nov): extraP (Terra, side 0) opens an EX Burst chance at 208.28 s (`[XREV] ... EX Burst chance`),
+  the burst starts at 208.85 s. At 208.4 s the reserve call-in of side 1 (`g_downrec` -> `queue_member` -> `reuse_parked`: KUJA takes the body of the fallen
+  Emperor) rebuilt the parked extra and ran its entrance (script 240 -> 1100 -> 101, ~1.2 s), straight under the burst's cinematic (the burst then held it
+  under the stage, `EX Burst in it:extraP,slotC held: slotH extraE`).
+- **Cause**: every tag-in gate asked `exb_running()` = EX controller (`*0x08A405E0`) `+0x278 != 0`, which only turns on when the burst itself starts, ~0.5 s
+  after the chance is taken (slow motion 0.1 in between). The call-in's 20 s timer ran out inside that gap.
+- **Fix** (`tagteam.cpp`): `exb_busy()` = `exb_running()` OR some fighter (slot fighters, started extras) is in the EX Burst chance (flag `+0x5B2` bit 0x10)
+  or entering EX Mode / the burst (`+0x784` owner == fighter, state `+4` = 1 / 5 / 7). The "about to" part is dropped after 660 ticks of continuous
+  battle time (the CPU chance's own cut is 600), a running burst is held as before. Used by: reserve call-in (`g_downrec`), slot call-in (`g_slot_callin`),
+  the KO swap with the team mate (the fall keeps playing, the swap waits; also the no-mate path), the pad swap (refused while it is on), and the entrance
+  start of called-in extras (`only_callin`: the spawned member stands unstarted until the burst is over). All inputs are battle memory + battle age, so
+  every machine decides alike (lock-step). Not held: an entrance that already began before the chance (cannot be paused), and the Assist Off
+  guards (unchanged, `exb_running()`/`ao_partner_busy` already cover the chance). `PSPRECOMP_TAGTEAM_NOEXBBUSY=1` = old behaviour.
+- **Test aid**: `PSPRECOMP_TAGTEAM_EXBFAKE=<from s>:<to s>` makes `exb_busy()` true in that battle-time window (tests the gates without the chance).
+  Headless (`E2NEAR=10 KOLIST=enemy2:10 CALLIN_DELAY=8 RESERVE_SIDES=";28" EXBFAKE=17:24`): call-in due 18.0 -> happens at 24.0 (with `NOEXBBUSY=1` at 18.0).
+  `KOLIST=slot1:20 KOLIST_NAT=1 EXBFAKE=20:30`: KO swap at 30.0 (normally 1.6 s after the KO).
+
 ## Assists and ranged moves follow the real opponent (18 Nov, agent ttfa)
 **Assist target (user: the player's assist always attacks the original enemy).** Measured with `PSPRECOMP_TAGTEAM_ASSISTLOG=1` (new `[ASSISTAIM]` lines: the
 assist actor's foe `+0x300`, target `+0x2FC`, its own lock block's target, next to its master's): a real assist (kind `+0x542` = 1, master at `+0x1108`) keeps
