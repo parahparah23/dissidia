@@ -193,6 +193,9 @@ uint8_t g_shared_flags = 0; bool g_shared_valid = false;
 uint8_t g_shared_fill = 0;   // the battle lobby's CPU fill, from the host with the roster: 0 = off, else the CPUs' strength (1-9)
 }  // namespace
 void sp_mode_refresh();   // below (battle lobby): single player, the lobby's mode into g_three / g_ffa / g_lob_duel, a Debug / env override wins
+int g_ffa_cur_str = 0;   // single player free-for-all slot being picked: its strength (sp_fill_strength() returns it)
+std::map<int, int> g_sp_char_str;   // single player: charId -> strength of the CPU made for a Free-for-all slot (per battle)
+int sp_ffa_slot_char(int side, int team, bool* off);   // below: single player Free-for-all slot P3 (team 0) / P4 (team 1): its character (0 = none / off, -1 = not a custom free-for-all)
 int sp_fill_strength();   // below (battle lobby): single player CPU fill (0 = off, else the CPUs' strength)
 uint8_t lobby_fill_strength();   // below, outside the unnamed namespace (the host lobby: 0 = CPU fill off)
 namespace {
@@ -1822,11 +1825,13 @@ bool make_sp_cpu_record(uint32_t G, int charId) {
 // Single player CPU fill (the battle lobby): a CPU made for an empty place (fill_pick) gets a record of the lobby's strength, level Auto (the base is the
 // human's lead record), type Random; kept per battle in g_sp_cache so the brain parameters can be found again.
 bool make_sp_fill_record(uint32_t G, int charId) {
-    if (std::getenv("PSPRECOMP_TAGTEAM_NOSPFILL") || comms_battle() || !g_rec_scratch || charId <= 0 || charId > 0x3F || !sp_fill_strength()) return false;
+    if (std::getenv("PSPRECOMP_TAGTEAM_NOSPFILL") || comms_battle() || !g_rec_scratch || charId <= 0 || charId > 0x3F) return false;
+    const auto ms = g_sp_char_str.find(charId); const int str = ms != g_sp_char_str.end() ? ms->second : sp_fill_strength();
+    if (str <= 0) return false;
     const uint32_t side = (G - REC_BASE) / 4192u;
     if (side > 1u || !fill_has(static_cast<int>(side), charId)) return false;
     if (auto it = g_sp_cache.find(charId); it != g_sp_cache.end()) { std::memcpy(g_ram + (g_rec_scratch & 0x07FFFFFFu), it->second.data(), 0x1060u); g_rec_cpu_made = true; return true; }
-    const uint32_t tier = static_cast<uint32_t>(sp_fill_strength() - 1);
+    const uint32_t tier = static_cast<uint32_t>(str - 1);
     const uint32_t L0 = call(0x088CBAD0u, REC_BASE + 4192u * side_of_team(0));
     const uint32_t items = g_rec_scratch + 0x1070u; wr(items, 0xFFFFFFFFu); wr(items + 4u, 0xFFFFFFFFu);
     if (!run_cpu_record(G, static_cast<uint32_t>(charId), tier, 0u, 0xFFFFFFFFu, L0, 0xFFFFFFFFu, 0xFFFFFFFFu, items, 1u, 0u)) return false;
@@ -5806,7 +5811,7 @@ void reset_battle_state() {
     g_rebuild_count = 0;
     TtStep tt_step_("reset_battle_state");
     xas_reset(false);
-    g_match_cache.clear(); g_comms_cache.clear(); g_sp_cache.clear(); g_rec_cpu_made = false;
+    g_match_cache.clear(); g_comms_cache.clear(); g_sp_cache.clear(); g_sp_char_str.clear(); g_rec_cpu_made = false;
     for (Extra& x : g_extra) x = Extra();
     g_extra_mod.clear(); g_extra_hdl.clear(); g_exb_frozen.clear(); g_exb_lasthit.clear(); g_exb_fc.clear(); g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); g_xbroken.clear(); g_xbrv_last.clear(); g_xbreak_t0.clear(); g_rebuild.clear(); g_rb_watch.clear();
     g_down.clear(); reset_ko_state(); g_ko_mark.clear(); g_entrant = 0; g_cycs.clear(); g_late_q.clear(); g_late_load.clear();
@@ -10042,9 +10047,11 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 // side gets no partner (1 v 2; his next members come in when he falls). PSPRECOMP_TAGTEAM_SP_PARTNER=1 = the old 2 v 2 with his 2nd member.
                 static const bool sp_partner = std::getenv("PSPRECOMP_TAGTEAM_SP_PARTNER") != nullptr;
                 if (team == 0) update_party_reserve();   // (which team record is the human's)
-                const bool spc = team == 0 && !no_real && !l.callin && l.info_slot < 100 && sp_cpu_battle();   // single player: his first CPU row is the partner
-                int c = spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_fill_or_player(static_cast<int>(l.side), &drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
-                if (!c && !comms_battle() && !no_real && !l.callin && l.info_slot < 100 && cpu_fill_now() && l.side < 2) c = fill_pick(static_cast<int>(l.side));   // single player CPU fill (battle lobby): an empty place gets a CPU
+                bool ffa_off = false;
+                const int ffc = (no_real || l.callin || l.info_slot >= 100 || comms_battle()) ? -1 : sp_ffa_slot_char(static_cast<int>(l.side), team, &ffa_off);   // single player Free-for-all player setup: P3 / P4 (-1: not in use)
+                const bool spc = ffc < 0 && team == 0 && !no_real && !l.callin && l.info_slot < 100 && sp_cpu_battle();   // single player: his first CPU row is the partner
+                int c = ffc >= 0 ? ffc : spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_fill_or_player(static_cast<int>(l.side), &drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
+                if (!c && ffc < 0 && !comms_battle() && !no_real && !l.callin && l.info_slot < 100 && cpu_fill_now() && l.side < 2) c = fill_pick(static_cast<int>(l.side));   // single player CPU fill (battle lobby): an empty place gets a CPU
                 if (spc) { sp_mark(c, true); std::fprintf(stderr, "[TTSP] partner at the start: CPU member %d (%s)\n", c, c ? char_label(c, true).c_str() : "none loadable"); }
                 else if (!comms_battle() && team == 0 && !sp_partner && !clones_allowed() && g_log) std::fprintf(stderr, "[TAGTEAM] single player: no CPU row on the human's team, no partner (1 v 2)\n");
                 l.driver = drv;
@@ -10866,7 +10873,34 @@ uint8_t lobby_fill_strength() { return (g_lobby_init && g_lobby.cpu_fill) ? stat
 bool dissidia_tagteam_sp_mode();   // below
 // Single player: the player is the lobby's host (no beacon: the switches the battle reads are set locally).
 bool lobby_sp() { return dissidia_tagteam_sp_mode(); }
-int sp_fill_strength() { return (lobby_sp() && g_lobby_init) ? lobby_fill_strength() : 0; }
+int sp_fill_strength() { if (g_ffa_cur_str) return g_ffa_cur_str; return (lobby_sp() && g_lobby_init) ? lobby_fill_strength() : 0; }
+// ---- Single player Free-for-all player setup (docs/tag-team.md "Mode select, full-screen lobby, Free-for-all players"): P1 is the human (his fighters come from his party), P2..P4 are CPU
+// slots {on, main (0 = random), tag-in (0 = none), strength 1-9}. P2 = the enemy fighter of the Tournament screen's round 1 (forced to its main with dissidia_tagteam_ffa_enemy_char, always on),
+// P3 = the human side's extra, P4 = the enemy side's extra. The tag-in characters are kept and shown; they are not played yet.
+struct FfaSlotCfg { uint8_t on = 1, main = 0, tag = 0, str = 5; };
+FfaSlotCfg g_ffa_cfg[3] = {{1, 0, 0, 5}, {1, 0, 0, 5}, {1, 0, 0, 5}};
+bool sp_ffa_custom() { return lobby_sp() && g_lobby_init && g_lobby.mode == 3 && !g_dbg_ffa && !std::getenv("PSPRECOMP_TAGTEAM_FFA_NOSLOTS"); }
+void dissidia_tagteam_ffa_get(int i, uint8_t out[4]) { if (i < 0 || i > 2) return; out[0] = g_ffa_cfg[i].on; out[1] = g_ffa_cfg[i].main; out[2] = g_ffa_cfg[i].tag; out[3] = g_ffa_cfg[i].str; }
+void dissidia_tagteam_ffa_set(int i, const uint8_t in[4]) {
+    if (i < 0 || i > 2) return;
+    g_ffa_cfg[i].on = i == 0 ? 1 : (in[0] ? 1 : 0); g_ffa_cfg[i].main = in[1] <= 33 ? in[1] : 0; g_ffa_cfg[i].tag = in[2] <= 33 ? in[2] : 0; g_ffa_cfg[i].str = static_cast<uint8_t>(std::clamp<int>(in[3], 1, 9));
+    std::fprintf(stderr, "[FFA] player P%d: %s, main %d, tag-in %d, strength %d\n", i + 2, g_ffa_cfg[i].on ? "CPU" : "off", g_ffa_cfg[i].main, g_ffa_cfg[i].tag, g_ffa_cfg[i].str);
+}
+int dissidia_tagteam_ffa_players() { return 1 + g_ffa_cfg[0].on + g_ffa_cfg[1].on + g_ffa_cfg[2].on; }
+int dissidia_tagteam_roster(uint8_t out[40]) { int n = 0; for (int c = 1; c <= 33 && n < 40; c++) if (info_for_char(c)) out[n++] = static_cast<uint8_t>(c); return n; }
+int sp_ffa_slot_char(int side, int team, bool* off) {
+    *off = false; if (!sp_ffa_custom() || side < 0 || side > 1) return -1;
+    const FfaSlotCfg& f = g_ffa_cfg[team == 0 ? 1 : 2];
+    if (!f.on) { *off = true; std::fprintf(stderr, "[FFA] player P%d is off: no fighter\n", team == 0 ? 3 : 4); return 0; }
+    if (g_fill_gen != g_battle_gen) { g_fill_gen = g_battle_gen; g_fill_keys.clear(); }
+    int c = f.main;
+    if (c) g_fill_keys.push_back(side * 64 + c);
+    else { g_ffa_cur_str = f.str; c = fill_pick(side); g_ffa_cur_str = 0; }
+    if (c) g_sp_char_str[c] = f.str;
+    std::fprintf(stderr, "[FFA] player P%d: %s (strength %d)%s\n", team == 0 ? 3 : 4, c ? char_label(c, true).c_str() : "none left", f.str, f.main ? "" : " random");
+    return c;
+}
+int dissidia_tagteam_ffa_enemy_char() { return sp_ffa_custom() && g_ffa_cfg[0].main ? g_ffa_cfg[0].main : 0; }   // read by direct_battle.cpp's pad filter every poll
 void dissidia_tagteam_lobby_encode(uint8_t out[8]) {
     std::memset(out, 0, 8);
     if (!g_me.host || !g_lobby_init) return;
@@ -10963,8 +10997,9 @@ void dissidia_tagteam_sp_write_round(uint32_t screen) {
     LobbyCfg c; if (!lobby_sp() || !lobby_current(c) || !g_ram || !ok(screen, 0xB00)) return;
     uint8_t* p = g_ram + ((screen + 0xA58u) & 0x07FFFFFFu);
     if (p[7] != 0x65 || p[3] > 8) { static int warned = 0; if (warned++ < 3) std::fprintf(stderr, "[LOBBY] round 1 block not as expected at screen %08X + A58: stage / rules / judgement not written\n", screen); return; }
-    if (p[0] == c.stage && p[4] == c.judge && p[5] == c.rules) return;
-    p[0] = c.stage; p[4] = c.judge; p[5] = c.rules;
+    const uint8_t tier = sp_ffa_custom() ? static_cast<uint8_t>(g_ffa_cfg[0].str - 1) : p[3];   // free-for-all: P2's strength is round 1's CPU strength
+    if (p[0] == c.stage && p[4] == c.judge && p[5] == c.rules && p[3] == tier) return;
+    p[0] = c.stage; p[4] = c.judge; p[5] = c.rules; p[3] = tier;
     std::fprintf(stderr, "[LOBBY] single player round 1: stage %d rules %d judgement %d\n", c.stage, c.rules, c.judge);
 }
 // tagteam_menu.cpp: the lobby as 9 bytes {mode, size, cpu_fill, cpu_str, stage, rules, judge, exb, assist}; false = the host has not set one yet
@@ -10996,7 +11031,7 @@ int dissidia_tagteam_lobby_players(char names[16][32], uint8_t chars[16], int8_t
     }
     return k;
 }
-void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); bp_inject_rows(); if (g_me.host) { const bool first = !g_lobby_init; lobby_init_host(); if (first) lobby_apply(); } lobby_write_round(); }   // the setup screen runs: no battle, its snapshot is over
+void dissidia_tagteam_gb_setup_frame(int cursor_row) { g_snap_valid = false; gb_read_local(true); gb_read_regs(cursor_row); bp_inject_rows(); { static bool applied = false; if (g_me.host) { lobby_init_host(); if (!applied) { applied = true; lobby_apply(); } } else applied = false; } lobby_write_round(); }   // the setup screen runs: no battle, its snapshot is over
 int dissidia_tagteam_local_regs(uint8_t out[5]) { std::memcpy(out, g_me.regs, 5); return g_me.n; }
 uint8_t dissidia_tagteam_local_cpu_mask() { return g_me.cpu_mask; }
 uint8_t dissidia_tagteam_local_own_mask() { return g_me.own_mask; }

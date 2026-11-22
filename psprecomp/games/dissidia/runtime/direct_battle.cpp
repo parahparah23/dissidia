@@ -148,7 +148,23 @@ void team_swap() {
 }  // namespace
 
 // Called by the pad filter of framerate.cpp for every poll; returns the buttons to hand the game.
+int dissidia_tagteam_ffa_enemy_char();   // tagteam.cpp: the single player Free-for-all's P2 (0 = none)
+namespace {
+// The single player Free-for-all's P2 is the Tournament screen's CPU fighter of round 1: its record's charId, model and 1-on-1 team struct are set to the player's choice
+// before the loading screen (same fields as the test swap above).
+void force_cpu_char(int to) {
+    constexpr uint32_t kBlock = 0x09AFB8A0u, kSide = 0x1060u, kTeam = 0x2735u, kTeamStride = 0x38u;
+    if (!g_rdram) return;
+    uint8_t* rec = g_at(kBlock + kSide); uint8_t* ids = g_at(kBlock + kTeam + kTeamStride);
+    if (rec[1] < 1 || rec[1] > 100 || to <= 0) return;
+    const int from = rec[0];
+    if (from != to) { if (ids[-6] == 1 && ids[0] == from && ids[1] == 0xFF) ids[0] = static_cast<uint8_t>(to); rec[0] = static_cast<uint8_t>(to); std::fprintf(stderr, "[FFA] enemy fighter of round 1: charId %d -> %d\n", from, to); }
+    const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
+    if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
+}
+}  // namespace
 uint32_t dissidia_walk_filter(uint32_t buttons) {
+    if (const int fe = dissidia_tagteam_ffa_enemy_char()) force_cpu_char(fe);
     if (!g_swap.empty()) team_swap();
     if (!g_aset.empty()) assist_set();
     if (!g_replay && !g_record) return buttons;
