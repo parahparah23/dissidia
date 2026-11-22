@@ -2208,8 +2208,28 @@ bool exb_running() { const uint32_t c = rd(0x08A405E0u); return ok(c, 0x300) && 
 // in that gap and his entrance played under the burst). All of it is battle memory, the same on every machine (online lock-step). The "about to"
 // part is dropped after kExbBusyMax ticks of battle time so nothing is held forever; a running burst is held as before.
 // PSPRECOMP_TAGTEAM_NOEXBBUSY=1: only the running burst (old).
+extern bool g_kocam;   // "KO Kill Camera" row (below)
+bool ko_state(uint32_t a);
+// Retail's finishing-blow presentation (headless trace, SLOWCHLOG): a lethal HP hit sets bs+72 = 4 and slow-motion channel 0 of the manager *0x08A62280 (mgr + 4 + 4 * ch, 2.0 = idle)
+// goes to 0.02 for ~2.3 s, then 0.2 for ~3.3 s, then back to 2.0 (the finish camera runs in the same phase). When the match goes on (tag flow) the KO swap / call-in waits for it
+// and the phase goes back to 3 afterwards (its state machine would otherwise leave channel 0 at 0.02 for ever). Row off: no wait, the phase and the channel are restored at once.
+// Battle state only (the same on every machine). Gives up after kFinMax ticks (the channel is released by hand then).
+bool finish_busy() {
+    static uint32_t gen = ~0u; static float t0 = -1.f; static bool seen = false;
+    if (gen != g_battle_gen) { gen = g_battle_gen; t0 = -1.f; seen = false; }
+    if (!g_bs || !g_kocam || rd(g_bs + 72u) != 4u) { t0 = -1.f; seen = false; return false; }
+    const float age = dissidia_battle_age(); const uint32_t mg = rd(0x08A62280u); if (!ok(mg, 0x40)) return false;
+    const float ch0 = rdf(mg + 4u);
+    // a forfeit (a slot fighter in its fall with live HP: no lethal hit) is decided by the KO flow at once, as before: no wait
+    for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0) && ko_state(S) && hp_eff(S) > 0) return false; }
+    if (t0 < 0.f) t0 = age;
+    if (ch0 < 1.0f) seen = true;
+    static const float kFinMax = 720.f;
+    if (age - t0 > kFinMax) return false;
+    return !seen ? age - t0 < 90.f : ch0 < 1.99f;   // started (waits up to 1.5 s for channel 0 to drop), then until it is released
+}
 bool exb_busy() {
-    if (exb_running()) return true;
+    if (exb_running() || finish_busy()) return true;
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOEXBBUSY") != nullptr; if (off || !g_bs) return false;
     static uint32_t gen = ~0u; static float since = -1.f;
     const float age = dissidia_battle_age();
@@ -4105,7 +4125,8 @@ void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
 void dmg_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_dmg(rdram, ctx);
     g_ram = rdram; g_ctx = ctx;
-    if (!g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
+    static const bool no_dmg_clamp = std::getenv("PSPRECOMP_TAGTEAM_KOHOLD") == nullptr || std::getenv("PSPRECOMP_TAGTEAM_NODMGCLAMP") != nullptr;   // the old KO hold (1 HP clamp) only with PSPRECOMP_TAGTEAM_KOHOLD=1
+    if (no_dmg_clamp || !g_oneround || !g_tagin || !g_bs || g_nextra == 0) return;
     for (uint32_t k = 0; k < 2; k++) {
         const uint32_t a = srd(g_bs + 56u + 4u * k), st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0u;
         if (!ok(st, 0x40) || g_ko_mark.count(a)) continue;
@@ -4293,8 +4314,12 @@ void hp_hit_indicator(uint32_t victim, uint32_t att, int hp_before, bool ko_hold
     tagteam_hud_hp_hit(h);
     if (g_log) std::fprintf(stderr, "[HPDMG] t=%.2fs %s %s > %s %s: -%d (HP %d -> %d of %d)%s\n", dissidia_battle_age() / 60.0f, h.attacker ? role_of(att) : "?", h.aname.c_str(), role_of(victim), h.vname.c_str(), dmg, hp_before, h.hp_after, h.hp_max, h.ko ? " KO" : "");
 }
+bool g_clear_surv = false;   // debug row "Lethal HP Hits Kill": clear the retail survive-at-1-HP effects of a victim that would die (Tag Team group, default OFF = retail)
+bool g_kocam = true;   // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
+extern float g_callfx_rel; extern uint32_t g_callfx_gen;   // below (the call's slow motion release)
 void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_BS72WATCH")) { static uint32_t wg = 0xFFFFFFFFu; if (wg != g_battle_gen) { wg = g_battle_gen; psp_mem_watch_set(g_bs + 72u); std::fprintf(stderr, "[BS72] watching bs+72 at %08X\n", g_bs + 72u); } }   // debug: who writes the battle phase
     // The HP damage step FUN_08AEFF40(?, msg): msg+0 = the victim (always the attacker's slot opponent), *(msg+4) = the attacker. An HP attack that hit an extra was booked on the slot fighter (the HUD and the rules saw the main enemy lose HP; enough
     // of it ended the round). The module's fighter is the fighter the attacker really hit (hit registration) for the duration of the step.
     const uint32_t m = static_cast<uint32_t>(ctx->r[5]), h6 = static_cast<uint32_t>(ctx->r[6]);
@@ -4322,7 +4347,7 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     // capped at HP - 1 for retail and the fighter is KO'd for the tag flow (g_ko_mark -> ko_oneround swaps / rebuilds / calls in). PSPRECOMP_TAGTEAM_NOKOHOLD=1 off.
     const int dmg_hp0 = ok(a, 0x12D0) ? hp_eff(a) : 0;   // HP damage indicator: the victim's live HP before the step
     bool hold = false;
-    if (g_oneround && g_tagin && g_bs && g_nextra && ok(st, 0x40) && (a == srd(g_bs + 56u) || a == srd(g_bs + 60u)) && !std::getenv("PSPRECOMP_TAGTEAM_NOKOHOLD")) {
+    if (g_oneround && g_tagin && g_bs && g_nextra && ok(st, 0x40) && (a == srd(g_bs + 56u) || a == srd(g_bs + 60u)) && std::getenv("PSPRECOMP_TAGTEAM_KOHOLD") && !std::getenv("PSPRECOMP_TAGTEAM_NOKOHOLD")) {
         bool mate = false;
         for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != a && side_of(g_extra[i].actor) == side_of(a) && alive(g_extra[i].actor)) mate = true;
         if (ffa_now() ? ffa_keep(a) : (mate || reserve_left(team_of(side_of(a))) > 0)) { hold = true; wr(st + 0xCu, static_cast<uint32_t>(hp0 + 1000000)); }
@@ -4330,12 +4355,38 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t ratt = g_xstep_att ? g_xstep_att : att;   // the real attacker: inside an extra's / its assist's damage step the message still names the module's slot fighter (20 Nov RP6 partner-HP report misread that line as the human's attack)
     const uint32_t ast = ok(ratt, 0x12D0) ? rd(ratt + 0x52Cu) : 0u; const int abrv0 = ok(ast, 0x40) ? static_cast<int>(rdh(ast + 0x14u)) : -1;
     const int sh0 = panel_shown(0), sh1 = panel_shown(1);
+    bool lethal_diag = false; int diag_rem = 0;
+    const bool keep_surv = !(g_clear_surv || std::getenv("PSPRECOMP_TAGTEAM_NOSURVIVE") != nullptr);   // default: retail survive effects stay (user decision 22 Nov)
+    if ((g_log || (!keep_surv && g_oneround && g_tagin && g_nextra)) && ok(a, 0x12D0) && ok(st, 0x40) && std::max(0, hp0 - std::max(0, pd0)) <= static_cast<int>(ctx->r[6])) {   // diag: args of a hit that would be lethal at retail's numbers, and the victim's survive effects
+        const int rem = std::max(0, hp0 - std::max(0, pd0)); const int sr6 = static_cast<int>(ctx->r[6]); const uint32_t sr7 = static_cast<uint32_t>(ctx->r[7]), sr8 = static_cast<uint32_t>(ctx->r[8]); const uint32_t hnd = call(0x08835778u, a); int ef[4] = {-1, -1, -1, -1}; uint32_t efp[4] = {0, 0, 0, 0}; const uint32_t ids[4] = {0xF8u, 0xF7u, 0xA0u, 0x100u};
+        if (hnd) for (int q = 0; q < 4; q++) { const uint32_t e = call(0x088BF4CCu, hnd, ids[q]); ef[q] = e && ok(e, 4) ? static_cast<int16_t>(rdh(e)) : -1; efp[q] = e && ok(e, 4) ? e : 0u; }
+        if (g_log) std::fprintf(stderr, "[HPLETHAL] t=%.2fs victim %s %08X hp0 %d pending %d remaining %d | step r6 %d r7 %u r8 %u | victim flags900 %08X BRV %d | effects F8 %d F7 %d A0 %d 100 %d%s\n", dissidia_battle_age() / 60.0f, role_of(a), a, hp0, pd0, rem, sr6, sr7, sr8, rd(a + 900u), static_cast<int>(rdh(st + 0x14u)), ef[0], ef[1], ef[2], ef[3], hold ? " (hold)" : "");
+        lethal_diag = true; diag_rem = rem;
+        // The lethal path of the step has retail "survive at HP-1" effects (counters 0xF8 / 0xF7 / 0xA0 / 0x100, e.g. a CPU fighter's one-time survive): the victim is left at 1 HP and needs a second HP attack
+        // (RP6 22 Nov, Onion Knight / Jecht; reproduced headless, effect 0xF7 = 1 on the CPU fighter). 
+        // OFF by default (retail survive stays): PSPRECOMP_TAGTEAM_NOSURVIVE=1 or the "Lethal HP Hits Kill" debug row turns the clearing on.
+        if (!keep_surv && !hold && g_oneround && g_tagin && g_nextra && sr8 == 0) for (int q = 0; q < 4; q++) if (efp[q] && ef[q] > 0) { wr(efp[q], rd(efp[q]) & 0xFFFF0000u); if (g_log) std::fprintf(stderr, "[HPLETHAL] survive effect 0x%X (counter %d) cleared: the hit kills\n", ids[q], ef[q]); }
+        // effect ids: 0xF8 / 0xF7 = counter effects (survive at HP-1 while the counter lasts), 0xA0 = percent roll survive, 0x100 = hit-negating counter (retail names unknown; the ids are what the step tests)
+        if (g_log && (ef[0] > 0 || ef[1] > 0 || ef[2] > 0 || ef[3] > 0)) { char ab[512]; acc_str(rd(a + 0x30Cu), ab, sizeof ab); std::fprintf(stderr, "[HPLETHAL] victim %s (char %d) has survive effects: %s\n", role_of(a), actor_char(a), ab); }
+        if (g_log) std::fprintf(stderr, "[HPLETHAL] survive-capable: %s\n", (sr8 != 0 || ef[0] > 0 || ef[1] > 0 || ef[2] > 0 || ef[3] > 0) ? (sr8 != 0 ? "step flag r8 != 0 (non-lethal attack)" : "victim effect present (see counters)") : "none (a retail kill)");
+    }
     g_orig_hpstep(rdram, ctx);
     if (g_log && ok(st, 0x40)) {   // BRV vs HP damage (RP6 report: the panel showed more BRV than an HP attack dealt)
         const int dmg = static_cast<int>(rd(st + 0x8u)) - pd0;
         std::fprintf(stderr, "[HPBRV] t=%.2fs %s %08X (char %d) hits %s %08X: attacker BRV before %d, HP damage %d | panel side0 shows %d (fighter %s), side1 shows %d (fighter %s)\n",
                      dissidia_battle_age() / 60.0f, ok(ratt, 0x12D0) ? role_of(ratt) : "?", ratt, ok(ratt, 0x12D0) ? actor_char(ratt) : -1, ok(a, 0x12D0) ? role_of(a) : "?", a, abrv0, dmg,
                      sh0, ok(hud_panel_fighter(0), 0x12D0) ? role_of(hud_panel_fighter(0)) : "-", sh1, ok(hud_panel_fighter(1), 0x12D0) ? role_of(hud_panel_fighter(1)) : "-");
+    }
+    if (g_log && lethal_diag && ok(st, 0x40)) std::fprintf(stderr, "[HPLETHAL] result: damage taken %d -> %d of hp0 %d (remaining %d -> %d)%s\n", pd0, static_cast<int>(rd(st + 0x8u)), hp0, diag_rem, std::max(0, hp0 - std::max(0, static_cast<int>(rd(st + 0x8u)))), (hold ? "" : (static_cast<int>(rd(st + 0x8u)) == hp0 - 1 ? "  <-- SURVIVED AT 1 HP" : "")));
+    // KO kill camera (tag battle, the fighter's side goes on): the finishing blow of a lethal HP hit plays in slow motion (retail's channel 6 as the assist call, 0.3 for 70 ticks), the retail fall
+    // and finish camera run meanwhile. Battle state only (lock-step safe). PSPRECOMP_TAGTEAM_NOKOSLOW=1 / the "KO Kill Camera" debug row off.
+    if (g_oneround && g_tagin && g_nextra && ok(a, 0x12D0) && dmg_hp0 > 0 && hp_eff(a) <= 0 && (a == srd(g_bs + 56u) || a == srd(g_bs + 60u) || extra_of(a)) && std::getenv("PSPRECOMP_TAGTEAM_OWNKOSLOW") && g_kocam && !psp_adhoc_in_session() && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD") && g_callfx_rel < 0.f) {   // (offline only: the slow motion changes the simulation speed, a local row must not split a lock-step battle)
+        bool mate = false; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != a && side_of(g_extra[i].actor) == side_of(a) && alive(g_extra[i].actor)) mate = true;
+        if (mate || reserve_left(team_of(side_of(a))) > 0) {
+            const uint32_t sm = rd(0x08A62280u); const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u);
+            if (ok(sm, 0x40)) { g_ctx->f[12] = 0.3f; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + 70.f; g_callfx_gen = g_battle_gen; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs KO kill camera: slow motion 0.3 for 70 ticks on %s %08X\n", dissidia_battle_age() / 60.0f, role_of(a), a); }
+            g_ctx->r[29] = static_cast<int32_t>(sp1);
+        }
     }
     ledger_hp_hit(a, ratt);   // the KO ledger: who hit whom last (the extra itself inside its own step, not the module's slot fighter)
     if (hold) {
@@ -5722,6 +5773,18 @@ void ko_oneround() {
         g_ko_mark.erase(S); g_defeat_hold.erase(S); g_ffa_down.clear(); g_decided = true; g_slot_callin.clear();
         if (g_log) std::fprintf(stderr, "[FFA] t=%.1fs one fighter is left standing: %08X's KO goes to retail, team %d loses\n", age / 60.0f, S, team_of(side_of(S)));
         group_decided(team_of(side_of(S))); return;
+    }
+    // With the KO hold gone (default) retail's finish presentation (phase 4, the KO fall + camera ~1.5 s) runs for a lethal hit on a slot fighter whose side goes on.
+    // When the KO flow has handled it (nobody of the slots is in a KO state any more, no call-in / rebuild pending, the match not decided) the phase goes back to 3 and the
+    // finish latch bit (+0x380 0x20000000) is cleared, so the next fall is not taken for the finish of the match. PSPRECOMP_TAGTEAM_NOPHASEBACK=1: left at 4.
+    if (!g_decided && rd(g_bs + 72u) == 4u && !std::getenv("PSPRECOMP_TAGTEAM_NOPHASEBACK") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD") && g_slot_callin.empty() && g_rebuild.empty() && !exb_busy()) {
+        bool ko_any = false; for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0) && (ko_state(a2) || hp_eff(a2) <= 0 || g_ko_swap_at.count(a2))) ko_any = true; }
+        static uint32_t fin_gen = 0xFFFFFFFFu; static float fin_since = 0.f; if (fin_gen != g_battle_gen) { fin_gen = g_battle_gen; fin_since = 0.f; }
+        if (!ko_any) { if (fin_since == 0.f) fin_since = age; if (age - fin_since >= 5.f) {
+            { const uint32_t mg = rd(0x08A62280u); if (ok(mg, 0x40) && rdf(mg + 4u) < 1.99f) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, mg, 0u); g_ctx->r[29] = static_cast<int32_t>(sp1); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs finish slow motion (channel 0) released by hand\n", age / 60.0f); } }
+            wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
+            fin_since = 0.f; if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs KO flow done: battle phase 4 (finish) put back to 3\n", age / 60.0f); } }
+        else fin_since = 0.f;
     }
     if (age < g_phase_hold_until && rd(g_bs + 72u) == 4u && std::getenv("PSPRECOMP_TAGTEAM_PHASEBACK")) {   // opt-in experiment: froze the match (the finish presentation keeps running)   // the finish retail registered from the lethal hit: back to the fight
         wr(g_bs + 72u, 3u);
@@ -9563,6 +9626,11 @@ void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx) {
         const uint32_t o = rd(0x089D5EA8u); static float last_left = 0;
         if (ok(o, 0x10)) { const float v = rdf(o), left = rdf(o + 4u); if (left > 0.0f && last_left <= 0.0f) { std::fprintf(stderr, "[SLOW] t=%.2fs slow motion %.2f for %.1f flags %08X:", dissidia_battle_age() / 60.0f, v, left, rd(o + 8u)); uint32_t f[6]; const int n = g_bs ? all_fighters(f) : 0; for (int i = 0; i < n; i++) std::fprintf(stderr, " %s %d", role_of(f[i]), static_cast<int16_t>(rd(f[i] + 0x180u) & 0xFFFFu)); std::fprintf(stderr, "\n"); } last_left = left; }
     }
+    if (g_log && g_ram && std::getenv("PSPRECOMP_TAGTEAM_SLOWCHLOG")) {   // debug: the slow-motion manager *0x08A62280: per channel (mgr + 4 + 4 * ch) speed, 2.0 = idle; logged when any channel changes
+        const uint32_t mg = rd(0x08A62280u); static std::string last;
+        if (ok(mg, 0x40)) { char b[200]; int n = 0; for (int ch = 0; ch < 10; ch++) { const float v = rdf(mg + 4u + 4u * ch); n += std::snprintf(b + n, sizeof b - n, " %.2f", static_cast<double>(v)); } const std::string cur = b;
+            if (cur != last) { last = cur; std::fprintf(stderr, "[SLOWCH] t=%.2fs bs72 %u channels:%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, b); } }
+    }
     if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); }
 }
 
@@ -10402,6 +10470,10 @@ void dissidia_tagteam_install(uint8_t* rdram) {
                                    +[]() { return g_ffa == 3; }, +[](bool on) { g_ffa = on ? 3 : 0; if (on) overhead_default_on(); }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Free-for-all (4)", "Tag team free-for-all, 4 fighters (experimental)\nWith Tag Team on: you and three CPU fighters, everyone against everyone. L cycles the lock through every opponent. You lose when you fall, you win as the last one standing.\nAffects the next battle that starts.",
                                    +[]() { return g_ffa == 4; }, +[](bool on) { g_ffa = on ? 4 : 0; if (on) overhead_default_on(); }, false, false, "Tag Team"});
+    psp_settings_add_debug_toggle({"Lethal HP Hits Kill", "Tag team: lethal HP hits always kill\nOff (default, retail): a fighter with a survive-at-1-HP effect survives one lethal HP attack at 1 HP. On: a fighter with a retail survive-at-1-HP effect (some CPU fighters carry one) dies from an HP attack that would kill it, instead of being left at 1 HP. Off: retail behaviour. Tag team battles only.",
+                                   +[]() { return g_clear_surv; }, +[](bool on) { g_clear_surv = on; }, false, false, "Tag Team"});
+    psp_settings_add_debug_toggle({"KO Kill Camera", "Tag team: KO kill camera\nOn: an HP attack that knocks out a fighter whose team goes on plays retail's finishing-blow presentation (slow motion and finish camera) in full, then the fight continues with the next fighter. Off: the fight continues at once.",
+                                   +[]() { return g_kocam; }, +[](bool on) { g_kocam = on; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead HP Bars", "Tag team: HP bars over the enemies' heads\nOn: a thin HP bar over each enemy; the one you are locked on to is brighter and shows its Bravery. Only on your screen. This session only.",
                                    +[]() { return g_overhead == 1; }, +[](bool on) { g_overhead = on ? 1 : 0; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead Mini Panels", "Tag team: mini status panels over the enemies' heads\nOn: a small panel (name, Bravery, HP bar and number) over each enemy, see-through; the one you are locked on to is stronger. Replaces the other overhead styles. Only on your screen. This session only.",

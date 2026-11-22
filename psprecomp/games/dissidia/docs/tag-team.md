@@ -4532,3 +4532,29 @@ At 793.35 Gabranth (extraE, EX mode) stepped out for an Assist Off call, which p
   no hit landed on a body in that run, so no `[DEADHIT]` line.
 - **Not checked / open**: the exact Gabranth repro (EX-mode HP attack from the parking spot on a dead partner) was not reproduced headless. A burst started by an extra's hit
   on a LIVING extra still uses the extra's foe (the slot fighter) as the burst victim; not changed. Bodies are still in the world (only hits are refused).
+## KO hold removed from the default; the "1 HP" was a retail survive effect (22 Nov, tree ttx; host-only)
+RP6 report: an HP attack that should have killed left the victim at 1 HP and a second HP attack was needed (Terra BRV 1687 vs Onion Knight HP 1191 -> `-1190`; extraE vs extraP -555 of 556).
+- **Cause (reproduced headless, `[HPLETHAL]`):** the HP step `FUN_08AEFF40` (r6 = damage, r8 = flag) has, in its lethal path (`remaining - damage <= 0`), retail "survive at HP-1" branches
+  (`+0x8 = +0xC - 1`) driven by per-fighter effect counters 0xF8 / 0xF7 / 0xA0 (percent roll) / 0x100 (read with `FUN_088BF4CC(FUN_08835778(actor), id)`; halfword at +0 = counter, +4 = percent).
+  CPU fighters carry them at random: log `effects F7 1` on the enemy Laguna, hit of 1616 against HP 50 -> `damage taken 0 -> 49 ... <-- SURVIVED AT 1 HP`, the next hit (counter now 0) killed.
+  With the old hold the hit never looked lethal to retail (+0xC raised), so the survive branch only fired on fighters without a hold (the last one, extras, ...).
+- **Survive effects (user decision 22 Nov: keep retail):** the retail survive-at-1-HP stays. The clearing of the counters before a lethal step is kept behind `PSPRECOMP_TAGTEAM_NOSURVIVE=1` or the
+  debug row "Lethal HP Hits Kill" (default off). `[HPLETHAL] survive effect 0x.. cleared` when it fires; the `[HPLETHAL] victim ... has survive effects: <accessory ids of the record copy>` line names the
+  fighter's accessories. The effect ids are entries of the fighter's ability block (actor +0x310, bit n of its words = ability / accessory effect n, see "Accessories per fighter"); no name table for
+  0xF7 / 0xF8 / 0xA0 / 0x100 exists in the repo (not found in docs, tagteam.cpp or the analysis), so they are known by id only.
+- **Fix 2 (KO hold removed):** the +1,000,000 hold and `dmg_hook`'s HP-1 clamp are off by default (old behaviour: `PSPRECOMP_TAGTEAM_KOHOLD=1`). A lethal hit applies fully (real damage, HP 0, retail fall 1210).
+- **Retail's finishing-blow presentation is used as it is** (user: "the retail game already does everything we need"). `PSPRECOMP_TAGTEAM_SLOWCHLOG=1` logs the slow-motion manager (`*0x08A62280`, mgr + 4 + 4 * ch,
+  2.0 = idle): at a lethal HP hit `bs+72` goes to 4, channel 0 goes to 0.02 for ~2.3 s, then 0.20 for ~3.3 s, then back to 2.0 (~5.7 s; the finish camera and the "THE FINAL BLOW!" text run in the same
+  phase: screenshot sheet `~/dissidia/tt/ttx_killcam_montage.png`, a tag mid-battle KO). Same sequence for the last enemy (decided: retail goes on to the results ~24 s later) and on both copies of a two-copy
+  lock-step run (identical channel timings). The first version put the phase back after 1.7 s: channel 0 then stayed at 0.02 (the finish state machine never released it), the presentation was cut.
+  Now `finish_busy()` (part of `exb_busy()`, so every tag-in / swap / call-in waits) holds the KO flow until channel 0 is released (gives up after 12 s and releases it by hand), then `ko_oneround` puts the
+  phase back to 3 and clears `+0x380` bit 0x20000000 once no slot fighter is in a KO state, no call-in / rebuild is pending and the match is not decided (`KO flow done: battle phase 4 (finish) put back to 3`;
+  `PSPRECOMP_TAGTEAM_NOPHASEBACK=1` off). A forfeit (fallen slot fighter with live HP) is not delayed. Without the phase restore the leftover phase 4 made the next fall script of the other slot fighter look
+  like a forfeit. Row "KO Kill Camera" (Tag Team group, default on): on = presentation plays in full, off = no wait (phase and channel restored at once). The own channel-6 slow motion is gone
+  (`PSPRECOMP_TAGTEAM_OWNKOSLOW=1` brings it back for comparison, offline only).
+- Debug: `PSPRECOMP_TAGTEAM_BS72WATCH=1` (memory watch on bs+72; the writer was not found: the write lands between function entries in the main loop, writer not inside FUN_08AE6160).
+- Verified headless (22 Nov): NATKO human (mate + 3 reserves): finish presentation 15.47-21.1 s, swap, phase back 0.15 s later, fight continues; last enemy (`KOLIST=enemy2:8,cpu:14` + `NATKO=cpu:30:50`): decided, tally;
+  SP 130 s with 4 KOs (human slot x3 incl. a real HP KO of the CPU partner, with waits / call-ins / "takes the slot ... with the pad"), no false forfeit, no freeze; SP wait recipe (`sp_cpu_walk`, `KOLIST_NAT=1
+  KOLIST=human:15 CALLIN_DELAY=10`): "the human waits" 16.6 -> "wait is over" 26.6 -> "takes the slot ... with the pad" 30.3 s, same as the old hold build; FFA 4 and 3v3 runs with real + aid KOs; forfeit via the pause menu
+  (decided at once, tally, "Proceed" row left out); `tagteam_test.py --baseline` PASS; two-copy `mp_test.py` 150 s: 0 mismatched, identical presentation timings on both copies.
+- Not verified: EX Burst KO, an extra's HP KO beyond the earlier HPDMG lines, a real HP-step KO online, the survive-effect clearing firing, 3+ real HP KOs in a row.
