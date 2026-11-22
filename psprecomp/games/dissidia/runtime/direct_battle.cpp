@@ -148,6 +148,7 @@ void team_swap() {
 }  // namespace
 
 // Called by the pad filter of framerate.cpp for every poll; returns the buttons to hand the game.
+int dissidia_tagteam_ffa_human_chars(uint8_t out[2]);   // tagteam.cpp: the single player Free-for-all's P1 {main, tag-in}, count 0 = not in use
 int dissidia_tagteam_ffa_enemy_char();   // tagteam.cpp: the single player Free-for-all's P2 (0 = none)
 namespace {
 // The single player Free-for-all's P2 is the Tournament screen's CPU fighter of round 1: its record's charId, model and 1-on-1 team struct are set to the player's choice
@@ -162,8 +163,25 @@ void force_cpu_char(int to) {
     const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
     if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
 }
+// P1 (the human side, record 0): his main's own save record, model and a team struct of {main, tag-in}: the 5-member Party Select is not needed.
+void force_human_chars(const uint8_t* c, int n) {
+    constexpr uint32_t kBlock = 0x09AFB8A0u, kTeam = 0x2735u;
+    if (!g_rdram || n < 1) return;
+    uint8_t* rec = g_at(kBlock); uint8_t* ids = g_at(kBlock + kTeam);
+    if (rec[1] < 1 || rec[1] > 100) return;
+    const int to = c[0];
+    if (rec[0] != to) {
+        const uint32_t src = save_record(to); if (src) std::memcpy(rec, g_at(src), 0x778);
+        rec[0] = static_cast<uint8_t>(to);
+        std::fprintf(stderr, "[FFA] human fighter record: charId -> %d (%s)\n", to, src ? "its own save record" : "charId only");
+    }
+    const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
+    if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
+    if (ids[-6] != n || ids[0] != c[0] || (n > 1 && ids[1] != c[1])) { ids[-6] = static_cast<uint8_t>(n); ids[0] = c[0]; ids[1] = n > 1 ? c[1] : 0xFF; for (int k = 2; k < 5; k++) ids[k] = 0xFF; std::fprintf(stderr, "[FFA] human team: %d %d\n", c[0], n > 1 ? c[1] : -1); }
+}
 }  // namespace
 uint32_t dissidia_walk_filter(uint32_t buttons) {
+    { uint8_t hc[2]; if (const int hn = dissidia_tagteam_ffa_human_chars(hc)) force_human_chars(hc, hn); }
     if (const int fe = dissidia_tagteam_ffa_enemy_char()) force_cpu_char(fe);
     if (!g_swap.empty()) team_swap();
     if (!g_aset.empty()) assist_set();

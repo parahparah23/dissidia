@@ -46,7 +46,7 @@ void dissidia_tagteam_menu_mode(bool on);   // tagteam.cpp: Battle Mode > Tag Te
 void dissidia_tagteam_modesel_open();   // tagteam_menu.cpp: the mode select screen after choosing Tag Team Battle
 bool dissidia_tagteam_modesel_active();
 int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool online);   // 0 open, 1 chosen, 2 cancelled
-void dissidia_tagteam_modesel_confirm();   // a Cross press for the start menu once the screen is closed
+void dissidia_tagteam_modesel_confirm(bool sp);   // a Cross press for the start menu once the screen is closed
 void dissidia_tagteam_lobby_pending(bool on);   // the setup screen opens the lobby (or the Free-for-all players) once
 
 namespace {
@@ -399,7 +399,7 @@ bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st) {
     const uint32_t cur = st + 0xA58u;
     if (dissidia_tagteam_modesel_active()) {   // the mode select has the pad
         const int r = dissidia_tagteam_modesel_frame(rdram, ctx, g_ms_group == 2);
-        if (r == 1) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); g_ms_go = true; g_ms_go_age = 0; dissidia_tagteam_modesel_confirm(); std::fprintf(stderr, "[MENUSET] mode select: chosen, the game goes on (group %u)\n", tg->group); }
+        if (r == 1) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); g_ms_go = true; g_ms_go_age = 0; dissidia_tagteam_modesel_confirm(tg->group == 1); std::fprintf(stderr, "[MENUSET] mode select: chosen, the game goes on (group %u)\n", tg->group); }
         else if (r == 2) { dissidia_tagteam_menu_mode(false); std::fprintf(stderr, "[MENUSET] mode select: cancelled\n"); }
         return true;
     }

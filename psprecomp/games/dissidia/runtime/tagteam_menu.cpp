@@ -39,6 +39,8 @@ bool dissidia_tagteam_lobby_sp();
 void dissidia_tagteam_ffa_get(int slot, uint8_t out[4]);   // Free-for-all CPU slots P2..P4 (0..2): {on, main, tag-in, strength}
 void dissidia_tagteam_ffa_set(int slot, const uint8_t in[4]);
 int dissidia_tagteam_roster(uint8_t out[40]);   // the characters that can be picked
+void dissidia_tagteam_ffa_p1_get(uint8_t out[2]);   // P1 (you): {main, tag-in}
+void dissidia_tagteam_ffa_p1_set(const uint8_t in[2]);
 int dissidia_tagteam_ffa_players();   // P1 + the CPU slots that are on
 void dissidia_tagteam_sp_write_round(uint32_t screen);   // single player: round 1's stage / rules / judgement from the lobby   // single player: the player is the host, no beacon; Assist stays on Square
 uint8_t dissidia_tagteam_mode_byte();
@@ -106,6 +108,7 @@ constexpr uint32_t BTN_UP = 0x10u, BTN_RIGHT = 0x20u, BTN_DOWN = 0x40u, BTN_LEFT
 std::atomic<uint32_t> g_raw_pad{0};   // the pad as the filter saw it before the dialog took it
 std::atomic<bool> g_dlg_open{false};
 std::atomic<int> g_inject_cross{0};
+std::atomic<int> g_script_t{-1};   // the Free-for-all's scripted pass through retail's Party Select and CPU Select (single player): polls since the confirm, -1 = off
 std::atomic<int> g_inject_late{0};   // a confirm for the start menu after the mode select closed: pressed once the dialog hold is over (6 .. 1: Cross is down while 5 .. 3)   // "Add CPU" (L on the free row) presses Cross for the screen: it opens Player Select for the new row
 std::atomic<uint32_t> g_pad_polls{0}, g_sq_stamp{0};   // pad polls; the poll at which the setup screen last ran with Square taken (the block ends a few polls after the screen stops ticking)
 std::atomic<bool> g_sp_sq_block{false};   // single player setup list: Square is ours (Assist On / Off), the screen does not see it
@@ -271,18 +274,18 @@ const char* const kStages[35] = {"Random", "Old Chaos Shrine", "Pandaemonium", "
     "Pandaemonium - Top Floor", "Crystal Tower", "Phantom Train", "M.S. Prima Vista", "Old Chaos Shrine (Omega)", "Pandaemonium (Omega)", "World of Darkness (Omega)",
     "Lunar Subterrane (Omega)", "The Rift (Omega)", "Kefka's Tower (Omega)", "Planet's Core (Omega)", "Ultimecia's Castle (Omega)", "Crystal World (Omega)",
     "Dream's End (Omega)", "Order's Sanctuary (Omega)", "Edge of Madness (Omega)", "Empyreal Paradox (Omega)", "Sky Fortress Bahamut (Omega)", "Orphan's Cradle (Omega)"};   // the round dialog's list, in its order
+const char* const kStrName[9] = {"Minimal", "Very Low", "Low (Actions)", "Low (Equipment)", "Average", "High (Equipment)", "High (Actions)", "Very High", "Maximum"};   // retail's CPU STRENGTH labels 1..9 (read off the Tournament round dialog)
 const char* const kRules[6] = {"None", "Official", "Official (Skill)", "EX Centric", "Assist Centric", "BRV Centric"};
 const char* const kJudge[5] = {"None", "Cosmos Judgment", "Chaos Judgment", "Double Judgment", "Random"};
 struct LobbyMode { uint8_t mode, size; const char* label; const char* help; };
 const LobbyMode kLobbyModes[] = {
-    {0, 1, "1 vs 1 Duel", "One fighter each"},
     {1, 2, "Team 2 vs 2", "Two fighters per team"},
     {1, 3, "Team 3 vs 3", "Three fighters per team"},
     {2, 1, "Tag Duel", "One fighter each; the next party member tags in on a KO"},
     {3, 4, "Free-for-all", "Every player fights for himself (up to 4)"},
 };
 constexpr int kLobbyModeCount = sizeof kLobbyModes / sizeof kLobbyModes[0];
-int lobby_mode_index(const uint8_t* L) { for (int i = 0; i < kLobbyModeCount; i++) if (kLobbyModes[i].mode == L[0] && (L[0] == 3 || kLobbyModes[i].size == L[1])) return i; return 1; }
+int lobby_mode_index(const uint8_t* L) { for (int i = 0; i < kLobbyModeCount; i++) if (kLobbyModes[i].mode == L[0] && (L[0] == 3 || kLobbyModes[i].size == L[1])) return i; return 0; }
 int lobby_needed(const uint8_t*) { return 2; }   // players the room needs: party members fill the other places in team and free-for-all battles
 int lobby_fighters(const uint8_t* L, int players) { return L[0] == 1 ? 2 * L[1] : L[0] == 3 ? (L[2] ? 4 : std::clamp(players, 2, 4)) : 2; }   // (CPU fill: free-for-all of four)   // fighters on the stage at once
 std::string lobby_summary(const uint8_t* L) {
@@ -292,7 +295,7 @@ constexpr int kLobbyRows = 9;   // MODE, STAGE, RULES, JUDGMENT, EX BURST, ASSIS
 // The rows the dialog shows (logical row numbers): single player has no ASSIST row (Square on the setup screen toggles it), CPU STRENGTH only with CPU FILL on.
 int lobby_visible(const uint8_t* L, int out[kLobbyRows]) {
     int n = 0; const bool sp = dissidia_tagteam_lobby_sp();
-    for (int r = 0; r < kLobbyRows; r++) { if (r == 5 && sp) continue; if (r == 7 && !L[2]) continue; if (r == 8 && !(sp && L[0] == 3)) continue; out[n++] = r; }
+    for (int r = 1; r < kLobbyRows; r++) { if (r == 5 && sp) continue; if (r == 7 && !L[2]) continue; if (r == 8 && !(sp && L[0] == 3)) continue; out[n++] = r; }
     return n;
 }
 const char* kLobbyRowName[kLobbyRows] = {"MODE", "STAGE", "RULES", "JUDGMENT", "EX BURST", "ASSIST", "CPU FILL", "CPU STRENGTH", "PLAYERS"};
@@ -306,7 +309,7 @@ std::string lobby_value(int r, const uint8_t* L) {
     case 5: return L[8] ? "On" : "Off";
     case 6: return L[2] ? "On" : "Off";
     case 8: return "P1 + " + std::to_string(dissidia_tagteam_ffa_players() - 1) + " CPU  >";
-    default: return std::to_string(L[3]);
+    default: return kStrName[std::clamp<int>(L[3], 1, 9) - 1];
     }
 }
 void lobby_change(int r, int dir, uint8_t* L) {
@@ -371,12 +374,11 @@ void gs_row(float x0, float x1, float y, float h, bool sel, const std::string& n
 
 // ---- The mode select (Battle Mode / Communications Mode > Tag Team Battle, 22 Nov): the first screen after choosing the entry; its choice decides the screens that follow
 // (team modes: Party Select, the lobby; Free-for-all: Party Select, the Free-for-all player setup, the lobby).
-bool g_ms_first = true; int g_ms_sel = 1;
+bool g_ms_first = true, g_ms_ffa = false; int g_ms_sel = 1;
 const char* const kModeSelHelp[5] = {
-    "Your fighter against one CPU fighter. Party members do not join.",
     "Two fighters a side: CPU rows, CPU fill or the enemy party fill the places. Party Select, then the lobby.",
     "Three fighters a side. Party Select, then the lobby.",
-    "One fighter each at a time; the next party member tags in when one falls.",
+    "One fighter each on the stage; when one falls the next party member tags in, until a team has nobody left.",
     "Everyone for himself, up to 4 players with a character each (and a tag-in). Party Select, then the Free-for-all player setup.",
 };
 std::atomic<int> g_ms_result{0};
@@ -393,7 +395,7 @@ int modesel_frame(uint8_t* rdram, recomp_context* ctx, bool group_online) {
     int result = 0;
     if (pressed & BTN_UP) { g_ms_sel = (g_ms_sel + kLobbyModeCount - 1) % kLobbyModeCount; play_se(rdram, ctx, 1); }
     if (pressed & BTN_DOWN) { g_ms_sel = (g_ms_sel + 1) % kLobbyModeCount; play_se(rdram, ctx, 1); }
-    if (pressed & BTN_CROSS) { L[0] = kLobbyModes[g_ms_sel].mode; L[1] = kLobbyModes[g_ms_sel].size; dissidia_tagteam_lobby_set(L); play_se(rdram, ctx, 2); result = 1; }
+    if (pressed & BTN_CROSS) { g_ms_ffa = kLobbyModes[g_ms_sel].mode == 3; L[0] = kLobbyModes[g_ms_sel].mode; L[1] = kLobbyModes[g_ms_sel].size; dissidia_tagteam_lobby_set(L); play_se(rdram, ctx, 2); result = 1; }
     else if (pressed & BTN_CIRCLE) { play_se(rdram, ctx, 1); result = 2; }
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
     gs_background(); gs_title("MODE SELECT", group_online ? "Communications  >  Tag Team Battle" : "Battle Mode  >  Tag Team Battle");
@@ -415,74 +417,95 @@ int modesel_frame(uint8_t* rdram, recomp_context* ctx, bool group_online) {
 const LayerColor kSlotCol[4] = {{40, 90, 220, 1.f}, {210, 50, 60, 1.f}, {40, 160, 80, 1.f}, {220, 150, 20, 1.f}};
 const char* const kSlotName[4] = {"P1", "P2", "P3", "P4"};
 int g_ffa_slot = 0, g_ffa_field = 0;   // the cursor: slot 0..3, field 0 TYPE, 1 MAIN, 2 TAG-IN, 3 STRENGTH
-bool g_ffa_then_lobby = false, g_lobby_pending = false;
+bool g_ffa_then_lobby = false, g_lobby_pending = false, g_ffa_flow = false, g_ffa_autostart = false;
+std::chrono::steady_clock::time_point g_cover_until{};   // the Free-for-all starts without the retail setup screen: it is covered meanwhile
 uint8_t g_roster[40] = {}; int g_roster_n = 0, g_pk_sel = 0, g_pk_field = 0, g_pk_slot = 0;
-std::string slot_char_text(uint8_t c, bool tag) { return c ? dissidia_tagteam_char_name(c) : std::string(tag ? "None" : "Random"); }
+std::string slot_char_text(uint8_t c, bool tag) { return c == 254 ? std::string("Off") : c == 255 ? std::string("None") : c ? dissidia_tagteam_char_name(c) : std::string("Random"); }   // tag-in 255 = None
 bool ffa_picker_open() { return g_dlg_mode == 4; }
-void ffa_picker(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {   // full-screen roster list; entry 0 = Random / None
-    const int n = g_roster_n + 1;
+std::vector<uint8_t> g_pk_opts;   // the list's entries: 0 = Random, 255 = None (tag-in only), then the roster
+void ffa_picker(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
+    const int n = static_cast<int>(g_pk_opts.size());
     if (pressed & BTN_CIRCLE) { g_dlg_mode = 3; play_se(rdram, ctx, 1); return; }
     if (pressed & BTN_UP) { g_pk_sel = (g_pk_sel + n - 1) % n; play_se(rdram, ctx, 1); }
     if (pressed & BTN_DOWN) { g_pk_sel = (g_pk_sel + 1) % n; play_se(rdram, ctx, 1); }
     if (pressed & BTN_L) { g_pk_sel = std::max(0, g_pk_sel - 7); play_se(rdram, ctx, 1); }
     if (pressed & BTN_R) { g_pk_sel = std::min(n - 1, g_pk_sel + 7); play_se(rdram, ctx, 1); }
     if (pressed & BTN_CROSS) {
-        uint8_t s[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(g_pk_slot - 1, s);
-        s[g_pk_field] = g_pk_sel == 0 ? 0 : g_roster[g_pk_sel - 1];
-        if (g_pk_field == 1 && s[1] && s[1] == s[2]) s[2] = 0;
-        dissidia_tagteam_ffa_set(g_pk_slot - 1, s); g_dlg_mode = 3; play_se(rdram, ctx, 2); return;
+        const uint8_t v = g_pk_opts[g_pk_sel];
+        if (g_pk_slot == 0) { uint8_t p[2]; dissidia_tagteam_ffa_p1_get(p); p[g_pk_field - 1] = v; if (g_pk_field == 1 && v && v == p[1]) p[1] = 0; dissidia_tagteam_ffa_p1_set(p); }
+        else { uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(g_pk_slot - 1, sl); if (g_pk_field == 1 && v == 254) { sl[0] = 0; sl[1] = 0; } else { sl[g_pk_field] = v; if (g_pk_field == 1) sl[0] = 1; } if (g_pk_field == 1 && v && v == sl[2]) sl[2] = 0; dissidia_tagteam_ffa_set(g_pk_slot - 1, sl); }
+        g_dlg_mode = 3; play_se(rdram, ctx, 2); return;
     }
     gs_background(); gs_title(std::string("CHARACTER FOR ") + kSlotName[g_pk_slot], g_pk_field == 1 ? "Main fighter" : "Tag-in fighter");
     const int vis = 8, top = std::clamp(g_pk_sel - vis / 2, 0, std::max(0, n - vis));
     for (int i = 0; i < vis && top + i < n; i++) {
-        const int k = top + i; const uint8_t c = k == 0 ? 0 : g_roster[k - 1];
-        gs_row(110.f, 370.f, 48.f + 24.f * float(i), 22.f, k == g_pk_sel, slot_char_text(c, g_pk_field == 2), "", false, 8.f);
+        const int k = top + i;
+        gs_row(110.f, 370.f, 48.f + 24.f * float(i), 22.f, k == g_pk_sel, slot_char_text(g_pk_opts[k], g_pk_field == 2), "", false, 8.f);
     }
     gs_footer("Up/Down  L/R: page   Cross: choose   Circle: back");
+}
+// which fields of a slot can be selected: bit 1 MAIN, bit 2 TAG-IN, bit 3 STRENGTH (P1: no strength; an Off slot: only MAIN, where "Off" is an entry)
+int ffa_fields(int slot) {
+    if (slot == 0) return 0x6;
+    uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(slot - 1, sl);
+    return sl[0] ? 0xE : 0x2;
 }
 void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
     if (g_dlg_mode == 4) { ffa_picker(rdram, ctx, pressed); return; }
     uint8_t slots[3][4]; for (int i = 0; i < 3; i++) dissidia_tagteam_ffa_get(i, slots[i]);
-    if (pressed & (BTN_CIRCLE | BTN_OPEN)) { g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1); if (g_ffa_then_lobby) { g_ffa_then_lobby = false; g_dlg_mode = 2; g_dlg_open = true; } return; }
-    if (pressed & BTN_UP) { g_ffa_slot = (g_ffa_slot + 3) % 4; play_se(rdram, ctx, 1); }
-    if (pressed & BTN_DOWN) { g_ffa_slot = (g_ffa_slot + 1) % 4; play_se(rdram, ctx, 1); }
-    if (pressed & BTN_LEFTK) { g_ffa_field = (g_ffa_field + 3) % 4; play_se(rdram, ctx, 1); }
-    if (pressed & BTN_RIGHT) { g_ffa_field = (g_ffa_field + 1) % 4; play_se(rdram, ctx, 1); }
-    if (g_ffa_slot > 0 && (pressed & BTN_CROSS)) {
-        uint8_t* s = slots[g_ffa_slot - 1];
-        if (g_ffa_field == 0) { s[0] ^= 1; if (g_ffa_slot == 1) s[0] = 1; dissidia_tagteam_ffa_set(g_ffa_slot - 1, s); play_se(rdram, ctx, 1); }   // P2 is always there: the enemy of the Tournament screen's round 1
-        else if (g_ffa_field == 3) { s[3] = static_cast<uint8_t>(s[3] % 9 + 1); dissidia_tagteam_ffa_set(g_ffa_slot - 1, s); play_se(rdram, ctx, 1); }
-        else if (s[0]) { g_roster_n = dissidia_tagteam_roster(g_roster); g_pk_slot = g_ffa_slot; g_pk_field = g_ffa_field; g_pk_sel = 0; for (int k = 0; k < g_roster_n; k++) if (g_roster[k] == s[g_ffa_field]) g_pk_sel = k + 1; g_dlg_mode = 4; play_se(rdram, ctx, 1); }
+    auto finish = [&]() { g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1); if (g_ffa_then_lobby) { g_ffa_then_lobby = false; g_dlg_mode = 2; g_dlg_open = true; } };
+    if (pressed & (BTN_CIRCLE | BTN_OPEN)) { finish(); return; }
+    auto clamp_field = [&]() { const int m = ffa_fields(g_ffa_slot); if (!((m >> g_ffa_field) & 1)) { for (int f = 1; f <= 3; f++) if ((m >> f) & 1) { g_ffa_field = f; break; } } };
+    if (pressed & BTN_UP) { g_ffa_slot = (g_ffa_slot + 4) % 5; clamp_field(); play_se(rdram, ctx, 1); }
+    if (pressed & BTN_DOWN) { g_ffa_slot = (g_ffa_slot + 1) % 5; clamp_field(); play_se(rdram, ctx, 1); }
+    if (g_ffa_slot < 4 && (pressed & (BTN_LEFTK | BTN_RIGHT))) {
+        const int m = ffa_fields(g_ffa_slot), d = (pressed & BTN_RIGHT) ? 1 : -1;
+        for (int k = 1, f = g_ffa_field; k <= 3; k++) { f += d; if (f < 1 || f > 3) break; if ((m >> f) & 1) { g_ffa_field = f; play_se(rdram, ctx, 1); break; } }
+    }
+    clamp_field();
+    if (pressed & BTN_CROSS) {
+        if (g_ffa_slot == 4) { finish(); return; }
+        uint8_t sl[4] = {1, 0, 0, 5}; uint8_t p1[2] = {0, 0}; if (g_ffa_slot == 0) dissidia_tagteam_ffa_p1_get(p1); else dissidia_tagteam_ffa_get(g_ffa_slot - 1, sl);
+        auto open_list = [&](uint8_t cur) {
+            uint8_t ros[40]; const int rn = dissidia_tagteam_roster(ros);
+            g_pk_opts.clear(); g_pk_opts.push_back(0);
+            if (g_ffa_field == 2) g_pk_opts.push_back(255);          // tag-in: None
+            if (g_ffa_field == 1 && g_ffa_slot >= 2) g_pk_opts.push_back(254);   // P3 / P4: Off
+            for (int k = 0; k < rn; k++) g_pk_opts.push_back(ros[k]);
+            g_pk_slot = g_ffa_slot; g_pk_field = g_ffa_field; g_pk_sel = 0;
+            for (size_t k = 0; k < g_pk_opts.size(); k++) if (g_pk_opts[k] == cur) g_pk_sel = static_cast<int>(k);
+            g_dlg_mode = 4; play_se(rdram, ctx, 1);
+        };
+        if (g_ffa_slot == 0) open_list(p1[g_ffa_field - 1]);
+        else if (g_ffa_field == 3) { sl[3] = static_cast<uint8_t>(sl[3] % 9 + 1); dissidia_tagteam_ffa_set(g_ffa_slot - 1, sl); play_se(rdram, ctx, 1); }
+        else open_list(g_ffa_field == 1 && !sl[0] ? 254 : sl[g_ffa_field]);
     }
     gs_background(); gs_title("FREE-FOR-ALL", "Everyone fights for himself");
-    // header
-    const float xa = 24.f, xb = 456.f, cx[4] = {92.f, 168.f, 262.f, 364.f};
-    const char* head[4] = {"TYPE", "MAIN", "TAG-IN", "STRENGTH"};
-    for (int f = 0; f < 4; f++) g_layer.text(head[f], true, 5.6f, cx[f], 48.f, LayerColor{80, 84, 140, 1.f});
+    const float xa = 24.f, xb = 456.f, cx[4] = {0.f, 100.f, 210.f, 336.f};
+    const char* head[4] = {"", "MAIN", "TAG-IN", "STRENGTH"};
+    for (int f = 1; f < 4; f++) g_layer.text(head[f], true, 5.6f, cx[f] + 36.f, 46.f, LayerColor{80, 84, 140, 1.f});
     for (int p = 0; p < 4; p++) {
-        const float y = 54.f + 46.f * float(p), h = 42.f;
+        const float y = 50.f + 42.f * float(p), h = 38.f;
         const bool human = p == 0, on = human || slots[p - 1][0];
-        const bool cur = p == g_ffa_slot;
         gs_card(xa, y, xb, y + h);
         const LayerColor col = kSlotCol[p];
         g_layer.band(xa, y, xa + 30.f, y + h, [&](float, float) { return LayerColor{on ? col.r : 150.f, on ? col.g : 150.f, on ? col.b : 160.f, 1.f}; });
-        g_layer.text(kSlotName[p], true, 10.f, xa + 4.f, y + 25.f, LayerColor{255, 255, 255, 1.f});
+        g_layer.text(kSlotName[p], true, 10.f, xa + 4.f, y + 23.f, LayerColor{255, 255, 255, 1.f});
+        g_layer.text(human ? "You" : on ? "CPU" : "Off", true, 5.4f, xa + 36.f, y + 11.f, LayerColor{110, 114, 160, 1.f});
         std::string vals[4];
-        if (human) {
-            vals[0] = "You"; vals[1] = g_sp_rows_n > 0 ? dissidia_tagteam_char_name(g_sp_rows_c[0]) : "-"; vals[2] = g_sp_rows_n > 1 ? dissidia_tagteam_char_name(g_sp_rows_c[1]) : "None"; vals[3] = "-";
-        } else {
-            const uint8_t* s = slots[p - 1];
-            vals[0] = s[0] ? "CPU" : "Off"; vals[1] = s[0] ? slot_char_text(s[1], false) : "-"; vals[2] = s[0] ? slot_char_text(s[2], true) : "-"; vals[3] = s[0] ? std::to_string(s[3]) : "-";
-        }
-        for (int f = 0; f < 4; f++) {
-            const bool sel = cur && f == g_ffa_field;
-            const float fx0 = cx[f] - 6.f, fx1 = f == 3 ? xb - 6.f : cx[f + 1] - 8.f;
-            if (sel) g_layer.band(fx0, y + 4.f, fx1, y + h - 4.f, [&](float, float yy) { return LayerColor{90 + 40 * (yy - y) / h, 96 + 40 * (yy - y) / h, 200.f, 1.f}; });
-            g_layer.text(vals[f], true, 7.6f, cx[f], y + 26.f, sel ? LayerColor{255, 255, 255, 1.f} : (on ? LayerColor{40, 42, 65, 1.f} : LayerColor{130, 130, 150, 1.f}));
+        if (human) { uint8_t p1[2]; dissidia_tagteam_ffa_p1_get(p1); vals[1] = slot_char_text(p1[0], false); vals[2] = slot_char_text(p1[1], true); }
+        else { const uint8_t* s = slots[p - 1]; vals[1] = s[0] ? slot_char_text(s[1], false) : "Off"; vals[2] = s[0] ? slot_char_text(s[2], true) : "-"; vals[3] = s[0] ? kStrName[std::clamp<int>(s[3], 1, 9) - 1] : "-"; }
+        const int m = ffa_fields(p);
+        for (int f = 1; f < 4; f++) {
+            if (vals[f].empty()) continue;
+            const bool sel = p == g_ffa_slot && f == g_ffa_field && ((m >> f) & 1);
+            const float fx0 = cx[f] + 36.f - 6.f, fx1 = (f == 3 ? xb : cx[f + 1] + 36.f) - 8.f;
+            if (sel) g_layer.band(fx0, y + 14.f, fx1, y + h - 4.f, [&](float, float yy) { return LayerColor{90 + 40 * (yy - y) / h, 96 + 40 * (yy - y) / h, 200.f, 1.f}; });
+            g_layer.text(vals[f], true, 7.4f, cx[f] + 36.f, y + 28.f, sel ? LayerColor{255, 255, 255, 1.f} : (on ? LayerColor{40, 42, 65, 1.f} : LayerColor{130, 130, 150, 1.f}));
         }
     }
-    const bool ro = g_ffa_slot == 0;
-    gs_footer(ro ? "P1 is you: his fighters come from your party (Party Select).   Circle / Select: done" : "Up/Down: player   Left/Right: field   Cross: change   Circle / Select: done");
+    gs_row(150.f, 330.f, 220.f, 24.f, g_ffa_slot == 4, "DONE", "", false, 8.6f);
+    gs_footer("Up/Down: player   Left/Right: field   Cross: change   Done: Cross / Circle");
 }
 
 void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a) {
@@ -493,14 +516,16 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
     int vis[kLobbyRows]; int rows = lobby_visible(L, vis);
     if (g_lob_row >= rows) g_lob_row = rows - 1;
     if (pressed & (BTN_CIRCLE | BTN_CROSS | BTN_OPEN)) {
-        if ((pressed & BTN_CROSS) && vis[g_lob_row] == 8) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 0; play_se(rdram, ctx, 1); return; }   // PLAYERS: the Free-for-all setup
-        g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1); return;
+        if ((pressed & BTN_CROSS) && vis[g_lob_row] == 8) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; play_se(rdram, ctx, 1); return; }   // PLAYERS: the Free-for-all setup
+        g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1);
+        if (g_ffa_flow && sp) { g_ffa_flow = false; g_ffa_autostart = true; g_cover_until = std::chrono::steady_clock::now() + std::chrono::seconds(8); }   // Free-for-all: the battle starts from here
+        return;
     }
     if (pressed & BTN_UP) { g_lob_row = (g_lob_row + rows - 1) % rows; play_se(rdram, ctx, 1); }
     if (pressed & BTN_DOWN) { g_lob_row = (g_lob_row + 1) % rows; play_se(rdram, ctx, 1); }
     if (host && (pressed & (BTN_RIGHT | BTN_LEFTK))) { lobby_change(vis[g_lob_row], (pressed & BTN_RIGHT) ? 1 : -1, L); dissidia_tagteam_lobby_set(L); play_se(rdram, ctx, 1); rows = lobby_visible(L, vis); if (g_lob_row >= rows) g_lob_row = rows - 1; }
     gs_background();
-    gs_title("BATTLE LOBBY", sp ? "Battle Mode  >  Tag Team Battle" : "Communications  >  Tag Team Battle");
+    gs_title("BATTLE LOBBY", std::string(kLobbyModes[lobby_mode_index(L)].label));
     const float x0 = 16.f, x1 = 262.f, y0 = 46.f, h = 22.f;
     for (int i = 0; i < rows; i++) {
         const int r = vis[i];
@@ -516,6 +541,18 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
         const int per = L[0] == 1 ? L[1] : 1;
         g_layer.text(L[0] == 3 ? "FREE-FOR-ALL" : "YOUR PARTY", true, 7.4f, cx0 + 10.f, 62.f, LayerColor{40, 50, 140, 1.f});
         g_layer.text(std::string("Fighters on stage  ") + (L[0] == 3 ? "up to 4" : std::to_string(2 * per)), true, 6.2f, cx0 + 10.f, 74.f, LayerColor{40, 120, 60, 1.f});
+        if (L[0] == 3) {   // the free-for-all's players
+            uint8_t p1[2]; dissidia_tagteam_ffa_p1_get(p1);
+            for (int p = 0; p < 4; p++) {
+                uint8_t sl[4] = {1, 0, 0, 5}; if (p) dissidia_tagteam_ffa_get(p - 1, sl);
+                const float ry = 92.f + 18.f * float(p);
+                g_layer.text(kSlotName[p], true, 7.f, cx0 + 10.f, ry, kSlotCol[p]);
+                const std::string c = p == 0 ? slot_char_text(p1[0], false) + (p1[1] == 255 ? "" : " + " + slot_char_text(p1[1], true)) : sl[0] ? slot_char_text(sl[1], false) + " (" + kStrName[std::clamp<int>(sl[3], 1, 9) - 1] + ")" : std::string("Off");
+                const float cw = g_layer.text(c, true, 5.6f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+                g_layer.text(c, true, 5.6f, cx1 - 10.f - std::min(cw, 150.f), ry, LayerColor{40, 42, 65, 1.f});
+            }
+        } else
+        {
         const uint8_t cm = dissidia_tagteam_sp_cpu_mask();
         for (int i = 0; i < g_sp_rows_n && i < 5; i++) {
             const float ry = 92.f + 16.f * float(i);
@@ -523,6 +560,7 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
             const std::string c = dissidia_tagteam_char_name(g_sp_rows_c[i]);
             const float cw = g_layer.text(c, true, 6.4f, 0, 0, LayerColor{0, 0, 0, 0}, true);
             g_layer.text(c, true, 6.4f, cx1 - 10.f - cw, ry, LayerColor{40, 42, 65, 1.f});
+        }
         }
         const std::string note = L[0] == 3 ? "You + the CPU players of the player setup" : L[0] == 1 ? "CPU rows (L on the setup screen) are your partners" : "One fighter each; party members tag in on a KO";
         g_layer.text(note, true, 5.2f, cx0 + 10.f, 214.f, LayerColor{70, 72, 130, 1.f});
@@ -890,7 +928,7 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
         g_lobby_pending = false; opened_now = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
         uint8_t L0[9] = {1, 2, 0, 5, 0, 0, 0, 0, 0}; dissidia_tagteam_lobby_get(L0);
-        if (L0[0] == 3) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 0; } else g_dlg_mode = 2;
+        if (L0[0] == 3) { g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; } else g_dlg_mode = 2;
     }
     if (!g_dlg_open && cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_mode = 0; g_dlg_bp = false; g_dlg_sp = true; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; dissidia_tagteam_sp_get_cfg(row, g_dlg_cfg); g_dlg_open = true; play_se(rdram, ctx, 1); }
     if (!g_dlg_open && switchable && (pressed & BTN_L)) { dissidia_tagteam_sp_toggle(row); play_se(rdram, ctx, 1); }   // L (Square: Assist On / Off, below)
@@ -899,8 +937,13 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     if (!g_dlg_open && sq_ours && (pressed & BTN_SQUARE)) { dissidia_tagteam_sp_assist_toggle(); play_se(rdram, ctx, 1); }
     const uint8_t mask = dissidia_tagteam_sp_cpu_mask();
     { uint8_t L[9]; dissidia_tagteam_lobby_get(L); if (mok && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) dissidia_tagteam_sp_write_round(screen); }   // (the saved lobby is read once, the mode's switches follow it)
+    if (list) g_script_t.store(-1, std::memory_order_relaxed);   // the scripted Party Select pass is over
+    if (g_ffa_autostart && list && !g_dlg_open) {   // Enter Battle (the cursor starts on it)
+        g_ffa_autostart = false; g_inject_late.store(9, std::memory_order_relaxed); std::fprintf(stderr, "[FFA] lobby done: Enter Battle (cursor row %d)\n", row);
+    }
+    const bool cover = std::chrono::steady_clock::now() < g_cover_until;
     const bool labels = mok && (list || g_dlg_open) && !std::getenv("PSPRECOMP_TAGTEAM_SPLABELS_OFF");
-    if (!mask && !switchable && !sq_ours && !g_sp_layer_up && !hide && !labels) return;   // nothing to draw (the layer is left to the screen's other users)
+    if (!mask && !switchable && !sq_ours && !g_sp_layer_up && !hide && !labels && !cover) return;   // nothing to draw (the layer is left to the screen's other users)
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
     if (hide) sp_hide_bands();
     if (labels) {
@@ -933,7 +976,8 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
         }
         if (g_dlg_open) { if (g_dlg_mode == 2) lobby_dialog(rdram, ctx, opened_now ? 0u : pressed, a); else if (g_dlg_mode == 3 || g_dlg_mode == 4) ffa_screen(rdram, ctx, opened_now ? 0u : pressed); else dialog(rdram, ctx, opened_now ? 0u : pressed, dt, a); }
     }
-    g_layer.publish(); g_sp_layer_up = mask || switchable || sq_ours || g_dlg_open || hide || labels;
+    if (cover && !g_dlg_open) { gs_background(); const std::string t = "Starting the battle..."; const float w = g_layer.text(t, true, 10.f, 0, 0, LayerColor{0, 0, 0, 0}, true); g_layer.text(t, true, 10.f, kScrW / 2.f - w / 2.f, 140.f, LayerColor{40, 42, 100, 1.f}); }
+    g_layer.publish(); g_sp_layer_up = mask || switchable || sq_ours || g_dlg_open || hide || labels || cover;
 }
 void sp_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(SP_TICK)) f(rdram, ctx); return; }
@@ -967,6 +1011,12 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
     if (g_sp_sq_block.load(std::memory_order_relaxed) && g_pad_polls.fetch_add(1, std::memory_order_relaxed) - g_sq_stamp.load(std::memory_order_relaxed) < 40u) raw &= ~BTN_SQUARE;
     else g_pad_polls.fetch_add(1, std::memory_order_relaxed);
     if (const int eb = g_enter_block.load(std::memory_order_relaxed); eb && g_pad_polls.load(std::memory_order_relaxed) - g_enter_stamp.load(std::memory_order_relaxed) < 40u) { raw &= ~0x8u; if (eb == 2) raw &= ~BTN_CROSS; }   // the CPU party has no opponent yet: Start (and Cross on Enter Battle) do nothing
+    if (int st = g_script_t.load(std::memory_order_relaxed); st >= 0) {   // the scripted pass (offsets from the walk that works headless: Party A, the CPU's 1st slot, a character, down to OK, OK)
+        static const std::pair<int, uint32_t> ev[] = {{220, BTN_CROSS}, {340, BTN_CROSS}, {460, BTN_CROSS}, {580, BTN_DOWN}, {600, BTN_DOWN}, {620, BTN_DOWN}, {640, BTN_DOWN}, {660, BTN_DOWN}, {720, BTN_CROSS}};
+        uint32_t m = 0; for (const auto& e : ev) if (st >= e.first && st < e.first + 4) m |= e.second;
+        g_script_t.store(st > 800 ? -1 : st + 1, std::memory_order_relaxed);
+        raw = (raw & ~(BTN_CROSS | BTN_DOWN | BTN_UP | BTN_CIRCLE)) | m;
+    }
     if (const int cf = g_col_fix.load(std::memory_order_relaxed); cf && g_pad_polls.load(std::memory_order_relaxed) - g_enter_stamp.load(std::memory_order_relaxed) < 40u) {
         if (cf == 1) raw &= ~(BTN_RIGHT | BTN_LEFTK);
         else { static bool inj = false; inj = !inj; raw &= ~(BTN_CROSS | BTN_LEFTK); raw = inj ? (raw | BTN_RIGHT) : (raw & ~BTN_RIGHT); }   // a round row: back to the party column
@@ -986,7 +1036,10 @@ int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool onl
     if (r) { g_dlg_open = false; g_dlg_mode = 0; }
     return r;
 }
-void dissidia_tagteam_modesel_confirm() { g_inject_late.store(9, std::memory_order_relaxed); }   // the start menu sees a Cross press after the hold
+void dissidia_tagteam_modesel_confirm(bool sp) {
+    g_inject_late.store(9, std::memory_order_relaxed);
+    if (sp && g_ms_ffa && !std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY")) g_script_t.store(0, std::memory_order_relaxed);   // Free-for-all: no 5-member Party Select / CPU Select: the screens are passed by a script
+}   // the start menu sees a Cross press after the hold
 void dissidia_tagteam_lobby_pending(bool on) { g_lobby_pending = on; }
 
 void dissidia_tagteam_menu_install(uint8_t* rdram) {

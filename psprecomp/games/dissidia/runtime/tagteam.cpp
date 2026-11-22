@@ -19,6 +19,7 @@
 #include "hle/psp_hle_io.h"
 #include "hle/psp_hle_adhoc.h"
 #include <cstdint>
+#include <ctime>
 #include <chrono>
 #if !defined(__ANDROID__)
 #include <execinfo.h>
@@ -343,6 +344,7 @@ int g_mask = 3;
 bool g_two_v_one = false;   // Settings > Debug > Tag Team 2v1: only the partner is added (you and a partner against one enemy)
 bool g_one_v_two = false;   // Settings > Debug > Tag Team 1v2: only the enemy's second fighter is added (you alone against two); both 2v1 and 1v2 on = 2v2
 int g_ffa_mask_of(int ffa) { return ffa == 3 ? 1 : 3; }
+bool g_duel_notag = false;   // the lobby's 1 vs 1 Duel (not Tag Duel): one fighter each, no tag-ins: a KO ends the battle as in retail (single player: sp_mode_refresh; online: the host's, roster flags bit 5)
 bool g_lob_duel = false;   // single player: the battle lobby's 1 vs 1 Duel / Tag Duel (one fighter each at a time: no simultaneous extras)
 int eff_mask_base() { if (g_lob_duel && !psp_adhoc_in_session()) return 0; return (g_two_v_one == g_one_v_two) ? g_mask : (g_two_v_one ? (g_mask & 2) : (g_mask & 1)); }
 int g_three = 0;   // 3 v 3: two extras per side instead of one (the battle lobby, PSPRECOMP_TAGTEAM_3V3=1, Settings > Debug > 3 vs 3) - the value the battle reads
@@ -4764,7 +4766,8 @@ void reset_ko_state() { g_side_entry[0] = g_side_entry[1] = -1e9f; g_ko_swap_at.
 int team_of(uint32_t side) { return g_bs && side == side_of(srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u))) ? 0 : 1; }
 int team_of_side(uint32_t side) { return team_of(side); }
 uint32_t side_of_team(int team) { return team_of(0) == team ? 0u : 1u; }
-int reserve_left(int team) { if (comms_handover()) return comms_unused(static_cast<int>(side_of_team(team))); if (team == 0 && sp_cpu_battle()) return sp_left(false); const int n = static_cast<int>(g_reserve.size() > static_cast<size_t>(team) ? g_reserve[team].names.size() : 0u); return n - g_called[team]; }
+bool duel_notag_now() { return (comms_battle() && g_shared_valid) ? (g_shared_flags & 0x20u) != 0 : g_duel_notag; }
+int reserve_left(int team) { if (duel_notag_now()) return 0; if (comms_handover()) return comms_unused(static_cast<int>(side_of_team(team))); if (team == 0 && sp_cpu_battle()) return sp_left(false); const int n = static_cast<int>(g_reserve.size() > static_cast<size_t>(team) ? g_reserve[team].names.size() : 0u); return n - g_called[team]; }
 
 // The entrance of a member coming in, in two steps while the match pauses (only the entrant moves): the assist warp-in (action 240: what an assist
 // plays when it is called, with its effect and call line), then the battle-start pose (1100) with the banner naming him; then he fights.
@@ -10744,7 +10747,7 @@ uint32_t dissidia_tagteam_fighter_sig() {
 uint8_t local_rule_flags() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
     const bool assist_on = (e ? e[0] != '0' : g_sp_assist_on) || g_ffa;   // free-for-all: assists on for the group
-    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four)
+    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u) | (g_duel_notag ? 0x20u : 0u));   // bit 5: 1 vs 1 Duel (no tag-ins), bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four)
 }
 constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
 bool dissidia_tagteam_roster_host() { return comms_battle() && g_me.host; }
@@ -10953,8 +10956,15 @@ bool sp_ffa_custom() { return lobby_sp() && g_lobby_init && g_lobby.mode == 3 &&
 void dissidia_tagteam_ffa_get(int i, uint8_t out[4]) { if (i < 0 || i > 2) return; out[0] = g_ffa_cfg[i].on; out[1] = g_ffa_cfg[i].main; out[2] = g_ffa_cfg[i].tag; out[3] = g_ffa_cfg[i].str; }
 void dissidia_tagteam_ffa_set(int i, const uint8_t in[4]) {
     if (i < 0 || i > 2) return;
-    g_ffa_cfg[i].on = i == 0 ? 1 : (in[0] ? 1 : 0); g_ffa_cfg[i].main = in[1] <= 33 ? in[1] : 0; g_ffa_cfg[i].tag = in[2] <= 33 ? in[2] : 0; g_ffa_cfg[i].str = static_cast<uint8_t>(std::clamp<int>(in[3], 1, 9));
+    g_ffa_cfg[i].on = i == 0 ? 1 : (in[0] ? 1 : 0); g_ffa_cfg[i].main = in[1] <= 33 ? in[1] : 0; g_ffa_cfg[i].tag = (in[2] <= 33 || in[2] == 255) ? in[2] : 0;   // tag-in: 0 = Random, 255 = None g_ffa_cfg[i].str = static_cast<uint8_t>(std::clamp<int>(in[3], 1, 9));
     std::fprintf(stderr, "[FFA] player P%d: %s, main %d, tag-in %d, strength %d\n", i + 2, g_ffa_cfg[i].on ? "CPU" : "off", g_ffa_cfg[i].main, g_ffa_cfg[i].tag, g_ffa_cfg[i].str);
+}
+// P1 (the human): main and tag-in picked on the player setup screen (0 = Random, tag-in 255 = None); with the 5-member Party Select skipped the battle's team record is filled from these.
+uint8_t g_ffa_p1[2] = {0, 0}; uint8_t g_ffa_p1_res[2] = {0, 0}; uint32_t g_ffa_p1_res_gen = 0xFFFFFFFFu;
+void dissidia_tagteam_ffa_p1_get(uint8_t out[2]) { out[0] = g_ffa_p1[0]; out[1] = g_ffa_p1[1]; }
+void dissidia_tagteam_ffa_p1_set(const uint8_t in[2]) {
+    g_ffa_p1[0] = in[0] <= 33 ? in[0] : 0; g_ffa_p1[1] = (in[1] <= 33 || in[1] == 255) ? in[1] : 0;
+    std::fprintf(stderr, "[FFA] player P1 (you): main %d, tag-in %d\n", g_ffa_p1[0], g_ffa_p1[1]);
 }
 int dissidia_tagteam_ffa_players() { return 1 + g_ffa_cfg[0].on + g_ffa_cfg[1].on + g_ffa_cfg[2].on; }
 int dissidia_tagteam_roster(uint8_t out[40]) { int n = 0; for (int c = 1; c <= 33 && n < 40; c++) if (info_for_char(c)) out[n++] = static_cast<uint8_t>(c); return n; }
@@ -10970,7 +10980,20 @@ int sp_ffa_slot_char(int side, int team, bool* off) {
     std::fprintf(stderr, "[FFA] player P%d: %s (strength %d)%s\n", team == 0 ? 3 : 4, c ? char_label(c, true).c_str() : "none left", f.str, f.main ? "" : " random");
     return c;
 }
-int dissidia_tagteam_ffa_enemy_char() { return sp_ffa_custom() && g_ffa_cfg[0].main ? g_ffa_cfg[0].main : 0; }   // read by direct_battle.cpp's pad filter every poll
+int dissidia_tagteam_ffa_enemy_char() { return !g_bs && sp_ffa_custom() && g_ffa_cfg[0].main ? g_ffa_cfg[0].main : 0; }
+// The human's fighters for the free-for-all: {main, tag-in} (Random resolved once per setup-screen visit, different from the CPU slots' mains); returns the count (0 = not in use, keep the Party Select's).
+int dissidia_tagteam_ffa_human_chars(uint8_t out[2]) {
+    if (g_bs || !sp_ffa_custom() || std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY")) return 0;
+    uint8_t ros[40]; const int n = dissidia_tagteam_roster(ros); if (n < 2) return 0;
+    if (!g_ffa_p1_res[0] || (g_ffa_p1[0] && g_ffa_p1_res[0] != g_ffa_p1[0])) {
+        static uint32_t rnd = 12345u; rnd = rnd * 1664525u + 1013904223u + static_cast<uint32_t>(std::time(nullptr));
+        g_ffa_p1_res[0] = g_ffa_p1[0] ? g_ffa_p1[0] : ros[(rnd >> 8) % n]; g_ffa_p1_res[1] = 0;
+    }
+    if (g_ffa_p1[1] == 255) g_ffa_p1_res[1] = 0;
+    else if (g_ffa_p1[1]) g_ffa_p1_res[1] = g_ffa_p1[1];
+    else if (!g_ffa_p1_res[1] || g_ffa_p1_res[1] == g_ffa_p1_res[0]) { static uint32_t r2 = 777u; r2 = r2 * 1664525u + 1013904223u; uint8_t c = ros[(r2 >> 8) % n]; if (c == g_ffa_p1_res[0]) c = ros[((r2 >> 8) + 1) % n]; g_ffa_p1_res[1] = c; }
+    out[0] = g_ffa_p1_res[0]; out[1] = g_ffa_p1_res[1]; return g_ffa_p1_res[1] ? 2 : 1;
+}   // read by direct_battle.cpp's pad filter every poll
 void dissidia_tagteam_lobby_encode(uint8_t out[8]) {
     std::memset(out, 0, 8);
     if (!g_me.host || !g_lobby_init) return;
@@ -10981,6 +11004,7 @@ bool lobby_decode(const uint8_t* in, LobbyCfg& c) {
     if (in[0] != 'L') return false;
     c.mode = in[1] & 15; c.size = in[1] >> 4; c.cpu_fill = in[2] & 1; c.cpu_str = std::clamp<uint8_t>(in[2] >> 4, 1, 9);
     c.stage = std::min<uint8_t>(in[3], 34); c.rules = std::min<uint8_t>(in[4], 5); c.judge = std::min<uint8_t>(in[5], 4); c.exb = in[6] & 1; c.assist = (in[6] >> 1) & 1;
+    if (c.mode == 0) { c.mode = 1; c.size = 2; }   // the removed 1 vs 1 Duel: Team 2 vs 2
     return c.mode <= 4;
 }
 // The lobby the battle follows: the host's own (on the host, and in single player) or the one in the host's beacon.
@@ -10995,7 +11019,7 @@ std::string lobby_to_ini(const LobbyCfg& c) {
 }
 bool lobby_from_ini(const std::string& v, LobbyCfg& c) {
     int a[9]; if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d", a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7, a + 8) != 9) return false;
-    if (a[0] < 0 || a[0] > 3 || a[1] < 1 || a[1] > 4 || a[3] < 1 || a[3] > 9 || a[4] < 0 || a[4] > 34 || a[5] < 0 || a[5] > 5 || a[6] < 0 || a[6] > 4) return false;
+    if (a[0] < 1 || a[0] > 3 || a[1] < 1 || a[1] > 4 || a[3] < 1 || a[3] > 9 || a[4] < 0 || a[4] > 34 || a[5] < 0 || a[5] > 5 || a[6] < 0 || a[6] > 4) return false;
     c = LobbyCfg{uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2] != 0), uint8_t(a[3]), uint8_t(a[4]), uint8_t(a[5]), uint8_t(a[6]), uint8_t(a[7] != 0), uint8_t(a[8] != 0)};
     return true;
 }
@@ -11015,7 +11039,7 @@ void lobby_apply() {   // the host: the lobby's settings into the switches the b
     if (c.mode == 0 || c.mode == 2) per = 1;
     else if (c.mode == 1) { per = c.size == 3 ? 3 : 2; g_three = c.size == 3 ? 1 : 0; }
     else if (c.mode == 3) { g_ffa = 4; per = 2; }
-    g_ffa_auto = c.mode == 3;
+    g_ffa_auto = c.mode == 3; g_duel_notag = c.mode == 0;
     if ((g_three || g_ffa) && g_overhead == 0) g_overhead = 1;
     g_sp_assist_on = c.assist != 0; g_exb_lobby = c.exb;
     g_mode_pick = static_cast<uint8_t>(0x80 | per | (per << 2));
@@ -11039,16 +11063,17 @@ void lobby_init_host() {   // first use: the saved lobby (settings.ini), else st
 void sp_mode_refresh() {
     if (psp_adhoc_in_session()) return;
     const bool forced = g_dbg_three || g_dbg_ffa || g_two_v_one || g_one_v_two || std::getenv("PSPRECOMP_TAGTEAM_EXTRAS");
-    int three = g_dbg_three, ffa = g_dbg_ffa; bool duel = false;
+    int three = g_dbg_three, ffa = g_dbg_ffa; bool duel = false, nt = false;
     if (lobby_sp()) {
         lobby_init_host();
         const LobbyCfg& c = g_lobby;
         if (!forced) {
             if (c.mode == 3) ffa = 4;
             else if (c.mode == 1) three = c.size == 3 ? 1 : 0;
-            else duel = true;   // 1 vs 1 Duel, Tag Duel: one fighter each, the party members tag in when one falls
+            else { duel = true; nt = c.mode == 0; }   // 1 vs 1 Duel (nt: no tag-ins, retail 1v1) / Tag Duel: one fighter each, the party members tag in when one falls
         }
     }
+    g_duel_notag = nt;
     if (three != g_three || ffa != g_ffa || duel != g_lob_duel) { g_three = three; g_ffa = ffa; g_lob_duel = duel; std::fprintf(stderr, "[LOBBY] single player switches: 3 vs 3 %d, free-for-all %d, duel %d%s\n", three, ffa, duel, forced ? " (Debug / env override)" : ""); }
     if ((g_three || g_ffa) && g_overhead == 0) overhead_default_on(g_ffa != 0);
 }

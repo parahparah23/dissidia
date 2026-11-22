@@ -51,6 +51,8 @@ class Copy:
         ini = os.path.join(self.out, 'settings_%s.ini' % self.side)
         with open(ini, 'w') as f:
             f.write('display=window\nfps=30\nrender_scale=1\nwidescreen=0\nvoice=en\ncheck_updates=0\nhd_textures=0\nnet_mode=lan\n')
+            if self.env.get('MP_FILL'):
+                f.write('tagteam_lobby=1,2,1,5,0,0,0,0,0\n')
         env = dict(os.environ, PSPRECOMP_SETTINGS=ini, PSPRECOMP_MS0=ms0, PSPRECOMP_ADHOC_MODE='lan', PSPRECOMP_ADHOC_NICK=self.side,
                    PSPRECOMP_DEBUG_PORT=str(PORT[self.side]), PSPRECOMP_CHARMOD='0', PSPRECOMP_AUDIO='0', PSPRECOMP_SAVEDATA_AUTO='0',
                    PSPRECOMP_NET_TRACE='1', SDL_VIDEODRIVER='offscreen')
@@ -101,7 +103,23 @@ def wait(pred, timeout, what):
     raise RuntimeError('timeout: ' + what)
 
 
-def walk(a, b, slack=0.0):   # slack: extra seconds at the lobby steps that go through the network (--slack, for runs with PSPRECOMP_NET_LAG_MS)
+MENU_MODE_KEYS = {'team2': [], 'team3': ['down'], 'tagduel': ['down', 'down'], 'ffa': ['down', 'down', 'down']}   # Mode Select starts on Team 2 vs 2
+
+
+def shot(c, out, name):   # a screenshot with the game layer (the debug socket's V command)
+    if not out:
+        return
+    try:
+        from PIL import Image
+        tga = os.path.join(out, '%s_%s.tga' % (name, c.side))
+        c.cmd('V ' + tga)
+        Image.open(tga).convert('RGB').save(tga[:-4] + '.png')
+        os.remove(tga)
+    except Exception as e:   # a screenshot must not fail the walk
+        print('[mp_test] shot %s failed: %s' % (name, e), file=sys.stderr)
+
+
+def walk(a, b, slack=0.0, menu_mode=None, shots=None):   # slack: extra seconds at the lobby steps that go through the network (--slack, for runs with PSPRECOMP_NET_LAG_MS)
     both = (a, b)
     for c in both:
         wait(lambda: 'Debug socket listening' in c.text(), 90, 'debug socket ' + c.side)
@@ -119,8 +137,19 @@ def walk(a, b, slack=0.0):   # slack: extra seconds at the lobby steps that go t
     for c in both:
         c.press('down', 'down', 'cross', gap=1.2)          # Communications Mode
     time.sleep(2)
-    for c in both:
-        c.press('down', 'cross', gap=1.2)                  # Group Battle
+    if menu_mode:   # the MENU route: Communications > Tag Team Battle (the last row: Up from the first), Mode Select, then the game's Group Battle
+        for c in both:
+            c.press('up', 'cross', gap=1.2)
+        time.sleep(2)
+        shot(a, shots, 'modeselect')
+        for c in both:   # (the joiner's choice does not matter: the host's lobby decides)
+            c.press(*MENU_MODE_KEYS[menu_mode], gap=0.5)
+        shot(a, shots, 'modeselect_choice')
+        for c in both:
+            c.press('cross', gap=1.2)
+    else:
+        for c in both:
+            c.press('down', 'cross', gap=1.2)              # Group Battle
     time.sleep(4)
     a.press('cross'); time.sleep(4)                        # A: Create Room (Custom)
     b.press('down', 'down', 'cross'); time.sleep(6)        # B: Search for a Room
@@ -129,7 +158,9 @@ def walk(a, b, slack=0.0):   # slack: extra seconds at the lobby steps that go t
     a.press('cross'); time.sleep(8 + slack)
     a.press('cross'); time.sleep(slack); b.press('right', 'cross')   # Party A / Party B
     time.sleep(12 + slack)
+    shot(a, shots, 'partyselect'); shot(b, shots, 'partyselect')
     a.press('cross'); time.sleep(5)                        # A: Tournament
+    shot(a, shots, 'setup'); shot(b, shots, 'setup')
     for c in both:
         c.press('cross', gap=2.0)                          # the 1st slot -> Player Select
     for c in both:
@@ -138,6 +169,7 @@ def walk(a, b, slack=0.0):   # slack: extra seconds at the lobby steps that go t
         c.press('cross', gap=3.0)                          # YES
     for c in both:
         c.press('down', 'down', 'down', 'down', 'down', gap=0.5)
+    shot(a, shots, 'before_enter'); shot(b, shots, 'before_enter')
     for c in both:
         c.press('cross', gap=0.2)                          # Enter Battle
     end = time.time() + 90
@@ -193,20 +225,24 @@ def main(argv):
     ap.add_argument('--out', default=os.path.join(os.getcwd(), 'mp_test_out'))
     ap.add_argument('--rstick', action='store_true', help='also turn both views with the right stick while moving')
     ap.add_argument('--slack', type=float, default=0.0, help='extra seconds at the lobby steps (lag runs: the party screen comes later)')
+    ap.add_argument('--menu-mode', choices=sorted(MENU_MODE_KEYS), help='go through Communications > Tag Team Battle > Mode Select (the menu route, no PSPRECOMP_TAGTEAM) and pick this mode')
+    ap.add_argument('--fill', action='store_true', help='the host starts with CPU fill on (saved lobby in its settings.ini)')
+    ap.add_argument('--shots', action='store_true', help='screenshots of the flow steps and the battle into --out')
     ap.add_argument('--keep', action='store_true', help='leave both copies running afterwards')
     ap.add_argument('--expect-desync', action='store_true', help='exit 0 only when a desync was reported (the perturbation test)')
     a = ap.parse_args(argv)
     a.out = os.path.abspath(os.path.expanduser(a.out))
     os.makedirs(a.out, exist_ok=True)
     kv = lambda s: dict(x.split('=', 1) for x in s.split() if '=' in x)
-    A = Copy('A', os.path.abspath(os.path.expanduser(a.work_a)), a.out, {**kv(a.env), **kv(a.env_a)})
+    A = Copy('A', os.path.abspath(os.path.expanduser(a.work_a)), a.out, {**kv(a.env), **kv(a.env_a), **({'MP_FILL': '1'} if a.fill else {})})
     B = Copy('B', os.path.abspath(os.path.expanduser(a.work_b)), a.out, {**kv(a.env), **kv(a.env_b)})
     try:
         A.start()
         B.start()
         t0 = time.time()
-        walk(A, B, a.slack)
+        walk(A, B, a.slack, a.menu_mode, a.out if a.shots else None)
         print('[mp_test] in battle after %.0f s' % (time.time() - t0), file=sys.stderr)
+        shot(A, a.out if a.shots else None, 'battle'); shot(B, a.out if a.shots else None, 'battle')
         exercise(A, B, a.secs, RSTICK_MOVES + MOVES if a.rstick else MOVES)
         time.sleep(11)   # one more desync summary
         for c in (A, B):
