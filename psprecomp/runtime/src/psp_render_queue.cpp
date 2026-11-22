@@ -1,3 +1,4 @@
+#include <thread>
 #include <algorithm>
 #include "psp_render_queue.h"
 #include "psp_prof.h"
@@ -189,6 +190,22 @@ int render_queue_draw_sync(int mode) {
 bool render_queue_all_ge_done() {
     std::unique_lock<std::mutex> lock(g_render_mutex);
     return g_ge_queue.empty();
+}
+
+int render_queue_wait_caught_up(int timeout_ms) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(g_render_mutex);
+            bool caught_up = true;
+            for (const auto& e : g_ge_queue) if (!e.stalled) { caught_up = false; break; }
+            if (caught_up || g_should_exit.load())
+                return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+            g_work_cv.notify_one();
+        }
+        if (std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(timeout_ms)) return -1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 bool render_queue_has_pending_ge() {

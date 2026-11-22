@@ -103,7 +103,7 @@ struct Peer {
     char group[8] = {0};
     bool in_group = false;
     uint8_t fps = 0;
-    uint8_t game_data[40] = {0}; uint8_t game_len = 0;   // the game module's own bytes (psp_adhoc_set_game_data)
+    uint8_t game_data[48] = {0}; uint8_t game_len = 0;   // the game module's own bytes (psp_adhoc_set_game_data)
     int64_t last_seen = 0;
 };
 
@@ -228,7 +228,7 @@ int g_next_handler = 1;
 std::map<int, std::pair<uint32_t, uint32_t>> g_handlers;  // id -> (func,arg)
 int64_t g_scan_due = 0;
 int g_local_fps = 0;
-uint8_t g_game_data[40] = {0}; uint8_t g_game_len = 0;   // this player's game module bytes, sent in the beacons
+uint8_t g_game_data[48] = {0}; uint8_t g_game_len = 0;   // this player's game module bytes, sent in the beacons
 
 std::deque<Ev> g_events;
 std::map<int, Match> g_match;
@@ -1901,7 +1901,7 @@ void psp_adhoc_set_game_data(const uint8_t* d, int n) {
 }
 // The game bytes of the other players in this player's group (up to `max`): out[i] gets peer i's bytes, lens[i] their count; returns
 // the number of peers in the group (0 when not in a group). Peers without game bytes are counted with length 0.
-int psp_adhoc_group_game_data(uint8_t (*out)[40], int* lens, int max, uint8_t (*macs)[6]) {
+int psp_adhoc_group_game_data(uint8_t (*out)[48], int* lens, int max, uint8_t (*macs)[6]) {
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_connected) return 0;
     int k = 0;

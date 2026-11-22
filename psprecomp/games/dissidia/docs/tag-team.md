@@ -2127,6 +2127,38 @@ User: "make the 3v3". Each side gets two extras instead of one, so three fighter
 - Not yet: 3 v 3 with real party members online (3+ humans, the selector's "3 v 3", CPU rows), the human side's KO chain, two real PCs / relay,
   3 v 3 in single player without clones (the existing 2v2 rule applies: a side without party members may get no partners).
 
+## Battle lobby, free-for-all of players, fixes from the 10-player tests (22 Nov, branch tagteam-lobby; online with 2 and 3 players)
+User + Schindler: one place for the mode and the battle's rules, showing every player's character; FFA = independent players.
+- **Battle lobby** (tagteam_menu.cpp, setup screen): Select on one of the player's own rows opens BATTLE LOBBY: MODE (1 vs 1 Duel, Team 2 vs 2,
+  Team 3 vs 3, Tag Duel, Free-for-all), STAGE, RULES, JUDGMENT, EX BURST (freeze / keep fighting), ASSIST, CPU FILL (+ strength; not wired yet).
+  The host edits (Left / Right), the others see the host's settings. The lobby travels in beacon bytes 40-47 (version 9, 48 bytes):
+  'L', mode | size << 4, cpu_fill | strength << 4, stage, rules, judgement, exb | assist << 1. `lobby_apply` (host) sets the switches the
+  battle reads (fighters per side, g_three, g_ffa, assists, EX Burst rule) and `mp_sync_mode`.
+- The Tournament column is covered by a lobby panel (settings + players); the retail name bars / banner / Party A-B labels by bands in the
+  screen's pale blue (retail still draws them underneath). The cursor is kept out of the round rows (`g_col_fix` in the pad filter: Left /
+  Right taken in the party column, a round row pushes it back with Right). `PSPRECOMP_TAGTEAM_TOURNAMENT=1` shows the old column.
+- Round 1's record (0x08C64F58, the round dialog's): word 0 = 0x04 << 24 | stage, word 1 = 0x6523 << 16 | rules << 8 | judgement (rd / wr
+  words). `lobby_write_round` writes the lobby's stage / rules / judgement there on every machine while the setup screen runs.
+- Enter Battle waits for 2 players in the room (free-for-all never waits).
+- **Free-for-all = one fighter per player** (Schindler: "4 independent players"): the host sets the size from the room at the battle setup
+  (3 players: 3, else up to 4); the two slot fighters are the parties' stage members, every other fighter is the next player of the agreed
+  order who is not on the stage, with his own character (first own player row), driven by him (`ffa_player_char`). Parties do not matter.
+  No player left = no fighter (2 players: a duel; copies only with PSPRECOMP_TAGTEAM_CLONES). Verified with 3 linked copies: the third
+  fighter was the third player's VAAN on his stream, 0 mismatches on all three.
+- **FFA (3) desync** (Schindler, 10 humans): the host sent only "FFA on" (rule flags bit 2), everybody else assumed 4, and members queued
+  their extras before the host's rules came. Now bit 4 (0x10) = FFA of three, `eff_mask()` uses `ffa_now()` (the host's), and the
+  planning step drops a member's queued extra that the FFA does not have.
+- **Sync check**: netplay.cpp hashes one more value, `tag_fighters` = fighter count << 24 | a hash of their characters, so a different number
+  of fighters is a mismatch (before, only the two slot fighters were compared).
+- **3 v 3 GE fault** (Schindler run c1b, 10 copies on one host): DrawSync gives up after 500 ms, so on a loaded machine a list was still
+  running when the slot rebuild's destructor freed the old character's model packets and the constructor reused them: Unknown cmd, then an
+  endless list (2 frames/s). The rebuild now waits (`render_queue_wait_caught_up`, up to 3 s) until every queued list is finished or stalled
+  at its stall address. Not exercised here (needs a reserve call-in).
+- **FFA (4) slow result** (same rig): not the mod; both machines leave the battle normally (member 6 s, host 41 s after the decision), the
+  rest is the game's own end exchange on a host running 10 copies at ~15 fps.
+- Test aid: `PSPRECOMP_TAGTEAM_DEBUG_LOWHP=<s>`: every fighter's live HP (status +0xC) capped at 300 at that battle second, the same frame on
+  every machine, so a battle ends quickly.
+
 ## Score-based CPU targeting, the PPSSPP plugin's (21 Nov; host-only, headless)
 User: "check whether the AI would respond like ours" (the plugin's v0.39 scoring). It did not: `ai_target()` used the rule list above, checked once per 4 s.
 `ai_score_target()` (tagteam.cpp) now runs first and is the default; `PSPRECOMP_TAGTEAM_AI_SCORE=0` = the rule list. Every ~0.25 s (15 battle-clock units) each
