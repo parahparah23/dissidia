@@ -384,7 +384,7 @@ const char* g_gnote = nullptr; uint32_t g_gnote_a = 0; void agauge_note(const ch
 float agauge_of(uint32_t a); void agauge_hit_note(const char* who, uint32_t att, uint32_t vic, float g0);   // cause of the assist-gauge write our own code is about to make / just made (the gauge log, agauge_watch)
 void fix_assist();
 void assist_aim_follow(); void aim_fix(); void ai_target(); void aim_debug_force();
-uint32_t ao8_stand_in(uint32_t a); uint32_t ao8_body_of(uint32_t x); uint32_t ao8_hit_switch(uint32_t x, uint32_t att); int ao8_hit_test(uint8_t* rdram, recomp_context* ctx, uint32_t v);   // Assist Off round 8: a parked partner -> its assist actor during the call, and back
+int hit_attackers(uint32_t out[8]); uint32_t ao8_x_of_slot(uint32_t slot); uint32_t ao8_stand_in(uint32_t a); uint32_t ao8_body_of(uint32_t x); uint32_t ao8_hit_switch(uint32_t x, uint32_t att); int ao8_hit_test(uint8_t* rdram, recomp_context* ctx, uint32_t v);   // Assist Off round 8: a parked partner -> its assist actor during the call, and back
 void stock_hook(uint8_t* rdram, recomp_context* ctx);
 void rules_hook(uint8_t* rdram, recomp_context* ctx);
 void slotactor_hook(uint8_t* rdram, recomp_context* ctx);
@@ -7521,7 +7521,7 @@ FuncPtr g_orig_hitreact = nullptr, g_orig_hitreact2 = nullptr;
 // The extra whose hit is being booked against slot fighter `vowner`'s handler: an attacker of the other side registered a hit on it (0 = none).
 uint32_t booked_extra_victim(uint32_t vowner) {
     if (!g_bs || !g_nextra || !ok(vowner, 0x12D0) || !(vowner == srd(g_bs + 56u) || vowner == srd(g_bs + 60u))) return 0;
-    uint32_t f[8]; int nf = all_fighters(f);
+    uint32_t f[8]; int nf = hit_attackers(f);   // (the fighters and the assist actors of an Assist Off call: a called assist's hit on an extra was reacted in the enemy SLOT fighter's handler = a false BREAK on it, 21 Nov WoL log)
     if (g_xstep_att && !std::getenv("PSPRECOMP_TAGTEAM_NOFRIENDLYSLOT")) { f[0] = g_xstep_att; nf = 1; }   // inside an extra's damage step: that extra's hit
     g_react_att = 0;
     for (int i = 0; i < nf; i++) {
@@ -7544,7 +7544,7 @@ std::map<uint32_t, uint32_t> g_slot_hdl;
 uint32_t booked_friendly_slot_handler(uint32_t vowner) {
     if (!g_bs || !g_nextra || !ok(vowner, 0x12D0) || std::getenv("PSPRECOMP_TAGTEAM_NOFRIENDLYSLOT") || std::getenv("PSPRECOMP_TAGTEAM_NOFRIENDLYREACT")) return 0;
     if (!(vowner == srd(g_bs + 56u) || vowner == srd(g_bs + 60u))) return 0;
-    uint32_t f[8]; int nf = all_fighters(f);
+    uint32_t f[8]; int nf = hit_attackers(f);
     if (g_xstep_att) { f[0] = g_xstep_att; nf = 1; }   // inside an extra's own damage step: that extra's hit only (also when the list leaves it out)
     if (!g_xstep_att) for (int i = 0; i < nf; i++) if (hit_victim_of(f[i]) == vowner) return 0;   // the handler's own fighter was really hit too: retail's reaction
     static const bool dbg = g_log && std::getenv("PSPRECOMP_TAGTEAM_HITREACTLOG");
@@ -7730,7 +7730,7 @@ void hitmsg_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!off && g_bs && g_nextra && ok(m, 0x200) && a0 >= m && a0 < m + 0x200u) {
         const uint32_t owner = rd(m);
         if (owner == srd(g_bs + 56u) || owner == srd(g_bs + 60u)) {
-            uint32_t f[8]; const int nf = all_fighters(f);
+            uint32_t f[8]; const int nf = hit_attackers(f);
             for (int i = 0; i < nf; i++) {
                 if (side_of(f[i]) == side_of(owner)) continue;
                 const uint32_t v = hit_victim_of(f[i]);
@@ -7798,7 +7798,7 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
 void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     const uint32_t m = static_cast<uint32_t>(ctx->r[4]);
-    uint32_t sv_att[2] = {0, 0}, sv_foe[2] = {0, 0};
+    uint32_t sv_att[3] = {0, 0, 0}, sv_foe[3] = {0, 0, 0};
     const bool trc_slot = std::getenv("PSPRECOMP_TAGTEAM_DMGTRACE") && ok(m, 0x100) && ok(rd(m), 0x12D0) && (rd(rd(m) + 0x380u) & 0x200u);
     if (trc_slot) g_ram[0x0BFFF000u & 0x07FFFFFFu] = 10;
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_AFDCALL") && g_hframe >= 268 && g_hframe <= 282 && ok(m, 0x100)) std::fprintf(stderr, "[AFDCALL] frame %d module %08X slot %s %08X flags %08X recorded victim %08X nhits %d\n", g_hframe, m, ok(rd(m), 0x12D0) ? role_of(rd(m)) : "?", rd(m), ok(rd(m), 0x12D0) ? rd(rd(m) + 0x380u) : 0u, hit_victim_of(rd(m)), g_nhits);
@@ -7809,8 +7809,11 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     if (g_nextra && !std::getenv("PSPRECOMP_TAGTEAM_NOATTR") && ok(m, 0x100)) {   // the slot fighter (and its assist) damage who they actually hit, not their foe
         const uint32_t slot = rd(m), assist = ok(slot, 0x12D0) ? rd(slot + 0x1108u) : 0u;
-        const uint32_t cand[2] = {slot, assist};
-        for (int k = 0; k < 2; k++) {
+        // + the assist actor of an Assist Off call of this slot fighter (round 8: the partner's own assist X plays it; it is not the slot's +0x1108): its hit on an extra was booked on the
+        // enemy SLOT fighter (its foe) = the slot fighter's HP / BRV took the damage and its handler broke (21 Nov WoL log: slotC "BREAK" at 174.68 / 176.07 with BRV 2398). PSPRECOMP_TAGTEAM_NOXATTACKER=1: old.
+        const uint32_t xcall = ao8_x_of_slot(slot);
+        const uint32_t cand[3] = {slot, assist, xcall};
+        for (int k = 0; k < 3; k++) {
             const uint32_t a = cand[k];
             if (!a || !ok(a, 0x12D0)) continue;
             const uint32_t v = hit_victim_of(a);
@@ -7833,7 +7836,7 @@ void afd424_hook(uint8_t* rdram, recomp_context* ctx) {
     for (auto it = unl.rbegin(); it != unl.rend(); ++it) wr(it->first, it->second);
     g_hud_quiet = false;
     if (trc_slot) g_ram[0x0BFFF000u & 0x07FFFFFFu] = 0;
-    for (int k = 0; k < 2; k++) if (sv_att[k]) wr(sv_att[k] + 0x300u, sv_foe[k]);
+    for (int k = 0; k < 3; k++) if (sv_att[k]) wr(sv_att[k] + 0x300u, sv_foe[k]);
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_AFDDUMP")) {
         static bool once = false;
         if (!once && ok(m, 0x100)) { once = true;
@@ -8744,6 +8747,12 @@ struct Ao8 { uint32_t M = 0, P = 0, X = 0, prev = 0, gen = 0; float t0 = 0; bool
 bool g_ao8_hitfinish = false;   // ao8_finish from a hit on the assist: the partner keeps its hit reaction
 std::map<uint32_t, float> g_ao8_xwatch;
 struct Ao8XFix { uint32_t X = 0, P = 0, snap[4] = {}; float t = 0; }; std::vector<Ao8XFix> g_ao8_xfix;   // assist actors hit at a switch: their own reaction is undone when it starts   // dismissed assist actors (debug log of their state for 2 s, PSPRECOMP_TTCAM_AO8LOG)
+uint32_t ao8_x_of_slot(uint32_t slot) { if (std::getenv("PSPRECOMP_TAGTEAM_NOXATTACKER")) return 0; for (const Ao8& c : g_ao8) if (c.M && c.M == slot && c.parked && c.gen == g_battle_gen && ok(c.X, 0x12D0)) return c.X; return 0; }
+int hit_attackers(uint32_t out[8]) {   // all_fighters + the assist actors standing in for a parked partner (Assist Off round 8), as attackers of a registered hit
+    int n = all_fighters(out);
+    for (const Ao8& c : g_ao8) if (c.M && c.parked && c.gen == g_battle_gen && ok(c.X, 0x12D0) && n < 8 && !std::getenv("PSPRECOMP_TAGTEAM_NOXATTACKER")) out[n++] = c.X;
+    return n;
+}
 uint32_t ao8_stand_in(uint32_t a) { if (a) for (const Ao8& c : g_ao8) if (c.M && c.parked && c.P == a && c.gen == g_battle_gen && ok(c.X, 0x12D0)) return c.X; return a; }
 uint32_t ao8_body_of(uint32_t x) { if (x) for (const Ao8& c : g_ao8) if (c.M && c.parked && c.X == x && c.gen == g_battle_gen && ok(c.P, 0x12D0)) return c.P; return 0; }
 // User (20 Nov): "my lock was on that CPU that teleported, and my lock was locked to the empty air. It should move to the assist, then back." While a partner is parked
@@ -9142,6 +9151,17 @@ void ao9_extra_step(const Extra& e) {
         for (const char* q = fc; *q; ) { const char* c = std::strchr(q, ','); const std::string it = c ? std::string(q, c) : std::string(q); const size_t at = it.find('@');
             if (at != std::string::npos && it.substr(0, at) == role_of(E) && age >= static_cast<float>(std::atof(it.c_str() + at + 1)) && done.insert(it).second) { kind = std::getenv("PSPRECOMP_TTCAM_FORCEKIND") ? static_cast<uint32_t>(std::atoi(std::getenv("PSPRECOMP_TTCAM_FORCEKIND"))) : 1u; by = "test"; }
             if (!c) break; q = c + 1; }
+    }
+    if (const char* sf = std::getenv("PSPRECOMP_TTCAM_AO9STILL")) {   // test aid: for <sf> battle seconds from the human's call the caller's enemies stand still (AI gated, +0x380 bit 1), so the called human's attack is judged alone
+        static float from = -1.f; const float len = static_cast<float>(std::atof(sf));
+        if (from < 0.f && std::getenv("PSPRECOMP_TTCAM_AO9STILLFROM") && age >= static_cast<float>(std::atof(std::getenv("PSPRECOMP_TTCAM_AO9STILLFROM")))) from = age;   // (earlier start: the foe hovers before the call)
+        if (from < 0.f && g_ao9[k].E == E && g_ao9[k].human) from = g_ao9[k].t0 / 60.0f;
+        if (from >= 0.f) { const bool hold = age - from < len; uint32_t f[8]; const int n = all_fighters(f);
+            for (int i = 0; i < n; i++) { const uint32_t Q = f[i]; if (!ok(Q, 0x12D0) || side_of(Q) == side_of(M) || g_ram[(Q + 0x542u) & 0x07FFFFFFu] != 0) continue; wr(Q + 0x380u, hold ? (rd(Q + 0x380u) | 2u) : (rd(Q + 0x380u) & ~2u));
+                static const char* af = std::getenv("PSPRECOMP_TTCAM_AIRFOE"); static std::map<uint32_t, float> fy0;   // + PSPRECOMP_TTCAM_AIRFOE=<m>: they hover <m> m over their floor (an airborne foe), PLACEd every frame
+                if (af && hold) { if (!fy0.count(Q)) fy0[Q] = rdf(Q + 0x84u);
+                    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
+                    wrf(vec, rdf(Q + 0x80u)); wrf(vec + 4, fy0[Q] + static_cast<float>(std::atof(af))); wrf(vec + 8, rdf(Q + 0x88u)); wrf(vec + 12, 1.0f); call(PLACE, Q, vec, 1); g_ctx->r[29] = static_cast<int32_t>(sp0); } } }
     }
     if (!kind) return;
     ao9_call(k, E, M, kind, by);
