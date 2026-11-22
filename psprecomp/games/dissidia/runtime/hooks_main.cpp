@@ -19,6 +19,7 @@
 #include "hle/psp_hle.h"
 #include "recomp.h"   // psp_mem_read
 #include <cstdint>
+float dissidia_battle_age();   // framerate.cpp: ticks (1/60 s) since the battle started running
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -318,8 +319,16 @@ static int dissidia_stage_id() {
     if (psp_mem_read<uint32_t>(g_stage_ram, 0x089DD4C0u) != 1u) return -1;
     return int(psp_mem_read<uint32_t>(g_stage_ram, 0x08B98854u));
 }
+// Battle music loops. A battle can run far longer than the retail 1v1 (tag team: 7+ min) and some battle tracks (U_URACHOAS, 7:21) are played once by the game (it never
+// sets their loop count), so the music ended mid-fight (desktop log 21 Nov). During a running battle a long (>= 60 s: no jingles, results, events) streamed track with loop info
+// loops. PSPRECOMP_BGM_LOOP=0: off.
+static bool bgm_loop_policy(int endSample, int) {
+    static const bool off = std::getenv("PSPRECOMP_BGM_LOOP") && std::atoi(std::getenv("PSPRECOMP_BGM_LOOP")) == 0;
+    return !off && dissidia_battle_age() > 0.f && endSample >= 60 * 44100;
+}
 void dissidia_register_hooks(uint8_t* rdram) {
     g_stage_ram = rdram;
+    psp_atrac_set_loop_policy(bgm_loop_policy);
     psp_set_stage_id_provider(dissidia_stage_id);
     dissidia_register_reflectivity();
     psp_set_player_pos_provider(dissidia_player_pos);

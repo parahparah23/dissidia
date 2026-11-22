@@ -83,6 +83,8 @@ constexpr int32_t REMAIN_NONLOOP_ON_MEMORY = -2;
 
 constexpr int MAX_ATRAC_IDS = 8;
 
+static bool (*g_loopPolicy)(int endSample, int loopStart) = nullptr;
+
 struct AtracCtx {
     bool used = false;
     int codec = 0;              // CODEC_AT3 / CODEC_AT3PLUS
@@ -117,6 +119,7 @@ struct AtracCtx {
     struct Seg { uint32_t fileOff, len; };
     std::vector<Seg> segs;      // file ranges held in the ring, in ring order from ringPos
     int64_t lastDec = -1;       // file frame index last fed to the decoder (streamed)
+    bool loopSet = false;       // the game called sceAtracSetLoopNum for this track (its choice stands)
     bool testJumped = false;    // PSPRECOMP_ATRAC_TEST_TAIL
 
     // Decoder
@@ -355,6 +358,7 @@ uint32_t ctx_set_data(AtracCtx& c, const Track& t, uint32_t buffer, uint32_t rea
     c.readSize = std::min(readSize, t.fileSize);
     c.currentSample = 0;
     c.loopNum = 0;
+    c.loopSet = false;
     c.frame0.clear();
 
     if (bufferSize >= t.fileSize) {
@@ -445,6 +449,11 @@ uint32_t decode_data(AtracCtx& c, uint8_t* rdram, uint32_t outAddr, int* numSamp
     *finish = 0;
     *remains = 0;
 
+    // A game module may make a streamed track that has loop info and whose loop count the game never set (so it plays once) loop instead.
+    if (c.state == ST_STREAMED && c.loopNum == 0 && !c.loopSet && c.loopStart >= 0 && g_loopPolicy && g_loopPolicy(c.endSample, c.loopStart)) {
+        c.loopNum = -1; c.loopSet = true;
+        std::fprintf(stderr, "[ATRAC] loop count of the streamed track 0 -> -1 at sample %d (game module policy: the game never set it)\n", c.currentSample);
+    }
     if (c.currentSample >= c.endSample && c.loopNum == 0) {
         *finish = 1;
         return ERR_ALL_DATA_DECODED;
@@ -452,7 +461,7 @@ uint32_t decode_data(AtracCtx& c, uint8_t* rdram, uint32_t outAddr, int* numSamp
 
     {   // test: PSPRECOMP_ATRAC_TEST_TAIL=<seconds>: a looping streamed track jumps (once) to that long before its loop end, to check the wrap
         static const int tail = std::getenv("PSPRECOMP_ATRAC_TEST_TAIL") ? std::atoi(std::getenv("PSPRECOMP_ATRAC_TEST_TAIL")) : 0;
-        if (tail > 0 && c.state == ST_STREAMED && c.loops() && c.loopEnd > 0 && !c.testJumped && c.currentSample > 44100) {
+        if (tail > 0 && c.state == ST_STREAMED && c.loopStart >= 0 && c.loopEnd > 0 && !c.testJumped && c.currentSample > 44100) {
             c.testJumped = true;
             const int to = c.loopEnd - c.offsetFull() - tail * 44100;
             if (to > c.currentSample) { std::fprintf(stderr, "[ATRAC] test: jump %d -> %d (loop end %d, end %d)\n", c.currentSample, to, c.loopEnd - c.offsetFull(), c.endSample); seek_to(c, to); }
@@ -764,7 +773,10 @@ void hle_SetLoopNum(uint8_t*, recomp_context* ctx) {
     if (!c) return;
     if (c->loopStart < 0) { ret(ctx, ERR_NO_LOOP_INFO); return; }
     if (c->state == ST_STREAMED && c->loopNum != static_cast<int32_t>(A(ctx, 1))) std::fprintf(stderr, "[ATRAC] loop count of the streamed track %d -> %d at sample %d\n", c->loopNum, static_cast<int32_t>(A(ctx, 1)), c->currentSample);
+    static const bool ignoreSet = std::getenv("PSPRECOMP_ATRAC_TEST_IGNORE_LOOPNUM") != nullptr;   // test: the game's loop count is dropped (a track the game plays once)
+    if (ignoreSet) { ret(ctx, 0); return; }
     c->loopNum = static_cast<int32_t>(A(ctx, 1));
+    c->loopSet = true;
     ret(ctx, 0);
 }
 
@@ -977,3 +989,5 @@ void psp_hle_register_atrac() {
     psp_hle_register("sceAtracReinit", hle_Reinit);
     psp_hle_register("sceAtracStartEntry", hle_StartEntry);
 }
+
+void psp_atrac_set_loop_policy(bool (*fn)(int endSample, int loopStart)) { g_loopPolicy = fn; }
