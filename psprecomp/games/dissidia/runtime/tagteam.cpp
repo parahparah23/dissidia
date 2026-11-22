@@ -4458,6 +4458,26 @@ bool g_clear_surv = false;   // debug row "Lethal HP Hits Kill": clear the retai
 bool g_kocam = true;   // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
 extern float g_callfx_rel; extern uint32_t g_callfx_gen;   // below (the call's slow motion release)
 void xkocam_start(uint32_t victim);   // below (callfx_step): the kill camera of a KO'd extra
+// The kill camera (retail finish state 2 / 3 for slot KOs, xkocam_start for extras) leaves the camera director (cam = *0x08B3D6B8 + 1872: look-at vector +64, flag word +188 bits 1 / 2 / 4,
+// animation player +156.., +176 / +180 / +184) on a fixed look-at target with a camera animation running; retail never hands it back (the match ends). The director's words are saved before the kill camera
+// starts and put back when it is over, so the normal battle camera follows its fighters again (RP6 22 Nov: the camera stayed on the dead extra). PSPRECOMP_TAGTEAM_NOCAMRESTORE=1: old behaviour.
+struct CamSnap { uint32_t gen = ~0u, cam = 0; bool have = false; uint8_t d[0x100]; } g_camsnap;
+uint32_t cam_director() { const uint32_t p = rd(0x08B3D6B8u); return ok(p, 0x100) && ok(p + 1872u, 0x100) ? p + 1872u : 0u; }
+void cam_snap(const char* why) {
+    if (std::getenv("PSPRECOMP_TAGTEAM_NOCAMRESTORE")) return;
+    if (g_camsnap.have && g_camsnap.gen == g_battle_gen) return;   // one saved state per kill camera (a second KO during the first keeps the original)
+    const uint32_t c = cam_director(); if (!c) return;
+    std::memcpy(g_camsnap.d, g_ram + (c & 0x07FFFFFFu), sizeof g_camsnap.d); g_camsnap.cam = c; g_camsnap.gen = g_battle_gen; g_camsnap.have = true;
+    if (g_log) std::fprintf(stderr, "[KOCAM] camera director %08X saved (%s): flags +188 %08X, +176 %08X +180 %08X\n", c, why, rd(c + 188u), rd(c + 176u), rd(c + 180u));
+}
+void cam_restore(const char* why) {
+    if (!g_camsnap.have) return;
+    const bool same = g_camsnap.gen == g_battle_gen; g_camsnap.have = false;
+    if (!same || !ok(g_camsnap.cam, 0x100) || cam_director() != g_camsnap.cam) return;
+    const uint32_t c = g_camsnap.cam;
+    if (g_log) std::fprintf(stderr, "[KOCAM] camera director %08X restored (%s): flags +188 %08X -> %08X, +180 %08X -> %08X\n", c, why, rd(c + 188u), g_camsnap.d[188] | (g_camsnap.d[189] << 8) | (g_camsnap.d[190] << 16) | (static_cast<uint32_t>(g_camsnap.d[191]) << 24), rd(c + 180u), g_camsnap.d[180] | (g_camsnap.d[181] << 8) | (g_camsnap.d[182] << 16) | (static_cast<uint32_t>(g_camsnap.d[183]) << 24));
+    std::memcpy(g_ram + ((c + 0x40u) & 0x07FFFFFFu), g_camsnap.d + 0x40, sizeof g_camsnap.d - 0x40);
+}
 uint32_t g_midfin_gen = ~0u;   // battle generation whose retail finish phase (bs+72 == 4) was caused by a mid-battle KO: only its camera work and slow motion play (music / KO line / subtitle blocked)
 void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
@@ -5951,7 +5971,7 @@ void ko_oneround() {
         static uint32_t fin_gen = 0xFFFFFFFFu; static float fin_since = 0.f; if (fin_gen != g_battle_gen) { fin_gen = g_battle_gen; fin_since = 0.f; }
         if (!ko_any) { if (fin_since == 0.f) fin_since = age; if (age - fin_since >= 5.f) {
             { const uint32_t mg = rd(0x08A62280u); if (ok(mg, 0x40) && rdf(mg + 4u) < 1.99f) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, mg, 0u); g_ctx->r[29] = static_cast<int32_t>(sp1); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs finish slow motion (channel 0) released by hand\n", age / 60.0f); } }
-            g_midfin_gen = ~0u; wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
+            cam_restore("finish over"); g_midfin_gen = ~0u; wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
             fin_since = 0.f; if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs KO flow done: battle phase 4 (finish) put back to 3\n", age / 60.0f); } }
         else fin_since = 0.f;
     }
@@ -6172,6 +6192,7 @@ void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     g_midfin_gen = mid ? g_battle_gen : ~0u;
     if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish start (bs+72 %u): %s%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, mid ? "mid-battle KO of " : "match-ending / forfeit: full retail finish", mid ? role_of(who) : "");
+    if (mid) cam_snap("finish start"); else g_camsnap.have = false;
     g_orig_finstart(rdram, ctx);
 }
 void finish_hooks_install() {
@@ -8898,6 +8919,7 @@ void xkocam_start(uint32_t victim) {
     const uint32_t sm = rd(0x08A62280u), mach = rd(0x08B0CF20u), cam = ok(rd(0x08B3D6B8u), 0x100) ? rd(0x08B3D6B8u) + 1872u : 0u;   // (machine + 0x28 once a finish started: FUN_08B09D88 stores *0x08B3D738 + 1872 there)
     if (!ok(sm, 0x40) || !ok(cam, 0x100)) { if (g_log) std::fprintf(stderr, "[KOCAM] extra KO camera: no camera director (machine %08X cam %08X)\n", mach, cam); return; }
     const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x200u);
+    cam_snap("extra KO");
     const uint32_t buf = static_cast<uint32_t>(g_ctx->r[29]) + 0x40u, vec = buf + 0x20u;
     g_ctx->f[12] = 0.02f; call(0x08A62020u, sm, 0u);
     call(0x0883820Cu, victim, buf);
@@ -8909,14 +8931,16 @@ void xkocam_start(uint32_t victim) {
     g_xko.gen = g_battle_gen; g_xko.t0 = dissidia_battle_age(); g_xko.stage = 1; g_xko.victim = victim;
     if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra %s %08X KO: kill camera started (slow motion 0.02, camera program 0x898 on it)\n", dissidia_battle_age() / 60.0f, role_of(victim), victim);
 }
+float g_cam_post = -1.f;   // debug: log the camera director's words for 4 s after a kill camera
 void xkocam_step() {
+    if (g_log && g_cam_post > 0.f && dissidia_battle_age() < g_cam_post) { static float last = -1e9f; const float a = dissidia_battle_age(); if (a - last >= 30.f) { last = a; const uint32_t c = cam_director(); if (c) std::fprintf(stderr, "[KOCAM] t=%.2fs camera director after: flags +188 %08X +176 %08X +180 %08X +184 %08X +64 %.1f %.1f %.1f\n", a / 60.f, rd(c + 188u), rd(c + 176u), rd(c + 180u), rd(c + 184u), rdf(c + 64u), rdf(c + 68u), rdf(c + 72u)); } }
     if (g_xko.t0 < 0.f) return;
     if (g_xko.gen != g_battle_gen) { g_xko = XKo(); return; }
     const float age = dissidia_battle_age() - g_xko.t0; const uint32_t sm = rd(0x08A62280u);
     if (!ok(sm, 0x40)) return;
     const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
     if (g_xko.stage == 1 && age >= 140.f) { g_xko.stage = 2; g_ctx->f[12] = 0.20f; call(0x08A62020u, sm, 0u); }
-    else if (g_xko.stage == 2 && age >= 210.f) { g_xko.stage = 3; call(0x08A620B0u, sm, 0u); g_xko.t0 = -1.f; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra kill camera over (slow motion released)\n", dissidia_battle_age() / 60.0f); }
+    else if (g_xko.stage == 2 && age >= 210.f) { g_xko.stage = 3; call(0x08A620B0u, sm, 0u); cam_restore("extra kill camera over"); g_cam_post = dissidia_battle_age() + 240.f; g_xko.t0 = -1.f; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra kill camera over (slow motion released)\n", dissidia_battle_age() / 60.0f); }
     g_ctx->r[29] = static_cast<int32_t>(sp0);
 }
 void callfx_step() {

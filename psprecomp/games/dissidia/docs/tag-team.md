@@ -4806,3 +4806,11 @@ Same user save copy (Squall: stone 0x19 Gaia's Wrath, manual "R+O"; Cecil via `P
 - **Not done / gaps:** extras (the 2nd fighter of a side, not in the slot table) have no entry in the summon manager (`this + 240` has two per-side entries read through `FUN_08A22C78(side)` = the slot fighters) so an extra can never summon; a
   fighter keeps his own use / stone only while he is in the slot (a swapped-out slot fighter's used flag is lost with his object; the rebuilt one starts with a fresh use). The per-fighter version would need the manager's entry rewritten from
   the panel fighter on each swap / call-in and the use counter (`+0x10CE`) kept per member. CPU AI summons of slot fighters go through the same step (the CPU's cut-ins appear in the runs); extras' AI does not.
+
+## Kill camera: the camera director is handed back (22 Nov, tree ttx; host-only)
+RP6 (rp6_killcam_0834.log): after an extra's kill camera the battle camera never came back. The camera director (`cam = *0x08B3D6B8 + 1872`) keeps flag word `+188` = 7 (look-at override, bits 1 / 2 / 4) and `+180` = 2 (animation
+playing) after `FUN_0880FE58 / FEA0 / FD34`; nothing resets them (retail never needs to: the match ends). Logged at "extra kill camera over": `flags +188 00000007 -> 00000000, +180 00000002 -> 00000000`; the slot path
+(retail finish state 2 / 3) leaves `+188` = 4 the same way. Fix: `cam_snap` saves the director's 0x100 bytes before the kill camera starts (`xkocam_start`, `finstart_hook` for a mid-battle finish), `cam_restore` writes
+words `+0x40..` back when it is over (extra: at the end of `xkocam_step`; slot: with the phase restore). `PSPRECOMP_TAGTEAM_NOCAMRESTORE=1` = old. `[KOCAM] camera director ... saved / restored`, `... after:` lines for 4 s.
+Verified headless: enemy extra, our partner extra and human slot KO restore the words; extra-KO sheet `~/dissidia/tt/ttx_camreset_extra_montage.png` (close-up on the extra, then the normal view behind the human for 10+ s); regression PASS; mp_test 0 mismatched.
+The two forfeits in that log: an extra KO never reaches the forfeit branch (no finish phase for extras); `retail finish start: match-ending / forfeit` + a slot fighter in its fall with live HP (10171 / 9340) is the pause-menu forfeit.
