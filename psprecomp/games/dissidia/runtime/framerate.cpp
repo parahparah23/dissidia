@@ -2632,7 +2632,18 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (g_orig_pressed) psp_dispatch_register(PRESSED, pressed_hook);
     if (const char* g = std::getenv("PSPRECOMP_JECHT_GRID"); g && g[0] == '0') g_jecht_grid = false;
     psp_ctrl_set_filter(jecht_grid_filter);
-    psp_ctrl_set_chord_gate([]() -> bool { return overlay_id() == 1; });   // button chord window: battles only (menus keep their immediate buttons)
+    // Button chord window: ordinary combat only. Not in menus, the battle pause menu, outside the fight (loading, results), or while an EX Burst runs in any
+    // phase (the defender mashes Circle: a press held back, merged or lost in the window barely moves the EX defence bar; the attacker's prompts need every press).
+    psp_ctrl_set_chord_gate([]() -> bool {
+        static const bool always = std::getenv("PSPRECOMP_CHORD_ALWAYS") != nullptr;   // test aid: the old gate (any time the battle overlay runs)
+        if (always) return overlay_id() == 1;
+        if (overlay_id() != 1 || !in_fight()) return false;
+        const uint32_t mgr = r32(UI_MGR_PTR);
+        if (ok(mgr) && g_ram[(mgr + 34u) & 0x07FFFFFFu] != 0) return false;   // the UI manager's paused flag (pause menu)
+        const uint32_t bm = r32(0x08A405E0u);
+        if (ok(bm) && r32(bm + 632u) != 0) return false;                      // an EX Burst phase is running
+        return true;
+    });
     if ((g_orig_chain_check = dissidia_ovl_battle_lookup(CHAIN_CHECK))) psp_dispatch_register(CHAIN_CHECK, chain_check_hook);
     if ((g_orig_gate_37 = dissidia_ovl_battle_lookup(GATE_37))) psp_dispatch_register(GATE_37, gate_37_hook);
     if ((g_orig_gate_36 = dissidia_ovl_battle_lookup(GATE_36))) psp_dispatch_register(GATE_36, gate_36_hook);

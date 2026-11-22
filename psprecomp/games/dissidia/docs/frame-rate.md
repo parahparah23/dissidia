@@ -250,6 +250,11 @@ controller with digital shoulders (no trigger lag), so the likeliest cause is Sq
 (Medium 110). `[CHORD]` lines (raw and handed-over face / L / R bits with ms times, 20 a second, 3000 in all, plus a "window off" tag when not in battle) now
 also print with `PSPRECOMP_TAGTEAM_LOG=1`. Headless Square then R+Square at 33 / 67 / 100 ms: 40 ms window merges only the first; 70 ms merges all three (reads fall on a 33 ms grid).
 
+EX Burst / non-combat (21 Nov): the window is now off unless the battle overlay runs a fight (`in_fight`), the UI manager is not paused (pause menu, `+34`)
+and no EX Burst phase runs (`*(0x08A405E0)+632 == 0`); a mash must not be held back, merged or lost. Headless Circle mash during a burst (`exburst cpu`, 40 / 61 / 80 injected
+presses at 10 / 15 / 20 per second, 30 fps): Circle edges the game was handed with the old gate 20 / 31 / 21, with the new gate 40 / 61 / 41 (the 41 at 20/s is the
+test script's own 33 ms tick quantisation: the raw pad has 41 too). `PSPRECOMP_CHORD_ALWAYS=1` restores the old gate (test aid); an explicit `PSPRECOMP_CHORD_LOG=1` logs every line (400 / s).
+
 Measured (headless, Squall, `action 72` NEAR_COMBO4 then Cross in its chase window, 30 fps, 1x): Cross, then R + Cross one tick (33 ms)
 later: off = Chase starts; 40 ms = no Chase. Two ticks (67 ms): off and 40 = Chase, 80 = no Chase. Cross alone: Chase in all three.
 R first: no Chase. Idle fighter, same one-tick chord: off = script 100 (jump) then 400 (dodge); 40 ms = 400 straight away.

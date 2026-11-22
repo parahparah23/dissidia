@@ -118,7 +118,8 @@ static void chord_log(uint32_t raw, uint32_t out, bool held_back, bool window_on
     if ((raw & M) == (lraw & M) && (out & M) == (lout & M)) return;
     lraw = raw; lout = out;
     if (now_us - sec0 >= 1000000) { sec0 = now_us; in_sec = 0; }
-    if (in_sec >= 20 || total >= 3000) return;
+    static const int per_sec = std::getenv("PSPRECOMP_CHORD_LOG") ? 400 : 20;   // an explicit CHORD_LOG keeps (nearly) every line, for mash tests
+    if (in_sec >= per_sec || total >= (std::getenv("PSPRECOMP_CHORD_LOG") ? 100000 : 3000)) return;
     in_sec++; total++;
     std::fprintf(stderr, "[CHORD] %.1f ms raw %04X -> game %04X%s%s (window %d ms)\n", double(now_us) / 1000.0, raw & M, out & M,
                  held_back ? " held back" : "", window_on ? "" : " [window off: not in battle or setting Off]", psp_ctrl_chord_ms());
