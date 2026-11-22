@@ -7822,6 +7822,13 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
             if (g_log) { static int c = 0; if (c++ < 100) std::fprintf(stderr, "[FRIENDLYBLOCK] t=%.2fs %s %08X (char %d) hit on its team mate %s %08X (char %d) not registered\n", dissidia_battle_age() / 60.0f, role_of(att), att, actor_char(att), role_of(vic), vic, actor_char(vic)); }
             ctx->r[2] = 0; return;
         }
+        // A fighter with no HP left (a KO'd partner waiting parked off the stage, 21 Nov RP6: Gabranth's EX-mode HP attack, played from the parking spot
+        // by his assist call, overlapped the dead Squall parked on the same spot) cannot be hit at all: nothing registers (no damage step, no BRV spent,
+        // no reaction, no EX Burst chance started from the hit). The attack goes through him like a miss. PSPRECOMP_TAGTEAM_DEADHIT=1: the old rules.
+        if (ok(vic, 0x12D0) && vic != att && (hp_eff(vic) <= 0 || is_down(vic)) && !std::getenv("PSPRECOMP_TAGTEAM_DEADHIT")) {
+            if (g_log) { static int c = 0; if (c++ < 100) std::fprintf(stderr, "[DEADHIT] t=%.2fs %s %08X (char %d) hit on %s %08X (char %d, HP %d%s): not registered\n", dissidia_battle_age() / 60.0f, role_of(att), att, actor_char(att), role_of(vic), vic, actor_char(vic), hp_eff(vic), is_down(vic) ? ", down" : ""); }
+            ctx->r[2] = 0; return;
+        }
         if (ok(vic, 0x12D0) && vic != att && g_ram[(vic + 0x542u) & 0x07FFFFFFu] == 0) {
             int i = 0; while (i < g_nhits && g_hits[i].att != att) i++;
             // One attack that hits two fighters in one frame (an HP move through the target and a bystander): the step books one victim, the hit kept

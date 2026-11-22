@@ -4519,3 +4519,16 @@ RP6 `rp6_feral_2155.log` (2nd battle): Feral Chaos (extraE, char 32) spent its B
 - **Fix** (`tagteam.cpp`): `booked_extra_victim` has a second pass and `hitreact_hook` the same fallback: the attacker's last registered hit on an extra of the victim's side up to `PSPRECOMP_TAGTEAM_XHITAGE` (default 8) frames ago, when no registered hit of the other side landed on the slot fighter itself in that time (and not inside an extra's own damage step). Log `[HITREACT] late reaction (hit on extraE N frames ago) booked on it, not on slotC`. `PSPRECOMP_TAGTEAM_XHITAGE=2` = old. New diagnostic (`PSPRECOMP_TAGTEAM_HITREACTLOG=1`): `[HITREACT0]` = a slot fighter's own handler reacts with no extra victim found, with the last hits (attacker->victim(age)) of the last 30 frames, so the next RP6 log shows the real age if this was not it.
 - **Test aids:** `PSPRECOMP_TAGTEAM_SETBRV=enemy2:<s>:0` + `_SETBRV_HOLD=1` (BRV stays 0 until hit) + `_SETBRV_STATE=1` (the extra's handler state held at 1 = after its own HP attack until hit); `ENEMY2_CHAR=32` for Feral Chaos.
 - **HP whiff / BRV (open).** The `HPWHIFF` skip returns before retail's HP step, yet the extra's BRV is 0 and its handler at 1 four ticks later: something else of retail's HP-attack bookkeeping spends the BRV (its hits on its own mate count as hits in the attack's own state). Whether retail keeps the BRV of an HP attack that hit nothing was not checked; unchanged.
+
+## Hits on a KO'd fighter (21 Nov, tree tthud; host-only, headless, nothing seen on a device)
+RP6 `rp6_gab_2240.log`, t=790-797: "Gabranth did an EX Burst, he did not hit me". The partner Squall had been KO'd at 566.5 s (`extra 09D64240 (side 0) is down ..., reserve 0`):
+with nobody in reserve a dead extra is not rebuilt or swapped (by design, "a dead extra stays down"); he stays parked at (5000, 0, 5000) with HP <= 0.
+At 793.35 Gabranth (extraE, EX mode) stepped out for an Assist Off call, which parks him at the same spot, and his assist's HP attack overlapped the dead Squall:
+`[HPWHIFF] ... step victim 09D64240` (HP step skipped, he has no HP), but retail's hit registration had already run (BRV spent: extraE BRV 3002 -> 0, EX Burst chance
+`[XREV]` started 794.62), and the burst took the foe it knew, the human (slotH), who was never hit.
+- **Fix**: `hitreg_hook` drops a hit whose victim has no HP left or is on the down list (`[DEADHIT] ... not registered`, returns 0 before retail's registration, like
+  `FRIENDLYBLOCK`): no damage step, no BRV spent, no reaction, no EX Burst chance from the hit. `PSPRECOMP_TAGTEAM_DEADHIT=1` = old behaviour.
+- **Checked**: `tagteam_test.py --baseline` RESULT: PASS (BT_GPU=1, `/tmp/tthud_reg`). `KOLIST=partner:20,enemy2:20` + `CLONES=1` (both extras KO'd at 20 s) ran with and without the fix;
+  no hit landed on a body in that run, so no `[DEADHIT]` line.
+- **Not checked / open**: the exact Gabranth repro (EX-mode HP attack from the parking spot on a dead partner) was not reproduced headless. A burst started by an extra's hit
+  on a LIVING extra still uses the extra's foe (the slot fighter) as the burst victim; not changed. Bodies are still in the world (only hits are refused).
