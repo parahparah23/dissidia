@@ -638,6 +638,11 @@ bool overlay_read(int tag, int host_fd, int64_t off, uint32_t size, uint8_t* des
         dissidia_roster_patch_overlay(tag - TAG_OVL_BASE, off, (uint32_t)got, dest);
         return true;
     }
+    if (tag == TAG_PACKAGE) {
+        static const bool pkg_trace2 = std::getenv("PSPRECOMP_PKG_TRACE2") != nullptr;   // log every PACKAGE.BIN read, also without mods
+        if (pkg_trace2) std::fprintf(stderr, "[PKG2] off=0x%llX sector=%lld size=%u dest=0x%08X\n", (unsigned long long)off, (long long)(off / 2048), size,
+                                     g_dbg_rdram ? (uint32_t)(dest - g_dbg_rdram) + 0x08000000u : 0u);
+    }
     auto base = [host_fd](uint8_t* d, uint32_t n, int64_t o) -> int64_t {
         int64_t got = 0;
         while (got < (int64_t)n) {

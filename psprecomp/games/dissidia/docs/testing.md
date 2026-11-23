@@ -111,6 +111,7 @@ Revolver Drive is a ground HP attack (hold the HP attack button, Triangle by def
 
 ## Assist gauge idle drain (fixed 11 Nov, branch assist-gauge)
 
+- (Correction, 19 Nov, tag-team.md "Extras' EX and assist gauges": `+0x18` is the EX gauge, `+0x1C` the assist gauge; the notes below mix them up.)
 - Gauge struct (`[ctrl+0x52C]`): `+0x18` the gauge, `+0x1C` the bar that starts at the battle's initial gauge (2000 for side 0) and
   runs down after a few seconds with nothing done, with an accelerating curve; `[GSTRUCT]` logs the struct (PSPRECOMP_ASSIST_GAUGE=1).
 - Bug: the state machine FUN_08AED330 (-> 08AED83C -> 08AEE124) has drain terms per update instead of per step, so at 120 fps the bar
@@ -364,6 +365,26 @@ Added with `psp_settings_add_debug_toggle` (runtime/include/psp_settings.h: a ga
 
 - Jecht's Circle / Square are handed to the game on a 30 Hz grid above 30 fps (`jecht_grid_filter`, `PSPRECOMP_JECHT_GRID=0` to turn it off): the Jecht Combo Timing helper above therefore sees each press on a grid update, and a press can reach the game up to one 30 Hz frame after you pressed it. Details and measurements: docs/frame-rate.md "Jecht timed windows on the 30 Hz grid".
 
+## Frame pacing and vertical sync (issue #67)
+
+`PSPRECOMP_PRESENT_STATS=1` logs `[PRESENT_STATS]` every 5 s: present-to-present mean, standard deviation, median, p99, max and
+"uneven" (frames shown for more than 1.5x the median). The test-script command `vsync <0|1>` switches vertical sync in the middle of a
+run (A/B of the same fight); `BT_DISPLAY_MODE=fullscreen` makes `battle_test.py` run fullscreen, the way players do. Measure on a real,
+lit display: with the screen locked or powered off the compositor throttles a waiting (FIFO) swap to 60 Hz, which looks like a pacing
+bug and is not. Measured on a 3440x1440 175 Hz VRR monitor (GNOME 50 Wayland, VRR mode on, AMD, Vulkan), 150 fps fight
+(`~/dissidia/vrr_run.sh` on the desktop), per 5 s window: vertical sync off (MAILBOX) 6.67 ms, standard deviation 0.14-0.75; on
+(FIFO) 6.67 ms, standard deviation 0.14-0.63, at most 2 uneven frames. On a fixed 175 Hz refresh FIFO would put 150 fps frames on a
+5.71 ms grid (5.7 / 11.4 ms); even 6.67 ms frames mean the refresh followed the game. Both modes show a single 20-26 ms frame every
+few seconds: that comes from the game side, not from presenting.
+
+## Building the Android APK on this host
+No desktop needed. One-time setup (done 14 Nov, ~2.7 GB under `~/dissidia/android_vk` and `~/dissidia/android_local`):
+- Full NDK r27c: `unzip ~/andtc/dl/android-ndk-r27c-linux.zip` into `~/dissidia/android_local/ndk_unz`, linked as `~/dissidia/android_vk/sdk/ndk/27.2.12479018` (the copy in `~/andtc/android-ndk-r27c` is stripped, no `build/cmake`); `build-tools`, `platforms`, `platform-tools` link to `~/android-build/sdk`.
+- Pinned sources (toolchain/versions.json: freetype, sdl2, mbedtls, ffmpeg, glslang, libadrenotools, liblinkernsbypass) downloaded to `~/dissidia/android_local/cache`, then
+  `python3 psprecomp/android/build_deps.py --sdk ~/dissidia/android_vk/sdk --cache ~/dissidia/android_local/cache --cmake /usr/bin/cmake --ninja /usr/bin/ninja --out ~/dissidia/android_vk/and_deps29 --api 29` (4 min).
+- Skeleton: `PATH=~/android-build/jdk/bin:$PATH python3 psprecomp/android/make_skeleton.py --sdk ~/android-build/sdk --sdl-src ~/dissidia/android_vk/and_deps29/src-sdl2 -o ~/dissidia/android_vk/skeleton.apk`.
+Build: `games/dissidia/tools/build_apk_local.sh [psprecomp dir] [work folder with output/ + overlays/]` (copy at `~/dissidia/tt/build_apk.sh`) -> `~/dissidia/tt/dissidia_tt.apk`. It builds the core + game in `~/dissidia/android_local/tt` (`-DPSPRECOMP_ALLOW_STALE=ON`, the work folder's generated code is older than the emitter), packs shaders and signs with `android/debug_key.json` (same certificate as the desktop builds, so `adb install -r` upgrades in place). Full build 1 m 51 s (20 cores), unchanged rebuild 6 s; the APK has the same entries and a libmain.so within 2 KB of the desktop build.
+
 ## Frame-rate parity tests (`tools/fps_parity.py`)
 
 Every move of every playable character has to play at every frame rate the settings offer (30, 60, 90, 120, 150, 180, 210, 240) as it
@@ -513,3 +534,11 @@ bug and is not. Measured on a 3440x1440 175 Hz VRR monitor (GNOME 50 Wayland, VR
 (FIFO) 6.67 ms, standard deviation 0.14-0.63, at most 2 uneven frames. On a fixed 175 Hz refresh FIFO would put 150 fps frames on a
 5.71 ms grid (5.7 / 11.4 ms); even 6.67 ms frames mean the refresh followed the game. Both modes show a single 20-26 ms frame every
 few seconds: that comes from the game side, not from presenting.
+
+## Building the Android APK on this host
+No desktop needed. One-time setup (done 14 Nov, ~2.7 GB under `~/dissidia/android_vk` and `~/dissidia/android_local`):
+- Full NDK r27c: `unzip ~/andtc/dl/android-ndk-r27c-linux.zip` into `~/dissidia/android_local/ndk_unz`, linked as `~/dissidia/android_vk/sdk/ndk/27.2.12479018` (the copy in `~/andtc/android-ndk-r27c` is stripped, no `build/cmake`); `build-tools`, `platforms`, `platform-tools` link to `~/android-build/sdk`.
+- Pinned sources (toolchain/versions.json: freetype, sdl2, mbedtls, ffmpeg, glslang, libadrenotools, liblinkernsbypass) downloaded to `~/dissidia/android_local/cache`, then
+  `python3 psprecomp/android/build_deps.py --sdk ~/dissidia/android_vk/sdk --cache ~/dissidia/android_local/cache --cmake /usr/bin/cmake --ninja /usr/bin/ninja --out ~/dissidia/android_vk/and_deps29 --api 29` (4 min).
+- Skeleton: `PATH=~/android-build/jdk/bin:$PATH python3 psprecomp/android/make_skeleton.py --sdk ~/android-build/sdk --sdl-src ~/dissidia/android_vk/and_deps29/src-sdl2 -o ~/dissidia/android_vk/skeleton.apk`.
+Build: `games/dissidia/tools/build_apk_local.sh [psprecomp dir] [work folder with output/ + overlays/]` (copy at `~/dissidia/tt/build_apk.sh`) -> `~/dissidia/tt/dissidia_tt.apk`. It builds the core + game in `~/dissidia/android_local/tt` (`-DPSPRECOMP_ALLOW_STALE=ON`, the work folder's generated code is older than the emitter), packs shaders and signs with `android/debug_key.json` (same certificate as the desktop builds, so `adb install -r` upgrades in place). Full build 1 m 51 s (20 cores), unchanged rebuild 6 s; the APK has the same entries and a libmain.so within 2 KB of the desktop build.

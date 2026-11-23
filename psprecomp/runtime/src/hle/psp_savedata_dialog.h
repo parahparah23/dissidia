@@ -216,7 +216,7 @@ struct SetRow {
     int steps = 0, cur = 0;     // Slider: number of positions (>= 2) and the current one
     bool selectable() const { return kind != SetKind::Header; }
 };
-constexpr int SET_MAX_IDS = 640;
+constexpr int SET_MAX_IDS = 1024;
 struct SetCat { std::string name; int icon = 0; };   // icon: see settings_icon()
 struct SetKeyboardState {    // the text-entry modal
     bool active = false;
@@ -230,6 +230,24 @@ struct SetDialog {                            // a question over the settings sc
     std::vector<std::string> buttons;
     int sel = 0;
     int hover = -1;
+};
+struct SetTest {                              // the Test Controls screen (full screen, replaces the settings list)
+    bool active = false;
+    int player = 0;                           // the selected player tab
+    std::vector<std::string> players;         // tab labels
+    uint32_t buttons = 0;                     // PSP bits (SceCtrl) pressed now
+    int lx = 128, ly = 128;                   // left stick as the game reads it, 0..255
+    bool present = true;                      // the player has a device
+    std::string device;                       // what feeds the player
+    float exit_frac = 0, next_frac = 0, view_frac = 0;       // progress of the Start+Select hold (leave) and the L+R hold (next player)
+    bool keyboard = true;                     // hints name keys (else pad)
+    int view = 0;                             // compact canvases show one view at a time: 0 the PSP, 1 the controller
+    bool pad = false;                         // the player has a physical controller: the raw panel shows it (else "no controller")
+    int rx = 0, ry = 0, lrx = 0, lry = 0;     // raw sticks, -32768..32767
+    int lt = 0, rt = 0;                       // raw triggers 0..32767
+    uint32_t pad_buttons = 0;                 // bit i = SDL_CONTROLLER_BUTTON i
+    std::string l2_map, r2_map, rs_map;       // what the triggers / right stick do in the game ("" = nothing)
+    std::vector<std::string> pad_map;         // [SDL button] what it does in the game
 };
 struct SetScene {
     std::string title = "Settings";
@@ -250,6 +268,7 @@ struct SetScene {
     std::string brand = "Dissidia 012 Recompiled";   // the plate in the top right corner (a Back button inside a sub-menu)
     SetKeyboardState kb;
     SetDialog dlg;
+    SetTest test;
 };
 struct SetRect {
     float x = 0, y = 0, w = 0, h = 0;
@@ -259,6 +278,9 @@ struct SetKey { std::string label; int kind = 0; char ch = 0; SetRect r; };   //
 struct SetGeom {
     SetRect back, list, scroll_track, scroll_thumb, detail, side;
     std::vector<SetRect> dlg_btns;            // the dialog's buttons while it is open
+    std::vector<SetRect> test_tabs;           // Test Controls: the player tabs
+    std::vector<SetRect> test_views;          // Test Controls: the PSP / Controller view tabs (compact canvases)
+    SetRect test_exit;                        // Test Controls: the Exit button
     std::vector<SetRect> cats;
     struct Row { int idx = 0; SetRect r, dec, inc, track; };
     std::vector<Row> rows;                    // the rows at least partly inside the list

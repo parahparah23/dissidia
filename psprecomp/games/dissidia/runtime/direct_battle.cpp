@@ -85,6 +85,34 @@ int model_id(int charId) {   // object table id of a character's first-costume p
     }
     return -1;
 }
+// PSPRECOMP_TEST_ASSIST_SET=<side>=<charId>[:<object id>]: test aid, the retail assist of that side becomes that character's assist entry
+// (record +0xF3E = object id of the first entry with byte 6 = charId and type 8 / 13 (assist), or the id given; +4186 = charId, +4187 = 0).
+std::vector<std::pair<int, int>> g_aset; std::vector<int> g_aset_id;
+int assist_id(int charId) {
+    const uint32_t t = g_w32(0x089D4968u); if (t < 0x08800000u || t >= 0x0A000000u) return -1;
+    const uint32_t h = g_w32(t); if (h < 0x08800000u || h >= 0x0A000000u) return -1;
+    const uint32_t n = g_w32(h + 4u); int first = -1;
+    for (uint32_t i = 0; i < n && i < 4000u; i++) {
+        const uint8_t* r = g_at(h + 8u + 0x44u * i);
+        if (r[6] != charId || (r[8] != 8 && r[8] != 13)) continue;
+        uint16_t id; std::memcpy(&id, r, 2);
+        static int logged = 0; if (logged++ < 20) std::fprintf(stderr, "[DIRECT] assist entry candidate char %d id %u costume %u type %u name %.16s\n", charId, id, r[7], r[8], reinterpret_cast<const char*>(r + 36));
+        if (first < 0) first = id;
+    }
+    return first;
+}
+void assist_set() {
+    constexpr uint32_t kBlock = 0x09AFB8A0u, kSide = 0x1060u;
+    for (size_t k = 0; k < g_aset.size(); k++) {
+        const uint32_t side = static_cast<uint32_t>(g_aset[k].first) & 1u; uint8_t* rec = g_at(kBlock + kSide * side);
+        if (rec[1] < 1 || rec[1] > 100) continue;
+        int id = g_aset_id[k] > 0 ? g_aset_id[k] : assist_id(g_aset[k].second); if (id <= 0) continue;
+        uint16_t m; std::memcpy(&m, rec + 0xF3E, 2);
+        if (m == id && rec[4186] == g_aset[k].second) continue;
+        const uint16_t w = static_cast<uint16_t>(id); std::memcpy(rec + 0xF3E, &w, 2); rec[4186] = static_cast<uint8_t>(g_aset[k].second); rec[4187] = 0;
+        std::fprintf(stderr, "[DIRECT] side %u assist: object id %u -> %u (charId %d)\n", side, m, w, g_aset[k].second);
+    }
+}
 void team_swap() {
     constexpr uint32_t kBlock = 0x09AFB8A0u, kSide = 0x1060u, kTeam = 0x2735u, kTeamStride = 0x38u;
     static int done[2] = {-1, -1};                 // the pair applied to each side (one per side: "15=31,31=15" must not flip a side back)
@@ -120,8 +148,43 @@ void team_swap() {
 }  // namespace
 
 // Called by the pad filter of framerate.cpp for every poll; returns the buttons to hand the game.
+int dissidia_tagteam_ffa_human_chars(uint8_t out[2]);   // tagteam.cpp: the single player Free-for-all's P1 {main, tag-in}, count 0 = not in use
+int dissidia_tagteam_ffa_enemy_char();   // tagteam.cpp: the single player Free-for-all's P2 (0 = none)
+namespace {
+// The single player Free-for-all's P2 is the Tournament screen's CPU fighter of round 1: its record's charId, model and 1-on-1 team struct are set to the player's choice
+// before the loading screen (same fields as the test swap above).
+void force_cpu_char(int to) {
+    constexpr uint32_t kBlock = 0x09AFB8A0u, kSide = 0x1060u, kTeam = 0x2735u, kTeamStride = 0x38u;
+    if (!g_rdram) return;
+    uint8_t* rec = g_at(kBlock + kSide); uint8_t* ids = g_at(kBlock + kTeam + kTeamStride);
+    if (rec[1] < 1 || rec[1] > 100 || to <= 0) return;
+    const int from = rec[0];
+    if (from != to) { if (ids[-6] == 1 && ids[0] == from && ids[1] == 0xFF) ids[0] = static_cast<uint8_t>(to); rec[0] = static_cast<uint8_t>(to); std::fprintf(stderr, "[FFA] enemy fighter of round 1: charId %d -> %d\n", from, to); }
+    const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
+    if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
+}
+// P1 (the human side, record 0): his main's own save record, model and a team struct of {main, tag-in}: the 5-member Party Select is not needed.
+void force_human_chars(const uint8_t* c, int n) {
+    constexpr uint32_t kBlock = 0x09AFB8A0u, kTeam = 0x2735u;
+    if (!g_rdram || n < 1) return;
+    uint8_t* rec = g_at(kBlock); uint8_t* ids = g_at(kBlock + kTeam);
+    if (rec[1] < 1 || rec[1] > 100) return;
+    const int to = c[0];
+    if (rec[0] != to) {
+        const uint32_t src = save_record(to); if (src) std::memcpy(rec, g_at(src), 0x778);
+        rec[0] = static_cast<uint8_t>(to);
+        std::fprintf(stderr, "[FFA] human fighter record: charId -> %d (%s)\n", to, src ? "its own save record" : "charId only");
+    }
+    const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
+    if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
+    if (ids[-6] != n || ids[0] != c[0] || (n > 1 && ids[1] != c[1])) { ids[-6] = static_cast<uint8_t>(n); ids[0] = c[0]; ids[1] = n > 1 ? c[1] : 0xFF; for (int k = 2; k < 5; k++) ids[k] = 0xFF; std::fprintf(stderr, "[FFA] human team: %d %d\n", c[0], n > 1 ? c[1] : -1); }
+}
+}  // namespace
 uint32_t dissidia_walk_filter(uint32_t buttons) {
+    { uint8_t hc[2]; if (const int hn = dissidia_tagteam_ffa_human_chars(hc)) force_human_chars(hc, hn); }
+    if (const int fe = dissidia_tagteam_ffa_enemy_char()) force_cpu_char(fe);
     if (!g_swap.empty()) team_swap();
+    if (!g_aset.empty()) assist_set();
     if (!g_replay && !g_record) return buttons;
     const uint64_t n = ++g_poll;
     if (g_record) {
@@ -180,6 +243,12 @@ void dissidia_direct_battle_install(uint8_t* rdram) {
             if (*q == ',') q++;
         }
         std::fprintf(stderr, "[DIRECT] character swap: %zu pair(s) from %s\n", g_swap.size(), sw);
+    }
+    if (const char* as = std::getenv("PSPRECOMP_TEST_ASSIST_SET"); as && as[0]) {
+        for (const char* q = as; *q;) { int a = 0, b = 0, used = 0, id = 0; if (std::sscanf(q, "%d=%d%n", &a, &b, &used) != 2) break; q += used;
+            if (*q == ':') { int u2 = 0; std::sscanf(q + 1, "%d%n", &id, &u2); q += 1 + u2; }
+            g_aset.push_back({a, b}); g_aset_id.push_back(id); if (*q == ',') q++; }
+        std::fprintf(stderr, "[DIRECT] assist set: %zu side(s) from %s\n", g_aset.size(), as);
     }
     if (const char* r = std::getenv("PSPRECOMP_TEST_PAD_RECORD"); r && r[0] && r[0] != '0') {
         g_record = true;

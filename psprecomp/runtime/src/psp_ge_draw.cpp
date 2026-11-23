@@ -631,6 +631,30 @@ static void read_fbo_native(GLuint fbo, std::vector<uint8_t>& out, int* ow = nul
 // Composite the active savedata-dialog overlay (rendered at an integer
 // multiple of 480x272) into a top-down RGBA readback of w x h pixels, box
 // filtering when the sizes differ. No-op when no dialog is active.
+struct GameCanvas { std::mutex m; std::vector<uint32_t> px; int w = 0, h = 0; bool dirty = false; };
+static GameCanvas g_game_canvas;   // ge_draw_set_game_overlay: a game module's own 2D overlay (RGBA, row 0 = top)
+
+// The game module's overlay canvas alpha-blended into a captured frame (screenshots), centred at the canvas's own aspect.
+static void composite_game_overlay(std::vector<uint8_t>& rgba, int w, int h) {
+    std::lock_guard<std::mutex> lk(g_game_canvas.m);
+    const int cw = g_game_canvas.w, ch = g_game_canvas.h;
+    if (cw <= 0 || ch <= 0 || g_game_canvas.px.size() < size_t(cw) * size_t(ch) || rgba.size() < size_t(w) * h * 4) return;
+    const int dw = std::min(w, int(int64_t(h) * cw / ch)), x0 = (w - dw) / 2;
+    for (int y = 0; y < h; y++) {
+        const int sy = std::min(ch - 1, int(int64_t(y) * ch / h));
+        for (int x = 0; x < dw; x++) {
+            const int sx = std::min(cw - 1, int(int64_t(x) * cw / dw));
+            const uint32_t p = g_game_canvas.px[size_t(sy) * cw + sx];
+            const unsigned a = p >> 24;
+            if (!a) continue;
+            uint8_t* d = rgba.data() + (size_t(y) * w + x0 + x) * 4;
+            d[0] = uint8_t((d[0] * (255 - a) + (p & 255) * a) / 255);
+            d[1] = uint8_t((d[1] * (255 - a) + ((p >> 8) & 255) * a) / 255);
+            d[2] = uint8_t((d[2] * (255 - a) + ((p >> 16) & 255) * a) / 255);
+        }
+    }
+}
+
 static void composite_dialog_overlay(std::vector<uint8_t>& rgba, int w, int h) {
     static std::vector<uint32_t> ovl;
     int ow = 0, oh = 0;
@@ -666,6 +690,7 @@ static bool capture_fbo_to_tga(const char* path) {
     // An active savedata dialog is composited over the frame at present
     // time; include it so the capture matches the window.
     composite_dialog_overlay(flipped, w, h);
+    composite_game_overlay(flipped, w, h);
     return write_tga(path, flipped.data(), w, h);
 }
 
@@ -1353,6 +1378,13 @@ static std::atomic<bool> g_perf_hud{false};   // settings menu Debug page / PSPR
 static Stream g_s2d, g_s3d;
 static std::atomic<bool> g_vb_active{false};   // view blocker fade (ge_draw_set_view_blocker)
 static std::atomic<bool> g_vb_linger{false};   // some draw is still (partly) faded: keep evaluating so it fades back in instead of popping
+static float g_dbg_eye[3] = {0, 0, 0}, g_dbg_fwd[3] = {0, 0, 1};
+// The view (4x3) and projection (4x4) matrices of the last completed main scene (the camera most of its 3D draws used, widescreen /
+// tall screen included): game modules project world points onto the screen with them
+// (effects drawn on the game layer at a fighter's position).
+static float g_last_view[12] = {}, g_last_proj[16] = {}; static bool g_last_vp_ok = false;
+bool ge_draw_last_view_proj(float view[12], float proj[16]) { std::memcpy(view, g_last_view, sizeof g_last_view); std::memcpy(proj, g_last_proj, sizeof g_last_proj); return g_last_vp_ok; }
+void ge_draw_last_eye(float eye[3], float fwd[3]) { for (int i = 0; i < 3; i++) { eye[i] = g_dbg_eye[i]; fwd[i] = g_dbg_fwd[i]; } }   // view blocker fade (ge_draw_set_view_blocker)
 static float vb_fade_factor(uint8_t* rdram, const GeState& st, int n, int prim);
 static std::atomic<bool> g_cc_collect{false};   // camera collision: cache the main view's stage geometry (a battle camera is running)
 static void cc_collect(uint8_t* rdram, const GeState& st, int n, int prim);
@@ -2234,6 +2266,12 @@ static void fast_prim(uint8_t* rdram, const GeState& state, int prim_type, int c
         const int path = kc.path;
         const KeyBuf& key = kc.key;
         float vb_f = 1.f;
+        if (path == 1 && state.depth_test_enable) {   // debug: the eye of the last depth-tested 3D draw (ge_draw_last_eye)
+            const float* V = state.view_matrix;
+            g_dbg_eye[0] = -(V[0] * V[9] + V[1] * V[10] + V[2] * V[11]); g_dbg_eye[1] = -(V[3] * V[9] + V[4] * V[10] + V[5] * V[11]); g_dbg_eye[2] = -(V[6] * V[9] + V[7] * V[10] + V[8] * V[11]);
+            g_dbg_fwd[0] = -V[2]; g_dbg_fwd[1] = -V[5]; g_dbg_fwd[2] = -V[8];
+
+        }
         if ((g_vb_active.load(std::memory_order_relaxed) || g_vb_linger.load(std::memory_order_relaxed)) && path == 1 && state.depth_test_enable && !state.depth_write_disable)
             vb_f = vb_fade_factor(rdram, state, n, prim_type);
         if (path == 1 && state.depth_test_enable && !state.depth_write_disable && g_cc_collect.load(std::memory_order_relaxed))
@@ -3321,6 +3359,10 @@ float psp_fx_light_scale(int which) {
     return v;
 }
 void psp_fx_light_set_scale(int which, float v) { g_fx_scale[which ? 1 : 0].store(std::max(0.f, v)); }
+// A game module can lower the number of effect lights for a while (Dissidia tag team: a member's entrance makes a burst of glowing draws that became up
+// to 8 ray-traced lights and stalled Medium / High RT shadows, 18 Nov). 8 = no limit.
+static std::atomic<int> g_fx_light_limit{8};
+void psp_fx_lights_limit(int n) { g_fx_light_limit.store(n < 0 ? 0 : (n > 8 ? 8 : n)); }
 void psp_fx_lights_set(bool on) { g_fx_lights.store(on ? 1 : 0); std::fprintf(stderr, "[FXLIGHT] effect lights %s\n", on ? "on" : "off"); }
 static bool fx_additive(const GeState& st) {   // src x As (or 1) + dst x FIX with a bright FIX: the GE's additive glow
     const int dst = (st.blend_mode >> 4) & 0xF, op = (st.blend_mode >> 8) & 0x7;
@@ -3520,6 +3562,20 @@ static void glow_draw(int cur, const GeState& st, const float* T, size_t nf) {
         g_glow_lights[cur].push_back({0.5f * (bx[0] + bx[3]), 0.5f * (bx[1] + bx[4]), 0.5f * (bx[2] + bx[5]), spec[0], spec[1], spec[2], spec[3], spec[4], ext});   // clear = its own size: the crystal does not shadow its light
     }
 }
+// The main scene's camera without the screen effects (fx_track keeps it otherwise): the view / projection most opaque 3D draws of the main
+// target use, for ge_draw_last_view_proj.
+static void main_camera_vote(const GeState& st) {
+    static float vp[16], vv[12]; static int n = 0;
+    if (g_current_target < 0 || g_ab_shadow || !is_main_key(g_targets[g_current_target].key)) return;
+    if (st.clear_mode) { if (st.clear_flags == 0 || (st.clear_flags & 4)) n = 0; return; }   // a new frame of the main target: the vote starts over
+    if (ge_vtype_through(st.vertex_type) || !st.depth_test_enable || st.depth_write_disable) return;
+    float proj[16]; std::memcpy(proj, st.proj_matrix, sizeof proj);
+    if (const float wx = draw_wide_x(st); wx != 1.0f) { proj[0] *= wx; proj[4] *= wx; proj[8] *= wx; proj[12] *= wx; }
+    tall_proj(proj, draw_tall_y(st));
+    const bool same = n > 0 && !std::memcmp(vp, proj, sizeof vp) && !std::memcmp(vv, st.view_matrix, sizeof vv);
+    if (same) { if (n < 1000) n++; } else if (n > 0) n--; else { std::memcpy(vp, proj, sizeof vp); std::memcpy(vv, st.view_matrix, sizeof vv); n = 1; }
+    if (same && n >= 8) { std::memcpy(g_last_view, vv, sizeof g_last_view); std::memcpy(g_last_proj, vp, sizeof g_last_proj); g_last_vp_ok = true; }
+}
 static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count) {
     {   // effects draws (blended, depth tested, not depth writing) are also drawn into the SSR effects layer (fxl_*)
         // PSPRECOMP_SSR_FX_OFF=1: no effects layer at all (each effects draw is drawn twice, into another framebuffer: on a tiled mobile
@@ -3579,6 +3635,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             if (const float wx = draw_wide_x(st); wx != 1.0f) { proj[0] *= wx; proj[4] *= wx; proj[8] *= wx; proj[12] *= wx; }
             tall_proj(proj, draw_tall_y(st));
             const bool same = v.n > 0 && !std::memcmp(v.proj, proj, sizeof v.proj) && !std::memcmp(v.view, st.view_matrix, sizeof v.view);
+            if (same && v.n >= 8 && is_main_key(g_targets[cur].key)) { std::memcpy(g_last_view, v.view, sizeof g_last_view); std::memcpy(g_last_proj, v.proj, sizeof g_last_proj); g_last_vp_ok = true; }   // ge_draw_last_view_proj
             if (same) v.n++;
             else if (v.n > 0) v.n--;
             else {
@@ -3649,6 +3706,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
         std::memcpy(s.view, g_fx_vote[i].view, sizeof s.view);
         s.near_z = g_fx_vote[i].near_z; s.far_z = g_fx_vote[i].far_z;
         s.clear_z = g_fx_clearz[i];
+        std::memcpy(g_last_view, s.view, sizeof g_last_view); std::memcpy(g_last_proj, s.proj, sizeof g_last_proj); g_last_vp_ok = true;   // ge_draw_last_view_proj
         { static int dbg = 0; if (psp_rt_available() && dbg++ % 600 == 0) std::fprintf(stderr, "[RT] scene complete: %zu captured triangles, rt %d\n", g_rt_tris[i].size() / 9, (int)psp_rt_available()); }
         if (psp_rt_scene_wanted() && (!g_rt_tris[i].empty() || !g_rt_persist[i].empty())) rt_persist_merge(i, s.proj, s.view);
         if (psp_rt_scene_wanted()) rt_static_refresh(i);
@@ -3698,7 +3756,7 @@ static void fx_track(const GeState& st, uint8_t* rdram, int prim_type, int count
             g_rt_cpu = RtCpu{};
         }
         s.rt_fx = s.rt_ready && !g_rt_fx_cols[i].empty();
-        s.n_fx_lights = s.rt_ready ? fx_blob_lights(i, s.fx_lights, 8) : 0;
+        s.n_fx_lights = s.rt_ready ? fx_blob_lights(i, s.fx_lights, g_fx_light_limit.load()) : 0;
         s.n_glow_lights = 0;
         if (s.rt_ready) for (const auto& g : g_glow_lights[i]) { if (s.n_glow_lights >= 12) break; std::memcpy(s.glow_lights[s.n_glow_lights++], g.data(), sizeof s.glow_lights[0]); }
         g_glow_lights[i].clear();
@@ -3976,7 +4034,7 @@ static void ge_draw_prim_one(
             fvp.x, fvp.y, fvp.w, fvp.h, draw_wide_x(state));
     }
     if (psp_screenfx_active()) fx_track(state, rdram, prim_type, count);
-    else if (g_fxl_flag || g_rml_flag) { flush_batch(); g_fxl_flag = g_rml_flag = false; }
+    else { main_camera_vote(state); if (g_fxl_flag || g_rml_flag) { flush_batch(); g_fxl_flag = g_rml_flag = false; } }
     static const bool draw_trace_mat_env = std::getenv("PSPRECOMP_DRAW_TRACE_MAT") != nullptr;
     if (!state.clear_mode && prim_type == 3 && count > 30 && draw_trace_mat_env) {
         static int mat_n = 0;
@@ -4487,6 +4545,7 @@ static void present_service_screenshot(GLuint fbo) {
     // An active savedata dialog is composited over the frame at present time;
     // include it in the capture so screenshots match what the window shows.
     composite_dialog_overlay(flipped, cw, chh);
+    composite_game_overlay(flipped, cw, chh);
     write_tga(g_screenshot_path, flipped.data(), cw, chh);
     g_screenshot_done = true;
 }
@@ -5629,8 +5688,8 @@ static void present_toast(const PresentRect& pr) {
 // (top-left), otherwise the bare number with a soft shadow (top-right). `alpha` is the overall opacity.
 struct HudBlend { GLuint tex = 0; int tw = 0, th = 0, tscale = 0, alloc_w = 0, alloc_h = 0; std::vector<uint32_t> px; };
 static void present_blend_hud(HudBlend& st, const std::string& text, bool& text_dirty, bool box, float alpha, const PresentRect& pr,
-                              const float* graph = nullptr, int graph_n = 0) {
-    if (text.empty()) return;
+                              const float* graph = nullptr, int graph_n = 0, bool canvas = false) {
+    if (!canvas && text.empty()) return;
     static GLuint prog = 0, vao = 0, vbo = 0;
     static GLint u_tex = -1, u_alpha = -1;
     static bool failed = false;
@@ -5682,15 +5741,22 @@ static void present_blend_hud(HudBlend& st, const std::string& text, bool& text_
         glBindBuffer(GL_ARRAY_BUFFER, GLuint(prev_abo));
         glBindVertexArray(GLuint(prev_vao));
     }
-    const int scale = psp_sddialog::output_scale();
+    const int scale = canvas ? 1 : psp_sddialog::output_scale();
     GLint prev_tex = 0, prev_active = 0;
     glGetIntegerv(GL_ACTIVE_TEXTURE, &prev_active);
     glActiveTexture(GL_TEXTURE0);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
     if (text_dirty || scale != tscale || !tex) {
         int w = 0, h = 0;
-        const bool ok = box ? psp_sddialog::render_hud_box(text, scale, px, &w, &h, graph, graph_n)
-                            : psp_sddialog::render_hud_text(text, scale, px, &w, &h);
+        bool ok = false;
+        if (canvas) {
+            std::lock_guard<std::mutex> lk(g_game_canvas.m);
+            w = g_game_canvas.w; h = g_game_canvas.h;
+            if (w > 0 && h > 0 && g_game_canvas.px.size() >= size_t(w) * size_t(h)) { px = g_game_canvas.px; ok = true; }
+        } else {
+            ok = box ? psp_sddialog::render_hud_box(text, scale, px, &w, &h, graph, graph_n)
+                     : psp_sddialog::render_hud_text(text, scale, px, &w, &h);
+        }
         if (!ok || w <= 0 || h <= 0) {
             glActiveTexture(GLenum(prev_active));
             return;
@@ -5726,10 +5792,10 @@ static void present_blend_hud(HudBlend& st, const std::string& text, bool& text_
     psp_gl_drawable_size(psp_get_sdl_window(), &dw, &dh);
     if (dw <= 0 || dh <= 0) { glBindTexture(GL_TEXTURE_2D, GLuint(prev_tex)); glActiveTexture(GLenum(prev_active)); return; }
     const float sx = float(pr.x1 - pr.x0) / 480.f, sy = float(std::abs(pr.y1 - pr.y0)) / float(g_present_h272);   // a tall picture: the PSP band is its top 272 rows
-    const float qw = float(tw) / float(tscale) * sx;
-    const float right = box ? float(std::min(pr.x0, pr.x1)) + 4.f * sx + qw : float(std::max(pr.x0, pr.x1)) - 4.f * sx;
-    const float top = float(std::max(pr.y0, pr.y1)) - 4.f * sy;   // GL origin is bottom-left
-    const float qh = float(th) / float(tscale) * sy;
+    const float qw = canvas ? float(std::abs(pr.x1 - pr.x0)) : float(tw) / float(tscale) * sx;
+    const float right = canvas ? float(std::max(pr.x0, pr.x1)) : box ? float(std::min(pr.x0, pr.x1)) + 4.f * sx + qw : float(std::max(pr.x0, pr.x1)) - 4.f * sx;
+    const float top = canvas ? float(std::max(pr.y0, pr.y1)) : float(std::max(pr.y0, pr.y1)) - 4.f * sy;   // GL origin is bottom-left
+    const float qh = canvas ? float(std::abs(pr.y1 - pr.y0)) * 272.f / float(g_present_h272) : float(th) / float(tscale) * sy;
     auto cx = [&](float x) { return x / float(dw) * 2.f - 1.f; };
     auto cy = [&](float y) { return y / float(dh) * 2.f - 1.f; };
     const float u1 = float(tw) / float(alloc_w), v1 = float(th) / float(alloc_h);
@@ -5805,6 +5871,23 @@ static void present_fps_counter(const PresentRect& pr) {
     if (text != shown) { shown = text; dirty = true; }
     if (g_perf.fps_dirty) { g_perf.fps_dirty = false; dirty = true; }
     present_blend_hud(st, shown, dirty, false, 0.95f, pr);
+}
+// A game module's overlay canvas (ge_draw_set_game_overlay), over the 480-pixel-wide picture area.
+static void present_game_overlay(const PresentRect& pr) {
+    static HudBlend st;
+    bool dirty = false;
+    {
+        std::lock_guard<std::mutex> lk(g_game_canvas.m);
+        if (g_game_canvas.w <= 0 || g_game_canvas.h <= 0) return;
+        dirty = g_game_canvas.dirty; g_game_canvas.dirty = false;
+    }
+    present_blend_hud(st, std::string(), dirty, false, 1.0f, pr, nullptr, 0, true);
+}
+void ge_draw_set_game_overlay(const uint32_t* rgba, int w, int h) {
+    std::lock_guard<std::mutex> lk(g_game_canvas.m);
+    if (!rgba || w <= 0 || h <= 0) { g_game_canvas.w = g_game_canvas.h = 0; return; }
+    g_game_canvas.px.assign(rgba, rgba + size_t(w) * size_t(h));
+    g_game_canvas.w = w; g_game_canvas.h = h; g_game_canvas.dirty = true;
 }
 static void present_perf_hud(const PresentRect& pr) {
     static HudBlend st;
@@ -5966,9 +6049,9 @@ static void present_blit(GLuint fbo, const char* why = "flip") {
         present_game_layer_copies(src_tex, spw, h272_of_fbo(fbo), cpr);
     }
     present_game_layer(cpr);
-    if (std::strcmp(why, "menu") != 0) { present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
+    if (std::strcmp(why, "menu") != 0) { present_game_overlay(cpr); present_perf_hud(pr); present_fps_counter(pr); present_toast(pr); present_flash(pr); }
     present_dialog_overlay(cpr, pr);
-    if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)
+    if (psp_touch_enabled() && (!psp_settings_menu_open() || psp_touch_editing() || psp_settings_test_open())) {   // on-screen controls over the whole window (hidden while the settings menu is open: it takes touches itself) (own program/VAO: the GE's cached GL state is reset after)
         int tw = 0, th = 0;
         psp_gl_drawable_size(window, &tw, &th);
         psp_touch_draw(tw, th);

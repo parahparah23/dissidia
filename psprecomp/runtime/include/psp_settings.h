@@ -73,14 +73,22 @@ struct PspModInstaller {
 void psp_settings_set_mod_installer(const PspModInstaller& inst);
 
 /// A game module adds on/off rows to the Debug page (this session only, not saved): `get` says whether it is on, `set` switches it.
-/// Up to 6 rows; the label and help text must stay valid (string literals).
+/// Any number up to 256 (the rows' animation-slot ids; the page scrolls) (under_fx: listed right below the FX Shaders row instead of at the end); the label and help text must stay valid (string literals).
 struct PspDebugToggle {
     const char* label;
     const char* help;
     bool (*get)();
     void (*set)(bool on);
+    bool under_fx = false;
+    bool def = false;            // the value Debug > Reset All sets
+    const char* group = nullptr; // not null: the row is on a submenu of the Debug page with this name (rows with the same name share one submenu)
 };
 void psp_settings_add_debug_toggle(const PspDebugToggle& toggle);
+
+/// A game module remembers a value of its own in settings.ini (any thread; call rarely): `psp_settings_saved_value` is what the file held at the
+/// last read or save ("" = nothing saved), `psp_settings_save_value` stores one and rewrites the file.
+std::string psp_settings_saved_value(const char* key);
+void psp_settings_save_value(const char* key, const std::string& value);
 
 /// First thing in main(): read settings.ini and export the saved values as
 /// the PSPRECOMP_* variables the window, renderer and game module read.
@@ -95,6 +103,9 @@ bool psp_settings_handle_event(const SDL_Event& ev);
 void psp_settings_tick();
 
 bool psp_settings_menu_open();
+
+/// True while Settings > Controls > Test Controls is showing: the on-screen touch controls then stay live over it (they are under test).
+bool psp_settings_test_open();
 
 /// Any thread: ask for the menu to open (the game's own menu entries - title screen, main menu, pause menu - call this). Takes effect
 /// on the main thread's next tick; does nothing while the menu is already open or in a multiplayer session.

@@ -1523,8 +1523,7 @@ static const char* const SD_SYS_FILES[4] = {
     "ICON0.PNG", "ICON1.PMF", "PIC1.PNG", "SND0.AT3"};
 
 static bool sd_ram_ok(uint32_t a, uint32_t n) {
-    return a >= 0x08000000u && a < 0x0C000000u &&
-           n <= 0x0C000000u - a;
+    return psp_guest_ok(a, n);
 }
 
 static bool sd_is_dir(const std::string& p) {
@@ -2523,7 +2522,7 @@ static bool osk_headless() {
 }
 
 static bool osk_ptr_ok(uint32_t a) {
-    return a >= 0x08000000u && a < 0x0C000000u;
+    return psp_guest_ok(a);
 }
 
 static void osk_complete(UtilityDialogState& dlg, uint8_t* rdram) {

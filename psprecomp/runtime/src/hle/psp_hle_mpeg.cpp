@@ -941,7 +941,7 @@ uint32_t resolve_buffer(uint8_t* rd, uint32_t bufferAddr) {
     // PPSSPP: bufferAddr points at a u32 holding the real frame buffer.
     // Accept a direct VRAM address too (VRAM contents are not a pointer).
     auto is_vram = [](uint32_t a) { uint32_t p = a & 0x1FFFFFFFu; return p >= 0x04000000u && p < 0x04200000u; };
-    auto is_ram = [](uint32_t a) { uint32_t p = a & 0x1FFFFFFFu; return p >= 0x08000000u && p < 0x0C000000u; };
+    auto is_ram = [](uint32_t a) { uint32_t p = a & 0x1FFFFFFFu; return psp_guest_ok(p); };
     if (is_vram(bufferAddr)) return bufferAddr;
     uint32_t v = r32(rd, bufferAddr);
     if (is_vram(v) || is_ram(v)) return v;

@@ -71,9 +71,11 @@ void MenuLayer::begin(int scale) {
     w_ = 480 * s_; h_ = 272 * s_;
     px_.assign(size_t(w_) * size_t(h_) * 4, 0.f);
     copies_.clear();
+    zk_ = 1.f; zx_ = zy_ = 0.f;
 }
 
 void MenuLayer::blend(int x, int y, float r, float g, float b, float a) {
+    a *= opacity;
     if (a <= 0.f || x < 0 || y < 0 || x >= w_ || y >= h_) return;
     if (a > 1.f) a = 1.f;
     float* p = &px_[(size_t(y) * size_t(w_) + size_t(x)) * 4];
@@ -87,19 +89,19 @@ void MenuLayer::line(float x0, float x1, float y, float thick, LayerColor c) {
 }
 
 void MenuLayer::glow(float cx, float cy, float rad, LayerColor c) {
-    const int x0 = std::max(0, int((cx - rad) * s_)), x1 = std::min(w_, int((cx + rad) * s_) + 1);
-    const int y0 = std::max(0, int((cy - rad) * s_)), y1 = std::min(h_, int((cy + rad) * s_) + 1);
+    const int x0 = std::max(0, int(PX(cx - rad))), x1 = std::min(w_, int(PX(cx + rad)) + 1);
+    const int y0 = std::max(0, int(PY(cy - rad))), y1 = std::min(h_, int(PY(cy + rad)) + 1);
     for (int y = y0; y < y1; ++y)
         for (int x = x0; x < x1; ++x) {
-            const float dx = (x + 0.5f) / s_ - cx, dy = (y + 0.5f) / s_ - cy, d = std::sqrt(dx * dx + dy * dy) / rad;
+            const float dx = IX(x + 0.5f) - cx, dy = IY(y + 0.5f) - cy, d = std::sqrt(dx * dx + dy * dy) / rad;
             if (d < 1.f) blend(x, y, c.r, c.g, c.b, c.a * (1.f - d) * (1.f - d));
         }
 }
 
 void MenuLayer::image(const uint32_t* px, int iw, int ih, int sx, int sy, int sw, int sh, float x, float y, float w, float h, float alpha) {
     if (!px || sw <= 0 || sh <= 0 || w <= 0 || h <= 0) return;
-    const int x0 = std::max(0, int(x * s_)), x1 = std::min(w_, int((x + w) * s_ + 0.999f));
-    const int y0 = std::max(0, int(y * s_)), y1 = std::min(h_, int((y + h) * s_ + 0.999f));
+    const int x0 = std::max(0, int(PX(x))), x1 = std::min(w_, int(PX(x + w) + 0.999f));
+    const int y0 = std::max(0, int(PY(y))), y1 = std::min(h_, int(PY(y + h) + 0.999f));
     auto texel = [&](int tx, int ty, float* out) {
         tx = std::min(std::max(tx, sx), sx + sw - 1); ty = std::min(std::max(ty, sy), sy + sh - 1);
         tx = std::min(std::max(tx, 0), iw - 1); ty = std::min(std::max(ty, 0), ih - 1);
@@ -109,7 +111,7 @@ void MenuLayer::image(const uint32_t* px, int iw, int ih, int sx, int sy, int sw
     };
     for (int py = y0; py < y1; ++py)
         for (int pxx = x0; pxx < x1; ++pxx) {
-            const float u = sx + ((pxx + 0.5f) / s_ - x) / w * sw - 0.5f, v = sy + ((py + 0.5f) / s_ - y) / h * sh - 0.5f;
+            const float u = sx + (IX(pxx + 0.5f) - x) / w * sw - 0.5f, v = sy + (IY(py + 0.5f) - y) / h * sh - 0.5f;
             const int iu = int(std::floor(u)), iv = int(std::floor(v));
             const float fu = u - iu, fv = v - iv;
             float a[4], b[4], c[4], d[4], o[4];
@@ -126,9 +128,9 @@ float MenuLayer::text(const std::string& str, bool bold, float em, float x, floa
     if (!face) return 0.f;
     static std::mutex mu;
     std::lock_guard<std::mutex> lk(mu);
-    FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * s_)));
-    float pen = x * s_;
-    const int by = int(std::lround(baseline * s_));
+    FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * S())));
+    const float pen0 = PX(x); float pen = pen0;
+    const int by = int(std::lround(PY(baseline)));
     FT_UInt prev = 0;
     for (unsigned char ch : str) {
         const FT_UInt gi = FT_Get_Char_Index(face, ch);
@@ -147,7 +149,7 @@ float MenuLayer::text(const std::string& str, bool bold, float em, float x, floa
         }
         prev = gi;
     }
-    return pen / s_ - x;
+    return (pen - pen0) / S();
 }
 
 float MenuLayer::serif_caps(const std::string& str, float em, float small, float track, float x, float baseline, LayerColor c, bool measure_only) {
@@ -155,11 +157,11 @@ float MenuLayer::serif_caps(const std::string& str, float em, float small, float
     if (!face) return 0.f;
     static std::mutex mu;
     std::lock_guard<std::mutex> lk(mu);
-    float pen = x * s_;
-    const int by = int(std::lround(baseline * s_));
+    const float pen0 = PX(x); float pen = pen0;
+    const int by = int(std::lround(PY(baseline)));
     for (unsigned char ch : str) {
         const bool lower = ch >= 'a' && ch <= 'z';
-        FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * (lower ? small : 1.f) * s_)));
+        FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * (lower ? small : 1.f) * S())));
         const FT_UInt gi = FT_Get_Char_Index(face, lower ? ch - 32 : ch);
         if (FT_Load_Glyph(face, gi, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT) == 0) {
             const FT_GlyphSlot g = face->glyph;
@@ -171,10 +173,10 @@ float MenuLayer::serif_caps(const std::string& str, float em, float small, float
                         if (cov) blend(gx + int(q), gy + int(r), c.r, c.g, c.b, c.a * cov / 255.f);
                     }
             }
-            pen += g->advance.x / 64.f + track * s_;
+            pen += g->advance.x / 64.f + track * S();
         }
     }
-    return pen / s_ - x - track;
+    return (pen - pen0) / S() - track;
 }
 
 void MenuLayer::publish() {

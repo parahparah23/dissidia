@@ -20,6 +20,7 @@
 // patched index fits (retail, empty mods, a few overrides) every hook calls the original function: nothing changes.
 // PSPRECOMP_INDEX_RELOCATE=1 relocates even when the index fits (regression aid: retail through the hooks). The count is a u32 in the file header, so it needs no widening. PSPRECOMP_INDEX_EXTENDED=0 disables the hooks
 // (back to the retail ceiling).
+#include "psp_memory.h"
 #include "psp_game_module.h"
 #include "hle/psp_hle.h"
 #include "package_mods.h"
@@ -55,7 +56,7 @@ inline void call(uint8_t* rdram, recomp_context* ctx, uint32_t addr) { RECOMP_LO
 
 std::string guest_cstr(uint8_t* rdram, uint32_t a) {
     std::string s;
-    if (a < 0x08000000u || a >= 0x0C000000u) return s;
+    if (!psp_guest_ok(a)) return s;
     for (int i = 0; i < 256; i++) {
         char c = static_cast<char>(rdram[(a + i) & 0x07FFFFFFu]);
         if (!c) break;

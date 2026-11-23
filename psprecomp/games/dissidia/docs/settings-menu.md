@@ -29,12 +29,38 @@ VCKing101's, MIT), through the runtime's texture editor (`psp_texpack_set_editor
 pack's own image for the same texture overrides). `PSPRECOMP_NO_TEXTURE_EDITS=1` keeps the PSP's symbols, `PSPRECOMP_PROMPTS_LOG=1`
 logs each redraw. The Controls page is now on every device; its Touch screen rows only with a touch screen.
 
+**Controls > Button Chord Window** (Off, Short, Medium; `chord_ms`, `PSPRECOMP_CHORD_MS=<ms>`, default Short = 70 ms, Medium = 110 ms, 0 = off):
+in battle a face button pressed with no L / R held is held back for the window; if L or R comes down in it both reach the game in one
+pad read (R + Cross dodge, R + Triangle dash, R + Square EX, R + Circle summon, L + Circle / L + Square assists), otherwise the button
+arrives that much late (a tap shorter than the window is still delivered, for 34 ms). See frame-rate.md "Button chord window".
+
 **Controls > L / R Buttons** (Shoulders, Triggers; `lr_buttons`, `PSPRECOMP_LR_TRIGGERS=1`): Shoulders (the default) is as before,
 the shoulder buttons press L and R and so do the triggers. Triggers: only the triggers press L and R, the shoulders nothing, and the
 prompts name the triggers (LT / RT, L2 / R2, ZL / ZR). **Player 1 Controller** (`p1_controller`, `PSPRECOMP_P1_CONTROLLER=any|keyboard|<GUID>`):
 Any Controller (the default), one connected controller by name (the others are ignored: a Steam Deck with a pad plugged in, a pad
 someone else holds), or Keyboard Only. A saved controller that is not connected stays a choice, marked "(not connected)".
-**Keyboard > Move Keys**: one key for each move that takes two buttons, both going down in the same pad read as the game needs
+**Controls > Test Controls** (generic runtime, `psp_settings.cpp` / `psp_settings_render.inc`; no setting is saved): a full-screen PSP
+drawn with shapes (no image assets): D-pad, Cross / Circle / Square / Triangle, L, R, Start, Select and the analog stick, each lit
+while the PSP input reads it pressed, the stick nub following the live position, and the raw stick values (0..255, 128 = centre) with the
+list of pressed buttons on its screen. It shows the input after the game's mapping: keyboard (move keys press two buttons), controllers
+(Player 1 Controller, L / R Buttons, A / B swap), the on-screen touch controls (they stay live over the screen; Start + Select touches
+leave) and, for player 1, debug-socket injections. A tab per player: Player 1 is what the game reads for player 1; Player 2 is a
+placeholder for split screen that reads the second connected controller (the first one Player 1 does not use; "No controller" if none).
+The **Controller** panel shows the same player's physical controller (SDL game controller) raw, before the game's mapping: left and right
+stick (live nub, raw -32768..32767 values, L3 / R3 click lights the ring), L2 / R2 as analogue bars (0..100 %, "DOWN" past the press
+threshold) and the other buttons by SDL name (A B X Y, LB RB, Back / Guide / Start, D-pad), lit while down. Each control states what the game
+does with it, read from the runtime's own mapping: L2 / R2 follow `PSPRECOMP_PAD_L2` / `_R2` (the game's run.sh sets L2 = R + Cross) or become
+the PSP L / R when Controls > L / R Buttons = Triggers (LB / RB then do nothing); the A / B swap shows in A / B; R3 is the camera re-center; the
+right stick is the PSP right analog the game reads. A line lists what is down as "button > game action". Keyboard-only / touch players show
+"No controller for this player". On a tall canvas (design height >= 380) the PSP and the panel are stacked; on 16:9 two tabs (PSP /
+Controller, click, touch or F3) switch between them. Test rigs: `PSPRECOMP_TEST_VPAD="rx,ry,lt,rt,buttonmask,lx,ly"` attaches an SDL virtual
+controller holding those raw values (buttonmask bit i = SDL_GameControllerButton i), `PSPRECOMP_TEST_OPEN_TESTCONTROLS=<s>` opens the screen
+by itself after that many seconds and `PSPRECOMP_TEST_TESTCONTROLS_VIEW=1` starts on the Controller tab.
+Switch with a click or touch on a tab, PageUp / PageDown / F2, or by holding L + R for 1 s on a pad; on 16:9 the PSP / Controller views switch with a tab click or touch, F3, or Select + R held 1 s (pad). Leave with Esc, F1, Android Back,
+the Exit button (click / touch), right click, or by holding Start + Select for 2 s (from any player's input; a bar shows the hold); all
+other keys and buttons are the buttons under test and do nothing to the menu. `psp_input_sample(player, &sample)` (`psp_event_loop.h`)
+is the API a split-screen mode can reuse; the pre-menu-gate state is kept by `publish_input` even while the menu hides it.
+**Keyboard > Keyboard Controls** (a row that opens a list page: Cross opens, Back returns; two-button moves first, then the other keys): one key for each move that takes two buttons, both going down in the same pad read as the game needs
 (R held first makes a block instead): D dodge (R + Cross), F dash (R + Triangle), E EX Mode (R + Square), V summon (R + Circle),
 1 Brave assist (L + Circle), 2 HP assist (L + Square). Holding R or L and pressing the face button still works. (VCKing101's idea,
 `docs/port/keyboard-controls.md`; our keys, as our keyboard layout is fixed.) `PSPRECOMP_KEY_LOG=1` logs every change of the buttons
@@ -105,3 +131,18 @@ of retail textures: `tools/texpack_extract.py`.
 
 A loose-file mod that replaces one of the two layout files keeps its own layout (the built-in edit is skipped), and the start
 menu / title rows then overlap the retail rows; the pause menu row does not depend on files.
+
+## Debug page notes (21 Nov)
+- `psp_settings_add_debug_toggle` has no small cap any more (it was 10: the Jecht Combo Timing row, registered third, was dropped once the tag team added rows). The rows are a range of 256 row ids (`ROW_DBG0..ROW_DBG_END`, ids are per-row animation slots, `SET_MAX_IDS` = 1024) and the page scrolls.
+  lists a row right below the FX Shaders row; the Jecht Combo Timing helper uses it.
+- Controls > L / R Buttons (Shoulders / Triggers) is a value selector (< value >), not an On / Off switch.
+- Controls > Keyboard Controls opens the Keyboard Controls sub-page (read-only lines: key, move, PSP buttons).
+- Debug > **Button Chord Window (ms)** (Off, 10 to 200 ms in steps of 10): the fine version of Controls > Button Chord Window, the same saved `chord_ms` (default 70), applied at once. The Controls row shows "Custom (N ms)" when the value is none of its presets (Off / Short 70 / Medium 110).
+- `PspDebugToggle` has `def` (the value Reset All sets) and `group`: rows with the same group name are listed on a submenu row of the Debug page (Cross opens, Back returns; the row shows "N of M on"). The Dissidia tag team rows use group "Tag Team". Generic code only: `g_dbg_groups`, `PAGE_DBGGRP`, `ROW_GRP0..`.
+- Debug > **Reset All** (last row, asks Yes / No, No pre-selected): Performance Overlay off, FX Shaders on, GPU Sync off, Vertex Upload Sub, Glow Softening / Passes on, Effect Light sliders 2.5 / 1.5, chord window 70 ms, every game toggle to its `def`, and every developer option back to its default (those apply at the next start). Saved.
+
+## Game-module saved values, Tag Team debug rows are test overrides (22 Nov)
+- `psp_settings_saved_value(key)` / `psp_settings_save_value(key, value)` (psp_settings.h): a game module reads / writes a settings.ini key of its own (what the file held at the last read or save; writing rewrites the file). Dissidia uses
+  `tagteam_lobby=mode,size,fill,strength,stage,rules,judgement,exb,assist` for the battle lobby's last choice.
+- Debug > Tag Team: the mode rows (Tag Team (2v2), 3v3, 2v1, 1v2, Free-for-all) are test overrides now: the Battle Lobby (Select on a row of the Tag Team Battle setup screens, Battle Mode and Communications) decides the mode;
+  a Debug row / env variable that is on wins over the lobby, and "Tag Team (2v2)" on makes every battle a tag battle (default off: plain Quick Battle / Group Battle are retail). See tag-team.md "Battle lobby in single player".

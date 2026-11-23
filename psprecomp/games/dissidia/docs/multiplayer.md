@@ -29,11 +29,12 @@ between players. Nobody has to forward a port or know anyone's address.
   | Server | the relay: a host name or `host:port` (default `party.schindlershadow.com:27500`); Cross edits |
   | Room | blank = the public room; Cross edits |
   | Direct Peers | LAN only: extra addresses to contact directly; Cross edits |
+  | Network Delay | 1-8 battle frames (default 2); see "Input delay" below |
   | Status | `Connected, 3 online`, `No answer from the server yet`, `Cannot find ...`, `LAN: 2 nearby` |
 
   Editing text: type on a keyboard (Enter saves, Esc cancels), or with a controller pick a letter with left / right,
   add it with Cross, delete with Circle, and save with Start or the Done row. Changes apply at once and are saved
-  in `settings.ini` (`net_mode`, `net_server`, `net_room`, `net_peers`).
+  in `settings.ini` (`net_mode`, `net_server`, `net_room`, `net_peers`, `net_input_delay`).
 - Everything you send goes through the server, and the public room shows your player name to whoever is in it. The
   server never looks inside a game message and does not log them, but it has no accounts and no encryption: use a
   private room name for friends.
@@ -75,6 +76,48 @@ forwarded by hand. Only the router on the local network is contacted.
 **Expect latency to matter.** The game runs a lock-step battle over reliable streams, and nothing here delays or
 predicts input. It was built for a few milliseconds of WiFi latency. A relay adds the trip to the server on top of the
 direct path; how much round-trip time the game tolerates has not been measured, so try a nearby partner first.
+**Expect latency to matter.** Battles run on our pad link (see "Battles: our pad link"): the default network delay of 2 frames
+covers a round trip up to about 130 ms without waiting. Raise the Network Delay for slower connections.
+
+### Input delay
+
+There is ONE network delay: Settings > Network > **Network Delay** (`PSPRECOMP_NET_DELAY=1..8`, default 2; saved as
+`net_input_delay`; the old name `PSPRECOMP_NET_INPUT_DELAY` is still read when the new one is not set).
+`runtime/src/hle/psp_netplay.cpp` (`psp_netplay_input_delay`) holds it; both online battle engines use it:
+
+- plain battles: `comm_battle.cpp` (read again at every battle start, so a change in the menu applies to the next fight);
+- tag team Communications battles: `tagteam_net.cpp` (the tag lock-step, see tag-team.md "Online: pad link and tag lock-step").
+
+With N frames your own presses take effect N battle frames later and the other player's input has N frames longer to
+arrive. The delays of both players add up; a rough guide is one frame per 70 ms of round-trip ping at 30 fps, the same
+value on both sides (the two copies work with different values too, each pad is labelled by its frame). There is no
+"Off" any more: 0 was the game's own exchange, which main's pad link replaces.
+
+### Desync check (tag team battles)
+
+Plain battles are checked by the pad link (the game's own check value every 10 frames, 'checks agreed' in the
+`PSPRECOMP_NET_LINK_LOG=1` log). The runtime's own per-field check below runs in tag team battles only (`tagteam_net.cpp` submits
+the state of every delivered frame; `netplay.cpp` no longer hooks the game's exchange). Both copies hash the battle state at every frame the lock-step plays and send the hashes to each other (on by default;
+`PSPRECOMP_NET_SYNCCHECK=0` turns it off). Every 10 s the log says `[NETSYNC] so far: frames compared N, mismatched M`;
+the first frame that differs is logged with every field that differs, and a message appears on screen:
+
+```
+[NETSYNC] DESYNC at frame 601 with 02:aa:be:3e:ad:25: 7 of 65 fields differ, first fighter0.pos.x local C1A7D9AD remote C1A9D9AD
+[NETSYNC]   fighter0.pos.x           local C1A7D9AD remote C1A9D9AD
+[NETSYNC]   fighter0.body.x          local C1A7FE53 remote C1A9FE96
+...
+```
+
+The values: the battle clock; for each fighter its origin and body position, current script, motion time, the HP / brave
+block (+0x10A8..+0x10B8), the assist gauge, and FNV hashes of the fighter struct in 256-byte blocks (`fighter1.block300`
+= bytes +0x300..+0x3FF). Fields that differ between the two players by design (data only the local player's fighter
+fills: camera, lock-on, the pad number, and any word holding a heap pointer, because the HUD and effects allocate per
+view) are left out; the list is in `runtime/netplay.cpp` (`viewer_mask`). `PSPRECOMP_NETSYNC_DUMP=300,500` logs those
+blocks word by word every frame (`[NETDUMP]`) so the two logs can be diffed to find the word behind a block mismatch.
+
+The game has a much coarser check of its own (a sum of both fighters' positions and the battle clock every 10 frames,
+sent in its input packets): when that one fails, the game ends the match (`[NETPLAY] the game's own lock-step checksum
+failed at frame N`). Our check reports the exact frame and field before that happens.
 
 ## Ping and network warnings
 
@@ -198,6 +241,13 @@ brings the old behaviour back for tests.
 | `PSPRECOMP_ADHOC_MAC=aa:bb:cc:dd:ee:ff` | virtual MAC; default is random per launch (a host-name hash collides: every Steam Deck is called `steamdeck`) |
 | `PSPRECOMP_ADHOC_LOG=1` | log every call and event with arguments, results and the first bytes of each message |
 | `PSPRECOMP_PAD_BACKGROUND=1` | let controllers act while the window is unfocused |
+| `PSPRECOMP_NET_INPUT_DELAY` | old name of `PSPRECOMP_NET_DELAY` |
+| `PSPRECOMP_NET_SYNCCHECK=0` | turn the desync check off |
+| `PSPRECOMP_NET_TRACE=1` | log every PTP / PDP message with the frame number (`[NETTRACE]`) and the lock-step state of every frame (`[NETLS] rc= frame= seq= lead=`) |
+| `PSPRECOMP_NET_LAG_MS=<ms>`, `PSPRECOMP_NET_JITTER_MS=<ms>`, `PSPRECOMP_NET_LOSS=<percent>` | testing: delay (plus 0..jitter) or drop the game packets this copy receives; set on both copies (round trip = twice the delay) |
+| `PSPRECOMP_NET_PERTURB=<frame>` | testing: move fighter 0 by 0.25 on this copy only after that lock-step frame (the desync check must report frame+1) |
+| `PSPRECOMP_NETSYNC_DUMP=<hex offsets>` | log those fighter blocks word by word every frame (`[NETDUMP]`) |
+| `PSPRECOMP_NET_VIEW_STICK=1` | testing: turn every pad slot's stick by the local camera again (the old desync, see "Camera and stick") |
 
 Log lines start with `[ADHOC]` in `last_run.log`.
 
@@ -221,6 +271,11 @@ Guest callbacks never run on the network thread. They are queued and run on a ga
 
 Details worth knowing when changing it:
 
+- A matching request that is still pending (sent, received, or accepted but not yet established) stays until it is
+  accepted or cancelled, as on a PSP: both sides ping each other every second while it waits (a ping flag marks it as
+  pending), so a host may take as long as it likes to start a room. Only when a side's pings stop for 6 s is the other
+  side told (cancel for a requester that is gone, timeout for a target that is gone); a pending ping to a side that has
+  no such request is answered with a cancel, so no stale entry is left when a cancel is lost.
 - The game checks every peer with `sceNetAdhocctlGetPeerInfo` and drops anyone whose `last_recv` (game clock) is older
   than 20 s, so the field is filled from the beacon time.
 - After the PTP handshake the game keeps opening new sockets on the same ports whenever a connect fails. A SYN with no
@@ -231,6 +286,109 @@ Details worth knowing when changing it:
 - Struct layouts follow PPSSPP: scan info 28 bytes, peer info 152 bytes, PDP stat 20, PTP stat 36 (the last two are
   unchecked against the game).
 
+## Battle protocol
+
+What the two PSPs exchange during a Communications fight (Group Battle; found with `PSPRECOMP_NET_TRACE=1`):
+
+- Before the fight, over PTP (ports 0x64-0x66): the setup and each player's data (20 KB blocks on 0x64, a 4-byte hello
+  and a 64-byte answer on 0x66).
+- During the fight, nothing but pad input, over PDP port 0x67: every frame one 36-byte datagram to every peer. The
+  battle's net object (EBOOT `FUN_0890D664`, called once per frame) reads the pad itself (`sceCtrlReadBufferPositive`),
+  packs it into a 16-bit input word for frame `seq` and sends the newest 8 words (so a lost datagram is covered by the
+  next ones), the oldest frame of that window, and the game's checksum with its frame (every 10 frames). It then plays
+  frame `frame` if every player's input for it has arrived: it copies the inputs into the pad manager's per-player slots
+  (`[0x089D6008] + 96 x player`, +64) and returns 0; otherwise it returns 1 and the battle waits for a frame. 2 = no
+  battle, 3 = the checksums disagree (the match ends).
+- The run-ahead (`seq - frame`, the local input delay) is 0 on a LAN. The pad is read only while
+  `seq - (last frame played) < 4` (`FUN_0890D214`), so during waits the input can get up to 3 frames ahead, and stays
+  there. That is the latency the stock game absorbs. Input Delay N holds the battle back at the start until the input
+  runs N frames ahead (`FUN_0890D524`, "is this frame's input here", answers no) and raises the limit to 4 + N.
+- A tag team battle (docs/tag-team.md "Multiplayer: N-player lock-step") replaces this with the runtime's own protocol on every member
+  (the game's dispatcher `FUN_0890C5BC`): every member sends its input words to everyone, only the fighters' drivers are waited for.
+- Both copies simulate the whole fight from the same inputs; nothing of the state is sent. So any difference in the
+  simulation (an uninitialised value, a host-side random number, a frame-rate fix that depends on local timing) is a
+  desync. The negotiated frame rate (both play at the lowest rate either asked for) is what keeps the step identical.
+
+(The rows of the table below, and `mp_test.py`'s `NET_INPUT_DELAY` runs, measured the OLD input-delay hook in `netplay.cpp`, which is retired; plain battles are measured in "Battles: our pad link".)
+
+### Testing (two copies, headless)
+
+`tools/mp_test.py --work-a W1 --work-b W2 [--env 'PSPRECOMP_NET_LAG_MS=100 PSPRECOMP_NET_INPUT_DELAY=3'] [--secs 60]` boots
+two copies on this machine (LAN mode, no window: `SDL_VIDEODRIVER=offscreen` with the NVIDIA EGL vendor file, private
+settings and memory stick copies), walks both into a fight (A: Communications Mode > Group Battle > Create Room (Custom);
+B: Search for a Room, join; A starts; A takes Party A, B Party B; Tournament; both pick Lightning; Enter Battle; Next until
+the lock-step runs), presses a fixed list of moves on both through the debug socket, and prints the waits, the lead and
+the desync summary of each copy. `--env-a 'PSPRECOMP_NET_PERTURB=600' --expect-desync` is the desync-check self test.
+Results (30 fps, 60-120 s of moves each):
+
+| Case (`PSPRECOMP_NET_*` on both copies) | Waits | Lead A / B | Desync check |
+|---|---|---|---|
+| (old netplay.cpp hook) none, Input Delay Off | 0 % | 0 / 1 | 3600 frames, 0 mismatched |
+| none, Input Delay 3 | 0 % | 3 / 3 | 1800 frames, 0 mismatched |
+| LAG_MS=100 (200 ms round trip), Off | 33 % | 2-3 / 2-3 | 1200 frames, 0 mismatched |
+| LAG_MS=100, Input Delay 3 | 0.1 % | 5 / 3 | 1800 frames, 0 mismatched |
+| LAG_MS=60 JITTER_MS=40 LOSS=2, Input Delay 3 | 0.1 % | 5 / 4-5 | 1760 frames, 0 mismatched |
+| LAG_MS=60 JITTER_MS=40 LOSS=2, Off | 26-30 % | 2-3 / 2-3 | before the stick fix 3 of 6 runs desynced at frame 235 (see "Camera and stick") |
+| none, A: PERTURB=600 | 0 % | 0 / 1 | both report frame 601, `fighter0.pos.x` first; the game's own check ends the match at frame 611 |
+
+### Camera and stick (the jitter desync, fixed)
+
+Three of six runs with 60 ms + 0-40 ms jitter + 2 % loss and Input Delay Off once desynced at frame 235, right after copy
+A's first stick input, with identical inputs on both copies; a tag battle desynced the same way when a fighter got up from
+a knockdown with the stick held (yaw -1.99 on one copy, -1.15 on the other). Cause: **the runtime turned every player's
+stick by the local view.**
+
+- The stick reaches the battle like this: the net object (`FUN_0890D664`) reads the local pad and packs it into the 16-bit
+  input word (`FUN_0890CE58`), which runs the stick processor `FUN_08872138` on the local stick; only its 4 virtual D-pad
+  bits (0x1000-0x8000) are sent. Every machine unpacks every player's word into the pad slots (`FUN_0890D090`: each axis
+  becomes 0x00 / 0x80 / 0xFF) and runs `FUN_08872138` again on each slot.
+- `input.cpp` wraps `FUN_08872138` and turns the stick by `dissidia_camera_turn()`, how far this player's free camera
+  (right stick) or held camera (no lock-on, e.g. after a knockdown or before the first lock) is turned from the game's
+  camera, so that "up" goes into the screen. That ran for the slots too: on each machine both fighters' sticks were turned
+  by that machine's view, which differs between the players (and is advanced by the wall clock, also on held-back frames).
+- Fix (`input.cpp`): in a lock-step battle (`FUN_0890CE58` has run in this battle, or the player is in an ad-hoc group) the
+  turn is applied only inside `FUN_0890CE58`, to the local stick before it is packed, so it is part of the input every
+  machine receives; the slots are processed the same way everywhere. Per fighter by construction: each player's own word
+  carries their own turn, so a human-driven tag partner works the same way. Single player is unchanged (that path is not
+  taken). `PSPRECOMP_NET_VIEW_STICK=1` restores the old behaviour for A/B tests.
+- The game's own conversion does not read the displayed camera: with the left stick held in a single-player battle, gdb
+  read watchpoints on the camera manager's matrix / eye / target (`[0x08B3D6B8]`, +0x00..+0x5F) saw reads only inside
+  the camera update `FUN_08B3CA24` and its copy-outs (render camera `FUN_088A5F1C`, global camera `[0x089D5EC0]+0x720` by
+  `FUN_08B3C0D8`), and the global copy is read by the render-matrix builders and two unidentified battle-overlay readers
+  (`FUN_08B53C20` eye, `FUN_08ABBC48` matrix). Two copies with one player's view turned by the right stick while moving
+  stay in sync (below), which a movement conversion through the displayed camera could not. So the camera module's view
+  polish (free camera, hold, smoothing, own collision, wall fade, hitcam= and tag entrance close-ups) stays on in
+  multiplayer; none of it is disabled.
+
+Tests, 30 fps, two copies on one machine (`mp_test.py --rstick`: the usual moves plus right-stick turns on both copies while
+the left stick is held; tag battles: the same with `PSPRECOMP_TAGTEAM=1`, 2 v 2 with CPU partners; runs that stalled under
+the GPU load of other sessions are left out):
+
+| Case | Old stick turn (`PSPRECOMP_NET_VIEW_STICK=1`) | Fixed |
+|---|---|---|
+| Group Battle, right stick, LAN | 2 of 2 desynced at frame 345, the game ended the match at 352 | 2 of 2 in sync (2100 frames each) |
+| Group Battle, right stick, LAG 60 + JITTER 40 + LOSS 2 | (the run stalled) | 2 of 2 in sync (1446-1521 frames) |
+| Group Battle, no right stick, LAG 60 + JITTER 40 + LOSS 2 | 2 runs: no position desync | 2 runs: no position desync |
+| Tag battle, right stick, LAN | 1 of 1 desynced at frame 435, the game ended the match at 441 | 2 of 2 in sync (2094-2100 frames) |
+| Group Battle, right stick, copy A's view on the opponent's camera (`PSPRECOMP_CAM_VIEW_SLOT=1`) | - | in sync (2100 frames) |
+
+Without the right stick the old frame-235 desync did not reproduce in two runs with the old turn (the camera code changed
+since; not investigated), so the right stick is the repeatable pressure: it makes the turn non-zero at once.
+
+**Showing another fighter (view only).** The camera manager's slot table (`mgr + 0x6D0 + 4 * i`) is simulation state:
+every update `FUN_08B3CA24` steps the camera of every lock block listed there (`FUN_08B3C760`, `FUN_08B3B4FC`), and
+movement uses that fighter's lock-block camera (inferred from that test; the per-slot reads were not traced). Re-pointing a side's entry to show another fighter (a test in the
+lock-step tree) split the positions at the first stick input. Which slot is *shown* is per viewer: the update picks the
+slot whose lock block has byte `+0x125` set (`FUN_08B3B308`, index stored at `mgr + 0x8B8`). `camera.cpp`
+`dissidia_camera_set_view_slot(i)` (`PSPRECOMP_CAM_VIEW_SLOT=<i>` for tests) shows slot `i`'s camera by writing its
+eye / look-at (the update's copy at `mgr + 0x110 + 0x30 * i`) into the final eye, view only. That copy is the slot's raw
+camera, before the manager's final blend / pull-in (a metre or so from the game's own framing of the same slot), and a
+fighter needs a slot entry (made the same way on every machine) for his camera to be stepped at all.
+
+Still open: under jitter and loss a mismatch in `fighter1.blockD00` (one field, ~24-40 frames, positions and the game's
+own checksum unaffected) was seen with and without the fix (1 of 2 runs each, frames 960 / 1274); the word is not identified
+(`PSPRECOMP_NETSYNC_DUMP=D00` names it). Some jitter / loss runs stall at the start of the fight (both copies at under
+1 fps, no lock-step frames) with and without the fix; not looked into.
 ## Mods that change a character (verified packs)
 
 A player who uses a known pack (today: Bartz's Dissidia 1 moves, `mods/bartz-dff`) can play online with players who
@@ -282,6 +440,47 @@ forwarded; run your own with the README's two lines and point Server at it.
 
 - `sceNetAdhocDiscover*` and game mode (`sceNetAdhocctlCreateEnterGameMode` and friends): the game imports Discover but
   nothing in Communications mode was seen to need it.
-- Input delay or rollback for high latency, and any form of authentication or encryption. A single relay host is a
-  single point of failure.
+- Rollback (issue #66); see "Rollback: what it would need" below. Any form of authentication or encryption. A single
+  relay host is a single point of failure.
+- The Online Lobby (Communications Mode > Online Lobby) stops on a white screen: it jumps to `0x08A11ED8` in overlay 2,
+  a function the analysis did not find (`[LOOKUP_MISS]`). Group Battle works.
 - Infrastructure (WiFi access point) mode: the game does not use it.
+
+## Rollback: what it would need
+
+Notes from the input-delay / desync-check work (issue #66), for whoever builds rollback on top of it:
+
+- **Inputs are already isolated.** The battle reads its inputs only from the pad slots `FUN_0890D664` fills, one frame
+  at a time, and the frame number is explicit (`frame`, net object +72). A rollback layer can own that function: deliver
+  a predicted input for the remote player when the real one is missing (return 0 instead of 1), remember what was
+  predicted, and roll back when the real input differs.
+- **Frame boundary.** `FUN_0890D664` runs at the same point of the main thread's frame every frame, with the same native
+  call stack under it. That is the one place where a snapshot / restore of guest state can work despite the native-stack
+  execution model (`docs/savestates.md`): restore guest memory and the main thread's registers there and return, and the
+  main thread continues from a state it was in before. Other guest threads (audio, file loading) must not be in the
+  middle of touching battle memory then; that has not been checked.
+- **What to snapshot.** Not measured yet beyond the fighters: each fighter struct is about 0x1100 bytes, plus the battle
+  object (`[0x089D6A10]`), the slow-motion object, effect / projectile actors, the RNG the battle uses (not found yet), the
+  battle overlay's data section, and the runtime's own per-frame hook state in `games/dissidia/runtime` (frame-rate
+  compensation, press latch, camera). The desync check's block hashes can be extended to find what else changes per
+  frame.
+- **View-side state is separate.** The fields the desync check masks (camera, lock-on, HUD, effect pointers) differ
+  between the players and need not (and must not) be rolled back with the simulation; re-simulated frames must not draw
+  or play sounds (the 30 Hz logic work's "drawn-only frames" skip list is the opposite case and a starting point).
+- **The game's own checksum** compares positions every 10 frames and ends the match on a mismatch: a rollback
+  implementation has to send its checksums from confirmed frames only, or turn it off.
+- **Determinism risks seen in the code** (already a desync risk without rollback): `roster.cpp` `magi_pick` (modded
+  characters whose magic picks a random element) advances a process-wide xorshift (`g_pick_rng`) and a call counter that
+  live for the whole session, mixed with the actor address; two players whose games made a different number of picks
+  before the match (a single-player fight first) pick differently. It should be reseeded from battle state at the start
+  of each battle. Every native frame-rate compensation in `framerate.cpp` runs per update and must behave identically on
+  both sides (both play at the negotiated rate, so they do today); `camera.cpp` and `framerate.cpp` read the wall clock,
+  which is fine only while it feeds view-side state.
+- **The camera.** The displayed camera is view state and the simulation does not read it (see "Camera and stick"); the
+  stick turn by the local view is applied before the input is packed, so a rollback layer predicting or replaying inputs
+  sees the turned stick as plain input. Re-simulated frames must not run the camera module's per-frame hook (it also
+  calls `dissidia_tagteam_frame`, the tag team's swap / call-in safe point).
+- **Re-simulation cost** (up to 8 frames per displayed frame) is unknown; the battle update was never timed without
+  drawing.
+
+**Tag battles (our lock-step, 20 Nov):** the end of a tag battle and a silent peer are handled by `tagteam_net.cpp` (lock-step stands down at the decision so retail's end-of-battle exchange can run; `PSPRECOMP_TTLOCK_TIMEOUT` s of silence from a needed player = quit like above), see tag-team.md "Lock-step end of battle".

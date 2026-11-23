@@ -75,6 +75,11 @@ int render_queue_update_stall(int uid, uint32_t new_stall);
 /// Returns true if no pending GE lists in the queue.
 bool render_queue_all_ge_done();
 
+/// Waits (at most timeout_ms) until the GE has caught up with the game: every queued list is finished or stalled at its stall address
+/// (all the commands the game has written so far are processed). Unlike DrawSync it does not need the open list to end. Returns the
+/// milliseconds waited, or -1 on timeout.
+int render_queue_wait_caught_up(int timeout_ms);
+
 /// Returns true if there are pending GE lists waiting to be processed.
 bool render_queue_has_pending_ge();
 

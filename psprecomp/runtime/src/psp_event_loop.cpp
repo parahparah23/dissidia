@@ -81,8 +81,8 @@ std::atomic<uint32_t> g_host_buttons{0};
 //
 // SDL game controller (all connected pads, hot-plug aware):
 //   A -> CROSS        B -> CIRCLE      X -> SQUARE      Y -> TRIANGLE
-//   LEFTSHOULDER  -> LTRIGGER    TRIGGERLEFT  (>50%) -> LTRIGGER (or PSPRECOMP_PAD_L2)
-//   RIGHTSHOULDER -> RTRIGGER    TRIGGERRIGHT (>50%) -> RTRIGGER (or PSPRECOMP_PAD_R2)
+//   LEFTSHOULDER  -> LTRIGGER    TRIGGERLEFT  (>18%) -> LTRIGGER (or PSPRECOMP_PAD_L2)
+//   RIGHTSHOULDER -> RTRIGGER    TRIGGERRIGHT (>18%) -> RTRIGGER (or PSPRECOMP_PAD_R2)
 //   DPAD up/right/down/left -> UP/RIGHT/DOWN/LEFT
 //   START -> START    BACK -> SELECT    GUIDE -> ignored
 //   Left stick -> analogue lx/ly, 0..255 (centre 128), ~8% deadzone applied
@@ -141,6 +141,7 @@ int16_t  g_rx_raw = 0, g_ry_raw = 0;  // right stick (SDL range)
 uint8_t  g_kb_arrows = 0;       // bit0 up, 1 down, 2 left, 3 right
 int16_t  g_lx_raw = 0, g_ly_raw = 0;  // left stick (SDL range)
 std::map<SDL_JoystickID, SDL_GameController*> g_pads;
+std::atomic<uint32_t> g_test_buttons{0}, g_test_analog{0x8080};   // what the game would read, even while the settings menu hides it
 
 uint32_t g_trig_l_mask = P_L, g_trig_r_mask = P_R;  // PSPRECOMP_PAD_L2 / _R2
 bool g_lr_triggers = false;   // Controls > L / R Buttons = Triggers: LT/RT press L/R, the shoulders nothing (prompts say LT/RT)
@@ -339,6 +340,19 @@ void publish_input() {
     const uint32_t pad_triggers = pad_ok ? g_pad_triggers : 0;
     const int16_t lx_raw = pad_ok ? g_lx_raw : 0, ly_raw = pad_ok ? g_ly_raw : 0;
     const int16_t rx_raw = pad_ok ? g_rx_raw : 0, ry_raw = pad_ok ? g_ry_raw : 0;
+    // The left stick as the game reads it (keyboard arrows stand in while the pad stick is centred)
+    uint8_t lx = axis_to_psp(lx_raw), ly = axis_to_psp(ly_raw);
+    if (lx == 128 && ly == 128 && !g_arrows_dpad_only && g_kb_arrows) {
+        if (g_kb_arrows & 4) lx = 0;
+        if (g_kb_arrows & 8) lx = 255;
+        if (g_kb_arrows & 1) ly = 0;
+        if (g_kb_arrows & 2) ly = 255;
+        if ((g_kb_arrows & 12) == 12) lx = 128;  // opposing keys cancel
+        if ((g_kb_arrows & 3) == 3) ly = 128;
+    }
+    // What the game would read, kept even while the menu hides it (Settings > Controls > Test Controls, psp_input_sample)
+    g_test_buttons.store(g_kb_buttons | pad_buttons | pad_triggers, std::memory_order_relaxed);
+    g_test_analog.store(lx | (static_cast<uint32_t>(ly) << 8), std::memory_order_relaxed);
     // The settings menu takes all input while open (and until it is released after closing).
     if (psp_settings_block_input(g_kb_buttons | pad_buttons | pad_triggers)) {
         g_host_buttons.store(0, std::memory_order_relaxed);
@@ -357,19 +371,117 @@ void publish_input() {
     g_host_ranalog.store(static_cast<uint32_t>(axis_to_psp_raw(rx_raw)) |
                          (static_cast<uint32_t>(axis_to_psp_raw(ry_raw)) << 8),
                          std::memory_order_relaxed);
-    uint8_t lx = axis_to_psp(lx_raw), ly = axis_to_psp(ly_raw);
-    if (lx == 128 && ly == 128 && !g_arrows_dpad_only && g_kb_arrows) {
-        if (g_kb_arrows & 4) lx = 0;
-        if (g_kb_arrows & 8) lx = 255;
-        if (g_kb_arrows & 1) ly = 0;
-        if (g_kb_arrows & 2) ly = 255;
-        if ((g_kb_arrows & 12) == 12) lx = 128;  // opposing keys cancel
-        if ((g_kb_arrows & 3) == 3) ly = 128;
-    }
     g_host_analog.store(lx | (static_cast<uint32_t>(ly) << 8),
                         std::memory_order_relaxed);
 }
 
+}  // namespace
+
+// ---- Test Controls: the raw controller panel ----
+// Test rigs only: PSPRECOMP_TEST_VPAD="rx,ry,lt,rt,buttonmask,lx,ly" attaches an SDL virtual game controller holding those raw values
+// (axes -32768..32767, triggers 0..32767, buttonmask bit i = SDL_GameControllerButton i), so Test Controls can be checked without a pad.
+static SDL_Joystick* g_vpad = nullptr;
+static int16_t g_vpad_axes[6];
+static int g_vpad_buttons = 0;
+// Applied once the runtime has opened the controller, so the changes arrive as events like a real pad's
+static void test_vpad_apply() {
+    if (!g_vpad) return;
+    for (int i = 0; i < 6; ++i) SDL_JoystickSetVirtualAxis(g_vpad, i, g_vpad_axes[i]);
+    for (int i = 0; i < 15; ++i) SDL_JoystickSetVirtualButton(g_vpad, i, (g_vpad_buttons >> i) & 1);
+    g_vpad = nullptr;
+}
+void test_vpad_attach() {
+    const char* e = std::getenv("PSPRECOMP_TEST_VPAD");
+    if (!e || !e[0]) return;
+    int v[7] = {0, 0, 0, 0, 0, 0, 0};
+    std::sscanf(e, "%d,%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
+    const int idx = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 6, 15, 0);
+    SDL_Joystick* js = idx >= 0 ? SDL_JoystickOpen(idx) : nullptr;
+    if (!js) { std::fprintf(stderr, "[RT] test virtual pad failed: %s\n", SDL_GetError()); return; }
+    g_vpad = js;
+    for (int i = 0; i < 6; ++i) g_vpad_axes[i] = int16_t(std::max(-32768, std::min(32767, i < 2 ? v[5 + i] : i < 4 ? v[i - 2] : v[i - 2] * 2 - 32768)));   // lx ly rx ry; a trigger axis rests at -32768 (SDL maps it to 0..32767)
+    g_vpad_buttons = v[4];
+    std::fprintf(stderr, "[RT] test virtual pad attached (device %d)\n", idx);
+}
+
+namespace {
+std::string psp_bits_name(uint32_t m) {
+    static const struct { uint32_t bit; const char* n; } nm[] = {{P_L, "L"}, {P_R, "R"}, {P_UP, "Up"}, {P_DOWN, "Down"}, {P_LEFT, "Left"}, {P_RIGHT, "Right"},
+        {P_CROSS, "Cross"}, {P_CIRCLE, "Circle"}, {P_SQUARE, "Square"}, {P_TRI, "Triangle"}, {P_START, "Start"}, {P_SELECT, "Select"}};
+    std::string r;
+    for (auto& e : nm) if (m & e.bit) { if (!r.empty()) r += " + "; r += e.n; }
+    return r;
+}
+// The pad player 1 reads: the one last used if allowed, else the first allowed (as the button prompts pick it)
+SDL_GameController* test_p1_pad() {
+    if (g_p1_pad == "keyboard") return nullptr;
+    if (g_last_pad >= 0 && g_pads.count(g_last_pad) && pad_allowed(g_last_pad)) return g_pads[g_last_pad];
+    for (auto& pr : g_pads) if (pad_allowed(pr.first)) return pr.second;
+    return nullptr;
+}
+void test_fill_pad(SDL_GameController* gc, PspInputSample* out) {
+    out->pad = true;
+    out->rx = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
+    out->ry = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+    out->lraw_x = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
+    out->lraw_y = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+    out->lt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    out->rt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    out->pad_map.assign(SDL_CONTROLLER_BUTTON_MAX, std::string());
+    for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i) {
+        if (SDL_GameControllerGetButton(gc, SDL_GameControllerButton(i))) out->pad_buttons |= 1u << i;
+        out->pad_map[size_t(i)] = psp_bits_name(pad_button_to_psp(uint8_t(i)));
+    }
+    out->pad_map[SDL_CONTROLLER_BUTTON_RIGHTSTICK] = "Camera re-center";   // see the button handler: R3 without L3
+    out->pad_l2_map = psp_bits_name(g_lr_triggers ? P_L : g_trig_l_mask);
+    out->pad_r2_map = psp_bits_name(g_lr_triggers ? P_R : g_trig_r_mask);
+    out->pad_rstick_map = "Right analog";
+}
+}  // namespace
+
+// ---- Test Controls (Settings > Controls): the input a player would give the game, readable while the menu hides it ----
+int psp_input_sample_players() { return 2; }
+bool psp_input_sample(int player, PspInputSample* out) {
+    *out = PspInputSample{};
+    out->lx = out->ly = 128;
+    if (player <= 0) {   // player 1: keyboard, the pads Player 1 Controller allows, touch; plus the debug socket's injections (what the game reads)
+        out->present = true;
+        out->name = g_p1_pad.empty() ? "Any controller + keyboard" : g_p1_pad == "keyboard" ? "Keyboard only" : "Selected controller";
+        if (g_p1_pad.size() && g_p1_pad != "keyboard")
+            for (auto& pr : g_pads) if (pad_guid(pr.second) == g_p1_pad) { const char* n = SDL_GameControllerName(pr.second); out->name = n ? n : "Controller"; }
+        uint32_t b = g_test_buttons.load(std::memory_order_relaxed);
+        uint32_t a = g_test_analog.load(std::memory_order_relaxed);
+        const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now_ms < g_injected_buttons_deadline_ms.load(std::memory_order_relaxed)) b |= g_injected_buttons.load(std::memory_order_relaxed);
+        if (now_ms < g_injected_analog_deadline_ms.load(std::memory_order_relaxed)) a = g_injected_analog.load(std::memory_order_relaxed);
+        out->buttons = b;
+        out->lx = uint8_t(a & 255); out->ly = uint8_t((a >> 8) & 255);
+        if (SDL_GameController* gc = test_p1_pad()) test_fill_pad(gc, out);
+        return true;
+    }
+    // Player 2 (placeholder until split screen): the second connected controller, i.e. the first one Player 1 does not use
+    std::vector<SDL_GameController*> others;
+    for (auto& pr : g_pads) others.push_back(pr.second);
+    if (g_p1_pad.empty()) { if (!others.empty()) others.erase(others.begin()); }   // Any Controller: player 1 has the first
+    else if (g_p1_pad != "keyboard") others.erase(std::remove_if(others.begin(), others.end(), [](SDL_GameController* gc) { return pad_guid(gc) == g_p1_pad; }), others.end());
+    if (others.empty()) { out->name = "No second controller connected"; return true; }
+    SDL_GameController* gc = others.front();
+    out->present = true;
+    { const char* n = SDL_GameControllerName(gc); out->name = n ? n : "Controller"; }
+    uint32_t b = 0;
+    for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i)
+        if (SDL_GameControllerGetButton(gc, SDL_GameControllerButton(i))) b |= pad_button_to_psp(uint8_t(i));
+    const uint32_t lm = g_lr_triggers ? P_L : g_trig_l_mask, rm = g_lr_triggers ? P_R : g_trig_r_mask;
+    if (SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16000) b |= lm;
+    if (SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) b |= rm;
+    out->buttons = b;
+    out->lx = axis_to_psp(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
+    out->ly = axis_to_psp(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY));
+    test_fill_pad(gc, out);
+    return true;
+}
+
+namespace {
 void pad_open(int device_index) {
     SDL_GameController* gc = SDL_GameControllerOpen(device_index);
     if (!gc) {
@@ -402,16 +514,19 @@ void pad_close(SDL_JoystickID id) {
     }
 }
 
+// The analogue triggers count as pressed from ~18% travel (was 50%): R + X (dodge) pressed together on an Xbox pad reached the game as X first, R a frame or
+// two later (the trigger's travel), so X alone started a chase in a chase window (18 Nov, desktop). PSPRECOMP_PAD_TRIGGER_THRESH=<0..32767> overrides.
+int16_t trigger_threshold() { static const int t = [] { const char* e = std::getenv("PSPRECOMP_PAD_TRIGGER_THRESH"); return e ? std::atoi(e) : 6000; }(); return static_cast<int16_t>(t); }
 void pad_axis(uint8_t axis, int16_t v) {
     switch (axis) {
         case SDL_CONTROLLER_AXIS_LEFTX: g_lx_raw = v; break;
         case SDL_CONTROLLER_AXIS_LEFTY: g_ly_raw = v; break;
         case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-            g_trig_l_down = v > 16383;
+            g_trig_l_down = v > trigger_threshold();
             update_triggers();
             break;
         case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-            g_trig_r_down = v > 16383;
+            g_trig_r_down = v > trigger_threshold();
             update_triggers();
             break;
         case SDL_CONTROLLER_AXIS_RIGHTX: g_rx_raw = v; break;
@@ -582,6 +697,7 @@ static void handle_sdl_event(const SDL_Event& ev) {
     }
     case SDL_CONTROLLERDEVICEADDED:
         pad_open(ev.cdevice.which);  // 'which' is a device index here
+        test_vpad_apply();
         prompts_update();
         return;
     case SDL_CONTROLLERDEVICEREMOVED:
@@ -722,6 +838,8 @@ int psp_runtime_init_sdl() {
             "[RT] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+
+    test_vpad_attach();
 
     // 1b. Optional user gamecontrollerdb mapping file
     if (const char* db = std::getenv("PSPRECOMP_GAMECONTROLLERDB")) {

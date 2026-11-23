@@ -100,6 +100,10 @@ bool ge_draw_fps_counter();
 bool ge_draw_ping_overlay();
 void ge_draw_set_ping_overlay(bool on);
 void ge_draw_set_fps_counter(bool on);
+/// A game module's own 2D overlay: an RGBA canvas (bytes R, G, B, A; row 0 = top) of w x h pixels, laid over the picture
+/// (the middle 480-pixel-wide area when widescreen), alpha-blended each present. A canvas that stays unchanged costs nothing;
+/// call again to update it; null / 0 size removes it. Thread safe (the game thread sets it, the present thread draws it).
+void ge_draw_set_game_overlay(const uint32_t* rgba, int w, int h);
 /// Performance overlay (debugging): frames per second, average / worst frame time, presents per second, render
 /// scale and process memory, in the top-left corner (PSPRECOMP_PERF_HUD=1 turns it on at start).
 bool ge_draw_perf_overlay();
@@ -119,6 +123,8 @@ void ge_draw_flash(uint32_t rgb, int ms);
 /// View blocker fade: while `active`, static scene geometry (not skinned) that lies between the camera and `target` (world space, the
 /// player's chest) fades out to a see-through alpha, like the game's own wall fade does for its camera (the game computes that from its
 /// own eye, so a camera we move ourselves needs it done here). Call once per camera update (game thread).
+bool ge_draw_last_view_proj(float view[12], float proj[16]);   // view (4x3) and projection (4x4) of the last completed main scene (column-major, GE layout)
+void ge_draw_last_eye(float eye[3], float fwd[3]);   // debug: eye and view direction of the last depth-tested 3D draw
 void ge_draw_set_view_blocker(bool active, const float target[3], const float eye[3]);   // eye: the game camera's eye this update; only draws made from that view fade
 // Camera collision against the stage geometry the main view has drawn (static, non-skinned, depth-writing draws, cached in world
 // space per stage): ask for the segment from -> to (game thread); the answer, the fraction of the segment before its first hit

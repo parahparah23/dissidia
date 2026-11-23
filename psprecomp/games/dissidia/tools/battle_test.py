@@ -86,6 +86,9 @@ class Game:
         if os.environ.get('BT_NO_FREEZE'):
             env['PSPRECOMP_TEST_NO_AI'] = '0'      # let the CPU fighter act (the dummy is the default)
             env['PSPRECOMP_TEST_FREEZE_CPU'] = '0'
+        if os.environ.get('BT_NO_AI_ONLY'):        # the CPU brains do not think but the CPU fighters are not frozen (they react to hits, fly when launched)
+            env['PSPRECOMP_TEST_NO_AI'] = '1'
+            env['PSPRECOMP_TEST_FREEZE_CPU'] = '0'
         if os.path.exists(self.go_file):
             os.remove(self.go_file)
         env['PSPRECOMP_TEST_GO'] = self.go_file
@@ -253,7 +256,7 @@ def walk_direct(g, ff_menus=4):
             g.press('cross')                           # a slow load (real GPU, ray tracing) can leave the replay's last presses on the loading / VS ("Next") page
         if seen >= 2:
             g.touch_go()
-            g.wait_log(r'\[TEST\] battle started', 20)
+            g.wait_log(r'\[TEST\] battle started', 90)
             g.cmd('FF 0')
             return
     raise RuntimeError('the battle never started (direct)')
@@ -307,6 +310,10 @@ def walk_menus(g, char, tries=14, stage=12, ff_menus=0):
     g.step('cross')                                    # Quick Battle (1-on-1) -> Player Select
     time.sleep(1.0)
     lap('player select')
+    if os.environ.get('BT_PS_SHOT'):                   # debugging: the Player Select grid (where is a character?)
+        time.sleep(3.0); g.shot().save(os.environ['BT_PS_SHOT'])
+    if os.environ.get('BT_GRID'):                      # BT_GRID=down,right overrides the character's cursor steps (a character not in GRID)
+        GRID[char.lower()] = tuple(int(x) for x in os.environ['BT_GRID'].split(','))
     row, col = GRID[char.lower()]
     for _ in range(row):
         g.step('down', settle=False)

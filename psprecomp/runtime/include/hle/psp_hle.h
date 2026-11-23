@@ -170,6 +170,19 @@ uint32_t psp_kmem_bump_alloc(uint32_t size);
 /// Same, with a name for the [MEM] layout log.
 uint32_t psp_kmem_bump_alloc_named(uint32_t size, const char* name);
 
+/// Same, but region 2 first (when configured and the request fits there),
+/// else region 1: for blocks a game wants kept out of region 1 so that one
+/// big contiguous block can still come from it later.
+uint32_t psp_kmem_bump_alloc_named_r2(uint32_t size, const char* name);
+
+/// Bump-allocate from the high region (region 3, guest PSP_HI_RAM_BASE..PSP_HI_RAM_END, above the 64 MB RAM;
+/// see psp_memory.h). Page-aligned, never returned by the partition allocator: a game opts in per block.
+/// Code that range-checks pointers into such a block must use psp_guest_ok(). Returns 0 when it does not fit.
+uint32_t psp_kmem_bump_alloc_hi(uint32_t size, const char* name);
+
+/// Bytes still unallocated in one region (1, 2 or 3 = high region; 0 for an unconfigured region).
+uint32_t psp_kmem_free_region(int region);
+
 /// True when allocating `sizes[0..n)` in order (each rounded up to 256 B, the
 /// same first-fit as psp_kmem_bump_alloc: region 1, then region 2) would all
 /// succeed from the heap's current position. Does not allocate.
@@ -221,6 +234,9 @@ void psp_hle_register_sas();
 
 // ATRAC3/ATRAC3+ (sceAtrac3plus) via libavcodec when PSPRECOMP_HAVE_AVCODEC
 void psp_hle_register_atrac();
+/// A game module's policy for streamed ATRAC tracks that have loop info but whose loop count the game never set (they would play once): called from the
+/// decoder with (end sample, loop start sample); true = loop it forever. Must not block. nullptr: none.
+void psp_atrac_set_loop_policy(bool (*fn)(int endSample, int loopStart));
 
 // sceMpeg movie playback (PSMF/MPEG-PS, H.264 + ATRAC3+) via libavcodec
 void psp_hle_register_mpeg();

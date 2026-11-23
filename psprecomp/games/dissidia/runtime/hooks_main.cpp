@@ -19,6 +19,7 @@
 #include "hle/psp_hle.h"
 #include "recomp.h"   // psp_mem_read
 #include <cstdint>
+float dissidia_battle_age();   // framerate.cpp: ticks (1/60 s) since the battle started running
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,9 +61,13 @@ extern void dissidia_net_packs_install();
 // camera.cpp: analogue right-stick battle camera.
 extern void dissidia_camera_install(uint8_t* rdram);
 extern void dissidia_menu_settings_install(uint8_t* rdram);
+extern void dissidia_tagteam_menu_install(uint8_t* rdram);   // tagteam_menu.cpp: Group Battle setup screen marks (CPU picks)
 extern void dissidia_discord_install(uint8_t* rdram);   // discord_presence.cpp
+extern void dissidia_tagteam_install(uint8_t* rdram);
+extern void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx);   // tagteam.cpp: the swap's safe point, once per scene tick
 // direct_battle.cpp: test-only, skips the menus (PSPRECOMP_TEST_DIRECT_BATTLE=1).
 extern void dissidia_direct_battle_install(uint8_t* rdram);
+extern void dissidia_tagteam_install(uint8_t* rdram);
 // input.cpp: continuous analogue stick direction (the game's own processing is 8-way).
 extern void dissidia_input_install(uint8_t* rdram);
 extern void dissidia_button_prompts_install();
@@ -77,6 +82,7 @@ extern FuncPtr dissidia_xmod_changed_code(uint32_t vaddr);
 extern void dissidia_xmods_watch_begin(uint8_t* rdram);
 extern void dissidia_xmods_watch_boot();
 extern void dissidia_xmods_overlay_loaded(int ovl);
+extern void dissidia_netplay_install(uint8_t* rdram);
 
 bool dissidia_player_pos(float* P);   // camera.cpp
 int dissidia_ex_cores(float (*P)[3], int max);   // framerate.cpp
@@ -171,6 +177,7 @@ void dissidia_movie_time_wait(uint8_t* rdram, recomp_context* ctx) {
 // future so every timeline wait is satisfied.
 FuncPtr g_orig_scene_tick = nullptr;
 void dissidia_scene_tick(uint8_t* rdram, recomp_context* ctx) {
+    dissidia_tagteam_frame(rdram, ctx);
     uint32_t scene = static_cast<uint32_t>(ctx->r[4]);
     uint32_t movie = scene + 0x135Cu;
     if (psp_mem_read<uint32_t>(rdram, movie) == 0) {
@@ -312,8 +319,16 @@ static int dissidia_stage_id() {
     if (psp_mem_read<uint32_t>(g_stage_ram, 0x089DD4C0u) != 1u) return -1;
     return int(psp_mem_read<uint32_t>(g_stage_ram, 0x08B98854u));
 }
+// Battle music loops. A battle can run far longer than the retail 1v1 (tag team: 7+ min) and some battle tracks (U_URACHOAS, 7:21) are played once by the game (it never
+// sets their loop count), so the music ended mid-fight (desktop log 21 Nov). During a running battle a long (>= 60 s: no jingles, results, events) streamed track with loop info
+// loops. PSPRECOMP_BGM_LOOP=0: off.
+static bool bgm_loop_policy(int endSample, int) {
+    static const bool off = std::getenv("PSPRECOMP_BGM_LOOP") && std::atoi(std::getenv("PSPRECOMP_BGM_LOOP")) == 0;
+    return !off && dissidia_battle_age() > 0.f && endSample >= 60 * 44100;
+}
 void dissidia_register_hooks(uint8_t* rdram) {
     g_stage_ram = rdram;
+    psp_atrac_set_loop_policy(bgm_loop_policy);
     psp_set_stage_id_provider(dissidia_stage_id);
     dissidia_register_reflectivity();
     psp_set_player_pos_provider(dissidia_player_pos);
@@ -373,13 +388,16 @@ void dissidia_register_hooks(uint8_t* rdram) {
     psp_dispatch_set_overlay_resolver(dissidia_overlay_resolver);
     dissidia_roster_grid_install();   // wraps overlay functions: needs the overlay dispatch tables
     dissidia_direct_battle_install(rdram);  // direct_battle.cpp
+    dissidia_tagteam_install(rdram);  // tagteam.cpp (2 v 2 battles, experimental)
     dissidia_camera_install(rdram);   // camera.cpp (wraps a battle-overlay function too)
     dissidia_menu_settings_install(rdram);   // menu_settings.cpp: Settings entries in the title / start menu / pause menu
+    dissidia_tagteam_menu_install(rdram);    // tagteam_menu.cpp: Communications Mode tag team: CPU picks on the Group Battle setup screen
     dissidia_discord_install(rdram);         // discord_presence.cpp: Discord Rich Presence
     dissidia_input_install(rdram);    // input.cpp
     dissidia_button_prompts_install();   // button_prompts.cpp: the game's button symbols in the controller's style
     dissidia_comm_battle_install(rdram);   // comm_battle.cpp: online battles on our pad link
     dissidia_framerate_install(rdram);   // framerate.cpp (wraps a battle-overlay function too)
+    dissidia_netplay_install(rdram);     // netplay.cpp: the lock-step battle's input delay and desync check
 
     supacc_init_dispatch_table();
     supacc_init_data_sections(rdram);
