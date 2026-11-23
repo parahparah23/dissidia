@@ -3,8 +3,9 @@
 ## TODO (kept up to date; newest first)
 
 - **Turned off for now, to fix (22 Nov):**
-  - **Summonstones in tag battles are off** (`sum_track`; `PSPRECOMP_TAGTEAM_SUMMONS=1` turns them on): they could be used again and again. Fix that, then also: partners (extras) summoning (the manager's other checks reject them), per-member stones (one stone per side is built at battle start by FUN_08890BB8), the big retail orb not refreshing after a swap.
-  - **Kill camera / KO without the hold is off**: the KO hold is the default again (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move.
+  - **Summonstones: FIXED (23 Nov), on again** (see "Summonstones, twelfth round"). Still open: partners (extras) summoning, per-member STONES (each member
+    summons the side's stone), the big retail orb not refreshing after a swap.
+  - **Kill camera / KO without the hold is off**: the KO hold is the default again (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
   - FFA: Circle (back) on the FFA players screen starts the battle; it must go back.
@@ -14,10 +15,11 @@
   - Tag team: the original CPU enemy can attack during the other players' battle-start banter.
   - Tag team: the other players' banter should start before the "vs <enemy>" display; the camera is not the retail one (zoom in, angle change).
   - Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).
-  - Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.
+  - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov (see "Menu row and failed-call notice").
   - 3v3: many partner fixes do not apply to the second partner (the code assumes one extra per side).
   - 3v3: the 3rd enemy is a duplicate of the 2nd.
-  - When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.
+  - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov for the calls the tag code refuses
+    (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing yet.
   - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
 - **Low priority (user, 22 Nov; not started):**
   - 3v3: the banter intros do not play the correct audio (maybe other 3v3 intro issues).
@@ -4939,6 +4941,52 @@ Free-for-all needs its own player setup (players, characters, teams clear).
 - gdb counts of `FUN_088A9DE8` (effect start) and `FUN_08AE3E34` (cut-in message) with and without the forced request are identical (4 / 0 with clones; 5 / 0 with `ENEMY2_CHAR=11 PARTNER_CHAR=7`), and with the real Terra extra the step logs "presented"
   but never "summon used". So handing an extra to `FUN_08A22C78` for the step is not enough: the step's other predicates (`FUN_08A23488` / `08A23AEC` / `08A23BB8`, `FUN_0889120C` -> `FUN_08A22C78(entry side)` + `FUN_08B3390C`, the per-side rule records) do not accept
   him. The extras-summon code (`PSPRECOMP_TAGTEAM_NOXSUMMON=1` turns it off) is therefore inert, not harmful; treat extras as unable to summon. Per-member stones and the big orb's refresh were not attempted.
+### Menu row and failed-call notice (23 Nov)
+- **Back on Tag Team Battle** (`menu_settings.cpp` `sub_tick_hook`, `PSPRECOMP_TAGTEAM_NOROWBACK=1` = old): choosing Tag Team Battle hands the game the row it starts
+  (Group Battle / Quick Battle (Party), `cur + 4` = the group's target), so coming back the game put its cursor there. When the Battle Mode / Communications sub-list opens
+  while the tag team menu mode is still on (`dissidia_tagteam_menu_mode_on()`, it stays on until another entry is chosen or the mode select is cancelled) and the
+  cursor is on that target row, it is moved to the Tag Team Battle row (`[MENUSET] group N opened with Tag Team Battle on`). Not tested through a whole menu round trip yet.
+- **Failed assist call notice** (`call_fail_notice`, `PSPRECOMP_TAGTEAM_NOCALLNOTICE=1` = off): every call the tag code refuses shows a short HUD notice
+  "ASSIST FAILED: <why>" on the machines whose team it is (the side on the left, `bs + 84`), at most one per side every 1.5 s, view only: Tag Duel "nobody left on the
+  bench" / "your next member is not ready yet" (`tdx_gate`), partners "your partner is still out from the last call" (rounds 7 / 8 / 9 busy refusals) and
+  "<NAME> is knocked out / in hitstun / in a chase / Bravery-broken / in an EX Burst ..." (`ao_partner_busy`). Verified offline (forced calls 11 / 12 s, the second refused:
+  window shot shows the notice under the top edge; `PSPRECOMP_TAGTEAM_CALLNOTICE_SECS` lengthens it for slow test runs: the notice runs on wall-clock time).
+  Retail's own refusals (an empty gauge) never make a request, so they show nothing.
+
+### Kill camera: the battle music (23 Nov)
+- **Second release path found.** Test: offline tag battle, `PSPRECOMP_TAGTEAM_KOHOLD=0 PSPRECOMP_TAGTEAM_KOCAM=1` (new env for the "KO Kill Camera" debug row),
+  `ENEMY2_CHAR=11 DEBUG_LOWHP=12`, AI on (`tools_dbg/sumtest.py ... NOFREEZE=1`). At a mid-battle KO (`[KOCAM] mid-battle KO of slotC`) the finish BGM step
+  (`08B0998C`) is skipped as designed, the finish loads its 48 KB jingle into ANOTHER ATRAC id, and 0.5 s later `FUN_089922FC(player)` (a sound player's release:
+  `player + 4` = ATRAC id, `sceAtracReleaseAtracID` at `08992330`), called from `08990338`, releases the streamed battle music (`[ATRAC] release id=0 (streamed ...)`, the
+  release log now prints the caller). Nothing loads it again: the music is gone for the rest of the battle (the Golbez report).
+- **Fix** (`bgmrel_hook`, `PSPRECOMP_TAGTEAM_NOBGMKEEP=1` = old): while a mid-battle KO's finish runs (`mid_finish()`), `FUN_089922FC` is skipped for a player whose id is a
+  streamed track (`psp_atrac_is_streamed`, new in `psp_hle_atrac.cpp`); other players (jingles, voices) are released as before. Logs `[KOCAM] battle music release
+  skipped` / `battle music released (ra, bs+72)`. Verified in the log: fix run `battle music release skipped (mid-battle KO; ra 08990338)` and no `[ATRAC] release` of the
+  stream; old run `battle music released (ra 08990338, bs+72 4)` + `[ATRAC] release id=0 (streamed ...)`. Not verified by ear (headless runs have no audio device).
+- **Not reproduced:** the "stuck forever, the others could still move" part (in these offline runs the camera came back and the battle went on, the called-in member
+  took the slot about 5 s later). The KO hold therefore stays the default.
+
+### Summonstones, twelfth round (23 Nov): the "used again and again" bug FIXED, summons on again in tag battles
+- **Cause.** Every fighter has ONE summon use, actor halfword `+0x10CE` (1 at the start; the seventh round had it right, the ninth round's "it is only the round stock" was
+  wrong). The summon / rules step `FUN_08A23DA8` takes a slot fighter's request (bit 0x10 of `+0x5B3`) and calls `FUN_08B33914(actor)` (its ONLY call of it, at
+  `0x08A24018`, after `FUN_088912D0(entry)` == 0): `+0x10CE` - 1, `+0x10D0` = 1, then the cut-in `FUN_08A07DFC`. With `+0x10CE` = 0 the request is dropped. `stock_hook`
+  (the tag KO undo on `FUN_08B33914`) put stock and revive word back for EVERY living slot fighter, so each summon gave its use back. Reproduced in a plain AI
+  fight with summons on (`sum6`: the CPU summoned at 54.7 s and again at 67.7 s, entry `+8` 1 for 11 s each) and with a forced request (old code: three
+  `retail KO finish ... undone` at 10 / 25 / 40 s, one per request).
+- **The ninth round's per-side "used flag" (`manager + 0x3C8 + 4 * side`) was wrong:** side 1's word holds a code pointer (`08A048C8`) from the battle start;
+  `sum_track` wrote 0 / 1 into it on every slot change. Those writes are gone. The manager address is now taken from `FUN_08A23DA8`'s `this` (`g_sum_mgr`).
+- **Fix.** `slotactor_hook` records the slot fighters whose request the current rules step lets through (`g_sum_req`); `stock_hook` keeps the use spent for them
+  (`[SUMUSED] ... summon use spent`; `PSPRECOMP_TAGTEAM_OLDSUMSTOCK=1` = old). `sum_track` books uses per member (side, character id) from `+0x10CE` and, when
+  another member is in the slot (swap, KO call-in, rebuild: the rebuild carries the slot's `+0x10CE` over), sets `+0x10CE` from that member's own booking
+  (0 = spent, 1 = left); a member whose use is spent stays at 0 if something puts it back. Summons are ON in tag battles again (`PSPRECOMP_TAGTEAM_SUMMONS=0` = off).
+- **Test aid** `PSPRECOMP_TAGTEAM_FORCESUMMON_SLOT=<side>:<s>,...` (that side's slot fighter asks for a summon at that battle age); `PSPRECOMP_TAGTEAM_SUMDIFF=1` logs rarely
+  changing words of the manager and both entries; `[SUMLOG]` lines: entry `+8` (summon running) and every change of a slot fighter's uses.
+- **Verified** (host, clones, frozen dummy, `tools_dbg/sumtest.py`): forced CPU requests at 10 / 25 s: `summon use spent (uses left 0)` at 10 s, entry `+8` 1, the
+  25 s request reaches the step with uses 0 and nothing starts. With a partner of another character (`ENEMY2_CHAR=11`, `KOLIST_NAT=1 KOLIST=cpu:15`, requests at
+  10 / 30 / 45 s): Lightning spends hers at 10 s, Cecil takes the slot at 16.6 s (`summon uses 0 -> 1 (his use is left)`), spends his at 30 s, the 45 s request is refused.
+- **Not done:** per-member STONES (the side's stone entry is built once), extras summoning, the big orb's refresh after a swap. Seen on the way (not from this change,
+  the same with the fix off): `KOLIST=cpu:15` (plain HP 0, no mark) runs the full retail finish at 15 s and the human is then "defeated" at full HP at 20.8 s.
+
 ## Communications menu route tests, no 1v1 Duel, Free-for-all flow without Party Select (22 Nov, tree ttfa)
 - **1 vs 1 Duel removed** (user): Mode Select / the lobby offer Team 2 vs 2, Team 3 vs 3, Tag Duel, Free-for-all. A saved `tagteam_lobby` with mode 0 is ignored (Team 2 vs 2), a beacon with mode 0 decodes as Team 2 vs 2. The `g_duel_notag` flag (KO ends the battle, roster flags bit 5) was written for the split and is never set now.
 - **Communications > Tag Team Battle through the menu, two copies** (`mp_test.py --menu-mode team2|team3|tagduel|ffa [--fill] --shots`; no `PSPRECOMP_TAGTEAM`): Communications, Up, Cross (Tag Team Battle row), Mode Select on both copies, the host's lobby decides

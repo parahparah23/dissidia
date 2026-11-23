@@ -43,6 +43,7 @@ void dissidia_presence_main(uint32_t state);
 void dissidia_presence_sub(uint32_t state);
 
 void dissidia_tagteam_menu_mode(bool on);   // tagteam.cpp: Battle Mode > Tag Team Battle
+bool dissidia_tagteam_menu_mode_on();   // tagteam.cpp: the last Battle Mode / Communications entry chosen was Tag Team Battle
 void dissidia_tagteam_modesel_open();   // tagteam_menu.cpp: the mode select screen after choosing Tag Team Battle
 bool dissidia_tagteam_modesel_active();
 int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool online);   // 0 open, 1 chosen, 2 cancelled
@@ -424,6 +425,18 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     const TagGroup* tg = tag_group(st);
     const uint32_t cur = st + 0xA58u;
     if (tg && r32(cur + 32) == 0 && r32(cur + 36) == tg->rows - 1) std::memcpy(rdram + ((cur + 36) & 0x07FFFFFFu), &tg->rows, 4);   // one more row
+    {   // back from a tag battle (or its lobby): the game puts the cursor on the row it started (Group Battle / Quick Battle (Party)); put it on Tag Team Battle
+        // (user 22 Nov: "returning to the main menu selects Group Battle instead of Tag Team Battle"). Once per opening of the group's sub-list.
+        static uint32_t open_group = 0;
+        const uint32_t g = tg ? tg->group : 0u;
+        if (g != open_group) {
+            open_group = g;
+            if (tg && dissidia_tagteam_menu_mode_on() && !dissidia_tagteam_modesel_active() && r32(cur + 36) == tg->rows && r32(cur + 4) == tg->target && !std::getenv("PSPRECOMP_TAGTEAM_NOROWBACK")) {
+                std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->rows, 4);
+                std::fprintf(stderr, "[MENUSET] group %u opened with Tag Team Battle on: cursor %u -> %u (the Tag Team Battle row)\n", tg->group, tg->target, tg->rows);
+            }
+        }
+    }
     if (std::getenv("PSPRECOMP_MENU_SUBLOG") && st) { static std::string last; char b[128]; std::snprintf(b, sizeof b, "group %u idx %u min %u max %u state0 %u", r32(st + 0xA88), r32(cur + 4), r32(cur + 32), r32(cur + 36), r32(st)); if (last != b) { last = b; std::fprintf(stderr, "[SUBTICK] %s\n", b); } }
     if (tag_row_confirm(rdram, ctx, st)) return;
     g_orig_sub_tick(rdram, ctx);
