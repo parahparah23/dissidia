@@ -3,6 +3,7 @@
 // thread's window capture service (ge_draw_capture_window, the debug socket 'V' path: a TGA written on the render thread at its next present),
 // then converts the TGA to PNG (zlib) and deletes it. Files: <game dir>/breakshots/<battle#>_<battle age s>_<role>_<char>_<kind>_<n>.png.
 // Default on in tag battles; PSPRECOMP_TAGTEAM_BREAKSHOT=0 turns it off. At most 60 shots per run; none while the window is minimised / hidden.
+#include <filesystem>
 #include "psp_ge_draw.h"
 #include "psp_event_loop.h"
 #include "hle/psp_hle_io.h"
@@ -87,7 +88,7 @@ void worker() {
 void tagteam_breakshot_event(float age_s, unsigned battle_no, const char* role, int chr, const char* kind, const char* brv) {
     if (!enabled() || g_scheduled >= kMaxShots) return;
     const std::string dir = shot_dir();
-    { static std::string made; if (made != dir) { mkdir(dir.c_str(), 0775); made = dir; } }
+    { static std::string made; if (made != dir) { std::error_code mk_ec; std::filesystem::create_directories(dir, mk_ec); made = dir; } }
     for (int n = 0; n < 3 && g_scheduled < kMaxShots; n++, g_scheduled++) {
         char name[160]; std::snprintf(name, sizeof name, "/%u_%07.2f_%s_%d_%s_%d.png", battle_no, age_s, role, chr, kind, n);
         char what[160]; std::snprintf(what, sizeof what, "t=%.2f %s %d %s #%d", age_s + kOffsets[n], role, chr, kind, n);

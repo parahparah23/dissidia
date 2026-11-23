@@ -46,7 +46,9 @@
 #include <cstdint>
 #include <cstdio>
 #if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(_WIN32)
 #include <execinfo.h>
+#endif
 #endif
 #include <cstring>
 #include <cstdlib>
@@ -560,7 +562,7 @@ void heap_alloc_hook(uint8_t* rdram, recomp_context* ctx) {
     if (kHeapCheck && hc_ram(heap)) { hc_record(heap, hc_kind, 0, size, hc_ra, static_cast<uint32_t>(ctx->r[2])); hc_verify(rdram, heap, "after an allocation"); }
     if (fileheap_watch() && heap == fileheap_watch() && size >= 0x20000u) {
         std::fprintf(stderr, "[FILEHEAP] alloc heap %08X size 0x%X -> %08X stack:", heap, size, static_cast<uint32_t>(ctx->r[2]));
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(_WIN32)
         void* bt[32]; const int nb = backtrace(bt, 32); char** sy = backtrace_symbols(bt, nb); for (int i = 1; i < nb && sy; i++) { const char* f = std::strstr(sy[i], "(+"); if (f) std::fprintf(stderr, " %.11s", f + 1); } std::free(sy);
 #endif
         std::fprintf(stderr, "\n");

@@ -21,8 +21,19 @@
 #include <cstdint>
 #include <ctime>
 #include <chrono>
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(_WIN32)
 #include <execinfo.h>
+#endif
+#if defined(_WIN32)   // debug-only helpers (hang dumps, write watches, backtraces) do nothing on Windows
+static inline int backtrace(void**, int) { return 0; }
+static inline char** backtrace_symbols(void* const*, int) { return nullptr; }
+static inline void backtrace_symbols_fd(void* const*, int, int) {}
+#ifndef SIGUSR1
+#define SIGUSR1 10
+#endif
+#ifndef SIGTRAP
+#define SIGTRAP 5
+#endif
 #endif
 #if defined(__linux__) && !defined(__ANDROID__)
 #include <sys/prctl.h>
