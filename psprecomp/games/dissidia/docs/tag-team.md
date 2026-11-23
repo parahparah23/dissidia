@@ -3,37 +3,44 @@
 ## TODO (kept up to date; newest first)
 
 - **Turned off for now, to fix (22 Nov):**
-  - **Summonstones: FIXED (23 Nov), on again** (see "Summonstones, twelfth round"). Still open: partners (extras) summoning, per-member STONES (each member
+  - **Summonstones: FIXED (23 Nov) [PR #129], on again** (see "Summonstones, twelfth round"). Tested 23 Nov (headless, `~/dissidia/tt/ttest`): one summon per member PASS; partners summoning FAILS (the extra is presented to the summon step, no summon starts) although the PR #129 text claims it works. Still open: partners (extras) summoning, per-member STONES (each member
     summons the side's stone), the big retail orb not refreshing after a swap.
-  - **Kill camera / KO without the hold is off**: the KO hold is the default again (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move. Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
+  - **Kill camera / KO without the hold is off**: the KO hold is the default again; [PR #129] fixes the music part (the streamed battle BGM released by FUN_089922FC during the finish is now kept), the stuck camera / no control is still open (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move. Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
+- **User play-test 23 Nov (RP6, after PR #129 merge), not started:**
+  - Summonstones work, but every enemy uses the SAME summon; each fighter should use his own stone (probably the same on the player's team): per-member stones are still missing (one stone per side, built at battle start by FUN_08890BB8).
+  - Going to the second menu still puts the cursor on Quick Battle (Party), not Tag Team Battle (the PR #129 menu-row fix does not cover this path).
+  - 3v3: the 2nd partner is a duplicate taken from the enemy team - maybe only the wrong model: it looked like Jecht but used Terra's moves. The 3v3 banter audio is still wrong.
+  - The called-in partner's assist voice can be cut off by banter audio (two voices in the same sound slot / the banter pool).
+  - Game froze on the Bartz customization screen (Bartz D1 moves mod installed; RP6 log `~/dissidia/tt/desk_logs/rp6_bartz_custom_1123_1056.log`): tag team not involved (menus); the log ends with package reads (`sceIoLseek fd=4 ... 0x10846800` right after a Cross press) and 369 `[atrac3plus] Invalid start bit / Invalid number of transmitted units / Channel unit extension is not implemented` lines before it - an ATRAC3plus stream the decoder cannot read (the D1 mod's audio?) while previewing. No HANGDUMP (not in battle). Generic / mod issue, not tag-specific.
+  - Tested 23 Nov (headless, `~/dissidia/tt/ttest`, 05a28a4): partner EX Burst put back PASS on a normal stage (the high-stage case via EXBLIFT did not fire, not reproduced); no FMA fusion flag in place + PC 2-copy 0 mismatched PASS; online lobby stays open PASS (screens; no [TTLOBBY] lines); white screen after a dropped peer PASS; LAN between two copies PASS (the APK skeleton was rebuilt with the multicast permission 23 Nov). **Slot take online FAILS**: after the human's slot KO the mate took the slot (AI), the human's next member came in as an extra he drives (`chase camera on the extra this machine drives`), no `slot take` line - `slot_take()` returned false (guards: l.driver >= 0, slot's home driver == newcomer's driver, current driver different, mate alive / not rebuilding, rebuild_begin).
   - From the PR #129 play-test comment (RP6, online through the relay, logs on the upstream branch `logs/tagteam-rp6-22nov`):
-    - ~~Partner EX Burst soft-lock: everyone stays in the burst void (Feral Chaos, `rp6_feral_void_1122_2259`).~~ Fixed 23 Nov (see "Batch three").
+    - ~~Partner EX Burst soft-lock: everyone stays in the burst void (Feral Chaos, `rp6_feral_void_1122_2259`).~~ Fixed 23 Nov [PR #129] (see "Batch three").
     - Desync from the start: `DESYNC at frame 1`, fighter positions off in the last bits (`rp6_2v2_1122_2255`): the build no longer fuses
       multiply-adds (see "Batch three"); not re-tested between an Android and a PC copy. `DESYNC at frame 0`, whole blocks of the host's own
       fighter (`rp6_desync_1122_2242`): not understood; needs the other player's log of that session.
-    - ~~Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).~~ Fixed 23 Nov (see "Batch four").
+    - ~~Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).~~ Fixed 23 Nov [PR #129] (see "Batch four").
     - Cannot pause in the online tag battle: looks like retail (see "Batch four"); a pause for both players would be new work.
-    - ~~LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).~~ Fixed 23 Nov (see "Batch five"; the Android multicast lock needs a new APK skeleton).
+    - ~~LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).~~ Fixed 23 Nov [PR #129] (see "Batch five"; the Android multicast lock needs a new APK skeleton).
   - (23 Nov: likely cause found and changed, not reproduced on a device; see "Batch five".)
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
     - (23 Nov: changed, the player's own next member now takes the slot back; see "Batch five".)
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
-  - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov (see "Batch two").
+  - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov [PR #129] (see "Batch two").
   - FFA: use the game's own character selector, not a list.
   - ~~FFA: after the battle the player lands in the Group Battle menu, which makes no sense.~~ Changed 23 Nov: the players screen comes back (see "Batch six").
-  - ~~Battle lobby: a way to set the strength of all CPUs at once.~~ Done 23 Nov: the ALL CPUs row (see "Batch two").
-  - ~~Tag team: the original CPU enemy can attack during the other players' battle-start banter.~~ Fixed 23 Nov (see "Batch two").
+  - ~~Battle lobby: a way to set the strength of all CPUs at once.~~ Done 23 Nov [PR #129]: the ALL CPUs row (see "Batch two").
+  - ~~Tag team: the original CPU enemy can attack during the other players' battle-start banter.~~ Fixed 23 Nov [PR #129] (see "Batch two").
   - Tag team: the other players' banter should start before the "vs <enemy>" display; the camera is not the retail one (zoom in, angle change).
-  - ~~Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).~~ Fixed 23 Nov in
+  - ~~Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).~~ Fixed 23 Nov [PR #129] in
     single player (see "Batch two"); online it stays positional.
-  - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov (see "Menu row and failed-call notice").
+  - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov [PR #129] (see "Menu row and failed-call notice").
   - 3v3: many partner fixes do not apply to the second partner (the code assumes one extra per side). 23 Nov: the Assist Off partner pick, the overhead
     panels and the HUD refresh fixed (see "Batch six"); the clone-only SELECT swap still always takes the last partner.
-  - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov (see "Batch two").
-  - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov for the calls the tag code refuses
-    (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing yet. 23 Nov (user): those stay silent, as retail.
+  - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov [PR #129] (see "Batch two").
+  - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov [PR #129] for the calls the tag code refuses
+    (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing, as retail (user, 23 Nov).
   - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
 - **Low priority (user, 22 Nov; not started):**
   - 3v3: the banter intros do not play the correct audio (maybe other 3v3 intro issues). 23 Nov: one silent banter found and retried (see "Batch eight").
