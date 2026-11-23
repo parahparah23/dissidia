@@ -429,7 +429,14 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         // (user 22 Nov: "returning to the main menu selects Group Battle instead of Tag Team Battle"). Once per opening of the group's sub-list.
         static uint32_t open_group = 0;
         const uint32_t g = tg ? tg->group : 0u;
-        if (g != open_group) {
+        // 24 Nov (user: "going to the second menu still puts the cursor on Quick Battle (Party)"): backing out of Party Select / the lobby comes back to the SAME
+        // group, so the group never changed and the row was not put back. A sub-list that was not updated for 0.25 s (another screen ran) is a new opening too.
+        // PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY=1: old.
+        static auto last_tick = std::chrono::steady_clock::now();
+        const auto now_t = std::chrono::steady_clock::now();
+        const bool gap = std::chrono::duration<double>(now_t - last_tick).count() > 0.25 && !std::getenv("PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY");
+        last_tick = now_t;
+        if (g != open_group || gap) {
             open_group = g;
             if (tg && dissidia_tagteam_menu_mode_on() && !dissidia_tagteam_modesel_active() && r32(cur + 36) == tg->rows && r32(cur + 4) == tg->target && !std::getenv("PSPRECOMP_TAGTEAM_NOROWBACK")) {
                 std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->rows, 4);
