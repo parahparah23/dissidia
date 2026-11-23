@@ -434,6 +434,7 @@ const LayerColor kSlotCol[4] = {{40, 90, 220, 1.f}, {210, 50, 60, 1.f}, {40, 160
 const char* const kSlotName[4] = {"P1", "P2", "P3", "P4"};
 int g_ffa_slot = 0, g_ffa_field = 0;   // the cursor: slot 0..3, field 0 TYPE, 1 MAIN, 2 TAG-IN, 3 STRENGTH
 bool g_ffa_then_lobby = false, g_lobby_pending = false, g_ffa_flow = false, g_ffa_autostart = false;
+int g_ffa_after = 0;   // a Free-for-all battle started from the flow: 1 = started, 2 = the setup screen went away (the battle ran), 0 = off
 std::chrono::steady_clock::time_point g_cover_until{};   // the Free-for-all starts without the retail setup screen: it is covered meanwhile
 uint8_t g_roster[40] = {}; int g_roster_n = 0, g_pk_sel = 0, g_pk_field = 0, g_pk_slot = 0;
 std::string slot_char_text(uint8_t c, bool tag) { return c == 254 ? std::string("Off") : c == 255 ? std::string("None") : c ? dissidia_tagteam_char_name(c) : std::string("Random"); }   // tag-in 255 = None
@@ -956,6 +957,19 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     bool opened_now = false;
     const bool lobby_ok = list && row >= 0 && row < 5 && !cpu_row && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF");   // Select on the player's own row: the battle lobby
     if (!g_dlg_open && lobby_ok && (pressed & BTN_OPEN)) { opened_now = true; g_lob_sp = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }
+    // Free-for-all, after the battle (23 Nov, PR #129 TODO "after the battle the player lands in the Group Battle menu, which makes no sense"): "Return to
+    // Battle Setup" brought back retail's Group Battle setup screen, which the flow had only passed through. Now the Free-for-all players screen opens over
+    // it again (fighters, then the lobby, then the next battle); Circle there leaves the flow as before. The setup screen's tick does not run during the
+    // battle, so a gap of more than 2 s after the start marks the way back. PSPRECOMP_TAGTEAM_FFA_NOREOPEN=1: old.
+    {   static auto last = std::chrono::steady_clock::now(); const auto now = std::chrono::steady_clock::now();
+        if (g_ffa_after == 1 && now - last > std::chrono::seconds(2)) g_ffa_after = 2;
+        last = now;
+        if (g_ffa_after == 2 && list && !g_dlg_open && !g_ffa_autostart) {
+            g_ffa_after = 0; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
+            g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1;
+            std::fprintf(stderr, "[FFA] back from the battle: the players screen again (not the Group Battle setup)\n");
+        }
+    }
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
         g_lobby_pending = false; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
         uint8_t L0[9] = {1, 2, 0, 5, 0, 0, 0, 0, 0}; dissidia_tagteam_lobby_get(L0);
@@ -970,7 +984,7 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     { uint8_t L[9]; dissidia_tagteam_lobby_get(L); if (mok && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) dissidia_tagteam_sp_write_round(screen); }   // (the saved lobby is read once, the mode's switches follow it)
     if (list) g_script_t.store(-1, std::memory_order_relaxed);   // the scripted Party Select pass is over
     if (g_ffa_autostart && list && !g_dlg_open) {   // Enter Battle (the cursor starts on it)
-        g_ffa_autostart = false; g_inject_late.store(9, std::memory_order_relaxed); std::fprintf(stderr, "[FFA] lobby done: Enter Battle (cursor row %d)\n", row);
+        g_ffa_autostart = false; g_inject_late.store(9, std::memory_order_relaxed); if (!std::getenv("PSPRECOMP_TAGTEAM_FFA_NOREOPEN")) g_ffa_after = 1; std::fprintf(stderr, "[FFA] lobby done: Enter Battle (cursor row %d)\n", row);
     }
     const bool cover = std::chrono::steady_clock::now() < g_cover_until;
     const bool labels = mok && (list || g_dlg_open) && !std::getenv("PSPRECOMP_TAGTEAM_SPLABELS_OFF");

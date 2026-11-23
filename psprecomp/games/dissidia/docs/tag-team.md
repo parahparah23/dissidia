@@ -22,14 +22,15 @@
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
   - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov (see "Batch two").
   - FFA: use the game's own character selector, not a list.
-  - FFA: after the battle the player lands in the Group Battle menu, which makes no sense.
+  - ~~FFA: after the battle the player lands in the Group Battle menu, which makes no sense.~~ Changed 23 Nov: the players screen comes back (see "Batch six").
   - ~~Battle lobby: a way to set the strength of all CPUs at once.~~ Done 23 Nov: the ALL CPUs row (see "Batch two").
   - ~~Tag team: the original CPU enemy can attack during the other players' battle-start banter.~~ Fixed 23 Nov (see "Batch two").
   - Tag team: the other players' banter should start before the "vs <enemy>" display; the camera is not the retail one (zoom in, angle change).
   - ~~Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).~~ Fixed 23 Nov in
     single player (see "Batch two"); online it stays positional.
   - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov (see "Menu row and failed-call notice").
-  - 3v3: many partner fixes do not apply to the second partner (the code assumes one extra per side).
+  - 3v3: many partner fixes do not apply to the second partner (the code assumes one extra per side). 23 Nov: the Assist Off partner pick, the overhead
+    panels and the HUD refresh fixed (see "Batch six"); the clone-only SELECT swap still always takes the last partner.
   - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov (see "Batch two").
   - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov for the calls the tag code refuses
     (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing yet.
@@ -5125,3 +5126,26 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   slot 0 KO'd at 20 s by `PSPRECOMP_TAGTEAM_KOLIST`): at 29.6 s on both copies "LAGUNA (player 0, the slot's own) takes slot 0 from JECHT
   (player -1, hp 9214)", the extra goes on with hp 9214, NETSYNC 2070 frames compared, 0 mismatched. Not tried with two humans on one team
   (the mate a human), or on devices.
+
+### Batch six (23 Nov): 3 v 3 second partner, Free-for-all after the battle
+- **3 v 3, the second partner** (an audit of every place that took "the" extra of a side):
+  - **Assist Off call** (`ao_partner_of`, now also used by `ao8_try` and `assist_off_move`): the call always went to the side's first living partner, so
+    the second never played one, and a call was refused ("<NAME> is in hitstun") while the other partner stood free. Now the first FREE partner
+    (`ao_partner_busy` says nothing) takes it, else the first living one (refused as before). Log `[AO8] .. 3v3: the first partner .. is busy (..): the
+    call goes to partner ..`. `PSPRECOMP_TAGTEAM_OLDPARTNERPICK=1`: old. Two copies (`mp_test.py --menu-mode team3 --fill`, host Assists OFF,
+    `PSPRECOMP_TTLOCK_FORCECALL=0:19:31`, `PSPRECOMP_TTCAM_AO9STATE=x0:600@30.9`): at 31 s extra 0 in hitstun, the call went to the second partner on
+    both copies, NETSYNC 1078 frames, 0 mismatched. Note: the AO9STATE roles `extraP` / `extraE` are relative to the LOCAL player (copy B's
+    "extraP" is the other side), so in a two-copy run they desync; use `x<index>` (the extras' order is the same on every machine).
+  - **Overhead panels** (`npanel::frame`): two panels over the enemies, filled from the first two enemies in fighter order, so the third enemy never got
+    one, even when locked. Now the locked enemy always takes the second panel (`PSPRECOMP_TAGTEAM_OH3OLD=1`: old). Not looked at in a screenshot.
+  - **HUD / reserve refresh**: ran only on extra 0's brain tick; with four extras that one is more often down. Now the first started extra that is not
+    down ticks it (`PSPRECOMP_TAGTEAM_OLDHUDTICK=1`: old).
+  - Fine on reading: the small partner panels (one per extra), the BREAK code, KO tag-in (any living mate), the per-side call slot (one call per side
+    at a time, as retail). Not changed: the clone-only SELECT swap (`swap_content`) always goes to the last partner of the side.
+- **Free-for-all after the battle** (`tagteam_menu.cpp`, `g_ffa_after`): "Return to Battle Setup" on the result menu brought back retail's Group Battle
+  setup screen, which the flow had only passed through. Now the Free-for-all players screen opens over it again (fighters > lobby > the next battle;
+  Circle leaves the flow as before), `[FFA] back from the battle: the players screen again`. `PSPRECOMP_TAGTEAM_FFA_NOREOPEN=1`: old. Verified with
+  `tools_dbg/spwalk.py` (one copy, players screen > DONE > lobby > battle, the human KO'd twice by `KOLIST`, result menu > Return to Battle Setup):
+  the players screen is shown.
+- **Not done in this batch:** partner (extra) summons: the eleventh round found the summon step does not accept an extra, and nothing new was tried;
+  the CPU assist's return spot (Assist Off): the 20 Nov change (the partner reappears where its assist ended) stays until the user says which is wanted.

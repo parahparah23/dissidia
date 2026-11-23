@@ -3897,7 +3897,14 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t owner = rd(brain + 4);
     if (g_bs && owner == rd(g_bs + 56u)) g_tt_age += dissidia_logic_tick_len();   // the tag clock: one step per battle frame
     if (g_bs && owner == rd(g_bs + 56u)) exb_debug_start();   // debug (PSPRECOMP_TAGTEAM_EXBAT): start EX Bursts at fixed tag-clock times
-    if (g_nextra && g_extra[0].started && owner == g_extra[0].actor) hud_update();
+    // the HUD / reserve refresh runs on one extra's brain tick: extra 0's. With four extras (3 v 3) that one is more often down (a fallen extra's
+    // brain may stop), which froze the panels while the others fought (23 Nov). Now the first started extra that is not down ticks it.
+    // PSPRECOMP_TAGTEAM_OLDHUDTICK=1: old (extra 0 only).
+    if (g_nextra) { static const bool oldt = std::getenv("PSPRECOMP_TAGTEAM_OLDHUDTICK") != nullptr; uint32_t tk = 0;
+        if (oldt) tk = g_extra[0].started ? g_extra[0].actor : 0u;
+        else for (int i = 0; i < g_nextra && !tk; i++) if (g_extra[i].started && ok(g_extra[i].actor, 0x12D0) && alive(g_extra[i].actor) && !is_down(g_extra[i].actor)) tk = g_extra[i].actor;
+        if (!tk && !oldt && g_extra[0].started) tk = g_extra[0].actor;
+        if (tk && owner == tk) hud_update(); }
     if (g_bs && pad_driven(owner) && cyc_of(owner).cyc == 1 && !std::getenv("PSPRECOMP_TAGTEAM_NOCURSORFIX")) {
         // While the lock is on the other enemy the retail lock-on cursor stays hidden: the mode handler's word +0x28 (0 -> 1 with the selector, found
         // with a before/after diff, tag-reticle) hides it; with 0 the cursor shows at the locked enemy. (+0x1C of the handler is the selector itself.)
@@ -7482,6 +7489,7 @@ void frame(recomp_context* c, uint32_t a0) {
         const uint32_t a = f[i];
         if (!ok(a, 0x12D0) || a == me || !alive(a) || is_down(a)) continue;
         if (side_of(a) == side_of(me)) { if (!ally) ally = a; } else if (ne < 2) en[ne++] = a;
+        else if (a == tgt && !std::getenv("PSPRECOMP_TAGTEAM_OH3OLD")) en[1] = a;   // 3 v 3 (23 Nov): three enemies, two panels over them: the locked one always has one (it was the first two in fighter order)
     }
     const uint32_t sub = en[0] == tgt ? en[1] : (en[1] == tgt ? en[0] : en[1]);
     const uint32_t wantf[NV] = {en[0], en[1], ally, sub};
@@ -9521,9 +9529,18 @@ const char* ao_partner_busy(uint32_t P) {
     if (sc >= 500 && sc < 1000) return (sc >= 700 && sc < 800) ? "launched / knocked down (7xx)" : "in hitstun (5xx-6xx / 9xx)";
     return nullptr;
 }
+// The partner an Assist Off call brings in. 3 v 3 (23 Nov, PR #129 TODO "many partner fixes do not apply to the second partner"): a side has two
+// partners; the call took the first living one always, so the second never played a call and a call was refused ("<NAME> is in hitstun") while the
+// other partner stood free. Now the first partner that is free (ao_partner_busy says nothing) is taken, else the first living one (the refusal
+// names it as before). Extra order and battle state only: every machine picks the same one. PSPRECOMP_TAGTEAM_OLDPARTNERPICK=1: old.
 uint32_t ao_partner_of(uint32_t M) {
-    for (int i = 0; i < g_nextra; i++) { const Extra& e = g_extra[i]; if (e.started && ok(e.actor, 0x12D0) && side_of(e.actor) == side_of(M) && alive(e.actor)) return e.actor; }
-    return 0;
+    static const bool old = std::getenv("PSPRECOMP_TAGTEAM_OLDPARTNERPICK") != nullptr;
+    uint32_t first = 0; int n = 0;
+    for (int i = 0; i < g_nextra; i++) { const Extra& e = g_extra[i]; if (e.started && ok(e.actor, 0x12D0) && side_of(e.actor) == side_of(M) && alive(e.actor)) {
+        if (old) return e.actor;
+        n++; if (!first) first = e.actor;
+        if (!ao_partner_busy(e.actor)) { if (n > 1 && g_log) { static uint32_t lastp = 0; if (lastp != e.actor) { lastp = e.actor; std::fprintf(stderr, "[AO8] t=%.2fs 3v3: the first partner %08X is busy (%s): the call goes to partner %08X (char %d)\n", dissidia_battle_age() / 60.0f, first, ao_partner_busy(first), e.actor, actor_char(e.actor)); } } return e.actor; } } }
+    return first;
 }
 // ---- Assist Off, round 8: the partner plays ITS ASSIST move ----
 // A retail assist is a separate actor made from the character's assist file (FUN_088FB934(char, costume, 1) -> its own model / moveset: its attack scripts are 10010 / 10002 (BRV
@@ -9575,7 +9592,7 @@ void ao8_dump_assist(uint32_t X, uint32_t P) {
 bool ao8_try(uint32_t k, uint32_t M, uint32_t kind) {
     if (k > 1 || g_ao8[k].M) return false;
     uint32_t P = 0;
-    for (int i = 0; i < g_nextra; i++) { const Extra& e = g_extra[i]; if (e.started && ok(e.actor, 0x12D0) && side_of(e.actor) == side_of(M) && alive(e.actor)) { P = e.actor; break; } }
+    P = ao_partner_of(M);   // 3 v 3: a free partner of the two (see ao_partner_of)
     const float age = dissidia_battle_age() / 60.0f;
     if (!P) return false;
     const uint32_t X = xas_forced(P);
@@ -9747,7 +9764,7 @@ void assist_off_move(uint32_t k, uint32_t M, uint32_t kind) {
     // Round 7: the foe is the enemy the caller has locked (lock block target, what a retail assist attacks with ASSISTFOLLOW), else the caller's foe word, else the nearest enemy.
     const char* fwhy = ""; const uint32_t foe = ao_pick_foe(M, 0, &fwhy);
     uint32_t P = 0;
-    for (int i = 0; i < g_nextra; i++) { const Extra& e = g_extra[i]; if (e.started && ok(e.actor, 0x12D0) && side_of(e.actor) == side_of(M) && alive(e.actor)) { P = e.actor; break; } }
+    P = ao_partner_of(M);   // 3 v 3: a free partner of the two (see ao_partner_of)
     const float age = dissidia_battle_age() / 60.0f;
     const bool foe_ok = foe != 0;
     if (exb_running() && !std::getenv("PSPRECOMP_TTCAM_NOEXBGUARD")) {   // round 4: never during an EX Burst (k2: our 240 on the burster at 24.00 s ended its burst at once; a cut burst can leave its UI behind)
