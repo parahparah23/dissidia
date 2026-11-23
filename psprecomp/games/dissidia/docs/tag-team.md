@@ -7,6 +7,14 @@
     summons the side's stone), the big retail orb not refreshing after a swap.
   - **Kill camera / KO without the hold is off**: the KO hold is the default again (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move. Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
+  - From the PR #129 play-test comment (RP6, online through the relay, logs on the upstream branch `logs/tagteam-rp6-22nov`):
+    - ~~Partner EX Burst soft-lock: everyone stays in the burst void (Feral Chaos, `rp6_feral_void_1122_2259`).~~ Fixed 23 Nov (see "Batch three").
+    - Desync from the start: `DESYNC at frame 1`, fighter positions off in the last bits (`rp6_2v2_1122_2255`): the build no longer fuses
+      multiply-adds (see "Batch three"); not re-tested between an Android and a PC copy. `DESYNC at frame 0`, whole blocks of the host's own
+      fighter (`rp6_desync_1122_2242`): not understood; needs the other player's log of that session.
+    - Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).
+    - Cannot pause in the online tag battle.
+    - LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
@@ -5030,3 +5038,30 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   The human side is built from P1's picks: `force_human_chars` (direct_battle.cpp, every poll before the battle): the main's own save record, model id and a team struct {main, tag-in}, so the party chosen in Party Select is irrelevant. `PSPRECOMP_TAGTEAM_FFA_KEEPPARTY=1` keeps the old Party Select.
   Evidence: `~/dissidia/tt/ttfa_g3` (P1 Emperor, P2 Firion, P3 Off, P4 random: Emperor vs Firion + Bartz as P4 = 3 fighters), sheets `sheet.png`, `sheet2.png`.
 - **Not done**: online Free-for-all keeps the room's players + CPU fill (no P1-P4 screen, the retail Party Select / setup screen still show online); the single player setup screen is covered, not skipped (Enter Battle pressed for you); CPU tag-ins are not played.
+
+### Batch three (23 Nov): partner EX Burst soft-lock, no FMA
+
+- **Partner EX Burst: everyone stayed in the void** (`PSPRECOMP_TAGTEAM_EXBABSY=1` / `PSPRECOMP_TAGTEAM_NOEXBXBACK=1` = old). RP6 log
+  `rp6_feral_void_1122_2259` (stage 0, floor y ~30): the CPU partner Feral Chaos burst (265.08 - 270.61 s); the end logged only `the extra burster's lock
+  block ... taken out of its camera slot`, no `back from under the stage` line. Two causes:
+  - The burst parks the fighters outside it below the stage, and the end-of-burst restore only took a fighter as parked below an absolute y of -20. The
+    park depth is per stage: on stage 12 (floor ~0) they end at -20.2 whatever height they had (`PSPRECOMP_TAGTEAM_EXBLIFT=19.95:75` run), on the RP6's
+    stage the dead partner sank 29.5 -> -14.8. So nobody was taken as parked, the human and Golbez stayed under the stage and the human's camera showed
+    them in the dark (the screenshot). Now "sunk" is below -20 or 20 below the fighter's last spot on the stage (`sunk()` in the restore block).
+  - An extra IN the burst (burster or victim) stays where the burst scene put it (0,0,0; under the floor of a high stage; Feral Chaos stayed there,
+    `DRAWCHK ... pos (0.0,0.0,0.0)` after the burst). Retail only puts the slot fighters back. The extras in it are noted (`inb`) and put back on their
+    spot from before the burst (`EX Burst over: extraE back from the burst (an extra in it) to ...`).
+  - Runs (`sumtest.py 30 NOFREEZE=1 PSPRECOMP_TAGTEAM_EXBAT=x0:20`, stage 12): slotC, extraP and the bursting extraE back, the battle goes on
+    (`exb_new`); with `EXBLIFT=19.95:40` (fighters 40 up when the burst starts) all three back to their spots ~40 up (`exb_liftB`). The RP6 case itself
+    (a park that ends above -20) does not happen on stage 12: not re-run on a high stage or on the device.
+  - The `[OVL] resolve 0x08A4F148 (id 1) -> MISSING` lines during that burst are harmless: 0x08A4F148 is an empty function (`jr ra; nop`) and a miss
+    runs the no-op stub.
+  - New test aid `PSPRECOMP_TAGTEAM_EXBLIFT=<s>:<dy>`: once at tag-clock second s, every fighter dy higher.
+- **No multiply-add fusion** (`add_compile_options(-ffp-contract=off)` in `runtime/CMakeLists.txt` and `runtime/sdk/CMakeLists.txt`). RP6 log
+  `rp6_2v2_1122_2255`: `DESYNC at frame 1`, both slot fighters' positions off in the last bits (`fighter0.body.x 3FD890C6` here, `3FD8918D` on the other
+  copy), then every frame. Clang for ARM fuses `a * b + c` into one FMA by default (rounded once; an x86 build rounds twice), so an Android copy and a PC
+  copy cannot stay bit-equal. Now nothing is fused on any platform (generated code, VFPU, game C++). On x86 builds this changes nothing (no FMA there).
+  Not tested between an Android and a PC copy. The VFPU's sin / cos / sqrt are PPSSPP's bit-exact tables, not the platform's libm.
+- **Not fixed: `DESYNC at frame 0`** (`rp6_desync_1122_2242`): before any input, 13 blocks of the host's own fighter (Terra) and 3 of the other differ,
+  the positions and the fighter signature (characters) agree. Something about that fighter was built differently on the two copies (data, not
+  rounding). The other player's log of that session is needed.

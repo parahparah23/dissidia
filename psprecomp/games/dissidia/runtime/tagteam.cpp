@@ -3822,6 +3822,10 @@ void exb_debug_start() {
         static bool armed = false; float at = 0; char who[4] = {}; unsigned off = 0;
         if (!armed && std::sscanf(w, "%f:%3[^:]:%x", &at, who, &off) == 3 && dissidia_battle_age() / 60.0f >= at) { const uint32_t a = exb_fighter(who);
             if (ok(a, 0x12D0)) { armed = true; psp_mem_watch_set(a + off); std::fprintf(stderr, "[WATCHAT] t=%.2fs %s %08X +%X\n", dissidia_battle_age() / 60.0f, who, a, off); } } }
+    if (const char* lf = std::getenv("PSPRECOMP_TAGTEAM_EXBLIFT")) {   // test aid: "<s>:<dy>": once at tag-clock second s, every fighter dy higher (a burst then parks them only
+        static uint32_t lbs = 0; static bool done = false; if (lbs != g_bs) { lbs = g_bs; done = false; }   // ~44 below that: a high stage floor, as on the RP6 22 Nov)
+        float at = 0, dy = 0; if (!done && g_bs && std::sscanf(lf, "%f:%f", &at, &dy) == 2 && dissidia_battle_age() / 60.0f >= at) { done = true; uint32_t f[8]; const int nf = all_fighters(f);
+            for (int i = 0; i < nf; i++) { wrf(f[i] + 0x84u, rdf(f[i] + 0x84u) + dy); std::fprintf(stderr, "[EXBLIFT] t=%.2fs %s y -> %.1f\n", dissidia_battle_age() / 60.0f, role_of(f[i]), rdf(f[i] + 0x84u)); } } }
     static const char* env = std::getenv("PSPRECOMP_TAGTEAM_EXBAT");
     if (!env || !g_bs) return;
     struct Spec { char who[4]; char foe[4]; float at; bool done; };
@@ -10734,6 +10738,12 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         // the stage; retail has nobody else to bring back, so the tag fighters stayed down there. Their last position before the burst is put back
         // when it ends.
         static std::map<uint32_t, std::array<float, 3>> good, held; static std::map<uint32_t, int> gated; static bool was = false;
+        static std::set<uint32_t> inb;   // extras that were IN the burst (burster / victim): retail only puts the slot fighters back
+        // Parked under the stage: the burst's park sinks a fighter ~44 units below where it stood (RP6 log 22 Nov, stage 0: floor y ~30, parked at -14.8),
+        // so an absolute "y < -20" missed every fighter of a high stage: nobody was brought back and the camera stayed in the dark under the stage
+        // (user: "everyone stays in the burst void forever"). Sunk = 20 below its last spot on the stage, or below -20. PSPRECOMP_TAGTEAM_EXBABSY=1: old.
+        static const bool absy = std::getenv("PSPRECOMP_TAGTEAM_EXBABSY") != nullptr;
+        auto sunk = [&](uint32_t a) { const float y = rdf(a + 0x84u); if (y < -20.0f) return true; if (absy) return false; auto g = good.find(a); return g != good.end() && y < g->second[1] - 20.0f; };
         const uint32_t c = rd(0x08A405E0u); const bool on = ok(c, 0x300) && rd(c + 0x278u) != 0;
         uint32_t f[8]; const int nf = all_fighters(f);
         auto exb_camera = [&](uint32_t p0, uint32_t p1, bool known) {
@@ -10763,15 +10773,22 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                             g_ram[(lb + 0x125u) & 0x07FFFFFFu] = 1;
                             if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst by the extra %s %08X: its lock block %08X put into camera slot %d (%d camera words from %08X), shown byte moved to it\n", dissidia_battle_age() / 60.0f, role_of(p0), p0, lb, k, copied, lbS); } } } }
         };
+        auto exb_note_in = [&](uint32_t p0, uint32_t p1, bool known) {
+            // An extra in the burst stays where the burst scene put it (0,0,0 = under the floor of a high stage; Feral Chaos, RP6 22 Nov): it goes back to its
+            // spot from before the burst when the burst is over. Battle state only. PSPRECOMP_TAGTEAM_NOEXBXBACK=1: old.
+            static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOEXBXBACK") != nullptr; if (off || !known) return;
+            const uint32_t s0 = srd(g_bs + 56u), s1 = srd(g_bs + 60u);
+            for (uint32_t a : {p0, p1}) if (a != s0 && a != s1) inb.insert(a);
+        };
         if (!on) {
             if (was) {
                 const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
-                for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; auto it = good.find(a); if (it == good.end() || (rdf(a + 0x84u) > -20.0f && !held.count(a)) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;   // (held: parked in this burst; the burst's end can lift one just above -20 (-18.98 seen), it stayed there)
+                for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; auto it = good.find(a); if (it == good.end() || (!sunk(a) && !held.count(a) && !inb.count(a)) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;   // (held: parked in this burst; the burst's end can lift one just above -20 (-18.98 seen), it stayed there)
                     wrf(vec, it->second[0]); wrf(vec + 4, it->second[1]); wrf(vec + 8, it->second[2]); wrf(vec + 12, 1.0f); tp_vec("held spot", a, vec); call(PLACE, a, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
-                    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: %s back from under the stage to %.1f,%.1f,%.1f\n", dissidia_battle_age() / 60.0f, role_of(a), it->second[0], it->second[1], it->second[2]); }
+                    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs EX Burst over: %s back from %s to %.1f,%.1f,%.1f\n", dissidia_battle_age() / 60.0f, role_of(a), inb.count(a) ? "the burst (an extra in it)" : "under the stage", it->second[0], it->second[1], it->second[2]); }
                 g_ctx->r[29] = static_cast<int32_t>(sp0);
             }
-            for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; const float y = rdf(a + 0x84u), x = rdf(a + 0x80u); if (y > -20.0f && x < 1000.0f) good[a] = {x, y, rdf(a + 0x88u)}; }
+            for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; const float y = rdf(a + 0x84u), x = rdf(a + 0x80u); if (y > -20.0f && x < 1000.0f && !sunk(a)) good[a] = {x, y, rdf(a + 0x88u)}; }
             for (const auto& kv : gated) if (ok(kv.first, 0x12D0)) wr(kv.first + 0x380u, rd(kv.first + 0x380u) & ~2u);   // their AI back on
             static int exb_slot_wait = 0;   // (the burst camera is put back by the manager's own step of that block, mode 2 -> 1 the frame after the burst: the block stays in its slot until then)
             if (g_exb_slot_lb && ok(g_exb_slot_lb, 0x200) && rd(g_exb_slot_lb + 0x108u) == 2u && exb_slot_wait++ < 60) {}
@@ -10781,7 +10798,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 g_exb_slot_lb = 0; g_exb_slot_addr = 0; g_exb_shown.clear(); }
             for (const auto& kv : g_exb_fc) if (ok(kv.first, 0x200) && rd(kv.first + 0xFCu) == 0u) wr(kv.first + 0xFCu, kv.second);   // (the lock words the burst camera needed cleared)
             g_exb_fc.clear();
-            gated.clear(); held.clear(); g_exb_frozen.clear();
+            gated.clear(); held.clear(); inb.clear(); g_exb_frozen.clear();
         } else if (exb_rule_fight()) {
             // "Keep fighting" (PSPRECOMP_TAGTEAM_EXBURST=fight): the fighters outside the burst are not held. The game still parks them
             // 100 m under the stage at the start (retail has nobody else to show), so each one found there is put back on its last spot on
@@ -10790,6 +10807,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             const bool known = ok(p0, 0x12D0) && ok(p1, 0x12D0);
             const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
             exb_camera(p0, p1, known);   // (the burst camera fixes, as under the freeze rule)
+            exb_note_in(p0, p1, known);
             // (the floor of the fighters outside the burst: colloff_hook keeps the stage collision for them)
             if (const char* ta = std::getenv("PSPRECOMP_TAGTEAM_EXBTESTACT")) {   // test aid: "<who>:<s>:<script>" starts that script on that fighter once, during a burst (e.g. s0:13:600, a launch)
                 static bool done = false; char who[8] = {}; float at = 0; int id = 0;
@@ -10798,7 +10816,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             for (int i = 0; i < nf; i++) { const uint32_t a = f[i];
                 // the park is the outsider's script 101 (a scripted sink under the stage, started by the burst): back to idle (script 1) and onto the stage
                 const bool parked = (rd(a + 0x180u) & 0xFFFFu) == 101u;
-                if (!known || a == p0 || a == p1 || (!parked && rdf(a + 0x84u) > -20.0f) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;
+                if (!known || a == p0 || a == p1 || (!parked && !sunk(a)) || std::find(g_down.begin(), g_down.end(), a) != g_down.end()) continue;
                 auto it = good.find(a); if (it == good.end()) continue;
                 if (parked) { g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, a + 304u, 1, 0); }
                 wrf(vec, it->second[0]); wrf(vec + 4, it->second[1]); wrf(vec + 8, it->second[2]); wrf(vec + 12, 1.0f); tp_vec("burst: kept on stage", a, vec); call(PLACE, a, vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
@@ -10818,10 +10836,11 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             if (!known) { p0 = p1 = 0; int k = 0; for (int i = 0; i < nf; i++) if (inside(f[i])) { if (k == 0) p0 = f[i]; else p1 = f[i]; k++; } }
             for (int i = 0; i < nf; i++) { const uint32_t a = f[i]; if (inside(a)) continue;
                 if (!gated.count(a)) { const bool was_gated = (rd(a + 0x380u) & 2u) != 0; if (!was_gated) { wr(a + 0x380u, rd(a + 0x380u) | 2u); gated[a] = 1; } else gated[a] = 0; }
-                if (rdf(a + 0x84u) < -20.0f) { if (!held.count(a)) held[a] = {rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)};
+                if (sunk(a)) { if (!held.count(a)) held[a] = {rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)};
                     const auto& h = held[a]; wrf(a + 0x80u, h[0]); wrf(a + 0x84u, h[1]); wrf(a + 0x88u, h[2]); } }
             for (auto it = gated.begin(); it != gated.end();) { if (it->second == 0) it = gated.erase(it); else ++it; }   // (only the ones gated here are let go)
             exb_camera(p0, p1, known);
+            exb_note_in(p0, p1, known);
             if (g_log && std::getenv("PSPRECOMP_TAGTEAM_EXBCAM")) {   // debug: the camera manager and every fighter every 10 frames of a burst
                 static int k = 0; if (k++ % 10 == 0) { const uint32_t mgr = dissidia_camera_manager();
                     std::fprintf(stderr, "[EXBCAM] t=%.2fs mgr %08X eye %.2f,%.2f,%.2f at %.2f,%.2f,%.2f +8B4 %08X +8B8 %u slots %08X %08X %08X %08X %08X:", dissidia_battle_age() / 60.0f, mgr, rdf(mgr + 0x40u), rdf(mgr + 0x44u), rdf(mgr + 0x48u), rdf(mgr + 0x50u), rdf(mgr + 0x54u), rdf(mgr + 0x58u), rd(mgr + 0x8B4u), rd(mgr + 0x8B8u), rd(mgr + 0x6D0u), rd(mgr + 0x6D4u), rd(mgr + 0x6D8u), rd(mgr + 0x6DCu), rd(mgr + 0x6E0u));
