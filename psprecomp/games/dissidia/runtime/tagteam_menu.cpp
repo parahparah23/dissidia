@@ -100,6 +100,7 @@ constexpr float kRowY0 = 120.f, kRowPitch = 20.f, kColX0 = 2.f, kColX1 = 164.f;
 
 uint8_t* g_ram = nullptr;
 FuncPtr g_orig_ready = nullptr, g_orig_enter = nullptr, g_orig_tick = nullptr, g_play_se = nullptr, g_orig_sp_tick = nullptr, g_orig_sp_dlg = nullptr;
+bool g_lob_sp = false;   // the battle lobby (modes 2..4) was opened by the single player screen (else by the Communications setup screen)
 bool g_dlg_sp = false;   // the CPU settings dialog edits a single player CPU row (else a Communications row)
 dissidia::MenuLayer g_layer;
 uint32_t g_prev_buttons = 0;
@@ -543,6 +544,7 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
     }
     if (pressed & (BTN_CIRCLE | BTN_CROSS | BTN_OPEN)) {
         if ((pressed & BTN_CROSS) && vis[g_lob_row] == 8) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; play_se(rdram, ctx, 1); return; }   // PLAYERS: the Free-for-all setup
+        std::fprintf(stderr, "[TTLOBBY] lobby closed by a press %04X (sp %d)\n", pressed, (int)sp);
         g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1);
         if (g_ffa_flow && sp) { g_ffa_flow = false; g_ffa_autostart = true; g_cover_until = std::chrono::steady_clock::now() + std::chrono::seconds(8); }   // Free-for-all: the battle starts from here
         return;
@@ -695,7 +697,7 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
         g_col_fix.store(!lob ? 0 : col == 0u ? 1 : (col == 1u && row >= 0 && row < 5) ? 2 : 0, std::memory_order_relaxed);
     }
     g_enter_block.store(enter_blocked ? (r32(screen + SCR_COLUMN) == 1u && row == 5 ? 2 : 1) : 0, std::memory_order_relaxed); g_enter_stamp.store(g_pad_polls.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    if (!g_dlg_open && left && !cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }   // the battle lobby
+    if (!g_dlg_open && left && !cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_lob_sp = false; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }   // the battle lobby
     if (!g_dlg_open && cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_sp = false; g_dlg_bp = false; g_dlg_mode = 0; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; dissidia_tagteam_get_cpu_cfg(row, g_dlg_cfg); g_dlg_open = true; play_se(rdram, ctx, 1); }
     if (!g_dlg_open && switchable && (pressed & BTN_SQUARE)) { dissidia_tagteam_toggle_cpu_row(row); play_se(rdram, ctx, 1); }
     const uint8_t mask = dissidia_tagteam_local_cpu_mask();
@@ -764,6 +766,8 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
             g_layer.text(s, true, em, 240.f - w / 2.f, 266.f, lob_short > 0 ? LayerColor{150, 40, 40, a} : LayerColor{60, 60, 110, a});
         }
     }
+    { static bool po = false; static int pm = -1; const bool o2 = g_dlg_open.load(); if (o2 != po || (o2 && g_dlg_mode != pm)) { po = o2; pm = g_dlg_mode;
+        std::fprintf(stderr, "[TTLOBBY] setup screen dialog %s (mode %d, column %u row %d, pressed %04X)\n", o2 ? "open" : "closed", g_dlg_mode, r32(screen + SCR_COLUMN), row, pressed); } }
     if (g_dlg_open) { if (g_dlg_mode == 1) picker(rdram, ctx, opened_now ? 0u : pressed, a); else if (g_dlg_mode == 2) lobby_dialog(rdram, ctx, opened_now ? 0u : pressed, a); else dialog(rdram, ctx, opened_now ? 0u : pressed, dt, a); }
     g_layer.publish();
 }
@@ -951,9 +955,9 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     if (g_dlg_open && g_dlg_mode >= 2 && g_dlg_mode <= 4 && !list) g_dlg_open = false;
     bool opened_now = false;
     const bool lobby_ok = list && row >= 0 && row < 5 && !cpu_row && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF");   // Select on the player's own row: the battle lobby
-    if (!g_dlg_open && lobby_ok && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }
+    if (!g_dlg_open && lobby_ok && (pressed & BTN_OPEN)) { opened_now = true; g_lob_sp = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
-        g_lobby_pending = false; opened_now = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
+        g_lobby_pending = false; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
         uint8_t L0[9] = {1, 2, 0, 5, 0, 0, 0, 0, 0}; dissidia_tagteam_lobby_get(L0);
         if (L0[0] == 3) { g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; } else g_dlg_mode = 2;
     }
@@ -1016,7 +1020,7 @@ void sp_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (std::getenv("PSPRECOMP_TTSP_CURDUMP")) sp_dump(screen);
     if (std::getenv("PSPRECOMP_TTSP_PARTYSCAN")) sp_partyscan(screen);
     if (std::getenv("PSPRECOMP_TAGTEAM_NOSPCPU") || !dissidia_tagteam_sp_mode()) {
-        if (g_dlg_open && (g_dlg_sp || (g_dlg_mode >= 2 && g_dlg_mode <= 4))) g_dlg_open = false;
+        if (g_dlg_open && (g_dlg_sp || (g_lob_sp && g_dlg_mode >= 2 && g_dlg_mode <= 4))) g_dlg_open = false;   // (not the Communications lobby: PR #129, it closed at once)
         if (hide || g_sp_layer_up) { g_layer.begin(std::max(2, psp_sddialog::output_scale())); if (hide) sp_hide_bands(); g_layer.publish(); g_sp_layer_up = hide; }
         return;
     }

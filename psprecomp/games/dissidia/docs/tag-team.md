@@ -12,8 +12,8 @@
     - Desync from the start: `DESYNC at frame 1`, fighter positions off in the last bits (`rp6_2v2_1122_2255`): the build no longer fuses
       multiply-adds (see "Batch three"); not re-tested between an Android and a PC copy. `DESYNC at frame 0`, whole blocks of the host's own
       fighter (`rp6_desync_1122_2242`): not understood; needs the other player's log of that session.
-    - Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).
-    - Cannot pause in the online tag battle.
+    - ~~Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).~~ Fixed 23 Nov (see "Batch four").
+    - Cannot pause in the online tag battle: looks like retail (see "Batch four"); a pause for both players would be new work.
     - LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
@@ -5065,3 +5065,20 @@ Free-for-all needs its own player setup (players, characters, teams clear).
 - **Not fixed: `DESYNC at frame 0`** (`rp6_desync_1122_2242`): before any input, 13 blocks of the host's own fighter (Terra) and 3 of the other differ,
   the positions and the fighter signature (characters) agree. Something about that fighter was built differently on the two copies (data, not
   rounding). The other player's log of that session is needed.
+
+### Batch four (23 Nov): the Communications Battle Lobby, no pause online
+
+- **The Battle Lobby on the Communications setup screen closed at once** (PR #129). Select opened it and the next frame it was gone.
+  The single player screen's tick (`sp_tick_hook`) also runs on the Communications screen; out of single player mode it closes
+  "its" dialogs, and that test was any lobby mode (2..4), so it closed the online one too. `g_lob_sp` now says which screen
+  opened the lobby, and the single player tick only closes its own. `[TTLOBBY]` logs the setup screen's dialog opening / closing
+  and the press that closed the lobby. Verified with two copies (`tools_dbg/mp_lobby2.py`, Team 2 vs 2): the lobby is still open
+  0.4 / 1.9 / 4.9 s after Select and closes on Circle.
+- **No pause in an online tag battle: looks like retail, not a tag team bug.** Start reaches the battle (`FUN_0890CE58` packs it as
+  0x0400 and `FUN_0890D090` unpacks it on both machines; `[TTLAT]` shows 0x0400 on the host's stream for 4 frames). But the
+  battle's pause control never runs online: its task (`FUN_08B1D99C` makes the control and registers the tick `FUN_08B1DAB0`,
+  which calls the START check `FUN_08B1E298`) was never made or ticked in the online battle (dispatch hooks, nothing logged).
+  The mode words the check reads were 3 / 1 there (`*0x089D6A10` +72 / +88), which would let it through. Not checked: the same
+  hooks in an offline battle (the offline test harness could not open a display on this machine) and a plain online 1v1.
+  A pause for both players (both copies stop on the same frame, the pause list on the presser's machine, Forfeit for his team)
+  would be new work.
