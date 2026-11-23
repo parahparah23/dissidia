@@ -603,11 +603,17 @@ void hle_GetAtracID(uint8_t*, recomp_context* ctx) {
     ret(ctx, id < 0 ? ERR_NO_ATRACID : static_cast<uint32_t>(id));
 }
 
+// for games: is this ATRAC id a streamed track (the battle music)? (Dissidia's tag team keeps the battle music through a mid-battle KO's finish)
+bool atrac_is_streamed(int id) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    return get_ctx(id) && g_ctx[id].state == ST_STREAMED;
+}
+
 void hle_ReleaseAtracID(uint8_t*, recomp_context* ctx) {
     std::lock_guard<std::mutex> lk(g_mtx);
     int id = static_cast<int>(A(ctx, 0));
     if (!get_ctx(id)) { ret(ctx, ERR_BAD_ATRACID); return; }
-    { const AtracCtx& c = g_ctx[id]; if (c.state == ST_STREAMED) std::fprintf(stderr, "[ATRAC] release id=%d (streamed, at sample %d of %d, loops %d)\n", id, c.currentSample, c.endSample, (int)c.loops()); }   // the battle music: when does it stop
+    { const AtracCtx& c = g_ctx[id]; if (c.state == ST_STREAMED) std::fprintf(stderr, "[ATRAC] release id=%d (streamed, at sample %d of %d, loops %d) ra %08X\n", id, c.currentSample, c.endSample, (int)c.loops(), static_cast<uint32_t>(ctx->r[31])); }   // the battle music: when does it stop
     free_ctx(id);
     ret(ctx, 0);
 }
@@ -959,6 +965,8 @@ void hle_Reinit(uint8_t*, recomp_context* ctx) { ret(ctx, 0); }
 void hle_StartEntry(uint8_t*, recomp_context* ctx) { ret(ctx, 0); }
 
 }  // namespace
+
+bool psp_atrac_is_streamed(int id) { return atrac_is_streamed(id); }
 
 void psp_hle_register_atrac() {
     psp_hle_register("sceAtracGetAtracID", hle_GetAtracID);
