@@ -4400,8 +4400,8 @@ void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
     if (const uint32_t sd = req_side; sd < 2 && !std::getenv("PSPRECOMP_TAGTEAM_NOXSUMMON") && !(g_ram[(a + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) {   // an extra of this side asks for a summon: the manager's step treats him as the slot fighter
         if (g_sum_pres[sd]) { ctx->r[2] = g_sum_pres[sd]; return; }
         for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].side == side_of(a) && g_extra[i].actor != a && alive(g_extra[i].actor) && (g_ram[(g_extra[i].actor + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) {
-            g_sum_pres[sd] = g_extra[i].actor; ctx->r[2] = g_extra[i].actor;
-            if (g_log) std::fprintf(stderr, "[SUMUSED] side %u: extra %08X (char %d) presented to the summon step\n", sd, g_extra[i].actor, actor_char(g_extra[i].actor));
+            g_sum_pres[sd] = g_extra[i].actor; ctx->r[2] = g_extra[i].actor; g_sum_req.insert(g_extra[i].actor);
+            if (g_log) std::fprintf(stderr, "[SUMUSED] side %u: extra %08X (char %d) presented to the summon step (his uses %u, +0x10D0 %u)\n", sd, g_extra[i].actor, actor_char(g_extra[i].actor), sum_uses(g_extra[i].actor), static_cast<unsigned>(rd(g_extra[i].actor + 0x10D0u) & 0xFFFFu));
             return;
         }
     }
@@ -6742,6 +6742,28 @@ void sum_track() {
             used[id] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u char %d: summon used\n", dissidia_battle_age() / 60.0f, k, key);
         } else if (u > 0 && used.count(id) && used[id]) {   // put back by something else (a rebuild of the same character, a KO call-in): the use stays spent
             sum_set_uses(F, 0); if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u char %d: summon uses %u -> 0 (already spent)\n", dissidia_battle_age() / 60.0f, k, key, u);
+        }
+    }
+    // 24 Nov: partners (extras) never summoned: the summon step's gate FUN_0889120C asks FUN_08B3390C(actor) = the fighter's summon uses (+0x10CE), and an
+    // extra is spawned with 0 (test `~/dissidia/tt/xsum4`: "presented to the summon step (his uses 0)"). Every started extra now gets one use of his own,
+    // booked per member (side, character id) like the slot fighters, so a member who summoned stays spent in the slot or as a partner. PSPRECOMP_TAGTEAM_NOXSUMUSE=1: old.
+    static const bool no_xuse = std::getenv("PSPRECOMP_TAGTEAM_NOXSUMUSE") != nullptr;
+    static std::map<uint32_t, int> given;   // extra actor -> the character his use was given for
+    static uint32_t given_bs = 0; if (given_bs != g_bs) { given_bs = g_bs; given.clear(); }
+    if (!no_xuse) for (int i = 0; i < g_nextra; i++) {
+        const uint32_t X = g_extra[i].actor;
+        if (!g_extra[i].started || !ok(X, 0x12D0) || is_rebuilding(X) || X == srd(g_bs + 56u) || X == srd(g_bs + 60u)) continue;
+        const int key = actor_char(X); const std::pair<int, int> id{static_cast<int>(side_of(X)), key};
+        const bool spent = used.count(id) && used[id]; const uint32_t u = sum_uses(X);
+        auto g = given.find(X);
+        if (g == given.end() || g->second != key) {   // a new partner (or another member in this actor): his own use state
+            given[X] = key;
+            const uint32_t want = spent ? 0u : 1u;
+            if (u != want) { sum_set_uses(X, want); if (g_log) std::fprintf(stderr, "[SUMUSED] side %u partner %08X char %d: summon uses %u -> %u (%s)\n", side_of(X), X, key, u, want, spent ? "his use is spent" : "his own use"); }
+        } else if (u == 0 && !spent) {
+            used[id] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u partner char %d: summon used\n", dissidia_battle_age() / 60.0f, side_of(X), key);
+        } else if (u > 0 && spent) {
+            sum_set_uses(X, 0); if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u partner char %d: summon uses %u -> 0 (already spent)\n", dissidia_battle_age() / 60.0f, side_of(X), key, u);
         }
     }
 }
