@@ -21,6 +21,13 @@
 #include "psp_platform.h"
 #include "psp_ge_draw.h"
 #include "hle/psp_upnp.h"
+#ifdef __ANDROID__
+#include "psp_android.h"
+#endif
+#ifndef _WIN32
+#include <ifaddrs.h>
+#include <net/if.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -799,6 +806,51 @@ void on_packet_now(const uint8_t* d, size_t n, const sockaddr_in& from) {
     dispatch_packet(d[4], src, from, body, blen);
 }
 
+// LAN beacons (23 Nov, PR #129: "LAN never finds the other player on the same WiFi; the relay does"): 255.255.255.255 goes out of one
+// interface only on Windows (often a virtual adapter: WSL / Hyper-V / VPN) and is dropped by many Wi-Fi access points / phone drivers in power
+// save. Every up IPv4 interface's own subnet broadcast (address | ~netmask) is sent to as well, refreshed every 10 s.
+// PSPRECOMP_ADHOC_NOSUBNETCAST=1: only 255.255.255.255 (old).
+std::vector<uint32_t> lan_broadcasts() {   // network byte order
+    static std::vector<uint32_t> cache; static int64_t at = -1;
+    const int64_t t = now_us();
+    if (at >= 0 && t - at < 10000000) return cache;
+    at = t; cache.clear();
+    if (std::getenv("PSPRECOMP_ADHOC_NOSUBNETCAST")) return cache;
+#ifdef _WIN32
+    SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd != INVALID_SOCKET) {
+        INTERFACE_INFO info[32]; DWORD got = 0;
+        if (WSAIoctl(fd, SIO_GET_INTERFACE_LIST, nullptr, 0, info, sizeof info, &got, nullptr, nullptr) == 0) {
+            for (DWORD i = 0; i < got / sizeof(INTERFACE_INFO); i++) {
+                const INTERFACE_INFO& f = info[i];
+                if (!(f.iiFlags & IFF_UP) || (f.iiFlags & IFF_LOOPBACK)) continue;
+                const uint32_t a = f.iiAddress.AddressIn.sin_addr.s_addr, m = f.iiNetmask.AddressIn.sin_addr.s_addr;
+                if (!a || !m || m == 0xFFFFFFFFu) continue;
+                cache.push_back(a | ~m);
+            }
+        }
+        closesocket(fd);
+    }
+#else
+    ifaddrs* ifs = nullptr;
+    if (getifaddrs(&ifs) == 0) {
+        for (ifaddrs* f = ifs; f; f = f->ifa_next) {
+            if (!f->ifa_addr || f->ifa_addr->sa_family != AF_INET || !f->ifa_netmask) continue;
+            if (!(f->ifa_flags & IFF_UP) || (f->ifa_flags & IFF_LOOPBACK)) continue;
+            const uint32_t a = ((sockaddr_in*)f->ifa_addr)->sin_addr.s_addr, m = ((sockaddr_in*)f->ifa_netmask)->sin_addr.s_addr;
+            if (!a || !m || m == 0xFFFFFFFFu) continue;
+            cache.push_back(a | ~m);
+        }
+        freeifaddrs(ifs);
+    }
+#endif
+    std::sort(cache.begin(), cache.end()); cache.erase(std::unique(cache.begin(), cache.end()), cache.end());
+    static std::string shown;
+    std::string now; for (uint32_t b : cache) { in_addr x; x.s_addr = b; now += " "; now += inet_ntoa(x); }
+    if (now != shown) { shown = now; ANOTE("LAN broadcast addresses:%s", now.empty() ? " (none found; 255.255.255.255 only)" : now.c_str()); }
+    return cache;
+}
+
 // ---- periodic work (network thread) ----
 void send_beacons() {
     if (g_relay_mode && !g_relay_ok) return;
@@ -833,8 +885,13 @@ void send_beacons() {
         sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); targets.push_back(a);
         a.sin_addr.s_addr = htonl(INADDR_BROADCAST); targets.push_back(a);
+        for (uint32_t bc : lan_broadcasts()) { a.sin_addr.s_addr = bc; targets.push_back(a); }
     }
     for (auto& a : g_extra_peers) targets.push_back(a);
+    // every peer we hear gets our beacon directly too: if only one direction's broadcast gets through, both still find each other
+    // (PSPRECOMP_ADHOC_NODIRECTBEACON=1: old)
+    static const bool direct_beacon = !std::getenv("PSPRECOMP_ADHOC_NODIRECTBEACON");
+    if (direct_beacon) for (auto& [m, pe] : g_peers) if (pe.addr.sin_port && pe.addr.sin_addr.s_addr && pe.addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) targets.push_back(pe.addr);
     int64_t now = now_us();
     for (auto it = g_gossip.begin(); it != g_gossip.end();) {
         if (it->second < now) { it = g_gossip.erase(it); continue; }
@@ -1035,6 +1092,8 @@ void net_thread() {
             std::lock_guard<std::mutex> lk(g_mu);
             send_beacons();
         }
+        { static const char* sw = std::getenv("PSPRECOMP_ADHOC_TEST_TOLAN"); static int64_t sw_at = sw ? t + (int64_t)(std::atof(sw) * 1e6) : -1;   // test aid: Settings > Network = LAN after <s> seconds
+          if (sw_at >= 0 && t >= sw_at) { sw_at = -1; psp_adhoc_configure(false, "", "", ""); } }
         if (t >= next_tick) { next_tick = t + 10000; apply_pending_config(); relay_service(); periodic(); }
     }
 }
@@ -1070,6 +1129,30 @@ void apply_pending_config() {
         g_relay_cookie = 0; g_relay_players = 0; g_relay_hello_next = 0; g_relay_resolve_next = 0;
         for (auto& [id, m] : g_match) m.peers.clear();
         ANOTE("network: %s%s", relay ? "Internet via " : "LAN", relay ? g_cfg_server.c_str() : "");
+    }
+    // Internet -> LAN (23 Nov, PR #129 RP6 log: Settings > Network switched to LAN in a running game, "no peer ever found"): an Internet-mode socket is
+    // bound to a port the OS picked (all traffic went to the server), but LAN beacons are sent to the well-known ports g_base_port.. only, so
+    // nobody heard us and we heard nobody. The socket is bound again to the first free well-known port. PSPRECOMP_ADHOC_NOREBIND=1: old.
+    if (!relay && g_sock >= 0 && (g_my_port < g_base_port || g_my_port >= g_base_port + g_span) && !std::getenv("PSPRECOMP_ADHOC_NOREBIND")) {
+        const int ns = (int)socket(AF_INET, SOCK_DGRAM, 0);
+        uint16_t np = 0;
+        if (ns >= 0) {
+            int one = 1;
+            setsockopt(ns, SOL_SOCKET, SO_BROADCAST, PSP_SOCKOPT_CAST(&one), sizeof one);
+            psp_plat::set_nonblocking(ns);
+            for (int i = 0; i < g_span && !np; i++) {
+                sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_ANY); a.sin_port = htons((uint16_t)(g_base_port + i));
+                if (bind(ns, (sockaddr*)&a, sizeof a) == 0) np = (uint16_t)(g_base_port + i);
+            }
+        }
+        if (np) {
+            int old;
+            { std::lock_guard<std::mutex> lk(g_mu); old = g_sock; g_sock = ns; ANOTE("LAN: socket moved from UDP %u to %u (the LAN ports %d-%d)", g_my_port, np, g_base_port, g_base_port + g_span - 1); g_my_port = np; }
+            psp_plat::close_socket(old);
+        } else {
+            if (ns >= 0) psp_plat::close_socket(ns);
+            ANOTE("LAN: could not bind any of UDP %d-%d; staying on %u (other players will not find this one by broadcast)", g_base_port, g_base_port + g_span - 1, g_my_port);
+        }
     }
     std::vector<sockaddr_in> ps;
     if (!relay && !peers.empty()) ps = parse_peers_list(peers);   // DNS lookups happen without the lock
@@ -1172,6 +1255,9 @@ bool ensure_net() {
         int one = 1;
         setsockopt(g_sock, SOL_SOCKET, SO_BROADCAST, PSP_SOCKOPT_CAST(&one), sizeof one);
         psp_plat::set_nonblocking(g_sock);
+#ifdef __ANDROID__
+        psp_android_wifi_multicast_lock();   // LAN broadcasts reach us (Wi-Fi power save filters them otherwise)
+#endif
         if (const char* sp = std::getenv("PSPRECOMP_ADHOC_SPAN")) g_span = std::clamp(std::atoi(sp), 1, 64);
         for (int i = 0; i < g_span && !g_my_port; i++) {
             sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_ANY);

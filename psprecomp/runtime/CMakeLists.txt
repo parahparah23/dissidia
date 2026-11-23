@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(psprecomp_runtime CXX C)
 
+# Online play is lock-step: every machine runs the same simulation and the state is compared bit for bit (NETSYNC). Clang for
+# ARM (Android, Apple silicon) fuses a * b + c into one FMA instruction by default (-ffp-contract=on), rounding once where an x86
+# build rounds twice, so an Android copy and a PC copy drifted apart in the last bits of the fighters' positions from frame 1
+# (RP6 log 22 Nov, rp6_2v2_1122_2255: fighter0.body.x 3FD890C6 here, 3FD8918D on the PC). No contraction anywhere: the generated
+# code, the VFPU and the game's own C++ round every operation the same way on every platform.
+add_compile_options(-ffp-contract=off)
+
 set(PSP_VFPU_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/psp_vfpu_core.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/psp_vfpu_ops.cpp

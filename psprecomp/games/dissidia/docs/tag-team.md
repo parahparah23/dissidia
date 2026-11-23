@@ -7,14 +7,18 @@
     summons the side's stone), the big retail orb not refreshing after a swap.
   - **Kill camera / KO without the hold is off**: the KO hold is the default again; [PR #129] fixes the music part (the streamed battle BGM released by FUN_089922FC during the finish is now kept), the stuck camera / no control is still open (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move. Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
-  - Online 2v2 (Communications, RP6 log `~/dissidia/tt/desk_logs/rp6_2v2_1122_2255.log`): the Battle Lobby closes instantly, the player cannot get into it. (The log also shows `[LOBBY] single player: ...` at the start of an online session.)
-  - Online DESYNC again, same session: `[NETSYNC] DESYNC at frame 1 ... 11 of 66 fields differ, first fighter0.body.x` - both slot fighters' positions (body.x/y/z, tiny float differences) and blocks 0x100/0x300/0x800 differ from frame 1 (the earlier log differed at frame 0 in fighter 0's blocks only). Start positions / setup differ between the machines.
-  - Feral Chaos's EX Burst is "completely broken" (user; same log: extraP Feral Chaos (char 32) burst chance t=264.08, burst 265.08 with slotC, over 270.61) - user: after the burst EVERYONE stays in the burst "void" forever (black background, timer 00:00, HUD still up; screenshot `~/dissidia/tt/desk_logs/rp6_feral_void_*.png`, log next to it). The log has `EX Burst over: the extra burster's lock block ... taken out of its camera slot` at 270.61 but NO `EX Burst over: <fighter> back from under the stage` lines (other bursts log those), so the end of a burst by an extra (the CPU partner) does not restore the stage / bring the held fighters back. Repro: an extra (partner) burst with EXBAT, check the end.
-  - LAN mode does not find the other player on the same WiFi (RP6 log `~/dissidia/tt/desk_logs/rp6_lan_1122_2246.log`): with Network = LAN the RP6 joined group "MLOBBY" and started matching but no peer ever appeared, so the user switched back to Internet (via the relay the same peer "AIRBEAK" showed up at once, its LAN address 192.168.2.120). Check the LAN discovery path on Android (UDP broadcast / multicast needs a WifiManager MulticastLock; broadcast address; both devices really in LAN mode; firewall) - generic multiplayer, not tag-specific.
-  - Online tag battle: the player cannot pause (Start does nothing; same session as the desync log `rp6_desync_1122_2242.log`). Check what retail allows in a Communications battle (a pause / forfeit menu for both players?) and make it work in tag battles.
-  - Online DESYNC from the first frame (RP6 log `~/dissidia/tt/desk_logs/rp6_desync_1122_2242.log`, 2 machines, v0.1.25 code): `[NETSYNC] DESYNC at frame 0 ... 16 of 66 fields differ, first fighter0.block100` - fighter 0 (the human's Terra, slot 0) already differs in blocks 0x100-0xA00 before any input, then every compared frame mismatches (2935 of 2935). Likely the two machines built Terra from different data (his record / level / equipment / accessories from each machine's own save vs the roster). User saw: on the opponent's screen Terra died while alive on his own, then the AI seemed to drive the human players, and the game froze when Feral Chaos spawned (call-in) on the opponent's screen. Also odd: `[LOBBY] single player: ...` logged in an online session.
+  - From the PR #129 play-test comment (RP6, online through the relay, logs on the upstream branch `logs/tagteam-rp6-22nov`):
+    - ~~Partner EX Burst soft-lock: everyone stays in the burst void (Feral Chaos, `rp6_feral_void_1122_2259`).~~ Fixed 23 Nov [PR #129] (see "Batch three").
+    - Desync from the start: `DESYNC at frame 1`, fighter positions off in the last bits (`rp6_2v2_1122_2255`): the build no longer fuses
+      multiply-adds (see "Batch three"); not re-tested between an Android and a PC copy. `DESYNC at frame 0`, whole blocks of the host's own
+      fighter (`rp6_desync_1122_2242`): not understood; needs the other player's log of that session.
+    - ~~Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).~~ Fixed 23 Nov [PR #129] (see "Batch four").
+    - Cannot pause in the online tag battle: looks like retail (see "Batch four"); a pause for both players would be new work.
+    - ~~LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).~~ Fixed 23 Nov [PR #129] (see "Batch five"; the Android multicast lock needs a new APK skeleton).
+  - (23 Nov: likely cause found and changed, not reproduced on a device; see "Batch five".)
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
+    - (23 Nov: changed, the player's own next member now takes the slot back; see "Batch five".)
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
   - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov [PR #129] (see "Batch two").
   - FFA: use the game's own character selector, not a list.
@@ -5036,3 +5040,88 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   The human side is built from P1's picks: `force_human_chars` (direct_battle.cpp, every poll before the battle): the main's own save record, model id and a team struct {main, tag-in}, so the party chosen in Party Select is irrelevant. `PSPRECOMP_TAGTEAM_FFA_KEEPPARTY=1` keeps the old Party Select.
   Evidence: `~/dissidia/tt/ttfa_g3` (P1 Emperor, P2 Firion, P3 Off, P4 random: Emperor vs Firion + Bartz as P4 = 3 fighters), sheets `sheet.png`, `sheet2.png`.
 - **Not done**: online Free-for-all keeps the room's players + CPU fill (no P1-P4 screen, the retail Party Select / setup screen still show online); the single player setup screen is covered, not skipped (Enter Battle pressed for you); CPU tag-ins are not played.
+
+### Batch three (23 Nov): partner EX Burst soft-lock, no FMA
+
+- **Partner EX Burst: everyone stayed in the void** (`PSPRECOMP_TAGTEAM_EXBABSY=1` / `PSPRECOMP_TAGTEAM_NOEXBXBACK=1` = old). RP6 log
+  `rp6_feral_void_1122_2259` (stage 0, floor y ~30): the CPU partner Feral Chaos burst (265.08 - 270.61 s); the end logged only `the extra burster's lock
+  block ... taken out of its camera slot`, no `back from under the stage` line. Two causes:
+  - The burst parks the fighters outside it below the stage, and the end-of-burst restore only took a fighter as parked below an absolute y of -20. The
+    park depth is per stage: on stage 12 (floor ~0) they end at -20.2 whatever height they had (`PSPRECOMP_TAGTEAM_EXBLIFT=19.95:75` run), on the RP6's
+    stage the dead partner sank 29.5 -> -14.8. So nobody was taken as parked, the human and Golbez stayed under the stage and the human's camera showed
+    them in the dark (the screenshot). Now "sunk" is below -20 or 20 below the fighter's last spot on the stage (`sunk()` in the restore block).
+  - An extra IN the burst (burster or victim) stays where the burst scene put it (0,0,0; under the floor of a high stage; Feral Chaos stayed there,
+    `DRAWCHK ... pos (0.0,0.0,0.0)` after the burst). Retail only puts the slot fighters back. The extras in it are noted (`inb`) and put back on their
+    spot from before the burst (`EX Burst over: extraE back from the burst (an extra in it) to ...`).
+  - Runs (`sumtest.py 30 NOFREEZE=1 PSPRECOMP_TAGTEAM_EXBAT=x0:20`, stage 12): slotC, extraP and the bursting extraE back, the battle goes on
+    (`exb_new`); with `EXBLIFT=19.95:40` (fighters 40 up when the burst starts) all three back to their spots ~40 up (`exb_liftB`). The RP6 case itself
+    (a park that ends above -20) does not happen on stage 12: not re-run on a high stage or on the device.
+  - The `[OVL] resolve 0x08A4F148 (id 1) -> MISSING` lines during that burst are harmless: 0x08A4F148 is an empty function (`jr ra; nop`) and a miss
+    runs the no-op stub.
+  - New test aid `PSPRECOMP_TAGTEAM_EXBLIFT=<s>:<dy>`: once at tag-clock second s, every fighter dy higher.
+- **No multiply-add fusion** (`add_compile_options(-ffp-contract=off)` in `runtime/CMakeLists.txt` and `runtime/sdk/CMakeLists.txt`). RP6 log
+  `rp6_2v2_1122_2255`: `DESYNC at frame 1`, both slot fighters' positions off in the last bits (`fighter0.body.x 3FD890C6` here, `3FD8918D` on the other
+  copy), then every frame. Clang for ARM fuses `a * b + c` into one FMA by default (rounded once; an x86 build rounds twice), so an Android copy and a PC
+  copy cannot stay bit-equal. Now nothing is fused on any platform (generated code, VFPU, game C++). On x86 builds this changes nothing (no FMA there).
+  Not tested between an Android and a PC copy. The VFPU's sin / cos / sqrt are PPSSPP's bit-exact tables, not the platform's libm.
+- **Not fixed: `DESYNC at frame 0`** (`rp6_desync_1122_2242`): before any input, 13 blocks of the host's own fighter (Terra) and 3 of the other differ,
+  the positions and the fighter signature (characters) agree. Something about that fighter was built differently on the two copies (data, not
+  rounding). The other player's log of that session is needed.
+
+### Batch four (23 Nov): the Communications Battle Lobby, no pause online
+
+- **The Battle Lobby on the Communications setup screen closed at once** (PR #129). Select opened it and the next frame it was gone.
+  The single player screen's tick (`sp_tick_hook`) also runs on the Communications screen; out of single player mode it closes
+  "its" dialogs, and that test was any lobby mode (2..4), so it closed the online one too. `g_lob_sp` now says which screen
+  opened the lobby, and the single player tick only closes its own. `[TTLOBBY]` logs the setup screen's dialog opening / closing
+  and the press that closed the lobby. Verified with two copies (`tools_dbg/mp_lobby2.py`, Team 2 vs 2): the lobby is still open
+  0.4 / 1.9 / 4.9 s after Select and closes on Circle.
+- **No pause in an online tag battle: looks like retail, not a tag team bug.** Start reaches the battle (`FUN_0890CE58` packs it as
+  0x0400 and `FUN_0890D090` unpacks it on both machines; `[TTLAT]` shows 0x0400 on the host's stream for 4 frames). But the
+  battle's pause control never runs online: its task (`FUN_08B1D99C` makes the control and registers the tick `FUN_08B1DAB0`,
+  which calls the START check `FUN_08B1E298`) was never made or ticked in the online battle (dispatch hooks, nothing logged).
+  The mode words the check reads were 3 / 1 there (`*0x089D6A10` +72 / +88), which would let it through. Not checked: the same
+  hooks in an offline battle (the offline test harness could not open a display on this machine) and a plain online 1v1.
+  A pause for both players (both copies stop on the same frame, the pause list on the presser's machine, Forfeit for his team)
+  would be new work.
+
+### Batch five (23 Nov): white screen after a dropped peer, LAN discovery, spectating notes
+
+- **White screen after the other player dropped out** (RP6 `rp6_whitescreen_1122_2228`). In that log the peer's connection was lost mid
+  battle (t=342 s), the battle went straight to the menu overlay, and 20 frames later our leftover unload (`leftover_unload`, the characters
+  loaded mid battle) released 7 characters' files while the menu was loading its own files through the same file manager. The menu stayed white
+  (still drawing ~134 draws per frame). Two copies on the PC (`tools_dbg/mp_drop.py`: B killed 8 s into a tag battle) go back to the Group
+  Battle menu correctly, but that run had no mid-battle loads, so the leftover unload never ran. The `[HANGDUMP] game thread stuck` lines in
+  both logs are a false alarm: the menus have an empty world list, and the backtrace is the normal vblank wait. Change: the leftover unload no
+  longer runs once the menu overlay is in; the next battle's setup releases them first (it already did, forced). `PSPRECOMP_TAGTEAM_MENULEFTOVER=1`:
+  old. Not reproduced: the copies' parties have no reserve members, so nothing is loaded mid battle in the two-copy rig.
+- **LAN never found the other player** (RP6 `rp6_lan_1122_2246`). Three causes, all in `runtime/src/hle/psp_hle_adhoc.cpp`:
+  - The real one: the game started in Internet mode, whose socket is bound to a port the OS picks (UDP 52365), then Settings > Network was set
+    to LAN. LAN beacons only go to the well-known ports 27312.., so nobody heard this player and it heard nobody. Switching to LAN now moves the
+    socket to the first free well-known port (`[ADHOC] LAN: socket moved from UDP ... to ...`; `PSPRECOMP_ADHOC_NOREBIND=1`: old).
+    Test aid `PSPRECOMP_ADHOC_TEST_TOLAN=<s>` (the Settings switch after <s> seconds); `tools_dbg/mp_tolan.py` starts copy A in Internet mode
+    and switches it: with the old code B heard A but A never heard B (no room); now both see each other and move on into the battle room.
+  - Every peer we hear gets our beacon directly as well, so one working direction is enough for both (`PSPRECOMP_ADHOC_NODIRECTBEACON=1`: old).
+  - Beacons also go to every up IPv4 interface's own subnet broadcast address (`[ADHOC] LAN broadcast addresses: ...`), not only
+    255.255.255.255, which Windows sends out of one adapter only (often a virtual one) (`PSPRECOMP_ADHOC_NOSUBNETCAST=1`: old). The Windows
+    branch (`SIO_GET_INTERFACE_LIST`) was not compiled here (no Windows compiler in this setup).
+  - Android: a `WifiManager.MulticastLock` is taken when the network starts (`psp_android_wifi_multicast_lock`, `[ADHOC] Wi-Fi multicast
+    lock held / NOT taken`): many Wi-Fi drivers drop broadcasts to an app without it. Needs `CHANGE_WIFI_MULTICAST_STATE`, now in
+    `android/hello/AndroidManifest.xml`; the APK skeleton (`make_skeleton.py`) has to be built again for it. Without the permission it only
+    logs. Not compiled for Android or tried on a device here.
+- **Spectating after death online** (RP6 `rp6_spectate_terra_1122_2207`). What happened: the human's Kain (slot 0) fell at 179.8 s,
+  so by the handover rules slot 0 was rebuilt as the team mate Jecht (another driver) and this player watched slot 0's camera (Jecht). At
+  199.8 s the player's own next member Terra came in as an EXTRA this machine drives, with the extra chase camera (camera slot 4 + n), which did not
+  follow / turn like a slot's and on which L did not change the lock. Only when Jecht fell (228 s) was the slot rebuilt as Terra. Choices: (a) when
+  this player's next member comes in while a team mate holds the slot, swap them (the slot becomes the newcomer, the mate goes on as an extra);
+  (b) keep the newcomer an extra and make the extra camera and the L lock cycle behave like a slot's.
+  **Changed (a), "slot take"** (`slot_take` in `tagteam.cpp`, called from `queue_member`): in a Communications lock-step battle, when the
+  newcomer's driver is the player the slot started with (the first entry of the slot stream's schedule, `dissidia_ttnet_driver_mac`) and
+  somebody else drives the slot now, the slot is rebuilt as the newcomer (his own stats, his entrance) and handed to his driver, and the team mate
+  goes on as a new extra, driven as before, with the HP and BRV he had and no entrance (`Late`/`Extra` `hp`, `brv`, `quiet`). Decided from the
+  schedule and the battle state only, so every machine does the same. The KO ledger skips a mate who is on his way to an extra (no false
+  "KO of ..." at the take). Log `[TTLOCK] t=..s slot take: ...` and `[TAGTEAM] extra ... goes on with hp .. brv ..`.
+  `PSPRECOMP_TTLOCK_NOSLOTTAKE=1`: old (the newcomer is an extra). Test: `tools_dbg/mp_take.py` (A registers a 2nd character, CPU fill,
+  slot 0 KO'd at 20 s by `PSPRECOMP_TAGTEAM_KOLIST`): at 29.6 s on both copies "LAGUNA (player 0, the slot's own) takes slot 0 from JECHT
+  (player -1, hp 9214)", the extra goes on with hp 9214, NETSYNC 2070 frames compared, 0 mismatched. Not tried with two humans on one team
+  (the mate a human), or on devices.
