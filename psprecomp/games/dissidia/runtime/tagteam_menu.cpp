@@ -837,7 +837,10 @@ void sp_dlg_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!dissidia_tagteam_sp_tag_on()) return;
     const uint32_t M = r32(screen + SCR_M); if (M < 0x08800000u || M >= 0x0A000000u) return;
     const uint32_t round = r32(M + 1444u); const int row = static_cast<int>(r32(M + 1488u));
-    g_sp_dlg_ran = true; g_sp_hide_round = round >= 1u && round < 5u ? static_cast<int>(round) : -1;
+    // 23 Nov (user, low priority list: "remove the options the Battle Lobby now covers (stage, rules, judgment)"): round 1 too, unless the lobby is off
+    // (PSPRECOMP_TAGTEAM_SPLOBBY_OFF) or PSPRECOMP_TAGTEAM_R1ROWS=1 (old: round 1 kept them).
+    static const bool r1rows = std::getenv("PSPRECOMP_TAGTEAM_R1ROWS") || std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF");
+    g_sp_dlg_ran = true; g_sp_hide_round = round >= (r1rows ? 1u : 0u) && round < 5u ? static_cast<int>(round) : -1;
     g_sp_row.store(g_sp_hide_round >= 0 ? row : -1, std::memory_order_relaxed);
 }
 // ---- Single player: CPU rows on the Tournament screen (docs/tag-team.md "Single player: CPU rows") ----
@@ -916,7 +919,7 @@ void sp_row_label(int i, bool hi, const std::string& ours, const std::string& fo
         sp_label(363.f, y0 + 9.f, foe, 7.5f, col, 46.f);
     }
 }
-void sp_hide_bands() {   // the round dialog of matchups 2..: STAGE / RULES / JUDGEMENT covered
+void sp_hide_bands() {   // the round dialog (every matchup, the lobby sets them): STAGE / RULES / JUDGEMENT covered
     for (const auto& r : {std::pair<float, float>{103.f, 125.f}, std::pair<float, float>{183.f, 229.f}})
         g_layer.band(66.f, r.first, 414.f, r.second, [&](float, float) { return LayerColor{208, 210, 219, 1.f}; });
 }

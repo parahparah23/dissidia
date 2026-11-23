@@ -1365,6 +1365,7 @@ void apply_undo(Extra& e) {
 }
 
 void safe_spot(uint32_t ref, float dx, float dz, float out[3], bool callin = false);   // below (grounded, inside-the-stage spot)
+struct Extra; void ffa_spread_spot(const Extra& e, float sp[3]);   // below (free-for-all: the start-of-battle extras apart)
 void ground_track();   // below
 float callin_countdown(int team, float age);   // below: seconds until the side's next call-in
 void entrance_effect(uint32_t A, const std::string& name, bool banter = false);
@@ -1404,7 +1405,7 @@ void start_extra(Extra& e) {
         const float dx = rdf(e.foe + 0x80u) - rdf(e.slot_actor + 0x80u), dz = rdf(e.foe + 0x88u) - rdf(e.slot_actor + 0x88u), d = std::sqrt(dx * dx + dz * dz);
         if (d > 1.0f) { const float k = std::min(5.0f, d * 0.4f) / d; pdx = dx * k - dz / d * 1.5f; pdz = dz * k + dx / d * 1.5f; }
     }
-    { float sp[3]; safe_spot(e.slot_actor, pdx, pdz, sp, e.callin); wrf(vec, sp[0]); wrf(vec + 4, sp[1]); wrf(vec + 8, sp[2]); wrf(vec + 12, 1.0f); }
+    { float sp[3]; safe_spot(e.slot_actor, pdx, pdz, sp, e.callin); if (!e.callin) ffa_spread_spot(e, sp); wrf(vec, sp[0]); wrf(vec + 4, sp[1]); wrf(vec + 8, sp[2]); wrf(vec + 12, 1.0f); }
     tp_vec("call-in start", e.actor, vec); call(PLACE, e.actor, vec, 1);
     g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
     { const uint32_t rv = call(START_ACTION, e.actor + 304u, 1, 0); if (g_log) std::fprintf(stderr, "[TAGTEAM] START_ACTION(%08X, 1) -> %u, script now %d\n", e.actor + 304u, rv, static_cast<int16_t>(rd(e.actor + 0x180u) & 0xFFFFu)); }
@@ -1602,6 +1603,50 @@ float nearest_sample(float x, float z, GPos* o, bool strict = true) {
 // A stage spawn point is used only where a fighter has really stood (a ground sample within 1.5 m, same height within 1 m): the old 6 m radius let
 // Ultimecia spawn at (0,0,10) inside the rubble of Order's Sanctuary (device log 1118_2030; hidden, not missing). PSPRECOMP_TAGTEAM_SPAWNR=<m> overrides.
 const float kSpawnFloorR = std::getenv("PSPRECOMP_TAGTEAM_SPAWNR") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_SPAWNR"))) : 1.5f;
+// The stage's floor under a point, asked the game's own way: FUN_08899300() = the world, then FUN_088976E4(world, out, pos, 0x22, 1, 0, 0) with
+// pos = (x, top, z) -> f0 = the floor height below `top` (the same call FUN_0880496C makes to put an object on the ground, pos y = its y + 3).
+// No floor: a value far below (the stage answers -100 where there is none). NAN when the functions are missing.
+float stage_floor_y(float x, float top, float z) {
+    const FuncPtr w = fn(0x08899300u), q = fn(0x088976E4u); if (!w || !q || !g_ctx) return NAN;
+    const recomp_context saved = *g_ctx;
+    const uint32_t base = (static_cast<uint32_t>(saved.r[29]) - 0x400u) & ~0xFu, vec = base + 0x40u, out = base + 0x100u;
+    g_ctx->r[29] = static_cast<int32_t>(base); w(g_ram, g_ctx); const uint32_t world = static_cast<uint32_t>(g_ctx->r[2]);
+    float y = NAN;
+    if (world) {
+        wrf(vec, x); wrf(vec + 4, top); wrf(vec + 8, z); wrf(vec + 12, 1.0f);
+        g_ctx->r[29] = static_cast<int32_t>(base); g_ctx->r[4] = static_cast<int32_t>(world); g_ctx->r[5] = static_cast<int32_t>(out); g_ctx->r[6] = static_cast<int32_t>(vec);
+        g_ctx->r[7] = 0x22; g_ctx->r[8] = 1; g_ctx->r[9] = 0; g_ctx->r[10] = 0;
+        q(g_ram, g_ctx); y = g_ctx->f[0];
+    }
+    *g_ctx = saved;
+    return y;
+}
+// Free-for-all (23 Nov, PR #129 low-priority TODO "fighters still spawn as two teams"): the extras started beside their slot fighter (the stage only
+// has the two sides' start spots), so the fight began as two pairs. Now the k-th start-of-battle extra of a free-for-all goes to the other axis of the
+// arena: the middle of the two slot fighters plus / minus the half distance between them, turned 90 degrees (4 fighters: a square). The spot must have
+// floor by the game's own floor query (stage_floor_y) within 3 m of the slot fighters' height; else it is tried nearer the middle (75 %, 50 %, 30 %),
+// else the old spot. Battle state and stage only: the same on every machine. PSPRECOMP_TAGTEAM_FFA_NOSPREAD=1: old.
+void ffa_spread_spot(const Extra& e, float sp[3]) {
+    if (!ffa_now() || e.callin || !g_bs || std::getenv("PSPRECOMP_TAGTEAM_FFA_NOSPREAD")) return;
+    const uint32_t s0 = srd(g_bs + 56u), s1 = srd(g_bs + 60u);
+    int k = 0; for (int i = 0; i < g_nextra && &g_extra[i] != &e; i++) if (!g_extra[i].callin) k++;
+    if (!ok(s0, 0x12D0) || !ok(s1, 0x12D0) || k >= 4) return;
+    const float x0 = rdf(s0 + 0x80u), z0 = rdf(s0 + 0x88u), x1 = rdf(s1 + 0x80u), z1 = rdf(s1 + 0x88u), y = 0.5f * (rdf(s0 + 0x84u) + rdf(s1 + 0x84u));
+    const float mx = 0.5f * (x0 + x1), mz = 0.5f * (z0 + z1), hx = 0.5f * (x1 - x0), hz = 0.5f * (z1 - z0);
+    if (std::hypot(hx, hz) < 2.f || !std::isfinite(y)) return;
+    if (g_log && k == 0) std::fprintf(stderr, "[TAGTEAM] free-for-all: floor query check under slot fighter 0 (%.1f,%.1f,%.1f): %.2f\n", x0, rdf(s0 + 0x84u), z0, stage_floor_y(x0, rdf(s0 + 0x84u) + 3.f, z0));
+    const float sg = (k % 2 == 0) ? 1.f : -1.f, top = k < 2 ? 1.f : 0.6f;   // (a 3rd / 4th extra: nearer the middle)
+    for (float sc : {1.0f, 0.75f, 0.5f, 0.3f}) {
+        const float f = top * sc, tx = mx - hz * sg * f, tz = mz + hx * sg * f, fy = stage_floor_y(tx, y + 3.f, tz);
+        if (std::isfinite(fy) && std::fabs(fy - y) <= 3.f) {
+            sp[0] = tx; sp[1] = fy; sp[2] = tz;
+            if (g_log) std::fprintf(stderr, "[TAGTEAM] free-for-all: extra %08X (k %d) starts apart at (%.1f,%.1f,%.1f) (%.0f %% of the way out, floor by the stage query)\n", e.actor, k, tx, fy, tz, f * 100.f);
+            return;
+        }
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] free-for-all: extra %08X (k %d): (%.1f,%.1f) floor %.1f, slot height %.1f: not there\n", e.actor, k, tx, tz, fy, y);
+    }
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] free-for-all: extra %08X (k %d): no floor on the other axis, the usual spot\n", e.actor, k);
+}
 void safe_spot(uint32_t ref, float dx, float dz, float out[3], bool callin) {
     GPos b{rdf(ref + 0x80u), rdf(ref + 0x84u), rdf(ref + 0x88u)};
     if (callin && !std::getenv("PSPRECOMP_TAGTEAM_NOSTARTSPOT") && !std::getenv("PSPRECOMP_TAGTEAM_NOSAFESPOT") && g_ground_gen == g_battle_gen && ok(ref, 0x12D0) && g_side_start_set[side_of(ref) & 1u]) {
@@ -4890,6 +4935,20 @@ void intro_load(uint32_t A) {
     if (ok(g_banter_ctx, 0x90)) for (uint32_t o = 108; o <= 124; o += 16) if (rd(g_banter_ctx + o) || rd(g_banter_ctx + o + 4u)) { call(0x08B0D9B0u, g_banter_ctx + o, 0); call(0x08B0D8D8u, g_banter_ctx + o); }
     g_ctx->r[9] = -1;
     call(0x08B0D7F4u, g_intro_obj, A, 2u, 0x09AFDFB0u, 0u);
+    // 23 Nov (3v3 banter audio): the game's line picker (FUN_08B009A0 -> FUN_08B00B2C) gave no line at all for the third start-of-battle partner (Yuffie,
+    // mp3v3 run): "(none)", a silent banter. The picker draws at random from the member's records that fit the situation; it is asked again (the draw
+    // moves on) and the member's record count is logged. PSPRECOMP_TAGTEAM_NOINTRORETRY=1: old.
+    if (!rd(g_intro_obj + 12u) && !std::getenv("PSPRECOMP_TAGTEAM_NOINTRORETRY")) {
+        const uint32_t vd = rd(A + 912u); const uint32_t cnt = ok(vd, 0x100) ? call(0x088A3A48u, vd + 212u) : 0u;
+        const uint32_t foe = rd(A + 1348u);
+        int tries = 0;
+        for (const uint32_t kind : {2u, 2u, 2u, 0u, 1u, 3u}) {
+            for (uint32_t o = 0; o < 16; o += 4) wr(g_intro_obj + o, 0);
+            g_ctx->r[9] = -1; call(0x08B0D7F4u, g_intro_obj, A, kind, 0x09AFDFB0u, 0u); ++tries;
+            if (rd(g_intro_obj + 12u)) { if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: no intro line at first; found on try %d (kind %u)\n", A, tries, kind); break; }
+        }
+        std::fprintf(stderr, "[TAGTEAM] entrance of %08X (char %d): intro line picker: records %u, +1348 %08X, after %d more tries: %s\n", A, actor_char(A), cnt, foe, tries, rd(g_intro_obj + 12u) ? "a line" : "still none");
+    }
     pool_dump("intro_load after");
     if (g_log) { const uint32_t r = rd(g_intro_obj + 12u); std::fprintf(stderr, "[TAGTEAM] entrance of %08X: intro line %s %s\n", A, ok(r, 0x20) ? reinterpret_cast<const char*>(g_ram + (r & 0x07FFFFFFu)) : "(none)", rd(g_intro_obj + 4u) ? "loaded" : "NOT loaded"); }
 }
@@ -11530,9 +11589,20 @@ void dissidia_tagteam_sp_write_round(uint32_t screen) {
     uint8_t* p = g_ram + ((screen + 0xA58u) & 0x07FFFFFFu);
     if (p[7] != 0x65 || p[3] > 8) { static int warned = 0; if (warned++ < 3) std::fprintf(stderr, "[LOBBY] round 1 block not as expected at screen %08X + A58: stage / rules / judgement not written\n", screen); return; }
     const uint8_t tier = sp_ffa_custom() ? static_cast<uint8_t>(g_ffa_cfg[0].str - 1) : p[3];   // free-for-all: P2's strength is round 1's CPU strength
-    if (p[0] == c.stage && p[4] == c.judge && p[5] == c.rules && p[3] == tier) return;
-    p[0] = c.stage; p[4] = c.judge; p[5] = c.rules; p[3] = tier;
-    std::fprintf(stderr, "[LOBBY] single player round 1: stage %d rules %d judgement %d\n", c.stage, c.rules, c.judge);
+    // 23 Nov (user, low priority list: "the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show
+    // the stage picked in the Battle Lobby"): the rows of matchups 2..5 kept their own stage (the screen's preview follows the cursor row's stage), so the
+    // lobby's stage / rules / judgement go into every round block that has the record's layout. (The battle uses round 1's only.) PSPRECOMP_TAGTEAM_ROUND1ONLY=1: old.
+    static const bool r1only = std::getenv("PSPRECOMP_TAGTEAM_ROUND1ONLY") != nullptr;
+    int changed = 0;
+    for (uint32_t i = 0; i < (r1only ? 1u : 5u); i++) {
+        if (!ok(screen + 0xA58u + 0x16DCu * i, 0x10)) break;
+        uint8_t* q = g_ram + ((screen + 0xA58u + 0x16DCu * i) & 0x07FFFFFFu);
+        if (q[7] != 0x65 || q[3] > 8) break;
+        const uint8_t t = i == 0 ? tier : q[3];
+        if (q[0] == c.stage && q[4] == c.judge && q[5] == c.rules && q[3] == t) continue;
+        q[0] = c.stage; q[4] = c.judge; q[5] = c.rules; q[3] = t; changed++;
+    }
+    if (changed) std::fprintf(stderr, "[LOBBY] single player rounds (%d changed): stage %d rules %d judgement %d\n", changed, c.stage, c.rules, c.judge);
 }
 // tagteam_menu.cpp: the lobby as 9 bytes {mode, size, cpu_fill, cpu_str, stage, rules, judge, exb, assist}; false = the host has not set one yet
 bool dissidia_tagteam_lobby_get(uint8_t out[9]) {

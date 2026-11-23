@@ -33,14 +33,15 @@
     panels and the HUD refresh fixed (see "Batch six"); the clone-only SELECT swap still always takes the last partner.
   - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov (see "Batch two").
   - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov for the calls the tag code refuses
-    (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing yet.
+    (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing yet. 23 Nov (user): those stay silent, as retail.
   - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
 - **Low priority (user, 22 Nov; not started):**
-  - 3v3: the banter intros do not play the correct audio (maybe other 3v3 intro issues).
+  - 3v3: the banter intros do not play the correct audio (maybe other 3v3 intro issues). 23 Nov: one silent banter found and retried (see "Batch eight").
   - Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.
-  - Final screen: remove the options the Battle Lobby now covers (stage, rules, judgment).
+    23 Nov: changed, not checked on screen (see "Batch eight").
+  - Final screen: remove the options the Battle Lobby now covers (stage, rules, judgment). 23 Nov: changed, not checked on screen (see "Batch eight").
   - Battle Lobby: follow the game's design language (frames, fonts, colours).
-  - Free-for-all: fighters still spawn as two teams; spread them out (each player his own start spot).
+  - ~~Free-for-all: fighters still spawn as two teams; spread them out (each player his own start spot).~~ Done 23 Nov (see "Batch seven").
   - Free-for-all: much of the code still assumes a "partner" cannot be attacked (who takes the damage, who gets broken, friendly-fire paths); make every hit / break / HP path treat every other fighter as a foe.
 
 - **Proper PvE (humans vs a CPU party): DONE on the host (21 Nov, tree ttfa, section "Proper PvE: a CPU party the host sets up"; the old keeper is behind `PSPRECOMP_TAGTEAM_KEEPER=1`).** Open: 3 or more humans, a CPU party with more than the host's rows when a human also joined it, an Internet (relay) session, the CPU lead's own level (it keeps the owner's save level of that character; its AI strength / type do follow the row), a real device.
@@ -5149,3 +5150,38 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   the players screen is shown.
 - **Not done in this batch:** partner (extra) summons: the eleventh round found the summon step does not accept an extra, and nothing new was tried;
   the CPU assist's return spot (Assist Off): the 20 Nov change (the partner reappears where its assist ended) stays until the user says which is wanted.
+
+### Batch seven (23 Nov): free-for-all start spots
+- **Free-for-all start spots** (`ffa_spread_spot`, called from `start_extra`; `PSPRECOMP_TAGTEAM_FFA_NOSPREAD=1`: old): the stage only has the two sides'
+  start spots, and the extras started 3 m beside their slot fighter, so a free-for-all began as two pairs. Now the k-th start-of-battle extra goes to the
+  other axis of the arena: the middle of the two slot fighters +- the half distance between them turned 90 degrees (four fighters: a square; a 3rd / 4th
+  extra at 60 %), tried at 100 / 75 / 50 / 30 % of the way out, the first spot whose floor is within 3 m of the slot fighters' height.
+  - **The floor query** (`stage_floor_y`): the game's own, as `FUN_0880496C` puts an object on the ground: `FUN_08899300()` = the world, then
+    `FUN_088976E4(world, out, pos = (x, top, z), 0x22, 1, 0, 0)` -> f0 = the floor height below `top`. Check: under slot fighter 0 it answered its own
+    height (-0.00). A first try without it (drop from 1.5 m and check the landing 2 s later) was dropped: one fighter fell 22 m off the stage, the other
+    hung in the air (the fighters are held during the opening banter).
+  - Verified: one copy (`spwalk.py ffa`): extras at (15.0, 0, -4.8) / (-14.8, 0, -5.0), slot fighters at z = 10 / -19.8, the battle runs. Two copies
+    (`mp_test.py --menu-mode ffa --fill`): on a two-level stage the first spot had floor only on the level below (0 vs 23) and was skipped, the 75 % spot
+    used; the same on both copies, NETSYNC 1127 frames, 0 mismatched. Not checked: a stage with holes in the middle (the query should refuse them the same way).
+- **No notice for retail's own refusals** (user, 23 Nov: "there should be nothing shown"): an assist press with too little gauge shows nothing, as
+  retail. (A "not enough assist gauge" notice was tried and taken out again.)
+- **Still open from the list:** partner (extra) summons; the CPU assist return spot (waits for the user); the banter before the "vs" display and its
+  camera; 3 v 3 banter audio; pause for both players online; the FFA menus (scripted walk, list instead of the character selector); the final screen's
+  stage preview / options; the lobby's look; the frame-0 desync (needs the other player's log).
+
+### Batch eight (23 Nov): 3v3 banter line, the final screen's rounds
+- **A silent 3v3 banter** (`intro_load`; `PSPRECOMP_TAGTEAM_NOINTRORETRY=1`: old): in the two-copy 3v3 run `~/dissidia/mp3v3` the third start-of-battle partner
+  (Yuffie) did her banter without a voice: the game's line picker (`FUN_08B0D7F4` -> `FUN_08B009A0` -> `FUN_08B00B2C`, a random draw from the member's
+  voice records that fit the situation) gave no line ("intro line (none) NOT loaded"); the pool was not the cause (the name was already missing). Now the
+  picker is asked again (kind 2 three times, then 0 / 1 / 3) and the member's record count (`FUN_088A3A48(*(actor+912)+212)`) is logged
+  ("intro line picker: records N ..."). The rerun (`~/dissidia/mp3v3b`, Kefka / Garland / Chaos / Vaan) had all four lines and stayed in sync (1608 frames,
+  0 mismatched), but had no Yuffie: the retry itself is not exercised yet. Whether the lines are the "correct" ones (matchup lines vs generic) is not checked.
+- **Final screen, every round row** (`dissidia_tagteam_sp_write_round`; `PSPRECOMP_TAGTEAM_ROUND1ONLY=1`: old): the lobby's stage / rules / judgement went
+  into round 1's block only, so rows 2..5 kept their own stage and preview. Now every round block with the record's layout (+0xA58 + 0x16DC * i, byte 7 =
+  0x65) gets them (the battle still uses round 1's).
+- **Final screen, round dialog** (`sp_dlg_hook`; `PSPRECOMP_TAGTEAM_R1ROWS=1`: old): STAGE / RULES / JUDGEMENT were covered from round 2 on; round 1 now too
+  (the lobby sets them; not with `PSPRECOMP_TAGTEAM_SPLOBBY_OFF`).
+- Both final-screen changes build; NOT checked on screen (the one-copy walk could not get through the CPU party picker).
+- **Still open:** the banter before the "vs" display (the partners are spawned only after the retail intro scripts have run, so this needs the spawn moved
+  earlier); partner summons; pause for both players online; the FFA menus / character selector; the lobby's look; the frame-0 desync (needs the other
+  player's log); the Assist Off return spot (waits for the user).
