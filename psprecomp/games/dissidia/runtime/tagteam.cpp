@@ -370,10 +370,10 @@ bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits 
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
 struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; int driver = -1; };   // driver: the player (players_sorted index) who drives it, -1 = the AI
 bool clones_allowed() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_CLONES") != nullptr; return on; }   // copies of the fighter on the stage as partners (test setups); off: a team without a second member has no partner
-int g_real_partner[2] = {0, 0};   // 1 per team when the member on the stage beside the slot fighter is the real next member of the party (a group battle), not a clone
+int g_real_partner[2] = {0, 0};   // per team: how many of the party's next members stand beside the slot fighter (3 v 3: 2); 1 when the member on the stage beside the slot fighter is the real next member of the party (a group battle), not a clone
 std::string char_label(int id, bool full);
 std::map<uint32_t, int> g_label_char;   // HUD panel name override per actor (a rebuild KO leaves the fallen character's name on the parked actor)
-int party_partner_char(int team, uint32_t hum, uint32_t cpu);   // below: the charId of the next party member after the one on the stage, 0 = no party (a clone)
+int party_partner_char(int team, uint32_t hum, uint32_t cpu, int k = 1);   // below (k: the k-th member after the one on the stage): the charId of the next party member after the one on the stage, 0 = no party (a clone)
 std::vector<Late> g_late_q;
 std::vector<uint32_t> g_banter_q;   // start-of-battle partners that still have their banter (voice line + close-up) to do, in spawn order
 std::vector<Late> g_late_load;   // call-in members whose character files still have to be loaded (done from the frame hook, outside any fighter's update)   // extras still to be made (after the intro)
@@ -1720,14 +1720,15 @@ int human_party_rec(const PartyList lists[2], int hc, int oc) {
     return party_has(lists[0], hc) || !party_has(lists[1], hc) ? 0 : 1;   // (single player: as before)
 }
 // The member after the one on the stage in a team's party (a group battle), 0 when there is no party (count 1) or no loadable record. team 0 = the human's.
-int party_partner_char(int team, uint32_t hum, uint32_t cpu) {
+int party_partner_char(int team, uint32_t hum, uint32_t cpu, int k) {
     const PartyList lists[2] = {read_party(0), read_party(1)};
     const int hc = ok(hum, 0x12D0) ? actor_char(hum) : -1;
     const int ho = human_party_rec(lists, hc, ok(cpu, 0x12D0) ? actor_char(cpu) : -1);
     const PartyList& l = lists[team == 0 ? ho : 1 - ho];
     if (l.n <= 1) return 0;
     const int cur = actor_char(team == 0 ? hum : cpu);
-    for (int i = 0; i + 1 < l.n; i++) if (l.ids[i] == cur) { const int c = l.ids[i + 1]; return info_for_char(c) ? c : 0; }
+    // k: 3 v 3 has two partners a side; the second one is the member after the first (user 23 Nov: "the 3rd enemy is a duplicate of the 2nd": both got i + 1)
+    for (int i = 0; i + 1 < l.n; i++) if (l.ids[i] == cur) { if (i + k >= l.n) return 0; const int c = l.ids[i + k]; return info_for_char(c) ? c : 0; }
     return 0;
 }
 int g_party_last[2] = {0, 0};   // index of the member on the stage per team (only moves forward while the party list stays the same)
@@ -4251,6 +4252,20 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         { static const int kf = std::getenv("PSPRECOMP_TAGTEAM_KOFIX") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_KOFIX")) : 0; const bool held = !std::getenv("PSPRECOMP_TAGTEAM_NOBANTERHOLD") && (std::find(g_banter_q.begin(), g_banter_q.end(), owner) != g_banter_q.end() || (owner == g_entrant && dissidia_battle_age() < g_entrant_until));   // waiting for its opening banter / in its own banter or entrance pose: the brain does not act (18 Nov, user: the CPU team mate attacked during the opening banter)
           wr(owner + 0x380u, ((is_down(owner) && !(kf & 8)) || g_exb_frozen.count(owner) || held) ? (rd(owner + 0x380u) | 2u) : (rd(owner + 0x380u) & ~2u)); }   // (a fighter held out of an EX Burst keeps its gate)   // bit 2 of +0x380 makes the CPU brain skip the actor; the retail two lose it after the intro
     }
+    {   // the two slot fighters' CPU brains wait while a partner's start-of-battle banter is queued or running (user 23 Nov: "the original CPU enemy can attack
+        // during the other players' banter"). Retail gates them (+0x380 bit 2) through its own intro only; the gate set here is taken off again when the banters are over.
+        // PSPRECOMP_TAGTEAM_NOBANTERHOLD=1 = old (the partners are then not held either).
+        static std::set<uint32_t> gated; static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; gated.clear(); }
+        static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOBANTERHOLD") != nullptr;
+        if (!off && !extra_of(owner)) {
+            const bool banter = !g_banter_q.empty() || (g_entrant && g_entrant_banter && dissidia_battle_age() < g_entrant_until);
+            if (banter && is_slot_fighter(owner)) {
+                if (!(rd(owner + 0x380u) & 2u)) { wr(owner + 0x380u, rd(owner + 0x380u) | 2u); gated.insert(owner); std::fprintf(stderr, "[TAGTEAM] t=%.2fs slot fighter %08X (%s) waits for the banter\n", dissidia_battle_age() / 60.f, owner, char_label(actor_char(owner), true).c_str()); }
+            } else if (gated.erase(owner)) {
+                wr(owner + 0x380u, rd(owner + 0x380u) & ~2u); std::fprintf(stderr, "[TAGTEAM] t=%.2fs slot fighter %08X (%s): banter over, its brain acts again\n", dissidia_battle_age() / 60.f, owner, char_label(actor_char(owner), true).c_str());
+            }
+        }
+    }
     static uint32_t seen[8] = {}; static int cnt[8] = {}; static int n = 0;
     int i = 0; while (i < n && seen[i] != brain) i++;
     if (i == n && n < 8) { seen[n++] = brain; }
@@ -5371,7 +5386,16 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
           for (const uint32_t q : {id, sid + 50000u, sid}) { const uint32_t e = q ? call(0x088A0BC0u, q) : 0u; std::fprintf(stderr, "[SNDENTRY] id %u -> %08X:", q, e); for (uint32_t o = 0; o < 0x30 && ok(e, 0x30); o += 4) std::fprintf(stderr, " %08X", rd(e + o)); std::fprintf(stderr, "\n"); } }
         if (g_log && id) { const uint32_t rec = call(0x088A4364u, id, id, 1); std::fprintf(stderr, "[TAGTEAM] entrance of %08X: voice record of %u: %08X, params %08X:", A, id, rec, vp); for (uint32_t o = 120; o < 160; o += 4) std::fprintf(stderr, " %u", rd(vp + o)); std::fprintf(stderr, "\n"); }
         if (const char* vo = std::getenv("PSPRECOMP_TAGTEAM_ENTRVOICE_OFS")) { const uint32_t o2 = static_cast<uint32_t>(std::strtoul(vo, nullptr, 0)); if (ok(vp, 0x100)) { id = rd(vp + o2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance: voice from params +%u = %u (record %08X)\n", o2, id, call(0x088A4364u, id, id, 1)); } }
-        if (id && !std::getenv("PSPRECOMP_TAGTEAM_NOENTRVOICE")) { if (std::getenv("PSPRECOMP_TAGTEAM_VOICEDIRECT")) { const uint32_t h = call(0x088A24D4u, 1, id, 2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: direct play of %u -> %08X\n", A, id, h); } else { const uint32_t f380 = rd(A + 0x380u); wr(A + 0x380u, f380 & ~2u); call(0x08B33F8Cu, A, id, 0, 0); wr(A + 0x380u, f380); }   /* (the AI gate bit also silenced its voice) */ if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line voice %u\n", A, id); }
+        if (id && !std::getenv("PSPRECOMP_TAGTEAM_NOENTRVOICE")) { if (std::getenv("PSPRECOMP_TAGTEAM_VOICEDIRECT")) { const uint32_t h = call(0x088A24D4u, 1, id, 2); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: direct play of %u -> %08X\n", A, id, h); } else {
+            // user 23 Nov: "the called-in player's assist voice is very quiet when you are far from the spawn point": the line is positional (the member's emitter
+            // actor + 3312, FUN_0884EA08 from FUN_08B33F8C). Single player: it is played through the human fighter's emitter instead (next to the listener: SAS
+            // volume ~2700 / 2720, centred, against ~1570 / 1680 at the member's spot in the same run). Online keeps the member's emitter (the same actor memory on
+            // every machine). FUN_088A24D4 without an emitter (VOICEDIRECT) is not used: it came out panned hard left (l 2950, r 86). PSPRECOMP_TAGTEAM_VOICEFAR=1 = old.
+            static const bool far = std::getenv("PSPRECOMP_TAGTEAM_VOICEFAR") != nullptr;
+            const uint32_t H = (!far && !comms_battle() && g_bs) ? srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u)) : 0u;
+            if (H && H != A && ok(H, 0x12D0) && alive(H)) { call(0x0884EA08u, H + 3312u, id, 1); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line %u played at the human fighter %08X (near the listener)\n", A, id, H); }
+            else { const uint32_t f380 = rd(A + 0x380u); wr(A + 0x380u, f380 & ~2u); call(0x08B33F8Cu, A, id, 0, 0); wr(A + 0x380u, f380); }
+        }   /* (the AI gate bit also silenced its voice) */ if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line voice %u\n", A, id); }
         else if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: no call line (voice params %08X)\n", A, vp);
     }
     bool warp = false;
@@ -10428,13 +10452,15 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 bool ffa_off = false;
                 const int ffc = (no_real || l.callin || l.info_slot >= 100 || comms_battle()) ? -1 : sp_ffa_slot_char(static_cast<int>(l.side), team, &ffa_off);   // single player Free-for-all player setup: P3 / P4 (-1: not in use)
                 const bool spc = ffc < 0 && team == 0 && !no_real && !l.callin && l.info_slot < 100 && sp_cpu_battle();   // single player: his first CPU row is the partner
-                int c = ffc >= 0 ? ffc : spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_fill_or_player(static_cast<int>(l.side), &drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu);
+                const int kth = (l.side < 2 && !l.callin && !std::getenv("PSPRECOMP_TAGTEAM_OLDTHIRD")) ? std::max(1, per_side_seen[l.side]) : 1;   // 3 v 3: the side's 1st / 2nd partner
+                int c = ffc >= 0 ? ffc : spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_fill_or_player(static_cast<int>(l.side), &drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu, kth);
                 if (!c && ffc < 0 && !comms_battle() && !no_real && !l.callin && l.info_slot < 100 && cpu_fill_now() && l.side < 2) c = fill_pick(static_cast<int>(l.side));   // single player CPU fill (battle lobby): an empty place gets a CPU
                 if (spc) { sp_mark(c, true); std::fprintf(stderr, "[TTSP] partner at the start: CPU member %d (%s)\n", c, c ? char_label(c, true).c_str() : "none loadable"); }
                 else if (!comms_battle() && team == 0 && !sp_partner && !clones_allowed() && g_log) std::fprintf(stderr, "[TAGTEAM] single player: no CPU row on the human's team, no partner (1 v 2)\n");
                 l.driver = drv;
                 if (g_log) std::fprintf(stderr, "[TAGTEAM] team %d extra: party member %d (%s)\n", team, c, c ? char_label(c, true).c_str() : "clone");
-                if (c) { l.info_slot = static_cast<uint32_t>(100 + c); l.charId = c; g_real_partner[team] = 1; g_late_load.push_back(l); }
+                if (c) { const bool from_party = ffc < 0 && !spc && !comms_battle() && !(no_real || l.callin || l.info_slot >= 100);   // the k-th next party member: the reserve starts after all of them
+                    l.info_slot = static_cast<uint32_t>(100 + c); l.charId = c; g_real_partner[team] = std::max(g_real_partner[team], from_party ? kth : 1); g_late_load.push_back(l); }
                 else if (clones_allowed()) keep.push_back(l);
                 else if (g_log) std::fprintf(stderr, "[TAGTEAM] team %d has no second member: no partner (no duplicate of the fighter on the stage)\n", team);
             }
@@ -11546,6 +11572,20 @@ void dissidia_tagteam_bp_set_cfg(int row, const uint8_t in[3]) {
     if (!g_me.host || row < 0 || row >= g_me.bp_n) return;
     g_me.bp_cfg[row][0] = static_cast<uint8_t>(std::clamp<int>(in[0], 1, 9)); g_me.bp_cfg[row][1] = std::min<uint8_t>(in[1], 100); g_me.bp_cfg[row][2] = std::min<uint8_t>(in[2], 8);
     mp_sync_mode(); std::fprintf(stderr, "[TTBP] CPU party row %d (char %d) settings: strength %u, level %u (0 = Auto), type %u (0 = Random)\n", row + 1, g_me.bp_regs[row], g_me.bp_cfg[row][0], g_me.bp_cfg[row][1], g_me.bp_cfg[row][2]);
+}
+// The lobby's ALL CPUs row (user 23 Nov: "set the strength of all CPUs at once"): every CPU this machine sets gets strength v: the single player CPU partner rows, the
+// free-for-all's P2..P4 and, online, this player's own CPU rows and (host) the CPU party rows. (CPU fill and the single player enemies: tagteam_menu.cpp.)
+void dissidia_tagteam_all_cpu_strength(int v, bool sp) {
+    v = std::clamp(v, 1, 9);
+    for (int r = 1; r < 5; r++) g_sp.cfg[r][0] = static_cast<uint8_t>(v);
+    for (auto& f : g_ffa_cfg) f.str = static_cast<uint8_t>(v);
+    if (!sp) {
+        bool any = false;
+        for (int r = 0; r < 5; r++) if ((g_me.own_mask >> r) & 1) { g_me.cfg[r][0] = static_cast<uint8_t>(v); any = true; }
+        if (g_me.host) for (int r = 0; r < g_me.bp_n && r < 5; r++) { g_me.bp_cfg[r][0] = static_cast<uint8_t>(v); any = true; }
+        if (any) mp_sync_mode();
+    }
+    std::fprintf(stderr, "[TTLOBBY] all CPUs: strength %d\n", v);
 }
 // The characters the picker offers (not already in the CPU party): ids, in roster order.
 int dissidia_tagteam_bp_pick_list(uint8_t out[64]) {

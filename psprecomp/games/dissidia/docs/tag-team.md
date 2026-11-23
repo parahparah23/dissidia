@@ -8,16 +8,17 @@
   - **Kill camera / KO without the hold is off**: the KO hold is the default again (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
-  - FFA: Circle (back) on the FFA players screen starts the battle; it must go back.
+  - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov (see "Batch two").
   - FFA: use the game's own character selector, not a list.
   - FFA: after the battle the player lands in the Group Battle menu, which makes no sense.
-  - Battle lobby: a way to set the strength of all CPUs at once.
-  - Tag team: the original CPU enemy can attack during the other players' battle-start banter.
+  - ~~Battle lobby: a way to set the strength of all CPUs at once.~~ Done 23 Nov: the ALL CPUs row (see "Batch two").
+  - ~~Tag team: the original CPU enemy can attack during the other players' battle-start banter.~~ Fixed 23 Nov (see "Batch two").
   - Tag team: the other players' banter should start before the "vs <enemy>" display; the camera is not the retail one (zoom in, angle change).
-  - Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).
+  - ~~Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).~~ Fixed 23 Nov in
+    single player (see "Batch two"); online it stays positional.
   - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov (see "Menu row and failed-call notice").
   - 3v3: many partner fixes do not apply to the second partner (the code assumes one extra per side).
-  - 3v3: the 3rd enemy is a duplicate of the 2nd.
+  - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov (see "Batch two").
   - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov for the calls the tag code refuses
     (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing yet.
   - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
@@ -4941,6 +4942,35 @@ Free-for-all needs its own player setup (players, characters, teams clear).
 - gdb counts of `FUN_088A9DE8` (effect start) and `FUN_08AE3E34` (cut-in message) with and without the forced request are identical (4 / 0 with clones; 5 / 0 with `ENEMY2_CHAR=11 PARTNER_CHAR=7`), and with the real Terra extra the step logs "presented"
   but never "summon used". So handing an extra to `FUN_08A22C78` for the step is not enough: the step's other predicates (`FUN_08A23488` / `08A23AEC` / `08A23BB8`, `FUN_0889120C` -> `FUN_08A22C78(entry side)` + `FUN_08B3390C`, the per-side rule records) do not accept
   him. The extras-summon code (`PSPRECOMP_TAGTEAM_NOXSUMMON=1` turns it off) is therefore inert, not harmful; treat extras as unable to summon. Per-member stones and the big orb's refresh were not attempted.
+### Batch two (23 Nov): FFA back, ALL CPUs, banter hold, Mode Select crash
+- **Mode Select crash** (`tagteam_menu.cpp`): `kModeSelHelp` had 4 lines for the 5 modes since 1 vs 1 Duel came back, so every help line was one row off (Team 2 vs 2 showed
+  the 3 vs 3 text) and moving the cursor to Free-for-all built a `std::string` from null: the game quit (`basic_string: construction from null`). A Duel line is added and
+  a `static_assert` ties the table to `kLobbyModeCount`.
+- **FFA back** (`ffa_screen` / `lobby_dialog`, `PSPRECOMP_TAGTEAM_FFA_OLDBACK=1` = old): in the Free-for-all flow (Mode Select > Party Select > players screen > lobby >
+  battle) Circle on the players screen leaves the flow and shows the setup screen under it (no battle; `[FFA] players screen: Circle, back to the setup screen`), and
+  Circle in the lobby goes back to the players screen (`[FFA] lobby: Circle, back to the players screen`); only Cross starts the battle. Footers say so. Verified with
+  `tools_dbg/spwalk.py` (new: one copy, Battle Mode > Tag Team Battle > Mode Select > a mode, then a list of presses / shots): Circle -> setup screen, no battle; lobby
+  Circle -> players screen, Cross, Cross -> `[FFA] lobby done: Enter Battle` and the battle.
+- **ALL CPUs** (lobby row 9, host / single player only, `PSPRECOMP_TAGTEAM_NOALLCPU=1` = hidden): Left / Right sets one strength for every CPU: CPU fill (`L[3]`), the single
+  player CPU partner rows, the free-for-all's P2..P4, online this player's own CPU rows and the host's CPU party rows (`dissidia_tagteam_all_cpu_strength`, then
+  `mp_sync_mode`), and in single player the enemy rounds' STRENGTH (the round dialog byte `screen + 0xA5B + 0x16DC * i` = strength - 1, see `sp_enemy_strength`;
+  `PSPRECOMP_TAGTEAM_ALLCPU_NOENEMY=1` leaves them). Verified single player: High (Actions) -> P2..P4 "Random (High (Actions))" and all five rounds "CPU STR 7".
+  Online not run.
+- **Banter hold for the slot fighters** (brain hook, `PSPRECOMP_TAGTEAM_NOBANTERHOLD=1` = old): while a partner's start-of-battle banter is queued or running, the two slot
+  fighters' brains are gated (`+0x380` bit 2, only when retail had not set it) and released when the banters are over. Run: gated at 7.80 s (end of the retail intro),
+  released at 12.83 s after both banters (`slot fighter ... waits for the banter` / `banter over, its brain acts again`).
+
+- **Call line near the listener** (`entrance_effect`, `PSPRECOMP_TAGTEAM_VOICEFAR=1` = old): the called-in member's call line was played through its own emitter
+  (`actor + 3312`, `FUN_0884EA08` from `FUN_08B33F8C`), so it was positional. In single player it is now played through the human fighter's emitter (`[TAGTEAM] entrance
+  of ...: call line N played at the human fighter ... (near the listener)`). SAS trace of the same KO call-in (`RESERVE=1,2;20,24 KOLIST_NAT=1 KOLIST=cpu:15
+  PSPRECOMP_SAS_TRACE=1`, Jecht's line 2960052, 10944 bytes): member's emitter l/r ~1570 / 1680; human's emitter ~2700 / 2720, centred. The emitter-less play
+  (`FUN_088A24D4(1, id, 2)`, the old `VOICEDIRECT` aid) came out panned hard left (l 2950, r 86), so it is not used. Online keeps the member's emitter (every machine
+  writes the same actor memory). Not checked by ear.
+- **3 v 3: the second partner** (`party_partner_char(team, hum, cpu, k)`, `PSPRECOMP_TAGTEAM_OLDTHIRD=1` = old): both partners of a side were "the member after the one on
+  the stage", so the 3rd enemy was a copy of the 2nd. The k-th partner of a side now takes the k-th next member, and `g_real_partner[team]` counts the members fielded
+  so the KO reserve starts after both. Run (`sumtest.py` with the new `SUM_DIRECT=party_battle_walk.txt SUM_NOCLONES=1`, `PSPRECOMP_TAGTEAM_3V3=1`): old Vaan + Vaan,
+  enemy reserve LAGU; new Vaan + Laguna, enemy reserve empty (a party of 3).
+
 ### Menu row and failed-call notice (23 Nov)
 - **Back on Tag Team Battle** (`menu_settings.cpp` `sub_tick_hook`, `PSPRECOMP_TAGTEAM_NOROWBACK=1` = old): choosing Tag Team Battle hands the game the row it starts
   (Group Battle / Quick Battle (Party), `cur + 4` = the group's target), so coming back the game put its cursor there. When the Battle Mode / Communications sub-list opens
