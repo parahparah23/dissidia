@@ -14,9 +14,11 @@
       fighter (`rp6_desync_1122_2242`): not understood; needs the other player's log of that session.
     - ~~Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).~~ Fixed 23 Nov (see "Batch four").
     - Cannot pause in the online tag battle: looks like retail (see "Batch four"); a pause for both players would be new work.
-    - LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).
+    - ~~LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).~~ Fixed 23 Nov (see "Batch five"; the Android multicast lock needs a new APK skeleton).
+  - (23 Nov: likely cause found and changed, not reproduced on a device; see "Batch five".)
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
+    - (23 Nov: changed, the player's own next member now takes the slot back; see "Batch five".)
   - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
   - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov (see "Batch two").
   - FFA: use the game's own character selector, not a list.
@@ -5082,3 +5084,44 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   hooks in an offline battle (the offline test harness could not open a display on this machine) and a plain online 1v1.
   A pause for both players (both copies stop on the same frame, the pause list on the presser's machine, Forfeit for his team)
   would be new work.
+
+### Batch five (23 Nov): white screen after a dropped peer, LAN discovery, spectating notes
+
+- **White screen after the other player dropped out** (RP6 `rp6_whitescreen_1122_2228`). In that log the peer's connection was lost mid
+  battle (t=342 s), the battle went straight to the menu overlay, and 20 frames later our leftover unload (`leftover_unload`, the characters
+  loaded mid battle) released 7 characters' files while the menu was loading its own files through the same file manager. The menu stayed white
+  (still drawing ~134 draws per frame). Two copies on the PC (`tools_dbg/mp_drop.py`: B killed 8 s into a tag battle) go back to the Group
+  Battle menu correctly, but that run had no mid-battle loads, so the leftover unload never ran. The `[HANGDUMP] game thread stuck` lines in
+  both logs are a false alarm: the menus have an empty world list, and the backtrace is the normal vblank wait. Change: the leftover unload no
+  longer runs once the menu overlay is in; the next battle's setup releases them first (it already did, forced). `PSPRECOMP_TAGTEAM_MENULEFTOVER=1`:
+  old. Not reproduced: the copies' parties have no reserve members, so nothing is loaded mid battle in the two-copy rig.
+- **LAN never found the other player** (RP6 `rp6_lan_1122_2246`). Three causes, all in `runtime/src/hle/psp_hle_adhoc.cpp`:
+  - The real one: the game started in Internet mode, whose socket is bound to a port the OS picks (UDP 52365), then Settings > Network was set
+    to LAN. LAN beacons only go to the well-known ports 27312.., so nobody heard this player and it heard nobody. Switching to LAN now moves the
+    socket to the first free well-known port (`[ADHOC] LAN: socket moved from UDP ... to ...`; `PSPRECOMP_ADHOC_NOREBIND=1`: old).
+    Test aid `PSPRECOMP_ADHOC_TEST_TOLAN=<s>` (the Settings switch after <s> seconds); `tools_dbg/mp_tolan.py` starts copy A in Internet mode
+    and switches it: with the old code B heard A but A never heard B (no room); now both see each other and move on into the battle room.
+  - Every peer we hear gets our beacon directly as well, so one working direction is enough for both (`PSPRECOMP_ADHOC_NODIRECTBEACON=1`: old).
+  - Beacons also go to every up IPv4 interface's own subnet broadcast address (`[ADHOC] LAN broadcast addresses: ...`), not only
+    255.255.255.255, which Windows sends out of one adapter only (often a virtual one) (`PSPRECOMP_ADHOC_NOSUBNETCAST=1`: old). The Windows
+    branch (`SIO_GET_INTERFACE_LIST`) was not compiled here (no Windows compiler in this setup).
+  - Android: a `WifiManager.MulticastLock` is taken when the network starts (`psp_android_wifi_multicast_lock`, `[ADHOC] Wi-Fi multicast
+    lock held / NOT taken`): many Wi-Fi drivers drop broadcasts to an app without it. Needs `CHANGE_WIFI_MULTICAST_STATE`, now in
+    `android/hello/AndroidManifest.xml`; the APK skeleton (`make_skeleton.py`) has to be built again for it. Without the permission it only
+    logs. Not compiled for Android or tried on a device here.
+- **Spectating after death online** (RP6 `rp6_spectate_terra_1122_2207`). What happened: the human's Kain (slot 0) fell at 179.8 s,
+  so by the handover rules slot 0 was rebuilt as the team mate Jecht (another driver) and this player watched slot 0's camera (Jecht). At
+  199.8 s the player's own next member Terra came in as an EXTRA this machine drives, with the extra chase camera (camera slot 4 + n), which did not
+  follow / turn like a slot's and on which L did not change the lock. Only when Jecht fell (228 s) was the slot rebuilt as Terra. Choices: (a) when
+  this player's next member comes in while a team mate holds the slot, swap them (the slot becomes the newcomer, the mate goes on as an extra);
+  (b) keep the newcomer an extra and make the extra camera and the L lock cycle behave like a slot's.
+  **Changed (a), "slot take"** (`slot_take` in `tagteam.cpp`, called from `queue_member`): in a Communications lock-step battle, when the
+  newcomer's driver is the player the slot started with (the first entry of the slot stream's schedule, `dissidia_ttnet_driver_mac`) and
+  somebody else drives the slot now, the slot is rebuilt as the newcomer (his own stats, his entrance) and handed to his driver, and the team mate
+  goes on as a new extra, driven as before, with the HP and BRV he had and no entrance (`Late`/`Extra` `hp`, `brv`, `quiet`). Decided from the
+  schedule and the battle state only, so every machine does the same. The KO ledger skips a mate who is on his way to an extra (no false
+  "KO of ..." at the take). Log `[TTLOCK] t=..s slot take: ...` and `[TAGTEAM] extra ... goes on with hp .. brv ..`.
+  `PSPRECOMP_TTLOCK_NOSLOTTAKE=1`: old (the newcomer is an extra). Test: `tools_dbg/mp_take.py` (A registers a 2nd character, CPU fill,
+  slot 0 KO'd at 20 s by `PSPRECOMP_TAGTEAM_KOLIST`): at 29.6 s on both copies "LAGUNA (player 0, the slot's own) takes slot 0 from JECHT
+  (player -1, hp 9214)", the extra goes on with hp 9214, NETSYNC 2070 frames compared, 0 mismatched. Not tried with two humans on one team
+  (the mate a human), or on devices.

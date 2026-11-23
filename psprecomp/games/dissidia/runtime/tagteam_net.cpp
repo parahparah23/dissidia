@@ -391,6 +391,12 @@ void dissidia_ttnet_set_stream_pad(int stream, uint32_t slot, uint32_t ctrl) {
 // Does this machine drive the stream at frame f (camera / HUD follow the fighter it drives)?
 bool dissidia_ttnet_local_drives(int stream, uint32_t f) { Mac m; return stream >= 0 && stream < MAX_STREAMS && driver_at(stream, f, &m) && m == g_me; }
 bool dissidia_ttnet_padtest() { return g_padtest; }
+// The stream's driver at frame f (first = its first schedule entry: who the battle started with). false = nobody (the AI / no input).
+bool dissidia_ttnet_driver_mac(int stream, uint32_t f, bool first, uint8_t* mac) {
+    if (stream < 0 || stream >= MAX_STREAMS) return false;
+    if (first) { const std::vector<Sched>& v = g_streams[stream].s; if (v.empty() || !v[0].human) return false; std::memcpy(mac, v[0].mac.data(), 6); return true; }
+    Mac m; if (!driver_at(stream, f, &m)) return false; std::memcpy(mac, m.data(), 6); return true;
+}
 void dissidia_ttnet_slot_rebuilt(int slot, int charId) { std::fprintf(stderr, "[TTLOCK] slot %d rebuilt as char %d at lock-step frame %u\n", slot, charId, g_F); }
 uint32_t dissidia_ttnet_object() { return g_obj; }
 

@@ -109,6 +109,7 @@ bool dissidia_ttnet_running(); bool dissidia_ttnet_enabled(); uint32_t dissidia_
 uint8_t local_rule_flags();   // tagteam.cpp, after the lock-step interface: this machine's own battle rules as roster flags (the host's roster)
 void dissidia_ttnet_set_driver(int stream, const uint8_t* mac, uint32_t from); void dissidia_ttnet_set_stream_pad(int stream, uint32_t slot, uint32_t ctrl);
 bool dissidia_ttnet_local_drives(int stream, uint32_t f);
+bool dissidia_ttnet_driver_mac(int stream, uint32_t f, bool first, uint8_t* mac);
 
 extern "C" __attribute__((noinline)) void tagteam_hpm_marker(uint32_t att, uint32_t vic, int pi) { asm volatile("" :: "r"(att), "r"(vic), "r"(pi) : "memory"); }   // gdb breakpoint anchor (HPM windows)
 
@@ -341,7 +342,7 @@ bool tag_on() { mp_sync_mode(); return g_enabled || g_menu_mode || g_group_mode;
 recomp_context* g_ctx = nullptr;
 
 // The extra fighters of the battle being set up. side 1 = the CPU's team (the "third"), side 0 = the human's (the partner).
-struct Extra { uint32_t actor = 0, side = 0, foe = 0, slot_actor = 0; bool started = false; bool replaced = false; bool callin = false; int charId = 0; int hp_max = 0; int driver = -1; uint32_t pad = 0; int camslot = -1; std::vector<std::pair<uint32_t, uint32_t>> undo; };   // camslot: camera-manager slot of a human-driven extra (handovers, stage 2); undo: (address, value) writes that take back what the constructor registered
+struct Extra { uint32_t actor = 0, side = 0, foe = 0, slot_actor = 0; bool started = false; bool replaced = false; bool callin = false; int charId = 0; int hp_max = 0; int driver = -1; uint32_t pad = 0; int camslot = -1; std::vector<std::pair<uint32_t, uint32_t>> undo; int hp_carry = -1; uint32_t brv_carry = 0; bool quiet = false; };   // camslot: camera-manager slot of a human-driven extra (handovers, stage 2); undo: (address, value) writes that take back what the constructor registered
 Extra g_extra[10];   // 2 made at the start + one per call-in of a real party member (down ones stay: the fallen keep their place)
 std::vector<std::pair<uint32_t, uint32_t>> g_last_undo;
 std::vector<uint32_t> g_glob_snap; uint32_t g_glob_snap_for = 0;   // debug GLOBDIFF: globals (0x08800000..0x08C40000) before the last extra constructor
@@ -379,7 +380,7 @@ int eff_mask() { const int f = ffa_now(); return f ? g_ffa_mask_of(f) : eff_mask
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
-struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; int driver = -1; };   // driver: the player (players_sorted index) who drives it, -1 = the AI
+struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; int driver = -1; int hp = -1; uint32_t brv = 0; bool quiet = false; };   // driver: the player (players_sorted index) who drives it, -1 = the AI
 bool clones_allowed() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_CLONES") != nullptr; return on; }   // copies of the fighter on the stage as partners (test setups); off: a team without a second member has no partner
 int g_real_partner[2] = {0, 0};   // per team: how many of the party's next members stand beside the slot fighter (3 v 3: 2); 1 when the member on the stage beside the slot fighter is the real next member of the party (a group battle), not a clone
 std::string char_label(int id, bool full);
@@ -1411,6 +1412,7 @@ void start_extra(Extra& e) {
     {   // Bravery: the retail pair gets its base bravery (actor +0x10AC) in both halves of status +0x14 at battle start; the extras start at 0 (broken).
         const uint32_t st = rd(e.actor + 0x52Cu), b = rd(e.actor + 0x10ACu) & 0xFFFFu;
         if (ok(st, 0x40) && rd(st + 0x14u) == 0) wr(st + 0x14u, (b << 16) | b);
+        if (ok(st, 0x40) && e.hp_carry > 0) { wr(st + 0xCu, static_cast<uint32_t>(e.hp_carry)); wr(st + 0x14u, e.brv_carry); if (g_log) std::fprintf(stderr, "[TAGTEAM] extra %08X (char %d) goes on with hp %d brv %08X\n", e.actor, e.charId, e.hp_carry, e.brv_carry); }   // a team mate who left the slot (slot_take)
     }
     for (const Blk& b : g_owned[e.actor]) if (b.addr != e.actor) g_leak_watch[e.actor].push_back(b);   // what the destructor of an extra leaves is freed with its actor block
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_RECFIND")) { static bool d = false; if (!d) { d = true;   // debug: other copies of the side records' ability block (+0x3C0, 0x40 bytes): the save data's per-character records
@@ -1430,7 +1432,7 @@ void start_extra(Extra& e) {
     e.started = true;
     if (const char* sw = std::getenv("PSPRECOMP_TTCAM_STWATCH")) { const uint32_t side = static_cast<uint32_t>(std::atoi(sw)); if (e.side == side) { const uint32_t st = rd(e.actor + 0x52Cu); psp_mem_watch_set(st + 40u); std::fprintf(stderr, "[STWATCH] extra %08X side %u: watching status %08X +40 (= %08X)\n", e.actor, e.side, st, rd(st + 40u)); } }   // debug (round 6): who sets the status flags word
     if (!e.callin && !std::getenv("PSPRECOMP_TAGTEAM_NOBANTER")) { wr(e.actor + 0x380u, rd(e.actor + 0x380u) | 2u); g_banter_q.push_back(e.actor); }   // the start-of-battle partners: banter + close-up, one after the other, while the match is paused
-    if (e.callin) entrance_effect(e.actor, char_label(e.charId, true));   // a real party member called in: pose + pause + banner
+    if (e.callin && !e.quiet) entrance_effect(e.actor, char_label(e.charId, true));   // a real party member called in: pose + pause + banner
     if (g_log) for (uint32_t a : {e.slot_actor, e.actor}) { const uint32_t st = rd(a + 0x52Cu); std::fprintf(stderr, "[TAGTEAM] stats %08X: +10A8 %u %u %u %u %u status %08X +0x14 %08X +0x18 %08X +0x1C %08X\n", a, rd(a + 0x10A8u), rd(a + 0x10ACu), rd(a + 0x10B0u), rd(a + 0x10B4u), rd(a + 0x10B8u), st, rd(st + 0x14u), rd(st + 0x18u), rd(st + 0x1Cu)); }
     if (g_bs && !std::getenv("PSPRECOMP_TAGTEAM_KEEPSLOTOBJ")) {   // +0x5A0 points at the slot's controller object (a stride-0x50 array in the overlay): a clone of the human shares the human's, which reads the pad. Give the extra a private copy of a CPU slot's
         // The source is chosen from the slots' controllers themselves (+0x48: 1 CPU, 0 pad), not from the local human slot, so every
@@ -4221,7 +4223,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!g_late_q.empty() && g_late_ready && (g_planned_gen == g_battle_gen || std::getenv("PSPRECOMP_TAGTEAM_NOPLANWAIT"))) {   // the intro is over: make the late extras now
         for (const Late& l : g_late_q) {
             Extra& e = g_extra[g_nextra];
-            e.actor = spawn_fighter(g_bs, l.side, l.foe, l.cpu_side, l.info_slot, l.slot_actor); e.side = l.side; e.foe = l.foe; e.slot_actor = l.slot_actor; e.started = false; e.callin = l.callin; e.charId = l.charId; e.replaced = false; e.driver = l.driver; e.pad = 0; e.camslot = -1;
+            e.actor = spawn_fighter(g_bs, l.side, l.foe, l.cpu_side, l.info_slot, l.slot_actor); e.side = l.side; e.foe = l.foe; e.slot_actor = l.slot_actor; e.started = false; e.callin = l.callin; e.charId = l.charId; e.replaced = false; e.driver = l.driver; e.pad = 0; e.camslot = -1; e.hp_carry = l.hp; e.brv_carry = l.brv; e.quiet = l.quiet;
             if (e.actor) { e.undo = g_last_undo; g_nextra++; }
             else if (l.callin) { const int t = team_of_side(l.side); if (g_called[t] > 0) g_called[t]--; if (t == 0) sp_mark(l.charId, false); }   // spawn failed: the member stays in reserve
         }
@@ -4518,7 +4520,12 @@ void ledger_step() {   // every battle frame, before the KO handling (a KO is se
         int& s = state[key]; if (up) { s = 1; holder[key] = A; } else if (s == 0) { s = 2; if (!holder.count(key)) holder[key] = A; }
     }
     const float age = dissidia_battle_age();
+    std::set<std::pair<int, int>> coming;   // a team mate who left the slot (slot_take) is between bodies: his new extra is still loading, not down
+    for (const Late& l : g_late_load) if (l.quiet) coming.insert({team_of(l.side), l.charId});
+    for (const Late& l : g_late_q) if (l.quiet) coming.insert({team_of(l.side), l.charId});
+    for (int i = 0; i < g_nextra; i++) if (g_extra[i].quiet && !g_extra[i].started) coming.insert({team_of(g_extra[i].side), g_extra[i].charId});
     for (const auto& kv : state) {
+        if (coming.count(kv.first)) continue;
         const uint32_t A = holder[kv.first]; MemberStat& m = g_mstat[kv.first];
         const uint32_t st = rd(A + 0x52Cu);
         if (ok(st, 0x40)) { const uint8_t l1 = g_ram[(st + 1u) & 0x07FFFFFFu]; m.lv = l1 ? l1 : g_ram[st & 0x07FFFFFFu]; m.s8 = rd(st + 8u); m.sC = rd(st + 12u);
@@ -5231,6 +5238,10 @@ void unload_character(int c) {
 void leftover_unload(bool force = false) {
     TtStep tt_step_("leftover_unload");
     if (g_leftover_load.empty() || g_bs) return;
+    // Not once the menu overlay is in (23 Nov, RP6 white screen after the peer dropped out of a tag battle: the battle went straight to the menu,
+    // whose own files were loading through the same file manager when this released 7 characters; the menu stayed white). The next battle's
+    // setup releases them first (leftover_unload_fwd, forced). PSPRECOMP_TAGTEAM_MENULEFTOVER=1: old (release in the menu too).
+    if (!force && rd(0x089DD4C0u) == 2u && !std::getenv("PSPRECOMP_TAGTEAM_MENULEFTOVER")) { static bool told = false; if (!told) { told = true; std::fprintf(stderr, "[UNLOAD] %zu leftover character(s) kept until the next battle's setup (the menu is loaded)\n", g_leftover_load.size()); } return; }
     static int quiet = 0; if (!force && ++quiet < 20) return; quiet = 0;   // a third of a second after the teardown started (the fighters of the old battle are destroyed by then)
     std::map<int, std::vector<uint32_t>> left; left.swap(g_leftover_load);
     if (g_log) files_state_dump("before the leftover unload");
@@ -5859,6 +5870,34 @@ bool reuse_parked(Extra& e, int charId, uint32_t anchor, uint32_t foe) {
     if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.1fs CALLIN: %s (char %d) takes the body of the fallen char %d (extra %08X, side %u), at %.1f,%.1f,%.1f\n", dissidia_battle_age() / 60.0f, char_label(charId, true).c_str(), charId, oldc, A, e.side, sp[0], sp[1], sp[2]);
     return true;
 }
+// Multiplayer (23 Nov, PR #129 RP6 "spectating after death"): a player's slot fighter fell, the team mate took the slot (the swap: the mate's
+// driver drives it), and later the player's own next member came in as an EXTRA with the chase camera (the slot's camera and lock-on did not
+// follow it). Now when the newcomer's driver is the player the slot started with and somebody else drives the slot, the newcomer takes the slot
+// (rebuilt as his character, his pad) and the team mate goes on as a new extra with the HP / BRV he had, driven as before, without the entrance.
+// Decided from the lock-step schedule and the battle state only (the same on every machine). PSPRECOMP_TTLOCK_NOSLOTTAKE=1: old (an extra).
+int player_of_mac(const uint8_t* m) { std::vector<const NetPlayer*> ps = players_sorted(g_snap); for (size_t k = 0; k < ps.size(); k++) if (std::memcmp(ps[k]->mac, m, 6) == 0) return static_cast<int>(k); return -2; }
+bool slot_take(const Late& l, uint32_t S, uint32_t foe, uint32_t cpu_side) {
+    if (!comms_handover() || l.driver < 0 || std::getenv("PSPRECOMP_TTLOCK_NOSLOTTAKE")) return false;
+    int slot = -1; for (uint32_t k = 0; k < 2; k++) if (srd(g_bs + 56u + 4u * k) == S) slot = static_cast<int>(k);
+    if (slot < 0 || !ok(S, 0x12D0) || is_rebuilding(S) || is_down(S) || !alive(S)) return false;
+    uint8_t m[6];
+    const int home = dissidia_ttnet_driver_mac(slot, 0, true, m) ? player_of_mac(m) : -2;
+    const int now = dissidia_ttnet_driver_mac(slot, dissidia_ttnet_frame(), false, m) ? player_of_mac(m) : -1;
+    if (home != l.driver || now == l.driver) return false;
+    const int mate = actor_char(S); const uint32_t st = rd(S + 0x52Cu);
+    if (mate <= 0 || !ok(st, 0x40)) return false;
+    const int hp = static_cast<int>(rd(st + 0xCu)); const uint32_t brv = rd(st + 0x14u);
+    if (hp <= 0) return false;
+    if (!rebuild_begin(S, l.charId, static_cast<int>(rd(S + 0x10B0u)), static_cast<int>(((rd(S + 0x10ACu) & 0xFFFFu) << 16) | (rd(S + 0x10ACu) & 0xFFFFu)))) return false;
+    g_rebuild.back().own_stats = true; g_rebuild.back().entr = char_label(l.charId, true);
+    slot_handover(S, l.driver);
+    Late x; x.side = l.side; x.foe = foe; x.cpu_side = cpu_side; x.info_slot = static_cast<uint32_t>(100 + mate); x.slot_actor = S; x.callin = true; x.charId = mate;
+    x.driver = now; x.hp = hp; x.brv = brv; x.quiet = true;
+    g_late_load.push_back(x);
+    std::fprintf(stderr, "[TTLOCK] t=%.1fs slot take: %s (player %d, the slot's own) takes slot %d from %s (player %d, hp %d), who goes on as an extra\n",
+                 dissidia_battle_age() / 60.0f, char_label(l.charId, true).c_str(), l.driver, slot, char_label(mate, true).c_str(), now, hp);
+    return true;
+}
 void queue_member(DownRec& d, int charId) {
     side_entry_mark(d.side, dissidia_battle_age());
     uint32_t anchor = 0, foe = 0;
@@ -5875,6 +5914,11 @@ void queue_member(DownRec& d, int charId) {
     uint32_t cpu_side = 1u; for (uint32_t sd = 0; sd < 2; sd++) if (rdh(REC_BASE + 4192u * sd + 3892u) != 0) { cpu_side = sd; break; }
     Late l; l.side = d.side; l.foe = foe; l.cpu_side = cpu_side; l.info_slot = static_cast<uint32_t>(100 + charId); l.slot_actor = anchor; l.callin = true; l.charId = charId;
     if (comms_handover()) { int drv = -1; const int c2 = comms_next_char(static_cast<int>(d.side), &drv, true); if (c2 != charId) std::fprintf(stderr, "[TTLOCK] queue_member: order entry char %d differs from %d\n", c2, charId); l.driver = drv; }   // multiplayer: whose row it is (he drives it, tagteam_net.cpp), -1 = a CPU row
+    if (slot_take(l, anchor, foe, cpu_side)) {   // multiplayer: the newcomer is the slot's own player's: he takes the slot, the team mate in it goes on as an extra
+        if (Extra* e = extra_of(d.actor)) e->replaced = true;
+        g_called[team_of(d.side)]++;
+        return;
+    }
     g_late_load.push_back(l);   // the files are loaded from the camera step (frame hook), then the spawn follows through the late queue
     if (Extra* e = extra_of(d.actor)) e->replaced = true;
     g_called[team_of(d.side)]++; if (team_of(d.side) == 0) sp_mark(charId, true);
