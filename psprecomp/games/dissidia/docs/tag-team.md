@@ -2,6 +2,8 @@
 
 ## TODO (kept up to date; newest first)
 
+- **HIGH PRIORITY (23 Nov): players cannot join a Tag Team Battle room** (desktop + RP6, same build 1d9cae4 + 6ce3417 / APK 15:54; logs `~/dissidia/tt/desk_logs/desk_join_1123_2019.log`, `rp6_join_1123_2019.log`). Both reach Communications > Tag Team Battle > Mode Select > "Tag Team Battle chosen", the RP6 creates the room (`matching ... mode=1`, hello 2416 bytes), the desktop searches (`mode=2`, hello 240 bytes), the direct path between them is up (`path to ... is up`), `group of 1 other player(s): tag team on` on both - but the join never completes; the RP6 later logs `group of 0 other player(s)` and leaves. Right when matching starts BOTH log a missing function in the menu overlay: desktop `[OVL] resolve 0x08A6E870 (id 2) -> MISSING` (`LOOKUP_MISS_CTX ... caller=0x0885C6CC`), RP6 `resolve 0x08A6E740 (id 2) -> MISSING` (`LOOKUP_MISS ... first hit`). A call into menu-overlay code the recompiled overlay does not have (a mid-function entry / a code pointer our menu hooks changed?) - likely why the room / join step never runs. Check whether plain Group Battle joins (retail path) and what calls 0x08A6E740 / 0x08A6E870.
+
 - **Turned off for now, to fix (22 Nov):**
   - **Summonstones: FIXED (23 Nov) [PR #129], on again** (see "Summonstones, twelfth round"). Tested 23 Nov (headless, `~/dissidia/tt/ttest`): one summon per member PASS; partners summoning FAILS (the extra is presented to the summon step, no summon starts) although the PR #129 text claims it works. 24 Nov: partners (extras) summon now (see "Batch nine"). Still open: per-member STONES (each member
     summons the side's stone), the big retail orb not refreshing after a swap.
