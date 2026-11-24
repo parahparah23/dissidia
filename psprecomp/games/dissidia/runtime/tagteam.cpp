@@ -382,6 +382,7 @@ bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits 
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
 struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; int driver = -1; int hp = -1; uint32_t brv = 0; bool quiet = false; };   // driver: the player (players_sorted index) who drives it, -1 = the AI
 bool clones_allowed() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_CLONES") != nullptr; return on; }   // copies of the fighter on the stage as partners (test setups); off: a team without a second member has no partner
+std::set<int> g_partner_chars[2];   // per team: the characters standing beside the slot fighter as partners at the start (left out of the reserve list)
 int g_real_partner[2] = {0, 0};   // per team: how many of the party's next members stand beside the slot fighter (3 v 3: 2); 1 when the member on the stage beside the slot fighter is the real next member of the party (a group battle), not a clone
 std::string char_label(int id, bool full);
 std::map<uint32_t, int> g_label_char;   // HUD panel name override per actor (a rebuild KO leaves the fallen character's name on the parked actor)
@@ -1249,7 +1250,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     pool_dump("setup done");
     g_battle_gen++;   // a new battle (the setup object bs is usually at the same address as the last battle's)
     sp_mode_refresh();   // single player: the battle lobby's mode (or a Debug / env override) into the switches this battle reads
-    xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_real_partner[0] = g_real_partner[1] = 0;
+    xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_real_partner[0] = g_real_partner[1] = 0; g_partner_chars[0].clear(); g_partner_chars[1].clear();
     reset_battle_state();   // (a forfeited / left battle may not have run the teardown: nothing of it may reach this one)
     g_snap_valid = false; g_roster_ok = true; g_shared_valid = false;
     if (!tag_on()) return;
@@ -1827,7 +1828,11 @@ void update_party_reserve() {
         for (int i = 0; i < g_party_last[t] && at < 0; i++) if (l.ids[i] == cur) at = i;   // a new battle of the same party starts over at the first member
         if (at < 0) continue;
         g_party_last[t] = at;
-        for (int i = at + 1 + g_real_partner[t]; i < l.n; i++) { g_reserve[t].names.push_back(char_label(l.ids[i], false)); g_reserve_ids[t].push_back(l.ids[i]); }
+        // 24 Nov (RP6 3v3 log): the partners were left out by COUNT (the first g_real_partner members after the one on the stage). With single player CPU rows the
+        // partners are the CPU rows, not the next members (Kain, Terra own row, Jecht + Gabranth CPU rows: the list lost Terra and kept the two partners on the
+        // field). Now the partners' own characters are left out. PSPRECOMP_TAGTEAM_RESERVE_BYCOUNT=1: old.
+        static const bool by_count = std::getenv("PSPRECOMP_TAGTEAM_RESERVE_BYCOUNT") != nullptr;
+        for (int i = at + 1 + (by_count ? g_real_partner[t] : 0); i < l.n; i++) { if (!by_count && g_partner_chars[t].count(l.ids[i])) continue; g_reserve[t].names.push_back(char_label(l.ids[i], false)); g_reserve_ids[t].push_back(l.ids[i]); }
     }
     if (g_log) {
         static std::string last;
@@ -10688,7 +10693,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 l.driver = drv;
                 if (g_log) std::fprintf(stderr, "[TAGTEAM] team %d extra: party member %d (%s)\n", team, c, c ? char_label(c, true).c_str() : "clone");
                 if (c) { const bool from_party = ffc < 0 && !spc && !comms_battle() && !(no_real || l.callin || l.info_slot >= 100);   // the k-th next party member: the reserve starts after all of them
-                    l.info_slot = static_cast<uint32_t>(100 + c); l.charId = c; g_real_partner[team] = std::max(g_real_partner[team], from_party ? kth : 1); g_late_load.push_back(l); }
+                    l.info_slot = static_cast<uint32_t>(100 + c); l.charId = c; g_real_partner[team] = std::max(g_real_partner[team], from_party ? kth : 1); g_partner_chars[team].insert(c); g_late_load.push_back(l); }
                 else if (clones_allowed()) keep.push_back(l);
                 else if (g_log) std::fprintf(stderr, "[TAGTEAM] team %d has no second member: no partner (no duplicate of the fighter on the stage)\n", team);
             }

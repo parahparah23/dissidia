@@ -5231,3 +5231,20 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   the partner's request at 23.4 s rebuilds the entry 15 -> 18, his use is spent at 24.4 s and his summon is on screen (`stone7b`, shot at 24 s); the slot
   fighter's request at 26 s waits; at 44.4 s the entry goes back to 15; his request at 50 s goes through and Odin's Zantetsuken plays (shot at 51 s).
 - Stone ids 0..0x0B are AUTO summons: a forced request with an AUTO stone is not taken by the step (as in retail), so the tests use manual stones.
+
+### Batch twelve (24 Nov): reserve list with single player CPU rows (RP6 3v3 log)
+- **Report** (Schindler, PR #133 comment, log `rp6_3v3_jecht_1123_1558.log` on the `logs` branch): single player Team 3 vs 3 with CPU fill, human Kain; setup
+  rows 24 11 20 22 15 (Kain, Terra own row, Jecht + Gabranth CPU rows, Squall). "The enemy team showed Jecht."
+- **Found in the log.** The partners are the CPU rows (`[TTSP] partner at the start: CPU member 20 (JECHT)`, then 22), but the reserve list left out the
+  partners by COUNT (the first `g_real_partner` members after the one on the stage): `party reserve ... team0: TERR JECH GABR SQUA` -> `JECH GABR SQUA`. Terra
+  (the next member) was dropped and the two partners already on the field were listed as waiting. The list feeds the HUD's reserve icons and the voice preloads
+  (the human's next member in this mode comes from `sp_next`, not from this list).
+- **Fix** (`update_party_reserve`, `PSPRECOMP_TAGTEAM_RESERVE_BYCOUNT=1`: old): the partners' own characters (`g_partner_chars`, set where a partner is
+  queued) are left out instead. A party battle (partners = the next members) gives the same list as before (`~/dissidia/tt/res1`).
+- **Checked, not the cause:** the enemy fill Cloud's model file id 0 is his real id (Squall's is 2); `[MATCHUP] char 13 ... player's member 20` only takes
+  the base LEVEL from Jecht's save record, the record itself is built for char 13. The enemy side's own list (`team1: TIFA KUJA`) is the enemy party record,
+  while the enemies on the field are the matchup's CPU fill (Ultimecia, Cloud): still open.
+- **Screenshots (Android, another run):** Kain + Terra own + Jecht, Gabranth CPU vs Sephiroth, Squall, Gabranth, Cloud, Kuja (3v3, CPU fill 9). The ENEMY
+  Gabranth (right panel, 991 BRV) is drawn with JECHT's model; Gabranth is a partner on both sides. Early in the same battle our partner panels read GOLBEZ /
+  SHANTOTTO (the retail assists, before the partners started). Not reproduced (`~/dissidia/tt/dup1`: Gabranth clones as partners on both sides, no Jecht
+  loaded in between, all on file 260). Needs that run's log.
