@@ -87,6 +87,7 @@ int64_t now_us() {
 }
 
 bool g_log = false;
+bool g_trace = false;   // PSPRECOMP_ADHOC_LOG=2: also every matching message sent / received per peer (op, size, verdict)
 #define ALOG(...) do { if (g_log) { std::fprintf(stderr, "[ADHOC] " __VA_ARGS__); std::fputc('\n', stderr); } } while (0)
 #define ANOTE(...) do { std::fprintf(stderr, "[ADHOC] " __VA_ARGS__); std::fputc('\n', stderr); } while (0)
 
@@ -343,6 +344,10 @@ void queue_match(Match& m, int ev, const Mac& mac, const std::vector<uint8_t>& d
 }
 
 // ---- matching wire helpers ----
+const char* mo_name(uint8_t op) {
+    static const char* n[] = {"?", "HELLO", "JOIN", "ACCEPT", "CANCEL", "ESTAB", "BYE", "DATA", "DATA_ACK", "PING"};
+    return op < sizeof n / sizeof *n ? n[op] : "?";
+}
 void match_send(Match& m, const Mac& to, uint8_t op, const std::vector<uint8_t>& payload, uint32_t extra = 0) {
     std::vector<uint8_t> b;
     b.insert(b.end(), to.begin(), to.end());
@@ -350,6 +355,7 @@ void match_send(Match& m, const Mac& to, uint8_t op, const std::vector<uint8_t>&
     b.push_back(op);
     put32(b, extra);
     b.insert(b.end(), payload.begin(), payload.end());
+    if (g_trace) ALOG("match %d tx op %s -> %s (%zu bytes)", m.id, mo_name(op), mac_str(to).c_str(), payload.size());
     send_to_mac(to, T_MATCH, b);
 }
 
@@ -369,6 +375,8 @@ void handle_match(const Mac& src, const uint8_t* body, size_t len) {
     if (len < 6 + 2 + 1 + 4) return;
     Mac dst; std::memcpy(dst.data(), body, 6);
     if (dst != g_mac && !is_bcast(dst)) return;
+    if (g_trace) ALOG("match rx op %s <- %s (%zu bytes)%s", mo_name(body[8]), mac_str(src).c_str(), len - 13,
+                      !same_group(src) ? ": DROPPED (not in our group)" : g_match_filter && !g_match_filter(src.data()) ? ": DROPPED (the game module refuses this player)" : "");
     if (!same_group(src)) return;
     if (g_match_filter && !g_match_filter(src.data())) return;   // the game module refuses matches with this player
     int port = get16(body + 6);
@@ -1246,7 +1254,8 @@ bool ensure_net() {
         if (en && en[0] == '0') { g_enabled = false; return; }
         if (const char* dr = std::getenv("PSPRECOMP_ADHOC_DIRECT"); dr && dr[0] == '0') g_direct_off = true;
         const char* lg = std::getenv("PSPRECOMP_ADHOC_LOG");
-        g_log = lg && lg[0] == '1';
+        g_log = lg && (lg[0] == '1' || lg[0] == '2');
+        g_trace = lg && lg[0] == '2';
         if (const char* bp = std::getenv("PSPRECOMP_ADHOC_PORT")) g_base_port = std::atoi(bp);
         load_cfg_from_env();
         psp_plat::net_init();

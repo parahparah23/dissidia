@@ -131,6 +131,8 @@ std::vector<int> g_pack_state;               // per pack: 0 not ready, 1 ready, 
 std::vector<bool> g_want_active, g_active;   // a peer in the group uses it / applied in this session
 std::vector<bool> g_share;                   // this player uses it and can send it
 std::vector<int> g_use;                      // this player uses it: 1 shareable, 2 not shareable, 0 no
+std::vector<bool> g_use_exact;               // this player uses it AND its installed files are the listed ones byte for byte
+std::map<Mac, std::pair<std::string, int64_t>> g_refuse_why;   // allow_match's last verdict per player ("" = allowed) and when, shown by the worker
 std::map<std::string, std::vector<uint8_t>> g_serve;   // sha -> delta bytes this player sends
 std::vector<Download> g_dl;
 std::atomic<bool> g_started{false};
@@ -160,7 +162,7 @@ void refresh_local() {   // worker, once: what this player has and uses
     size_t nf = 0;
     for (const auto& p : P) nf += p.files.size();
     std::vector<int> ok(nf, 0), st(P.size(), 0), use(P.size(), 0);
-    std::vector<bool> share(P.size(), false);
+    std::vector<bool> share(P.size(), false), exact(P.size(), false);
     std::map<std::string, std::vector<uint8_t>> serve;
     for (size_t i = 0; i < P.size(); i++) {
         bool all = true, installed = true;
@@ -180,13 +182,19 @@ void refresh_local() {   // worker, once: what this player has and uses
             serve[f.sha] = std::move(d);
         }
         share[i] = deltas;
+        exact[i] = installed;
         use[i] = deltas ? 1 : 2;
+        // (23 Nov: one "NOT shareable" line covered both cases below; the first one made every other player that uses the pack refuse
+        // this one silently - "players cannot join", desktop + RP6)
         std::fprintf(stderr, "[NETPACK] %s v%d: in use here, %s\n", P[i].name, P[i].version,
-                     deltas ? "can be sent to players who don't have it" : "NOT shareable (this build differs from the known one): "
-                     "players without it cannot play this player online while it is on");
+                     deltas ? "can be sent to players who don't have it"
+                     : installed ? "the known build, but NOT shareable: its online copies (<mods>/.net/*.dlt) are missing (tools/netpack.py "
+                                   "deltas <mods> --disc <disc0> makes them): players who have it can play this player, players without it cannot"
+                                 : "but its files are NOT the known build (another version or an edited mod): NO online match with any "
+                                   "player while it is on (Settings > Mods turns it off, or reinstall it)");
     }
     std::lock_guard<std::mutex> lk(g_mu);
-    g_file_ok = ok; g_pack_state = st; g_use = use; g_share = share; g_serve = std::move(serve);
+    g_file_ok = ok; g_pack_state = st; g_use = use; g_use_exact = exact; g_share = share; g_serve = std::move(serve);
     g_want_active.assign(P.size(), false);
     g_active.assign(P.size(), false);
 }
@@ -214,7 +222,10 @@ std::vector<uint8_t> manifest() {   // g_mu held
     b.push_back((uint8_t)uses.size());
     for (int i : uses) { put_name(b, packs()[i].name, packs()[i].version); b.push_back((uint8_t)g_use[i]); }
     std::vector<int> ready;
-    for (size_t i = 0; i < g_pack_state.size(); i++) if (g_pack_state[i] == 1 && (g_active[i] || g_use[i])) ready.push_back((int)i);
+    // ready = this game runs the listed files: received and applied, or (a pack in use here) its own install byte for byte. A
+    // verified copy in the cache does not count for a pack in use here: the game runs the installed files.
+    for (size_t i = 0; i < g_pack_state.size(); i++)
+        if (g_use[i] ? (bool)g_use_exact[i] : g_pack_state[i] == 1 && g_active[i]) ready.push_back((int)i);
     b.push_back((uint8_t)ready.size());
     for (int i : ready) put_name(b, packs()[i].name, packs()[i].version);
     return b;
@@ -232,22 +243,39 @@ void on_side(const uint8_t mac[6], const uint8_t* data, size_t len) {
 }
 
 // may a match with this player start? (network thread, called with the ad-hoc lock held: only reads state)
+// "" = yes, else why not. Both players decide from the same facts (each one's packs in use, shareable or not, and whether
+// it runs the listed files), so they agree: a match refused on one side only was a lobby where one player sees the other and
+// a battle request that does nothing (23 Nov, desktop + RP6 both using bartz-dff, the desktop's "not shareable").
+std::string refusal(const Mac& m) {   // g_mu held
+    for (size_t i = 0; i < g_use.size(); i++)   // a pack in use here whose files are not the listed ones: every player refuses us
+        if (g_use[i] && !(i < g_use_exact.size() && g_use_exact[i]))
+            return std::string("this game's ") + packs()[i].name + " is not the known build";
+    bool i_use = false;
+    for (int u : g_use) i_use = i_use || u != 0;
+    auto it = g_peers.find(m);
+    if (it == g_peers.end() || !it->second.manifest) return i_use ? "no pack list from that player yet (or an older build)" : "";
+    const Peer& p = it->second;
+    for (auto [idx, state] : p.uses) {
+        if (idx < 0) return "that player uses a pack this build does not know";
+        // runs the listed files: shareable (state 1) or not (it listed the pack as ready: installed byte for byte)
+        if (state != 1 && !p.ready.count(idx)) return std::string("that player's ") + packs()[idx].name + " is not the known build";
+        if (!g_use[idx] && !(g_pack_state[idx] == 1 && g_active[idx]))
+            return std::string("that player's ") + packs()[idx].name + (state == 1 ? " is not received yet" : " cannot be sent (and this game does not have it)");
+    }
+    for (size_t i = 0; i < g_use.size(); i++)
+        if (g_use[i] && !p.ready.count((int)i))
+            return std::string("that player does not have ") + packs()[i].name + (g_use[i] == 1 ? " yet" : " (and this game cannot send it)");
+    return "";
+}
+
 bool allow_match(const uint8_t mac[6]) {
     Mac m;
     std::memcpy(m.data(), mac, 6);
     std::lock_guard<std::mutex> lk(g_mu);
-    bool i_use = false;
-    for (int u : g_use) i_use = i_use || u != 0;
-    auto it = g_peers.find(m);
-    if (it == g_peers.end() || !it->second.manifest) return !i_use;   // unknown player: fine only while no pack is in use here
-    const Peer& p = it->second;
-    for (auto [idx, state] : p.uses) {
-        if (idx < 0 || state != 1) return false;                     // unknown here, or the player's build is not the listed one
-        if (!g_use[idx] && !(g_pack_state[idx] == 1 && g_active[idx])) return false;   // not received / applied yet
-    }
-    for (size_t i = 0; i < g_use.size(); i++)
-        if (g_use[i] && !p.ready.count((int)i)) return false;        // the player has not confirmed having mine
-    return true;
+    std::string why = refusal(m);
+    const bool ok = why.empty();
+    g_refuse_why[m] = {std::move(why), now_us()};
+    return ok;
 }
 
 // ---- worker ----
@@ -278,7 +306,8 @@ void handle(const Mac& from, const std::vector<uint8_t>& b, std::vector<std::pai
         for (auto [idx, state] : p.uses) {
             if (idx < 0) continue;
             g_want_active[idx] = true;
-            if (g_pack_state[idx] == 0 && state == 1) {   // fetch from this player what is missing
+            if (g_pack_state[idx] == 0 && state == 1 && !g_use[idx]) {   // fetch from this player what is missing (a pack in use here runs
+                                                                         // its installed files: a fetched copy would not be used)
                 for (size_t f = 0; f < packs()[idx].files.size(); f++) {
                     if (g_file_ok[file_slot(idx, (int)f)] != 0) continue;
                     bool have = false;
@@ -299,6 +328,7 @@ void handle(const Mac& from, const std::vector<uint8_t>& b, std::vector<std::pai
         }
         if (g_activate_pending.load() == false) for (size_t i = 0; i < g_want_active.size(); i++)
             if (g_want_active[i] && g_pack_state[i] == 1 && !g_active[i] && !g_use[i]) g_activate_pending = true;
+        g_refuse_why[from] = {refusal(from), t};   // known from the list alone (the other player may never send us a matching message)
         return;
     }
     if (b[0] == 'R' && b.size() == 1 + 32 + 4 + 2) {
@@ -385,6 +415,7 @@ void worker() {
         const int64_t t = now_us();
         std::vector<std::pair<Mac, std::vector<uint8_t>>> out;
         std::vector<Download> done;
+        std::vector<std::string> toast;
         uint8_t peers[32][6];
         size_t npeers = 0;
         psp_adhoc_group_peers(peers, 32, &npeers, g_own.data());
@@ -397,6 +428,23 @@ void worker() {
             }
             for (auto it = g_peers.begin(); it != g_peers.end();)
                 if (t - it->second.seen > kPeerGoneUs) it = g_peers.erase(it); else ++it;
+            // why a player in the lobby cannot be matched: in the log when it changes, on screen when it lasts (a refused match
+            // used to be silent: the other player just never showed up / a request did nothing)
+            static std::map<Mac, std::pair<std::string, int64_t>> shown;   // player -> (reason, since)
+            for (auto it = g_refuse_why.begin(); it != g_refuse_why.end();)
+                if (t - it->second.second > kPeerGoneUs) { shown.erase(it->first); it = g_refuse_why.erase(it); } else ++it;
+            for (auto& [m, v] : g_refuse_why) {
+                const std::string& why = v.first;
+                auto& [last, since] = shown[m];
+                if (why != last) {
+                    if (!why.empty()) std::fprintf(stderr, "[NETPACK] no match with %s: %s\n", mac_str(m).c_str(), why.c_str());
+                    else if (!last.empty()) std::fprintf(stderr, "[NETPACK] %s: match allowed now\n", mac_str(m).c_str());
+                    last = why; since = t;
+                } else if (!why.empty() && since >= 0 && t - since > 3000000) {
+                    toast.push_back(why);
+                    since = -1;
+                }
+            }
             if (npeers && t >= next_manifest) { next_manifest = t + kManifestUs; out.emplace_back(kBcast, manifest()); }
             for (auto it = g_dl.begin(); it != g_dl.end();) {
                 Download& d = *it;
@@ -428,6 +476,7 @@ void worker() {
             }
         }
         for (auto& [m, b] : out) psp_adhoc_side_send(m.data(), b.data(), b.size());
+        for (const std::string& w : toast) psp_net_notice("netpack_refuse", 20, "Online: no match with a player in the lobby: %s.", w.c_str());
         for (Download& d : done) {
             const int r = finish(d);
             std::lock_guard<std::mutex> lk(g_mu);
