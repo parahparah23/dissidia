@@ -3,14 +3,14 @@
 ## TODO (kept up to date; newest first)
 
 - **Turned off for now, to fix (22 Nov):**
-  - **Summonstones: FIXED (23 Nov) [PR #129], on again** (see "Summonstones, twelfth round"). Tested 23 Nov (headless, `~/dissidia/tt/ttest`): one summon per member PASS; partners summoning FAILS (the extra is presented to the summon step, no summon starts) although the PR #129 text claims it works. 24 Nov: partners (extras) summon now (see "Batch nine"). Still open: per-member STONES (each member
-    summons the side's stone), the big retail orb not refreshing after a swap.
+  - **Summonstones: FIXED (23 Nov) [PR #129], on again** (see "Summonstones, twelfth round"). Tested 23 Nov (headless, `~/dissidia/tt/ttest`): one summon per member PASS; partners summoning FAILS (the extra is presented to the summon step, no summon starts) although the PR #129 text claims it works. 24 Nov: partners (extras) summon now (see "Batch nine"). Per-member STONES done 24 Nov (see "Batch eleven").
+    Still open: the big retail orb not refreshing after a swap.
   - **Kill camera / KO without the hold is off**: the KO hold is the default again; [PR #129] fixes the music part (the streamed battle BGM released by FUN_089922FC during the finish is now kept), the stuck camera / no control is still open (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move. Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
 - **User play-test 23 Nov (RP6, after PR #129 merge), not started:**
   - **Installer failed on the Shield** (v0.1.25 setup app; logs `~/dissidia/tt/desk_logs/shield_setup_1123_*/setup.log`, copied with `adb run-as org.psprecomp.setup`): steps 1-4 fine, STEP 5/5 "Compiling the game on this device" fails at once: `batch_0000.cpp:1:1: error: CacheCheckFailed` (zig). /data has only 1.0 GB free (91 % used) - likely zig's cache could not be written (out of space); user (23 Nov): the installer must check free space BEFORE installing (the whole install) and before enabling extras that need more space (HD textures, JP voices, D1 moves, texture packs ...), telling the user how much is needed / free; and the setup should be optimised to use less space (e.g. delete intermediates like EBOOT.dec.elf / generated sources / object files and zig's cache after the build, stream instead of keeping copies). Also report zig cache errors clearly. Generic installer, not tag-specific.
   - **Android: Settings > Install a Texture Pack says "this system has no file picker"** (user's PHONE, which does have the Android system file picker - so the game fails to find / launch it: check how the game opens the picker on Android (Intent ACTION_OPEN_DOCUMENT / GET_CONTENT through the SDL activity, the intent resolve check, package visibility `<queries>` in the manifest on Android 11+ - a missing <queries> entry makes resolveActivity() return null although a picker exists). Generic, not tag-specific.
-  - Summonstones work, but every enemy uses the SAME summon; each fighter should use his own stone (probably the same on the player's team): per-member stones are still missing (one stone per side, built at battle start by FUN_08890BB8).
+  - Summonstones work, but every enemy uses the SAME summon; each fighter should use his own stone (probably the same on the player's team): per-member stones are still missing (one stone per side, built at battle start by FUN_08890BB8). **Done 24 Nov (Batch eleven):** each member summons his own stone.
   - ~~Going to the second menu still puts the cursor on Quick Battle (Party), not Tag Team Battle (the PR #129 menu-row fix does not cover this path).~~ Fixed 24 Nov (see "Batch ten").
   - 3v3: the 2nd partner is a duplicate taken from the enemy team - maybe only the wrong model: it looked like Jecht but used Terra's moves. The 3v3 banter audio is still wrong.
   - The called-in partner's assist voice can be cut off by banter audio (two voices in the same sound slot / the banter pool).
@@ -5214,3 +5214,20 @@ Free-for-all needs its own player setup (players, characters, teams clear).
 - **Fix** (`PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY=1`: old): a sub-list that was not updated for 0.25 s (another screen ran in between) also counts as a new opening.
   Verified (`~/dissidia/tt/mrow2`): `[MENUSET] group 1 opened with Tag Team Battle on: cursor 1 -> 4`, the screenshot shows the hand on Tag Team Battle, Cross opens
   Mode Select again. The way back from a finished battle was not walked again (it went through the group change before and still does).
+
+### Batch eleven (24 Nov): per-member summonstones
+- **Cause.** Each side has ONE summon entry (`bs + 0x754 + 40*side`), built at the battle start by `FUN_0888C4C8` -> `FUN_08890BB8(entry, side, stone)` with
+  the slot fighter's stone (record `+0x10 + 0xC6*set + 0xBA`, set = record byte `+0x773`). Every member of the side (partners, members swapped in) summoned that stone.
+- **Fix** (`sum_track`, `PSPRECOMP_TAGTEAM_SIDESTONE=1`: old). The entry is rebuilt with `FUN_08890BB8` for whoever is about to summon: a partner with the request
+  bit (actor `+0x5B3` & 0x10) when the slot fighter has none, else the slot fighter (`[SUMSTONE] ... entry rebuilt for partner/slot fighter ...: stone A -> B`).
+  - After a rebuild the request waits 30 controller frames (`PSPRECOMP_TAGTEAM_STONEWAIT`) before the step sees it (`slotactor_hook`): presented the same
+    frame, the use was spent but no summon started (`stone5a/b`).
+  - Hold: the entry stays the partner's while his request waits (up to 180 frames; his request bit is kept set meanwhile, the game clears it within a few frames) and, once his use is spent (his summon started), for 600 frames more
+    (`PSPRECOMP_TAGTEAM_STONEHOLD`, about 20 s). Neither the entry's words nor the manager change while a summon plays (`stone7e`, a debug dump of both),
+    so the hold is timed. While it lasts the slot fighter's request waits; like a press during a running summon in retail, it is not queued.
+  - Test aid `PSPRECOMP_TAGTEAM_TESTSTONE=<slot stone>,<partner 0 stone>` writes those stones into side 1's records; `FORCESUMMON` keeps the partner's request
+    bit set for up to 90 frames.
+- **Verified** (`tools_dbg/sumtest.py`, `SUM_DIRECT=party_battle_walk.txt`, 3v3, `TESTSTONE=15,18`, `FORCESUMMON=0:700`, `FORCESUMMON_SLOT=1:26,1:50`, `~/dissidia/tt/stone8b`):
+  the partner's request at 23.4 s rebuilds the entry 15 -> 18, his use is spent at 24.4 s and his summon is on screen (`stone7b`, shot at 24 s); the slot
+  fighter's request at 26 s waits; at 44.4 s the entry goes back to 15; his request at 50 s goes through and Odin's Zantetsuken plays (shot at 51 s).
+- Stone ids 0..0x0B are AUTO summons: a forced request with an AUTO stone is not taken by the step (as in retail), so the tests use manual stones.
