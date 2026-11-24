@@ -1046,6 +1046,15 @@ uint32_t spawn_fighter(uint32_t bs, uint32_t side, uint32_t foe, uint32_t cpu_si
     const uint32_t rec = call(SIDE_REC, side);
     uint32_t before[24]; if (g_log) for (int k = 0; k < 24; k++) before[k] = rd(rec + 4u * k);
     const int want = static_cast<int>(info_slot) >= 100 ? static_cast<int>(info_slot) - 100 : 0;   // info_slot >= 100: a charId + 100 (an extra of its own character)
+    if (std::getenv("PSPRECOMP_TAGTEAM_INFOTABLE")) {   // debug: the whole character record table (index, address, byte 6 = charId, the model code at +36), once
+        static bool done = false;
+        const uint32_t t = rd(0x089D4968u), h = ok(t, 8) ? rd(t) : 0u;
+        if (!done && ok(h, 16)) { done = true; const uint32_t nrec = rd(h + 4u);
+            std::fprintf(stderr, "[INFOTAB] %u records at %08X\n", nrec, h + 8u);
+            for (uint32_t i = 0; i < nrec && i < 400; i++) { const uint32_t r = h + 8u + 0x44u * i; if (!ok(r, 0x44)) break;
+                char nm[17] = {}; std::memcpy(nm, g_ram + ((r + 36u) & 0x07FFFFFFu), 16); for (char& ch : nm) if (ch && (ch < 32 || ch > 126)) ch = '.';
+                std::fprintf(stderr, "[INFOTAB] %3u %08X b4 %02X b5 %02X b6 %d b7 %02X w0 %08X code %s\n", i, r, g_ram[(r + 4u) & 0x07FFFFFFu], g_ram[(r + 5u) & 0x07FFFFFFu], static_cast<int8_t>(g_ram[(r + 6u) & 0x07FFFFFFu]), g_ram[(r + 7u) & 0x07FFFFFFu], rd(r), nm); } }
+    }
     uint32_t info = want ? info_for_char(want) : 0u;
     if (want && !info) std::fprintf(stderr, "[TAGTEAM] no info record for charId %d, using the copy\n", want);
     if (!info) info = call(CHAR_INFO, rd(bs + 2008u + 4u * (want ? 0u : info_slot)));
@@ -4381,6 +4390,11 @@ uint32_t side_of(uint32_t a);
 int team_of(uint32_t side);
 int reserve_left(int team);
 uint32_t g_sum_pres[2] = {0, 0};   // an extra presented as the side's slot fighter for this rules step (summon request), 0 = none
+int g_stone_built[2] = {-100000, -100000};   // g_hframe of the last rebuild of each side's summon entry (sum_track): a request waits PSPRECOMP_TAGTEAM_STONEWAIT frames after it
+extern int g_hframe;
+uint32_t g_stone_owner[2] = {0, 0};   // the partner the side's summon entry is held for (0: none), see sum_track
+bool stone_held_for_other(uint32_t side, uint32_t a) { return side < 2 && g_stone_owner[side] != 0 && g_stone_owner[side] != a; }
+bool stone_settling(uint32_t side) { static const int w = std::getenv("PSPRECOMP_TAGTEAM_STONEWAIT") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_STONEWAIT")) : 30; return side < 2 && g_hframe - g_stone_built[side] < w; }
 extern std::set<uint32_t> g_sum_req; uint32_t sum_uses(uint32_t a);
 uint32_t g_sum_mgr = 0;   // the summon manager (FUN_08A23DA8's this): a heap object, so its address is taken from the call, not fixed
 void rules_hook(uint8_t* rdram, recomp_context* ctx) {
@@ -4400,6 +4414,7 @@ void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
     if (const uint32_t sd = req_side; sd < 2 && !std::getenv("PSPRECOMP_TAGTEAM_NOXSUMMON") && !(g_ram[(a + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) {   // an extra of this side asks for a summon: the manager's step treats him as the slot fighter
         if (g_sum_pres[sd]) { ctx->r[2] = g_sum_pres[sd]; return; }
         for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].side == side_of(a) && g_extra[i].actor != a && alive(g_extra[i].actor) && (g_ram[(g_extra[i].actor + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) {
+            if (stone_settling(sd)) { ctx->r[2] = 0; return; }   // the entry was just rebuilt with his stone: the request waits (the bit stays set)
             g_sum_pres[sd] = g_extra[i].actor; ctx->r[2] = g_extra[i].actor; g_sum_req.insert(g_extra[i].actor);
             if (g_log) std::fprintf(stderr, "[SUMUSED] side %u: extra %08X (char %d) presented to the summon step (his uses %u, +0x10D0 %u)\n", sd, g_extra[i].actor, actor_char(g_extra[i].actor), sum_uses(g_extra[i].actor), static_cast<unsigned>(rd(g_extra[i].actor + 0x10D0u) & 0xFFFFu));
             return;
@@ -4411,6 +4426,7 @@ void slotactor_hook(uint8_t* rdram, recomp_context* ctx) {
     if (ffa_now()) { mate = ffa_keep(a); reserve = false; }
     if (alive(a) || mate || reserve) {
         // a slot fighter with a pending summon request (bit 0x10 of +0x5B3, set by the fighter's step on R + Circle / the AI's use) must reach the manager: the same step processes the summon (use + cut-in)
+        if ((g_ram[(a + 0x5B3u) & 0x07FFFFFFu] & 0x10u) && alive(a) && !std::getenv("PSPRECOMP_TAGTEAM_NOSUMFIX") && (stone_settling(req_side) || stone_held_for_other(req_side, a))) { ctx->r[2] = 0; return; }   // the entry was just rebuilt, or holds a partner's stone: wait
         if ((g_ram[(a + 0x5B3u) & 0x07FFFFFFu] & 0x10u) && alive(a) && !std::getenv("PSPRECOMP_TAGTEAM_NOSUMFIX")) { if (g_log && !g_sum_req.count(a)) std::fprintf(stderr, "[SUMLOG] t=%.2fs rules step: slot fighter %08X summon request let through (uses %u)\n", dissidia_battle_age() / 60.0f, a, sum_uses(a)); g_sum_req.insert(a); return; }
         ctx->r[2] = 0;
         static std::map<uint32_t, float> last_t;
@@ -6685,6 +6701,14 @@ void hg_hook(uint8_t* rdram, recomp_context* ctx) {
 std::set<uint32_t> g_sum_req;   // slot fighters whose summon request the current rules step lets through (slotactor_hook)
 uint32_t sum_uses(uint32_t a) { return static_cast<uint32_t>(g_ram[(a + 0x10CEu) & 0x07FFFFFFu]) | (static_cast<uint32_t>(g_ram[(a + 0x10CFu) & 0x07FFFFFFu]) << 8); }
 void sum_set_uses(uint32_t a, uint32_t n) { g_ram[(a + 0x10CEu) & 0x07FFFFFFu] = static_cast<uint8_t>(n & 0xFFu); g_ram[(a + 0x10CFu) & 0x07FFFFFFu] = static_cast<uint8_t>((n >> 8) & 0xFFu); }
+// a fighter's own summonstone id (his record +0x10 + 0xC6 * set + 0xBA, set = record byte +0x773), -1 = none
+int member_stone(uint32_t a) {
+    if (!ok(a, 0x12D0)) return -1;
+    const uint32_t rec = rd(a + 0x30Cu); if (!ok(rec, 0x778)) return -1;
+    const uint32_t set = g_ram[(rec + 0x773u) & 0x07FFFFFFu];
+    const int id = g_ram[(rec + 0x10u + 0xC6u * (set > 4 ? 0 : set) + 0xBAu) & 0x07FFFFFFu];
+    return id < 0x50 ? id : -1;
+}
 void sum_track() {
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOSUMUSED") != nullptr;
     const uint32_t MGR = g_sum_mgr;
@@ -6725,7 +6749,7 @@ void sum_track() {
         }
     }
     if (const char* fs = std::getenv("PSPRECOMP_TAGTEAM_FORCESUMMON")) {   // test aid "<extra index>:<hframe>": that extra asks for a summon (request bit 0x10 of +0x5B3) at that controller frame
-        int xi = 0, hf = 0; if (std::sscanf(fs, "%d:%d", &xi, &hf) == 2 && g_hframe == hf && xi >= 0 && xi < g_nextra && ok(g_extra[xi].actor, 0x12D0)) { g_ram[(g_extra[xi].actor + 0x5B3u) & 0x07FFFFFFu] |= 0x10u; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.1fs test: extra %d (%08X) asks for a summon\n", dissidia_battle_age() / 60.0f, xi, g_extra[xi].actor); }
+        int xi = 0, hf = 0; if (std::sscanf(fs, "%d:%d", &xi, &hf) == 2 && g_hframe >= hf && g_hframe < hf + (std::getenv("PSPRECOMP_TAGTEAM_FORCESUMMON_ONCE") ? 1 : 90) && xi >= 0 && xi < g_nextra && ok(g_extra[xi].actor, 0x12D0) && !g_sum_req.count(g_extra[xi].actor)) { g_ram[(g_extra[xi].actor + 0x5B3u) & 0x07FFFFFFu] |= 0x10u; if (g_log && g_hframe == hf) std::fprintf(stderr, "[SUMUSED] t=%.1fs test: extra %d (%08X) asks for a summon\n", dissidia_battle_age() / 60.0f, xi, g_extra[xi].actor); }
     }
     if (off) return;
     if (g_bs != last_bs) { last_bs = g_bs; used.clear(); last_key[0] = last_key[1] = -1; }
@@ -6743,6 +6767,53 @@ void sum_track() {
         } else if (u > 0 && used.count(id) && used[id]) {   // put back by something else (a rebuild of the same character, a KO call-in): the use stays spent
             sum_set_uses(F, 0); if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u char %d: summon uses %u -> 0 (already spent)\n", dissidia_battle_age() / 60.0f, k, key, u);
         }
+    }
+    // 24 Nov (user, 23 Nov play-test: "every enemy uses the SAME summon; each fighter should use his own stone"): retail builds ONE summon entry per side at the
+    // battle start (FUN_0888C4C8 -> FUN_08890BB8(bs + 0x754 + 40 * side, side, the slot record's stone): +20 the stone id, +24 the resolved summon, its parts set up
+    // by FUN_08891B8C / 08891C18 / 08891CA4). While the side's summon is not running (entry +8 == 0), the entry is rebuilt with the stone of the member who would
+    // summon now: a partner who asks (request bit 0x10, the slot fighter not asking), else the slot fighter. PSPRECOMP_TAGTEAM_SIDESTONE=1: old (one stone a side).
+    static const bool side_stone = std::getenv("PSPRECOMP_TAGTEAM_SIDESTONE") != nullptr;
+    if (const char* ts = std::getenv("PSPRECOMP_TAGTEAM_TESTSTONE")) {   // test aid "<slot stone>,<partner 0 stone>": side 1's slot fighter and extra 0 get these stones (their records' set byte +0xBA)
+        int a = -1, b = -1; std::sscanf(ts, "%d,%d", &a, &b);
+        auto put = [&](uint32_t X, int id) { if (id < 0 || !ok(X, 0x12D0)) return; const uint32_t rec = rd(X + 0x30Cu); if (!ok(rec, 0x778)) return; const uint32_t set = g_ram[(rec + 0x773u) & 0x07FFFFFFu];
+            uint8_t& v = g_ram[(rec + 0x10u + 0xC6u * (set > 4 ? 0 : set) + 0xBAu) & 0x07FFFFFFu]; if (v != id) { v = static_cast<uint8_t>(id); if (g_log) std::fprintf(stderr, "[SUMSTONE] test: %08X stone -> %d\n", X, id); } };
+        put(srd(g_bs + 60u), a); if (g_nextra > 0 && g_extra[0].started) put(g_extra[0].actor, b);
+    }
+    if (g_log) {   // every fighter's own stone and record (logged when it changes)
+        static std::map<uint32_t, std::pair<int, uint32_t>> seen;
+        uint32_t f[8]; const int nf = all_fighters(f);
+        for (int i = 0; i < nf; i++) { const std::pair<int, uint32_t> v{member_stone(f[i]), rd(f[i] + 0x30Cu)}; auto it = seen.find(f[i]);
+            if (it == seen.end() || it->second != v) { seen[f[i]] = v; std::fprintf(stderr, "[SUMSTONE] fighter %08X (char %d, side %u): record %08X stone %d\n", f[i], actor_char(f[i]), side_of(f[i]), v.second, v.first); } }
+    }
+    // hold: after a rebuild for a partner the entry stays his while his request waits (up to 180 frames) and, once the step spent his use (his summon started),
+    // for PSPRECOMP_TAGTEAM_STONEHOLD controller frames more (default 600, about 20 s) while the summon plays. Neither the entry nor the manager shows a running
+    // summon (test `stone7e`: the entry's words do not change while it plays), so the hold is timed. While it lasts the slot fighter's request waits (slotactor_hook).
+    static const int hold_len = std::getenv("PSPRECOMP_TAGTEAM_STONEHOLD") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_STONEHOLD")) : 600;
+    static int hold[2] = {0, 0}, hold_t[2] = {0, 0}; static uint32_t hold_bs = 0;
+    if (hold_bs != g_bs) { hold_bs = g_bs; hold[0] = hold[1] = 0; g_stone_owner[0] = g_stone_owner[1] = 0; }
+    if (!side_stone) for (uint32_t k = 0; k < 2; k++) {
+        const uint32_t E = g_bs + 0x754u + 40u * k;
+        if (!ok(E, 40)) continue;
+        const uint32_t O = g_stone_owner[k];
+        if (hold[k] == 1) {   // waiting for the step to take his request
+            if (!ok(O, 0x12D0) || !alive(O)) hold[k] = 0;
+            else if (sum_uses(O) == 0) { hold[k] = 2; hold_t[k] = g_hframe; if (g_log) std::fprintf(stderr, "[SUMSTONE] t=%.2fs side %u: partner %08X summon started, entry held %d frames\n", dissidia_battle_age() / 60.0f, k, O, hold_len); }
+            else if (g_hframe - hold_t[k] > 180) hold[k] = 0;
+            else g_ram[(O + 0x5B3u) & 0x07FFFFFFu] |= 0x10u;   // his request stays set while the entry settles (the game clears it within a few frames: `stone7a`)
+        } else if (hold[k] == 2 && g_hframe - hold_t[k] >= hold_len) hold[k] = 0;
+        if (!hold[k]) g_stone_owner[k] = 0;
+        if (hold[k]) continue;
+        const uint32_t F = srd(g_bs + 56u + 4u * k); if (!ok(F, 0x12D0) || is_rebuilding(F)) continue;
+        uint32_t who = F;
+        if (!(g_ram[(F + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) for (int i = 0; i < g_nextra; i++) { const uint32_t X = g_extra[i].actor;
+            if (g_extra[i].started && ok(X, 0x12D0) && side_of(X) == side_of(F) && X != F && alive(X) && (g_ram[(X + 0x5B3u) & 0x07FFFFFFu] & 0x10u)) { who = X; break; } }
+        const int stone = member_stone(who);
+        if (stone < 0 || static_cast<int>(rd(E + 20u)) == stone) continue;
+        const int was = static_cast<int>(rd(E + 20u)), was_sum = static_cast<int>(rd(E + 24u));
+        const uint32_t r = call(0x08890BB8u, E, k, static_cast<uint32_t>(stone));
+        g_stone_built[k] = g_hframe;
+        if (who != F) { hold[k] = 1; hold_t[k] = g_hframe; g_stone_owner[k] = who; }
+        if (g_log) std::fprintf(stderr, "[SUMSTONE] t=%.2fs side %u: entry rebuilt for %s %08X (char %d): stone %d -> %d, summon %d -> %d (ret %d)\n", dissidia_battle_age() / 60.0f, k, who == F ? "slot fighter" : "partner", who, actor_char(who), was, stone, was_sum, static_cast<int>(rd(E + 24u)), static_cast<int>(r));
     }
     // 24 Nov: partners (extras) never summoned: the summon step's gate FUN_0889120C asks FUN_08B3390C(actor) = the fighter's summon uses (+0x10CE), and an
     // extra is spawned with 0 (test `~/dissidia/tt/xsum4`: "presented to the summon step (his uses 0)"). Every started extra now gets one use of his own,
