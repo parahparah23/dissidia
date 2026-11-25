@@ -448,24 +448,35 @@ std::string& edit_target() {
     default: return g_cloud.webdav_pass;
     }
 }
+// Settings text fields: the event loop sets SDL_ENABLE_SCREEN_KEYBOARD to 0 (the Steam Deck rule), which on Android also keeps the
+// system keyboard (IME) from opening and closing. SDL reads the hint inside Start / StopTextInput, so allow it for these calls only.
+static void text_input(bool on) {
+#if defined(__ANDROID__)
+    SDL_SetHint("SDL_ENABLE_SCREEN_KEYBOARD", "1");
+#endif
+    if (on) SDL_StartTextInput(); else SDL_StopTextInput();
+#if defined(__ANDROID__)
+    SDL_SetHint("SDL_ENABLE_SCREEN_KEYBOARD", "0");
+#endif
+}
 void edit_begin(int field) {
     g_edit = Edit{};
     g_edit.active = true;
     g_edit.field = field;
     g_edit.buf = edit_target();
-    SDL_StartTextInput();
+    text_input(true);
     g_dirty = true;
 }
 void saves_sync(int depth_dir);
 void edit_end() {
     const bool ext = g_edit.active && g_edit.field == 7;
-    g_edit.active = false; SDL_StopTextInput(); g_dirty = true;
+    g_edit.active = false; text_input(false); g_dirty = true;
     if (ext) { g_saves.text_done(false, ""); saves_sync(0); }   // cancelled
 }
 void edit_commit() {
     std::string v = g_edit.buf;
     if (g_edit.field == 7) {   // a Saves page question: hand the text over (paths keep their spaces)
-        g_edit.active = false; SDL_StopTextInput(); g_dirty = true;
+        g_edit.active = false; text_input(false); g_dirty = true;
         g_saves.text_done(true, v);
         saves_sync(1);
         return;
