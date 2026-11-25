@@ -29,7 +29,7 @@ def main():
     env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=os.path.join(work, "zig-cache"), HOME=work)
     cxx = [REPO + "/setup/" + f for f in ("install.cpp", "extras.cpp", "proc.cpp", "payload.cpp", "android_engine.cpp")]
     c = [REPO + "/setup/third_party/miniz.c"]
-    common = ["-target", "aarch64-linux-android", "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % API, "-fPIC", "-O2",
+    common = ["-target", "aarch64-linux-android", "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % API, "-fPIC", "-O2", "-ffp-contract=off",
               "-fdata-sections", "-ffunction-sections", "-funwind-tables", "-fstack-protector-strong", "-Wno-everything",
               "-isystem", sysroot + "/usr/include/aarch64-linux-android", "-isystem", sysroot + "/usr/include",
               "-I" + REPO + "/setup"]

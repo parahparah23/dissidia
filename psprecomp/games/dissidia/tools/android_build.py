@@ -216,7 +216,8 @@ def device_build(adir, work, jobs, say, tag, die):
     flags = ["-target", "aarch64-linux-android", "-nostdinc++", "-I" + sysroot + "/usr/include/c++/v1",
              "-isystem", sysroot + "/usr/include/aarch64-linux-android", "-isystem", sysroot + "/usr/include",
              "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % api, "-fdata-sections", "-ffunction-sections", "-funwind-tables",
-             "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-std=gnu++17", "-fPIC", "-O2", "-fno-lto", "-fno-strict-aliasing", "-Wno-everything"]
+             "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-std=gnu++17", "-fPIC", "-O2", "-fno-lto", "-fno-strict-aliasing", "-Wno-everything",
+             "-ffp-contract=off"]   # lock-step online play: no fused multiply-add (clang for ARM fuses a * b + c by default), same rounding as the PC build
     stamp = hashlib.sha256((" ".join(flags) + zig).encode()).hexdigest()[:12]
 
     def obj_of(src):

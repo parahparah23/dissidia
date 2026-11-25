@@ -153,12 +153,54 @@ void dump_blocks(uint32_t frame) {
     }
 }
 
+// The first two delivered frames of every battle: this machine's build (does the compiler fuse a * b + c?) and every word of both
+// fighters (pointers and viewer-only bits left out, as in the hashes), [NETDUMP0] lines. A DESYNC at frame 0 / 1 can then be pinned
+// to the words by diffing the two players' logs (grep NETDUMP0), also when only one of the two logs is at hand later.
+// PSPRECOMP_NETSYNC_F0DUMP=0 turns it off.
+bool fma_contracted() {   // true when this build fuses a * b - p into one FMA (the exact low part of a * b is left over)
+    volatile float xv = 1.0f + 1.0f / 4096.0f;
+    volatile float pv = xv * xv;   // rounded product
+    const float a = xv, b = xv;
+    const float r = a * b - pv;
+    return r != 0.0f;
+}
+void dump_start(uint32_t frame) {
+    static const bool off = [] { const char* e = std::getenv("PSPRECOMP_NETSYNC_F0DUMP"); return e && e[0] == '0'; }();
+    if (off || frame > 1) return;
+    if (frame == 0) {
+#if defined(__aarch64__)
+        const char* arch = "arm64";
+#elif defined(__x86_64__)
+        const char* arch = "x86_64";
+#else
+        const char* arch = "other";
+#endif
+        std::fprintf(stderr, "[NETSYNC] this build: %s, fused multiply-add %s, %s\n", arch, fma_contracted() ? "ON (differs from a PC build)" : "off",
+#ifdef __clang__
+                     "clang " __clang_version__
+#else
+                     "gcc/other"
+#endif
+        );
+    }
+    const uint32_t battle = r32(BATTLE_PTR);
+    for (int f = 0; f < 2; f++) {
+        const uint32_t a = ok(battle) ? r32(battle + 56 + 4 * f) : 0;
+        if (!ok(a)) { std::fprintf(stderr, "[NETDUMP0] frame=%u fighter=%d none (battle %08X)\n", frame, f, battle); continue; }
+        for (uint32_t off2 = BLOCK_START; off2 < BLOCK_END; off2 += BLOCK) {
+            std::string line; char w[12];
+            for (uint32_t i = 0; i < BLOCK; i += 4) { std::snprintf(w, sizeof w, " %08X", hashed_word(a, off2 + i)); line += w; }
+            std::fprintf(stderr, "[NETDUMP0] frame=%u fighter=%d block=%03X%s\n", frame, f, off2, line.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 // tagteam_net.cpp (the tag battle's own lock-step, which replaces FUN_0890D664 there): a frame was delivered (state = the start of it).
 void dissidia_netplay_frame_delivered(uint32_t frame) {
     if (!g_ram) return;
-    if (psp_netplay_sync_check()) { uint32_t vals[NVALUES]; const int n = collect(vals); psp_netplay_submit_state(frame, vals, n); }
+    if (psp_netplay_sync_check()) { uint32_t vals[NVALUES]; const int n = collect(vals); psp_netplay_submit_state(frame, vals, n); dump_start(frame); }
     if (g_dump_blocks) dump_blocks(frame);
     if (frame == g_perturb_frame) perturb();
 }
