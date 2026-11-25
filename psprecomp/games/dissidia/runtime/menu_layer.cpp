@@ -5,6 +5,7 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include <tuple>
 
 #include <cmath>
 #include <cstdio>
@@ -79,9 +80,11 @@ void MenuLayer::blend(int x, int y, float r, float g, float b, float a) {
     if (a <= 0.f || x < 0 || y < 0 || x >= w_ || y >= h_) return;
     if (a > 1.f) a = 1.f;
     float* p = &px_[(size_t(y) * size_t(w_) + size_t(x)) * 4];
+    if (p[3] <= 0.f) { p[0] = r; p[1] = g; p[2] = b; p[3] = a; return; }   // empty pixel: the same result without the divisions
     const float da = p[3] * (1.f - a), oa = a + da;
     if (oa <= 0.f) return;
-    p[0] = (r * a + p[0] * da) / oa; p[1] = (g * a + p[1] * da) / oa; p[2] = (b * a + p[2] * da) / oa; p[3] = oa;
+    const float inv = 1.f / oa;
+    p[0] = (r * a + p[0] * da) * inv; p[1] = (g * a + p[1] * da) * inv; p[2] = (b * a + p[2] * da) * inv; p[3] = oa;
 }
 
 void MenuLayer::line(float x0, float x1, float y, float thick, LayerColor c) {
@@ -93,8 +96,8 @@ void MenuLayer::glow(float cx, float cy, float rad, LayerColor c) {
     const int y0 = std::max(0, int(PY(cy - rad))), y1 = std::min(h_, int(PY(cy + rad)) + 1);
     for (int y = y0; y < y1; ++y)
         for (int x = x0; x < x1; ++x) {
-            const float dx = IX(x + 0.5f) - cx, dy = IY(y + 0.5f) - cy, d = std::sqrt(dx * dx + dy * dy) / rad;
-            if (d < 1.f) blend(x, y, c.r, c.g, c.b, c.a * (1.f - d) * (1.f - d));
+            const float dx = IX(x + 0.5f) - cx, dy = IY(y + 0.5f) - cy, d2 = (dx * dx + dy * dy) / (rad * rad);
+            if (d2 < 1.f) { const float k = 1.f - std::sqrt(d2); blend(x, y, c.r, c.g, c.b, c.a * k * k); }
         }
 }
 
@@ -122,30 +125,49 @@ void MenuLayer::image(const uint32_t* px, int iw, int ih, int sx, int sy, int sw
         }
 }
 
+// Rendered glyph cache: the HUD layer draws every string several times a frame (shadow passes, measuring) and used to render each glyph again with
+// FreeType every time (a banner / notice frame cost 40 ms: the stutter after a call-in). Key: face, pixel size, glyph index. Caller holds the text mutex.
+// PSPRECOMP_GLYPH_CACHE_OFF=1 renders as before.
+struct CGlyph { std::vector<uint8_t> buf; int rows = 0, width = 0, pitch = 0, left = 0, top = 0; float advance = 0.f; bool ok = false; };
+const CGlyph& cached_glyph(FT_Face face, unsigned px, FT_UInt gi) {
+    static std::map<std::tuple<FT_Face, unsigned, FT_UInt>, CGlyph> cache; static const bool off = std::getenv("PSPRECOMP_GLYPH_CACHE_OFF") != nullptr; static CGlyph tmp;
+    const auto key = std::make_tuple(face, px, gi);
+    if (!off) { auto it = cache.find(key); if (it != cache.end()) return it->second; }
+    CGlyph& c = off ? tmp : cache[key];
+    c = CGlyph{};
+    if (FT_Load_Glyph(face, gi, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT) == 0) {
+        const FT_GlyphSlot g = face->glyph;
+        c.ok = true; c.rows = int(g->bitmap.rows); c.width = int(g->bitmap.width); c.pitch = g->bitmap.pitch; c.left = g->bitmap_left; c.top = g->bitmap_top; c.advance = g->advance.x / 64.f;
+        if (g->bitmap.buffer && c.rows > 0 && c.pitch > 0) c.buf.assign(g->bitmap.buffer, g->bitmap.buffer + size_t(c.rows) * size_t(c.pitch));
+    }
+    return c;
+}
+
 float MenuLayer::text(const std::string& str, bool bold, float em, float x, float baseline, LayerColor c, bool measure_only) {
     Faces& f = faces();
     FT_Face face = bold ? f.bold : f.reg;
     if (!face) return 0.f;
     static std::mutex mu;
     std::lock_guard<std::mutex> lk(mu);
-    FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * S())));
+    const unsigned px = unsigned(std::lround(em * S()));
+    FT_Set_Pixel_Sizes(face, 0, FT_UInt(px));   // (kerning below reads the current size)
     const float pen0 = PX(x); float pen = pen0;
     const int by = int(std::lround(PY(baseline)));
     FT_UInt prev = 0;
     for (unsigned char ch : str) {
         const FT_UInt gi = FT_Get_Char_Index(face, ch);
         if (prev && gi && FT_HAS_KERNING(face)) { FT_Vector k; FT_Get_Kerning(face, prev, gi, FT_KERNING_DEFAULT, &k); pen += k.x / 64.f; }
-        if (FT_Load_Glyph(face, gi, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT) == 0) {
-            const FT_GlyphSlot g = face->glyph;
+        const CGlyph& g = cached_glyph(face, px, gi);
+        if (g.ok) {
             if (!measure_only) {
-                const int gx = int(std::lround(pen)) + g->bitmap_left, gy = by - g->bitmap_top;
-                for (unsigned r = 0; r < g->bitmap.rows; r++)
-                    for (unsigned q = 0; q < g->bitmap.width; q++) {
-                        const uint8_t cov = g->bitmap.buffer[r * g->bitmap.pitch + q];
-                        if (cov) blend(gx + int(q), gy + int(r), c.r, c.g, c.b, c.a * cov / 255.f);
+                const int gx = int(std::lround(pen)) + g.left, gy = by - g.top;
+                for (int r = 0; r < g.rows; r++)
+                    for (int q = 0; q < g.width; q++) {
+                        const uint8_t cov = g.buf[size_t(r) * size_t(g.pitch) + size_t(q)];
+                        if (cov) blend(gx + q, gy + r, c.r, c.g, c.b, c.a * cov / 255.f);
                     }
             }
-            pen += g->advance.x / 64.f;
+            pen += g.advance;
         }
         prev = gi;
     }
@@ -161,19 +183,20 @@ float MenuLayer::serif_caps(const std::string& str, float em, float small, float
     const int by = int(std::lround(PY(baseline)));
     for (unsigned char ch : str) {
         const bool lower = ch >= 'a' && ch <= 'z';
-        FT_Set_Pixel_Sizes(face, 0, FT_UInt(std::lround(em * (lower ? small : 1.f) * S())));
+        const unsigned px = unsigned(std::lround(em * (lower ? small : 1.f) * S()));
+        FT_Set_Pixel_Sizes(face, 0, FT_UInt(px));
         const FT_UInt gi = FT_Get_Char_Index(face, lower ? ch - 32 : ch);
-        if (FT_Load_Glyph(face, gi, FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT) == 0) {
-            const FT_GlyphSlot g = face->glyph;
+        const CGlyph& g = cached_glyph(face, px, gi);
+        if (g.ok) {
             if (!measure_only) {
-                const int gx = int(std::lround(pen)) + g->bitmap_left, gy = by - g->bitmap_top;
-                for (unsigned r = 0; r < g->bitmap.rows; r++)
-                    for (unsigned q = 0; q < g->bitmap.width; q++) {
-                        const uint8_t cov = g->bitmap.buffer[r * g->bitmap.pitch + q];
-                        if (cov) blend(gx + int(q), gy + int(r), c.r, c.g, c.b, c.a * cov / 255.f);
+                const int gx = int(std::lround(pen)) + g.left, gy = by - g.top;
+                for (int r = 0; r < g.rows; r++)
+                    for (int q = 0; q < g.width; q++) {
+                        const uint8_t cov = g.buf[size_t(r) * size_t(g.pitch) + size_t(q)];
+                        if (cov) blend(gx + q, gy + r, c.r, c.g, c.b, c.a * cov / 255.f);
                     }
             }
-            pen += g->advance.x / 64.f + track * S();
+            pen += g.advance + track * S();
         }
     }
     return (pen - pen0) / S() - track;

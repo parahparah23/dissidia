@@ -435,13 +435,21 @@ void tagteam_hud_hide() { g_hits.clear(); g_fighters.clear(); g_reserves.clear()
 bool tagteam_fx_draw(dissidia::MenuLayer& layer);   // tagteam_fx.cpp
 
 // once per frame: the HUD and the effects on the game layer
+namespace {
+struct Lap {   // PSPRECOMP_TAGTEAM_HITCH: where a slow layer frame spends its time
+    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now(); bool on = std::getenv("PSPRECOMP_TAGTEAM_HITCH") != nullptr; std::string acc;
+    void lap(const char* n) { if (!on) return; const auto now = std::chrono::steady_clock::now(); const double ms = std::chrono::duration<double, std::milli>(now - t).count(); t = now; if (ms >= 3.0) { char b[64]; std::snprintf(b, sizeof b, " %s=%.1f", n, ms); acc += b; } }
+    ~Lap() { if (on && !acc.empty()) std::fprintf(stderr, "[LAYERLAP]%s\n", acc.c_str()); }
+};
+}
 void tagteam_layer_frame(bool in_battle) {
+    Lap L;
     if (!in_battle) { tagteam_hud_hide(); }
     const double tnow = now_s();
     g_notices.erase(std::remove_if(g_notices.begin(), g_notices.end(), [&](const Notice& n) { return n.until <= tnow; }), g_notices.end());
     g_hits.erase(std::remove_if(g_hits.begin(), g_hits.end(), [&](const HitRec& r) { return tnow - r.t0 >= kFeedLife + 0.1; }), g_hits.end());
     const bool any = !g_fighters.empty() || !g_hits.empty() || !g_reserves.empty() || !g_overhead.empty() || !g_banner.empty() || !g_notices.empty();
-    g_layer.begin(std::max(2, psp_sddialog::output_scale()));
+    L.lap("prep"); g_layer.begin(std::max(2, psp_sddialog::output_scale())); L.lap("begin");
     if (any) {
         for (const TagHudOverhead& o : g_overhead) if (!o.target) overhead_bar(o);   // (under the panels; the target's bar last, on top of the others)
         for (const TagHudOverhead& o : g_overhead) if (o.target) overhead_bar(o);
@@ -457,7 +465,7 @@ void tagteam_layer_frame(bool in_battle) {
             panel(f, s == 0 ? (g ? 9.f : 4.f) : 480.f - (g ? 9.f : 4.f) - 112.f, 142.f - (g ? 34.f : 27.f) * row[s]++, tnow);
             g_layer.set_zoom(1.f, 0.f, 0.f); g_layer.opacity = 1.f;
         }
-        for (const TagHudReserve& r : g_reserves) reserve(r);
+        L.lap("panels"); for (const TagHudReserve& r : g_reserves) reserve(r); L.lap("reserves");
         if (hpdmg_mode() > 0 && !g_hits.empty()) {   // fighters on the retail big panels (bottom corners, number beside the BRV): ours sits next to the retail pulse
             for (int s = 0; s < 2; s++) {
                 bool small = false; for (const TagHudFighter& f : g_fighters) if (f.id == g_big[s]) small = true;
@@ -466,12 +474,12 @@ void tagteam_layer_frame(bool in_battle) {
             hit_floating(tnow);
             { float top = 0.f; for (const Notice& n : g_notices) if (n.kind != 0) top += 19.f; hit_feed(tnow, top); }
         }
-        if (!g_banner.empty()) banner(g_banner);
+        L.lap("hits"); if (!g_banner.empty()) banner(g_banner); L.lap("banner");
         { float yd = 70.f, yj = 0.f;   // falls under the join banner, job powers along the top edge
           for (const Notice& n : g_notices) { if (n.kind == 0) { notice(n, yd, tnow); yd += 13.f; } else { notice(n, yj, tnow); yj += 19.f; } } }
     }
-    const bool fx = tagteam_fx_draw(g_layer);
+    L.lap("notices"); const bool fx = tagteam_fx_draw(g_layer); L.lap("fx");
     if (!any && !fx) { if (g_layer_shown) { g_layer.clear(); g_layer_shown = false; } return; }
-    g_layer.publish();
+    g_layer.publish(); L.lap("publish");
     g_layer_shown = true;
 }

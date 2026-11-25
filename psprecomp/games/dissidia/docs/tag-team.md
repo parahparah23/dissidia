@@ -22,7 +22,7 @@
 - **User play-test 23 Nov (RP6, after PR #129 merge), not started:**
   - **Freeze for a few minutes after several tag matches** (RP6, 25 Nov, log `~/dissidia/tt/desk_logs/rp6_freeze_1125_1400.log`, 2 battles in that session, `[HANGDUMP] game thread stuck`): looks like memory / state not released between battles (heaps, file objects, sound banks, the leftover unload, per-battle tables); compare [MEMSUM] / [FILESTATE] / [SNDREG] at each battle start across several battles.
   - **Laguna invisible ~1 min + DESYNC at frame 998** (desktop vs RP6, 24 Nov, logs `desk_laguna_1124_1352.log` / `rp6_laguna_1124_1352.log`): **MERGED 25 Nov (host-tested only; verify on the devices)**, report `~/dissidia/tt/headless/report_laguna.md`. Two fixes in `tagteam.cpp`: (1) `fix_assist` no longer takes an EMPTY assist place (cause of the invisible Laguna: retail ran him as the RP6 Lightning's assist; `PSPRECOMP_TAGTEAM_EXTRA_ASSISTLINK=1` = old); (2) `run_cpu_record` with `fix_time` pins the game's rand() LCG word 0x09AF84D0 to a seed-derived value for the CPU-row record build and restores it, so both machines build the same record (the DESYNC at frame 998; `PSPRECOMP_TAGTEAM_CPUREC_LCG=1` = old). Test aids `TEST_NOASSIST=<side>`, `FILLCHAR=<s0>,<s1>`. Regression `--baseline` PASS (`~/dissidia/tt/reg_dc47_laguna`).
-  - **Lag when a new player is tagged in** (call-in / swap hitch).
+  - **Lag when a new player is tagged in** (call-in / swap hitch): **FIXED on the host 25 Nov, see "Batch twenty" (branch tt-taglag); verify on the RP6**: the entrance effect and the model load were the cost; a debug aid (`PSPRECOMP_TAGTEAM_HITCH=<ms>`) logs frames over a limit with the tag team steps that ran in them.
   - **Both installers (PC + Android): a failure reason** shown to the user when an install fails (which step, why, what to do), not only "failed".
   - **Both installers: report a problem on GitHub** - a simple button when an install fails or crashed that opens a GitHub issue (prefilled title / body: version, device, step) with the logs attached (setup.log, last_run.log, crash report; on Android via share / the GitHub app or a pre-filled issue URL + attached zip).
   - Setup (all platforms): before asking for an extra's disc image (undub / Japanese voices, Dissidia 2008 for the Bartz D1 moves, xdelta mods), look for a matching ISO / CSO in the same folder as the first ISO the user picked and use it if found (check its id / hash), only ask when none matches.
@@ -5417,3 +5417,31 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   (2) a second entrance within 4 s could take the registry slot of the first call line's `_a` bank (`sndreg_make_room` tier 2): banks of a call line requested < 4 s ago are taken last (tier 3).
   `PSPRECOMP_TAGTEAM_CALLHOLD_OLD=1`: both old. **Not verified by ear / on a device.**
 - **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_ttassist --baseline` PASS (`~/dissidia/tt/s2/ttassist/reg1`).
+
+### Batch twenty (25 Nov): lag when a new player is tagged in (tree ttlag, branch tt-taglag)
+
+- **Measure first**: `PSPRECOMP_TAGTEAM_HITCH=<ms>` (default off) logs `[HITCH] frame N (battle t=..) took X ms (game thread cpu Y, file reads ..); steps (wall/cpu ms): ...` for every game frame over the limit (wall time between two
+  frame ends), with every `TtStep` of tag team code that ran in that frame (nested steps indented, `@` = start time on the monotonic clock) and the game's file reads in it (`psp_io_read_stats_take`, psp_hle_io.cpp).
+  `[LAYERLAP]` lines (tagteam_hud.cpp) split a slow HUD layer frame; `PSPRECOMP_TAGTEAM_HITCH_PROF=1` + `PSPRECOMP_FUNC_TRACE=1` samples the newest dispatched function (polluted by the audio thread, little use).
+  Steps added: tt_frame, fx_frame, layer_frame, group_end_step, breakshot_poll, entrance_step, GE_wait, fighter_dtor, leftover_scan, fighter_ctor, LOAD_FILE_GROUP, preload_member ...
+- **Findings** (headless Party A, slot 0 KO at 20 s and 40 s, host load ~35, game thread CPU ms): (1) the file reads are NOT the cost (6 reads, 3-4 MB, 0.6 ms, page cache); the cost is `LOAD_FILE_GROUP` = the game's own model build,
+  25-40 ms; (2) the rest of `rebuild_begin` (destructor + constructor + the sweep for leftover blocks `leftover_scan`, a 56 MB word pass = 25 ms) 30-60 ms; (3) **the entrance effect** (tagteam_fx.cpp: column of light, glows)
+  made the HUD layer frame cost 25-45 ms EVERY frame for the ~0.3 s of the warp-in / pose (the stutter after the call-in: per pixel exp / pow / sin over a 100k+ pixel band, large glows with a sqrt and three divisions per pixel);
+  (4) the first run's worst frames were 190 ms (call-in frame) and 8 consecutive 40-48 ms frames in the entrance.
+- **Fixes** (all draw / data-file work, nothing that changes game state; `PSPRECOMP_TAGTEAM_FXSLOW=1` / `PSPRECOMP_GLYPH_CACHE_OFF=1` / `PSPRECOMP_TAGTEAM_PRELOAD_OLD=1` = old behaviour):
+  * tagteam_fx.cpp: the column's x / y terms are computed once per pixel column / row (lazily from the band's own coordinates, so the picture is the same). menu_layer.cpp: `glow` without a sqrt for pixels outside, `blend` without divisions
+    for an empty pixel and one reciprocal otherwise; a rendered-glyph cache for `text` / `serif_caps` (every string was re-rasterised by FreeType per frame and per shadow pass).
+  * `preload_member` (tagteam.cpp): the next member's `load_character` runs 1.5 s after the slot fall (single player / any slot call-in; the due time is only ~3 s after the fall) or 5 s before a fallen extra's call-in
+    (`PSPRECOMP_TAGTEAM_PRELOAD_LEAD`, default 5 s) instead of in the call-in frame. Same call, at tag team clock ticks all machines reach together (the due times come from `g_tt_age`), only when no rebuild / late load /
+    entrance / EX Burst is running, and the peek (`next_member_char`) is the one the call-in uses; the files are pinned against `unload_departed` for 40 s (`g_ahead`) so the "departed" sweep does not free them before he is on the stage.
+    The later `load_character` finds the files loaded ("already loaded") and does nothing.
+  * `leftover_scan`: the pass skips a block of 16 words without a word in the candidates' range at once (same result, 25 -> 15 ms).
+- **Numbers** (same scenario, frames over 40 ms from battle second 15; old flags = all three opt-outs): old 12 frames, worst 98 ms (cpu 88), call-in frame 97.6 ms, 8 frames of 40-45 ms in the entrance; new 3 frames, worst 56 ms
+  (cpu 45): the preload frame 40-48 ms (the model build, now in a calm frame), the call-in frame 56 ms, none in the entrance. Fallen extra (partner:20 / enemy2:32): old worst 147 ms, new 90 ms.
+  Logs `~/dissidia/tt/s2/ttlag/{h1,h10,h11,e1,e2,r2}/run_30.log`.
+- **Tests**: `tagteam_test.py --baseline` PASS (`~/dissidia/tt/s2/ttlag/reg1`); two-copy online (`mp_slot.py`, slot 0 KO at 20 s, 2392 frames, both copies preload Vaan at the same battle time 36.6 s, slot take at 41.6 s):
+  NETSYNC 0 mismatched on both (`~/dissidia/tt/s2/ttlag/s1`).
+- **Not done / open**: the remaining call-in frame (rebuild: destructor + constructor + GE wait, 30-60 ms) and the start-of-battle `spawn_fighter` (50 ms) cannot be split without changing frame order; the two file ids of a load
+  could be spread over two frames (the own-file bookkeeping would have to append). Not measured on the RP6 / emulator (phone reads may be cold: the preload also warms them). The per-frame HUD layer (clear + publish of up to
+  1920x1088 floats) costs a flat 3-5 ms on the host every battle frame: worth a look for phones.
+
