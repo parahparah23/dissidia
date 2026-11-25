@@ -64,10 +64,10 @@
   - ~~A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.~~ Fixed 25 Nov ("Batch nineteen"; the round 8 hand-over is now opt-in).
 - **Low priority (user, 22 Nov; not started):**
   - ~~3v3: the banter intros do not play the correct audio.~~ 23 Nov: one silent banter retried ("Batch eight"); 25 Nov: the second line (cut short by the next entrance) was silent, fixed ("Batch seventeen"). Whether each line is the matchup-specific one is not checked.
-  - Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.
-    23 Nov: changed, not checked on screen (see "Batch eight").
-  - Final screen: remove the options the Battle Lobby now covers (stage, rules, judgment). 23 Nov: changed, not checked on screen (see "Batch eight").
-  - Battle Lobby: follow the game's design language (frames, fonts, colours).
+  - ~~Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.~~
+    Checked on screen 25 Nov, one stale case fixed ("Batch twenty-three").
+  - ~~Final screen: remove the options the Battle Lobby now covers (stage, rules, judgment).~~ Checked on screen 25 Nov: gone ("Batch twenty-three").
+  - ~~Battle Lobby: follow the game's design language (frames, fonts, colours).~~ Restyled after the retail Options screen 25 Nov ("Batch twenty-three"; not checked on a device).
   - ~~Free-for-all: fighters still spawn as two teams; spread them out (each player his own start spot).~~ Done 23 Nov (see "Batch seven").
   - ~~Free-for-all: much of the code still assumes a "partner" cannot be attacked (who takes the damage, who gets broken, friendly-fire paths); make every hit / break / HP path treat every other fighter as a foe.~~ Audited 25 Nov ("Batch twenty-one"): the hit, damage, steal, break, break-bonus and HP paths already book same-side hits right; the leftovers (EX force for hits on a same-side fighter, assist aim, assist-off / call-in hit checks, chase pair, lethal glow) fixed. Not checked: result tally for 3 / 4 fighters, summons, online FFA with 3+ humans.
 
@@ -5486,3 +5486,20 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   guest only once its screen is shown, so a script that presses Cross on the guest too early opens Player Select there (test artifact, not a game bug).
 - Regression: see the commit message.
 
+
+
+### Batch twenty-three (25 Nov): the lobby / final screen UI checked on screen, the lobby restyled (tree ttlobui, branch tt-lobbyui)
+- **Checked** (host, one copy, `~/dissidia/tt/s2/lobui/ctl.py` + `walk.sh`, screenshots there): (1) the setup screen's stage preview shows on every row 1st..5th (`s_rows.png`) and follows the lobby's
+  stage (World of Darkness -> pillars, Kefka's Tower, Planet's Core). Wrong in one case: when the lobby was opened with Select on a row and the stage changed, the preview stayed on the old stage until the cursor
+  moved (`s6.png` footer "Planet's Core", preview still World of Darkness; `s7.png` after Down/Up: right). Cause: the screen reloads the preview only when the cursor row changes. **Fix** (`PSPRECOMP_TAGTEAM_NONUDGE=1`: old):
+  when the single player lobby closes, `g_nudge` injects one Down + Up on the pad (tagteam_menu.cpp, `dissidia_tagteam_menu_pad`), the cursor comes back to its row and the preview is reloaded (`a_setup3.png`, `a_setup5.png`).
+  Not changed: the "Enter Battle" row shows the empty preview frame (nothing selected). (2) STAGE / RULES / JUDGEMENT are gone from the round dialog (`d1.png`: only STRENGTH / LEVEL / TYPE of the CPU rows); nothing to fix.
+- **Restyle** (`PSPRECOMP_TAGTEAM_LOBBYSTYLE_OLD=1`: the flat 22 Nov look). The screen helpers `gs_*` (tagteam_menu.cpp), shared by the Battle Lobby, Mode Select, Free-for-all players screen and the character list, now follow the retail Options
+  screen and the Group Battle / CPU settings dialog (compare `r_opt1.png`, `r_opt3.png`, `c2.png`, `d1.png`): ground with a light sweep and soft glows; navy title ribbon with a pale bevel line; the title in the game's serif small capitals
+  (`MenuLayer::serif_caps`) with a dark edge; the mode as a dark capsule at the top right (the "START Default" pill); bars with pointed ends (pale silver; the selected one royal blue with a lighter top and right end, white text with a dark edge);
+  a blue bullet before each label and the value between two triangles; the game's pointing hand left of the selected bar (`dissidia_menu_draw_hand`, menu_settings.cpp, HD-pack aware); silver-bevelled cards with a shadow and a pale heading plate;
+  a lavender-navy help panel at the bottom with the selected row's help text (new one-line help for STAGE / RULES / JUDGMENT / EX BURST / ASSIST) and the button hints, the key in cyan, the action in white. Layout of the lobby: rows x 38..268, y 42 on,
+  pitch 18 (20 up to 8 rows), card x 280..466. All behaviour and the back flow (Batch fifteen) are unchanged (`f_lobby.png`, `f_party.png`: setup > Circle > lobby > Circle > Party Select).
+  Before: `m10.png` (lobby), `m2.png` (Mode Select); after: `a_lobby.png`, `a_lobby3.png`, `a_modesel.png`, `a_ffa_players.png`, `a_ffa_p2.png`. Communications: one copy walked up to the Group Battle room screen (`c1.png` Mode Select, `c4.png`);
+  the Communications lobby panel itself (needs the two-copy room) shares the helpers but was not looked at. Retail fonts are the game's own face; the lobby uses the same bold face as before (the retail Options labels are the same face).
+- **Not done:** a device check (RP6 / Deck); the lobby card text (party names) keeps its old plain text style.

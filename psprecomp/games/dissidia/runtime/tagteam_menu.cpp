@@ -43,6 +43,7 @@ int dissidia_tagteam_roster(uint8_t out[40]);   // the characters that can be pi
 void dissidia_tagteam_ffa_p1_get(uint8_t out[2]);   // P1 (you): {main, tag-in}
 void dissidia_tagteam_ffa_p1_set(const uint8_t in[2]);
 int dissidia_tagteam_ffa_players();   // P1 + the CPU slots that are on
+void dissidia_menu_draw_hand(dissidia::MenuLayer& L, float x, float y, float a);   // menu_settings.cpp: the game's pointing hand
 void dissidia_tagteam_sp_write_round(uint32_t screen);   // single player: round 1's stage / rules / judgement from the lobby   // single player: the player is the host, no beacon; Assist stays on Square
 uint8_t dissidia_tagteam_mode_byte();
 bool dissidia_tagteam_lobby_get(uint8_t out[10]);
@@ -115,6 +116,7 @@ std::atomic<int> g_inject_cross{0};
 // Circle on the setup screen's list (no dialog) now reopens the lobby (g_lob_flow), Circle in that lobby goes back to Party Select (one injected Circle for retail's screen),
 // and menu_settings.cpp reopens the Mode Select when the Battle Mode / Communications list comes back. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old.
 bool g_lob_flow = false;   // the lobby is a step of the menu chain (opened by the flow or by Circle on the setup screen): Circle goes back a screen, Cross goes on
+std::atomic<int> g_nudge{0};   // 25 Nov: the setup screen's stage preview only follows the cursor row: after the lobby closed, one Down + Up reloads it (PSPRECOMP_TAGTEAM_NONUDGE=1: old)
 std::atomic<int> g_inject_circle{0};   // a Circle for retail's setup screen after the lobby closed (6 .. 1: down while 5 .. 3)
 std::atomic<int64_t> g_circle_stamp{0};   // steady-clock ms of the last setup screen tick that took Circle (the pad filter hides Circle from the screen for 100 ms after)
 int64_t steady_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -355,46 +357,163 @@ uint8_t g_sp_rows_c[5] = {}; int g_sp_rows_n = 0;   // set by sp_draw every fram
 // ---- Full-screen screens in the game's look (22 Nov): opaque pale-lavender background like the Tournament screen, a dark navy title band that fades out to the right (as "Party A"),
 // the selected row in the menus' blue band with white text, idle rows with a thin line under them, a navy button bar at the bottom.
 constexpr float kScrW = 480.f, kScrH = 272.f;
+// 25 Nov (user low priority list: "Battle Lobby: follow the game's design language"): restyled after the retail Options screen (screenshots of it and of the CPU settings
+// dialog): pale periwinkle ground with soft swirls, a navy title ribbon with a bevel line and the serif title ("Options") in white with a dark edge, pale bevelled bars with
+// pointed ends carrying a blue bullet, the label and the value between two blue triangles, the selected bar royal blue with white text and the pointing hand, a navy help panel
+// at the bottom with the button hints (key in cyan). PSPRECOMP_TAGTEAM_LOBBYSTYLE_OLD=1: the flat 22 Nov look.
+bool style_old() { static const bool v = std::getenv("PSPRECOMP_TAGTEAM_LOBBYSTYLE_OLD") != nullptr; return v; }
 void gs_background() {
     g_layer.band(0.f, 0.f, kScrW, kScrH, [&](float x, float y) { const float t = y / kScrH; return LayerColor{230 - 18 * t + 6 * (x / kScrW), 234 - 16 * t, 252 - 8 * t, 1.f}; });
-    g_layer.band(0.f, 36.f, kScrW, 37.f, [&](float, float) { return LayerColor{170, 176, 220, 1.f}; });
+    if (style_old()) { g_layer.band(0.f, 36.f, kScrW, 37.f, [&](float, float) { return LayerColor{170, 176, 220, 1.f}; }); return; }
+    g_layer.band(0.f, 0.f, kScrW, kScrH, [&](float x, float y) {   // a lighter diagonal sweep from the top right, a darker lavender haze at the lower left (the retail ground)
+        const float d = (x / kScrW) * 0.8f - (y / kScrH) * 0.6f + 0.35f, k = std::clamp(1.f - std::fabs(d - 0.5f) * 3.2f, 0.f, 1.f);
+        return LayerColor{255, 255, 255, 0.34f * k};
+    });
+    g_layer.glow(400.f, 70.f, 90.f, LayerColor{255, 255, 255, 0.22f});
+    g_layer.glow(60.f, 230.f, 110.f, LayerColor{150, 150, 215, 0.20f});
+    g_layer.glow(440.f, 200.f, 70.f, LayerColor{255, 255, 255, 0.18f});
 }
 void gs_title(const std::string& s, const std::string& sub = std::string()) {
-    g_layer.band(0.f, 8.f, kScrW, 30.f, [&](float x, float y) {
-        const float t = (y - 8.f) / 22.f, fade = x < 450.f ? 1.f : std::max(0.f, 1.f - (x - 450.f) / 30.f);
-        return LayerColor{22 + 28 * (1 - t), 20 + 26 * (1 - t), 104 + 46 * (1 - t), fade};
+    if (style_old()) {
+        g_layer.band(0.f, 8.f, kScrW, 30.f, [&](float x, float y) {
+            const float t = (y - 8.f) / 22.f, fade = x < 450.f ? 1.f : std::max(0.f, 1.f - (x - 450.f) / 30.f);
+            return LayerColor{22 + 28 * (1 - t), 20 + 26 * (1 - t), 104 + 46 * (1 - t), fade};
+        });
+        g_layer.text(s, true, 10.5f, 16.f, 25.5f, LayerColor{255, 255, 255, 1.f});
+        if (!sub.empty()) { const float w = g_layer.text(sub, true, 6.4f, 0, 0, LayerColor{0, 0, 0, 0}, true); g_layer.text(sub, true, 6.4f, kScrW - 24.f - w, 22.f, LayerColor{225, 228, 255, 1.f}); }
+        return;
+    }
+    g_layer.band(0.f, 6.f, kScrW, 31.f, [&](float x, float y) {   // the navy ribbon: lighter at the top, a pale bevel line under it
+        const float t = (y - 6.f) / 25.f, fade = x < 440.f ? 1.f : std::max(0.f, 1.f - (x - 440.f) / 40.f);
+        if (y > 29.6f) return LayerColor{214, 218, 244, 0.95f * fade};
+        return LayerColor{20 + 40 * (1 - t), 22 + 38 * (1 - t), 96 + 56 * (1 - t), fade};
     });
-    g_layer.text(s, true, 10.5f, 16.f, 25.5f, LayerColor{255, 255, 255, 1.f});
-    if (!sub.empty()) { const float w = g_layer.text(sub, true, 6.4f, 0, 0, LayerColor{0, 0, 0, 0}, true); g_layer.text(sub, true, 6.4f, kScrW - 24.f - w, 22.f, LayerColor{225, 228, 255, 1.f}); }
+    // the serif title in small capitals with the dark edge the game's headings carry
+    const std::string up = s;
+    for (const auto& o : {std::pair<float, float>{0.9f, 0.9f}, {0.9f, 0.f}, {0.f, 0.9f}, {-0.6f, 0.f}, {0.f, -0.6f}, {0.9f, -0.6f}})
+        g_layer.serif_caps(up, 15.5f, 0.76f, 0.5f, 16.f + o.first, 26.f + o.second, LayerColor{18, 16, 64, 0.8f});
+    g_layer.serif_caps(up, 15.5f, 0.76f, 0.5f, 16.f, 26.f, LayerColor{255, 255, 255, 1.f});
+    if (!sub.empty()) {   // the Options screen's "START Default" pill: a dark navy capsule with white text
+        const float em = 6.2f, w = g_layer.text(sub, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true), x1 = kScrW - 14.f, x0 = x1 - w - 22.f, y0 = 9.f, y1 = 25.f;
+        g_layer.band(x0, y0, x1, y1, [&](float x, float y) {
+            const float rr = (y1 - y0) / 2.f, cx = std::clamp(x, x0 + rr, x1 - rr), dy = y - (y0 + y1) / 2.f, d = std::sqrt((x - cx) * (x - cx) + dy * dy);
+            const float t = (y - y0) / (y1 - y0);
+            return LayerColor{14 + 22 * (1 - t), 14 + 22 * (1 - t), 40 + 40 * (1 - t), std::clamp((rr - d) * 2.f, 0.f, 1.f)};
+        });
+        g_layer.text(sub, true, em, x0 + 11.f, 20.4f, LayerColor{255, 255, 255, 1.f});
+    }
 }
-void gs_footer(const std::string& s) {
-    g_layer.band(0.f, 248.f, kScrW, kScrH, [&](float, float y) { const float t = (y - 248.f) / 24.f; return LayerColor{30 + 18 * (1 - t), 30 + 18 * (1 - t), 100 + 30 * (1 - t), 1.f}; });
-    const float w = g_layer.text(s, true, 6.4f, 0, 0, LayerColor{0, 0, 0, 0}, true);
-    g_layer.text(s, true, 6.4f, kScrW / 2.f - w / 2.f, 264.f, LayerColor{235, 238, 255, 1.f});
+// The hint line: "Key: action   Key: action"; the key part in the cyan of the Options screen's help panel, the action white. `help` (optional) is the row's help text above it.
+void gs_footer(const std::string& s, const std::string& help = std::string()) {
+    if (style_old()) {
+        g_layer.band(0.f, 248.f, kScrW, kScrH, [&](float, float y) { const float t = (y - 248.f) / 24.f; return LayerColor{30 + 18 * (1 - t), 30 + 18 * (1 - t), 100 + 30 * (1 - t), 1.f}; });
+        const float w = g_layer.text(s, true, 6.4f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        g_layer.text(s, true, 6.4f, kScrW / 2.f - w / 2.f, 264.f, LayerColor{235, 238, 255, 1.f});
+        return;
+    }
+    const float top = help.empty() ? 244.f : 222.f;
+    g_layer.band(0.f, top, kScrW, kScrH, [&](float, float y) {   // the help panel: lavender-navy, lighter at its upper edge
+        const float t = (y - top) / (kScrH - top);
+        if (y < top + 1.2f) return LayerColor{206, 210, 244, 1.f};
+        return LayerColor{66 - 28 * t, 62 - 26 * t, 150 - 40 * t, 1.f};
+    });
+    if (!help.empty()) g_layer.text(help, true, 6.6f, 22.f, top + 15.f, LayerColor{255, 255, 255, 1.f});
+    // split the hints at runs of three spaces
+    std::vector<std::pair<std::string, std::string>> parts; size_t i = 0;
+    while (i < s.size()) {
+        size_t e = s.find("   ", i); if (e == std::string::npos) e = s.size();
+        std::string seg = s.substr(i, e - i); const size_t c = seg.find(':');
+        if (c == std::string::npos) parts.push_back({seg, ""}); else parts.push_back({seg.substr(0, c + 1), seg.substr(c + 1)});
+        i = e; while (i < s.size() && s[i] == ' ') i++;
+    }
+    const float em = 6.3f, gap = 12.f; float tw = 0.f;
+    for (const auto& p : parts) tw += g_layer.text(p.first + p.second, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true) + gap;
+    tw -= gap; float x = kScrW / 2.f - tw / 2.f; const float by = kScrH - 8.f;
+    for (const auto& p : parts) {
+        x += g_layer.text(p.first, true, em, x, by, LayerColor{110, 232, 240, 1.f});
+        x += g_layer.text(p.second, true, em, x, by, LayerColor{255, 255, 255, 1.f}) + gap;
+    }
 }
-void gs_card(float x0, float y0, float x1, float y1) {   // a white-ish card with a thin border
+// a white-ish panel with a silver bevel and a soft shadow (the Party Select's party panel)
+void gs_card(float x0, float y0, float x1, float y1) {
+    if (style_old()) {
+        g_layer.band(x0, y0, x1, y1, [&](float x, float y) {
+            const float e = std::min({x - x0, x1 - x, y - y0, y1 - y});
+            return e < 1.f ? LayerColor{150, 156, 214, 1.f} : LayerColor{246, 247, 255, 1.f};
+        });
+        return;
+    }
+    g_layer.band(x0 + 1.5f, y0 + 2.f, x1 + 2.5f, y1 + 3.f, [&](float, float) { return LayerColor{90, 90, 150, 0.18f}; });
     g_layer.band(x0, y0, x1, y1, [&](float x, float y) {
-        const float e = std::min({x - x0, x1 - x, y - y0, y1 - y});
-        return e < 1.f ? LayerColor{150, 156, 214, 1.f} : LayerColor{246, 247, 255, 1.f};
+        const float e = std::min({x - x0, x1 - x, y - y0, y1 - y}), t = (y - y0) / (y1 - y0);
+        if (e < 1.f) return LayerColor{120, 124, 188, 1.f};
+        if (e < 2.2f) return LayerColor{255, 255, 255, 1.f};
+        return LayerColor{244 - 12 * t, 246 - 12 * t, 255 - 6 * t, 1.f};
+    });
+}
+// a bar with pointed ends (the retail option bars): colour_at(t = 0..1 across, v = 0..1 down)
+template <class F> void gs_bar(float x0, float x1, float y, float h, F colour_at) {
+    const float pt = std::min(9.f, h * 0.55f);
+    g_layer.band(x0, y, x1, y + h, [&](float x, float yy) {
+        const float dx = std::min(x - x0, x1 - x), half = h / 2.f * (dx >= pt ? 1.f : 0.45f + 0.55f * dx / pt), dy = std::fabs(yy - (y + h / 2.f));
+        const float m = std::clamp((half - dy) * 2.f, 0.f, 1.f);
+        LayerColor c = colour_at(std::clamp((x - x0) / (x1 - x0), 0.f, 1.f), (yy - y) / h, std::min(dy / std::max(half, 0.01f), 1.f)); c.a *= m; return c;
+    });
+}
+void gs_tri(float cx, float cy, float r, bool right, LayerColor c) {   // a solid triangle pointing right / left
+    g_layer.band(cx - r, cy - r, cx + r, cy + r, [&](float x, float y) {
+        const float u = right ? (cx + r - x) / (2 * r) : (x - (cx - r)) / (2 * r), half = r * u, m = std::clamp((half - std::fabs(y - cy)) * 2.f, 0.f, 1.f);
+        return LayerColor{c.r, c.g, c.b, c.a * m * std::clamp((1.f - u) * 8.f + 0.2f, 0.f, 1.f) * 1.f};
     });
 }
 // a menu row: the selected one is the blue band with white text (value with < > when `arrows`), idle ones carry dark text and a thin line under them
 void gs_row(float x0, float x1, float y, float h, bool sel, const std::string& name, const std::string& val, bool arrows, float em = 7.6f) {
-    if (sel) g_layer.band(x0, y, x1, y + h, [&](float x, float yy) {
-        const float t = std::clamp((x - x0) / (x1 - x0), 0.f, 1.f), v = (yy - y) / h;
-        float r = 63 + 71 * t, g = 53 + 83 * t, b = 174 + 33 * t;
-        if (v < 0.25f) { r += 24; g += 26; b += 9; } else if (v > 0.8f) { r -= 8; g -= 8; b -= 10; }
+    if (style_old()) {
+        if (sel) g_layer.band(x0, y, x1, y + h, [&](float x, float yy) {
+            const float t = std::clamp((x - x0) / (x1 - x0), 0.f, 1.f), v = (yy - y) / h;
+            float r = 63 + 71 * t, g = 53 + 83 * t, b = 174 + 33 * t;
+            if (v < 0.25f) { r += 24; g += 26; b += 9; } else if (v > 0.8f) { r -= 8; g -= 8; b -= 10; }
+            return LayerColor{r, g, b, 1.f};
+        });
+        else g_layer.band(x0 + 4.f, y + h - 0.8f, x1 - 4.f, y + h, [&](float, float) { return LayerColor{119, 114, 149, 0.8f}; });
+        const LayerColor tc = sel ? LayerColor{255, 255, 255, 1.f} : LayerColor{40, 42, 65, 1.f};
+        const float by = y + h * 0.5f + em * 0.36f;
+        g_layer.text(name, true, em, x0 + 10.f, by, tc);
+        if (!val.empty()) {
+            const std::string v = (sel && arrows ? "< " : "") + val + (sel && arrows ? " >" : "");
+            const float vw = g_layer.text(v, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true);
+            g_layer.text(v, true, em, x1 - 10.f - vw, by, tc);
+        }
+        return;
+    }
+    if (sel) gs_bar(x0, x1, y, h, [&](float t, float v, float) {   // royal blue, lighter top edge and right end (as the Options bar)
+        float r = 63 + 71 * t * t, g = 53 + 83 * t * t, b = 174 + 33 * t * t;
+        if (v < 0.22f) { r += 34; g += 36; b += 14; } else if (v > 0.82f) { r -= 12; g -= 12; b -= 18; }
         return LayerColor{r, g, b, 1.f};
     });
-    else g_layer.band(x0 + 4.f, y + h - 0.8f, x1 - 4.f, y + h, [&](float, float) { return LayerColor{119, 114, 149, 0.8f}; });
+    else gs_bar(x0, x1, y, h, [&](float, float v, float e) {   // pale silver, a darker rim
+        if (e > 0.86f) return LayerColor{128, 126, 164, 1.f};
+        return LayerColor{248 - 40 * v, 249 - 40 * v, 255 - 26 * v, 1.f};
+    });
     const LayerColor tc = sel ? LayerColor{255, 255, 255, 1.f} : LayerColor{40, 42, 65, 1.f};
-    const float by = y + h * 0.5f + em * 0.36f;
-    g_layer.text(name, true, em, x0 + 10.f, by, tc);
+    const float by = y + h * 0.5f + em * 0.36f, cy = y + h * 0.5f;
+    auto put = [&](const std::string& t, float x) {
+        if (sel) for (const auto& o : {std::pair<float, float>{0.6f, 0.6f}, {0.6f, 0.f}, {0.f, 0.6f}}) g_layer.text(t, true, em, x + o.first, by + o.second, LayerColor{30, 24, 80, 0.6f});
+        g_layer.text(t, true, em, x, by, tc);
+    };
+    const float bx = x0 + 15.f;
+    g_layer.band(bx, cy - 2.4f, bx + 4.8f, cy + 2.4f, [&](float, float) { return sel ? LayerColor{255, 255, 255, 1.f} : LayerColor{96, 98, 190, 1.f}; });
+    put(name, bx + 9.f);
     if (!val.empty()) {
-        const std::string v = (sel && arrows ? "< " : "") + val + (sel && arrows ? " >" : "");
-        const float vw = g_layer.text(v, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true);
-        g_layer.text(v, true, em, x1 - 10.f - vw, by, tc);
+        const float cx = x0 + (x1 - x0) * 0.70f, vw = g_layer.text(val, true, em, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        put(val, cx - vw / 2.f);
+        if (arrows) {
+            const LayerColor tcol = sel ? LayerColor{255, 255, 255, 1.f} : LayerColor{70, 74, 200, 1.f};
+            gs_tri(cx - vw / 2.f - 9.f, cy, 3.4f, false, tcol);
+            gs_tri(cx + vw / 2.f + 9.f, cy, 3.4f, true, tcol);
+        }
     }
+    if (sel) dissidia_menu_draw_hand(g_layer, x0 - 22.f, cy - 12.f, 1.f);
 }
 
 // ---- The mode select (Battle Mode / Communications Mode > Tag Team Battle, 22 Nov): the first screen after choosing the entry; its choice decides the screens that follow
@@ -547,6 +666,11 @@ void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
     gs_footer(g_ffa_flow ? "Up/Down: player   Left/Right: field   Cross: change / Done   Circle: back to the selectors" : "Up/Down: player   Left/Right: field   Cross: change   Done: Cross / Circle");
 }
 
+void card_head(float cx0, float cx1) {   // the pale pill behind a card's heading (retail's "Party A" plate)
+    if (style_old()) return;
+    gs_bar(cx0 + 5.f, cx1 - 5.f, 51.f, 15.f, [&](float, float v, float e) { return e > 0.88f ? LayerColor{150, 154, 205, 1.f} : LayerColor{226 - 24 * v, 228 - 24 * v, 250 - 14 * v, 1.f}; });
+}
+
 void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a) {
     (void)a;
     uint8_t L[10] = {1, 2, 0, 5, 0, 0, 0, 0, 0, 1};
@@ -568,6 +692,7 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
         if ((pressed & BTN_CROSS) && vis[g_lob_row] == 8) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; play_se(rdram, ctx, 1); return; }   // PLAYERS: the Free-for-all setup
         std::fprintf(stderr, "[TTLOBBY] lobby closed by a press %04X (sp %d)\n", pressed, (int)sp);
         g_dlg_open = false; g_dlg_mode = 0; g_lob_flow = false; play_se(rdram, ctx, 1);
+        if (sp && !g_ffa_flow && !std::getenv("PSPRECOMP_TAGTEAM_NONUDGE")) g_nudge.store(24, std::memory_order_relaxed);
         if (g_ffa_flow && sp) { g_ffa_flow = false; g_ffa_autostart = true; g_cover_until = std::chrono::steady_clock::now() + std::chrono::seconds(8); }   // Free-for-all: the battle starts from here
         return;
     }
@@ -576,19 +701,25 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
     if (host && (pressed & (BTN_RIGHT | BTN_LEFTK))) { lobby_change(vis[g_lob_row], (pressed & BTN_RIGHT) ? 1 : -1, L); dissidia_tagteam_lobby_set(L); play_se(rdram, ctx, 1); rows = lobby_visible(L, vis); if (g_lob_row >= rows) g_lob_row = rows - 1; }
     gs_background();
     gs_title("BATTLE LOBBY", std::string(kLobbyModes[lobby_mode_index(L)].label));
-    const float x0 = 16.f, x1 = 262.f, y0 = 46.f, h = rows > 8 ? 19.f : 22.f;
+    const float x0 = style_old() ? 16.f : 38.f, x1 = style_old() ? 262.f : 268.f, y0 = style_old() ? 46.f : 42.f, h = style_old() ? (rows > 8 ? 19.f : 22.f) : (rows > 8 ? 18.f : 20.f);
     for (int i = 0; i < rows; i++) {
         const int r = vis[i];
         gs_row(x0, x1, y0 + h * float(i), h - 1.f, i == g_lob_row, kLobbyRowName[r], lobby_value(r, L), host && r != 8, 7.2f);
     }
     const int cur = vis[g_lob_row];
-    const std::string help = cur == 0 ? kLobbyModes[lobby_mode_index(L)].help : cur == 8 ? "Cross: choose the players of the free-for-all" : cur == 9 ? "Left/Right: every CPU (fill, partners, enemies, free-for-all) gets this strength" : cur == 10 ? "On: no slow motion during a Chase (the host decides online)" : (cur >= 6 ? "Empty places are filled with CPU fighters of this strength" : "");
-    if (!help.empty()) g_layer.text(help, true, 5.6f, x0 + 6.f, y0 + h * float(rows) + 12.f, LayerColor{60, 62, 120, 1.f});
+    const std::string help = [&]() -> std::string {
+        static const char* const kRowHelp[] = {"", "The stage of the battle. Random picks one when it starts.", "The rules of the match (None, Official, or a centred rule set).", "The judgment setting of the match (None, Cosmos, Chaos, Double, Random).", "How the EX Burst behaves in this battle.", "How the Assist gauge behaves in this battle.", "On: empty places are filled with CPU fighters.", "Strength of the CPU fill fighters.", "", "", ""};
+        std::string h = cur == 0 ? kLobbyModes[lobby_mode_index(L)].help : cur == 8 ? "Cross: choose the players of the free-for-all" : cur == 9 ? "Left/Right: every CPU (fill, partners, enemies, free-for-all) gets this strength" : cur == 10 ? "On: no slow motion during a Chase (the host decides online)" : (cur >= 6 ? "Empty places are filled with CPU fighters of this strength" : "");
+        if (h.empty() && cur >= 1 && cur <= 7) h = kRowHelp[cur];
+        return h;
+    }();
+    if (style_old() && !help.empty()) g_layer.text(help, true, 5.6f, x0 + 6.f, y0 + h * float(rows) + 12.f, LayerColor{60, 62, 120, 1.f});
     // the right card: your party (single player) / the room's players
-    const float cx0 = 274.f, cx1 = 466.f;
-    gs_card(cx0, 46.f, cx1, 238.f);
+    const float cx0 = 280.f, cx1 = 466.f;
+    gs_card(cx0, style_old() ? 46.f : 42.f, cx1, style_old() ? 238.f : 216.f);
     if (sp) {
         const int per = L[0] == 1 ? L[1] : 1;
+        card_head(cx0, cx1);
         g_layer.text(L[0] == 3 ? "FREE-FOR-ALL" : "YOUR PARTY", true, 7.4f, cx0 + 10.f, 62.f, LayerColor{40, 50, 140, 1.f});
         g_layer.text(std::string("Fighters on stage  ") + (L[0] == 3 ? "up to 4" : std::to_string(2 * per)), true, 6.2f, cx0 + 10.f, 74.f, LayerColor{40, 120, 60, 1.f});
         if (L[0] == 3) {   // the free-for-all's players
@@ -613,12 +744,13 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
         }
         }
         const std::string note = L[0] == 3 ? "You + the CPU players of the player setup" : L[0] == 1 ? "CPU rows (L on the setup screen) are your partners" : "One fighter each; party members tag in on a KO";
-        g_layer.text(note, true, 5.2f, cx0 + 10.f, 214.f, LayerColor{70, 72, 130, 1.f});
-        if (L[2]) g_layer.text("CPU fill on: empty places get a CPU fighter", true, 5.2f, cx0 + 10.f, 226.f, LayerColor{170, 100, 20, 1.f});
+        g_layer.text(note, true, 5.2f, cx0 + 10.f, style_old() ? 214.f : 202.f, LayerColor{70, 72, 130, 1.f});
+        if (L[2]) g_layer.text("CPU fill on: empty places get a CPU fighter", true, 5.2f, cx0 + 10.f, style_old() ? 226.f : 211.f, LayerColor{170, 100, 20, 1.f});
     } else {
         char names[16][32] = {}; uint8_t chars[16] = {}; int8_t parties[16] = {}; bool hosts[16] = {};
         const int np = dissidia_tagteam_lobby_players(names, chars, parties, hosts);
         const int need = lobby_needed(L);
+        card_head(cx0, cx1);
         g_layer.text("PLAYERS  " + std::to_string(np), true, 7.4f, cx0 + 10.f, 62.f, LayerColor{40, 50, 140, 1.f});
         g_layer.text("Fighters on stage  " + std::to_string(lobby_fighters(L, np)), true, 6.2f, cx0 + 10.f, 74.f, np >= need ? LayerColor{40, 120, 60, 1.f} : LayerColor{190, 100, 20, 1.f});
         for (int i = 0; i < np && i < 9; i++) {
@@ -628,9 +760,9 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
             const float cw = g_layer.text(c, true, 6.2f, 0, 0, LayerColor{0, 0, 0, 0}, true);
             g_layer.text(c, true, 6.2f, cx1 - 10.f - cw, ry, LayerColor{40, 42, 65, 1.f});
         }
-        if (np < need && L[0] != 3) g_layer.text("Waiting for " + std::to_string(need - np) + " more player(s)", true, 5.6f, cx0 + 10.f, 226.f, LayerColor{190, 100, 20, 1.f});
+        if (np < need && L[0] != 3) g_layer.text("Waiting for " + std::to_string(need - np) + " more player(s)", true, 5.6f, cx0 + 10.f, style_old() ? 226.f : 211.f, LayerColor{190, 100, 20, 1.f});
     }
-    gs_footer(g_ffa_flow && sp && L[0] == 3 ? "Up/Down: row   Left/Right: change   Cross: start the battle   Circle: back" : host ? (g_lob_flow && sp && L[0] != 3 && !menuback_old() ? "Up/Down: row   Left/Right: change   Cross: done   Circle: back" : "Up/Down: row   Left/Right: change   Cross / Circle: done") : "Set by the host   Circle: close");
+    gs_footer(g_ffa_flow && sp && L[0] == 3 ? "Up/Down: row   Left/Right: change   Cross: start the battle   Circle: back" : host ? (g_lob_flow && sp && L[0] != 3 && !menuback_old() ? "Up/Down: row   Left/Right: change   Cross: done   Circle: back" : "Up/Down: row   Left/Right: change   Cross / Circle: done") : "Set by the host   Circle: close", style_old() ? std::string() : (help.empty() ? std::string("Left/Right: change the value of the selected row") : help));
     (void)have;
 }
 
@@ -1126,6 +1258,7 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
     static std::atomic<int> hold{0};   // a button that closed a dialog stays down for a few polls: the screen under it must not see it
     if (g_dlg_open.load(std::memory_order_relaxed)) { hold.store(12, std::memory_order_relaxed); return 0u; }
     if (const int h = hold.load(std::memory_order_relaxed); h > 0) { hold.store(h - 1, std::memory_order_relaxed); return 0u; }
+    if (int nu = g_nudge.load(std::memory_order_relaxed); nu > 0) { g_nudge.store(nu - 1, std::memory_order_relaxed); raw = (raw & ~(BTN_DOWN | BTN_UP)) | ((nu >= 18 && nu <= 20) ? BTN_DOWN : (nu >= 8 && nu <= 10) ? BTN_UP : 0u); }
     if (int ic = g_inject_circle.load(std::memory_order_relaxed); ic > 0) { g_inject_circle.store(ic - 1, std::memory_order_relaxed); raw = (ic >= 3 && ic <= 5) ? (raw | BTN_CIRCLE) : (raw & ~BTN_CIRCLE); }
     if (int il = g_inject_late.load(std::memory_order_relaxed); il > 0) { g_inject_late.store(il - 1, std::memory_order_relaxed); raw = (il >= 3 && il <= 5) ? (raw | BTN_CROSS) : (raw & ~BTN_CROSS); }
     return raw;

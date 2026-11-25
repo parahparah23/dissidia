@@ -228,7 +228,7 @@ int g_ui_hd_w = 0, g_ui_hd_h = 0;
 bool g_ui_hd_ok = false;
 
 // The pointing hand at native size (36 x 24 design units; wider would take in the next sprite of an HD sheet, the game draws it 1:1), from the HD image when the game has one.
-void draw_hand(float x, float y, float alpha) {
+void draw_hand_on(dissidia::MenuLayer& g_layer, float x, float y, float alpha) {
     if (!g_ui_hd_ok && psp_texpack_watched(kUiSheetTexId, g_ui_hd, g_ui_hd_w, g_ui_hd_h) && g_ui_hd_w >= 128 && g_ui_hd_h >= 128) {
         g_ui_hd_ok = true;
         std::fprintf(stderr, "[MENUSET] pointing hand from the HD texture (%dx%d)\n", g_ui_hd_w, g_ui_hd_h);
@@ -241,6 +241,8 @@ void draw_hand(float x, float y, float alpha) {
         g_layer.image(g_ui_sheet.rgba.data(), g_ui_sheet.w, g_ui_sheet.h, 2, 50, 36, 24, x, y, 36.f, 24.f, alpha);
     }
 }
+void load_ui_sheet();
+void draw_hand(float x, float y, float alpha) { draw_hand_on(g_layer, x, y, alpha); }
 float g_sel_anim = 0.f;               // 0..1, the selected look fading in
 std::chrono::steady_clock::time_point g_last_draw;
 const char* const kMainHelp = "Display, graphics, controls and other settings of this port.";
@@ -653,6 +655,9 @@ void title_tick_hook(uint8_t* rdram, recomp_context* ctx) {
 }
 
 }  // namespace
+
+// The tag team screens (tagteam_menu.cpp) draw the game's pointing hand on their own layer.
+void dissidia_menu_draw_hand(dissidia::MenuLayer& L, float x, float y, float a) { load_ui_sheet(); draw_hand_on(L, x, y, a); }
 
 void dissidia_add_asset_patch(const std::string& asset, std::function<bool(std::vector<uint8_t>&)> edit);   // hooks_io.cpp
 
