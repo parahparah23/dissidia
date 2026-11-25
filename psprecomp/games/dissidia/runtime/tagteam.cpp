@@ -106,6 +106,7 @@ void psp_mem_watch_set(uint32_t addr);   // runtime/src/psp_dispatch.cpp
 void dissidia_ttnet_slot_rebuilt(int slot, int charId);   // tagteam_net.cpp: a slot fighter was rebuilt as another character
 bool psp_atrac_is_streamed(int id);   // psp_hle_atrac.cpp: a streamed ATRAC track (the battle music)
 bool dissidia_ttnet_running(); bool dissidia_ttnet_enabled(); uint32_t dissidia_ttnet_frame(); bool dissidia_ttnet_padtest();   // tagteam_net.cpp: the N-player lock-step
+bool noslow_local();   // tagteam.cpp lobby section: this machine's "No chase slow-down"
 uint8_t local_rule_flags();   // tagteam.cpp, after the lock-step interface: this machine's own battle rules as roster flags (the host's roster)
 void dissidia_ttnet_set_driver(int stream, const uint8_t* mac, uint32_t from); void dissidia_ttnet_set_stream_pad(int stream, uint32_t slot, uint32_t ctrl);
 bool dissidia_ttnet_local_drives(int stream, uint32_t f);
@@ -2498,6 +2499,9 @@ bool exb_busy() {
 bool g_view_outside_exb = false;
 int g_exb_lobby = -1;   // the battle lobby's EX Burst rule (-1 = not set: PSPRECOMP_TAGTEAM_EXBURST decides)
 bool exb_rule_fight_env() { static const bool f = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_EXBURST"); return e && !std::strcmp(e, "fight"); }(); return g_exb_lobby >= 0 ? g_exb_lobby != 0 : f; }
+bool comms_battle();
+// "No chase slow-down": online the host's value (roster flag 0x80, agreed before the first lock-step frame), else this machine's own.
+bool noslow_now() { if (g_shared_valid && comms_battle()) return (g_shared_flags & 0x80u) != 0; return noslow_local(); }
 bool exb_rule_fight() { if (g_shared_valid && comms_battle()) return (g_shared_flags & 2u) != 0; return exb_rule_fight_env(); }   // online: the host's rule
 // Keep-fighting rule, during a burst: x and y are on opposite sides of it (one fights in it, the other outside it). The fighters outside
 // then aim only at each other (aim_fix treats one in the burst as no target), so they do not chase the burst pair across the stage.
@@ -7855,6 +7859,13 @@ void slowset_hook(uint8_t* rdram, recomp_context* ctx) {
             if (age - it->second.t0 >= len && ok(st, 0x40) && rdf(st + 0x18u) > 0.f) { std::fprintf(stderr, "[XREV] t=%.2fs %s %08X: EX Burst chance cut after %.0f ticks (safety net): EX gauge %.0f -> 0\n", age / 60.0f, role_of(a), a, age - it->second.t0, static_cast<double>(rdf(st + 0x18u))); wrf(st + 0x18u, 0.f); }
         }
     }
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_SLOWSETLOG")) std::fprintf(stderr, "[SLOWSET] t=%.2fs channel %u speed %.3f flags %X ra %08X chase ctl %08X state %u\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[5]), static_cast<double>(ctx->f[12]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[31]), g_chase_ctl_now, g_chase_ctl_now && ok(g_chase_ctl_now, 8) ? rd(g_chase_ctl_now) : 0u);
+    // "No chase slow-down": retail's chase controller (FUN_08AB5xxx: state 2 sets slow-motion channel 1 to 0.05, state 4 to 0.133 every frame until the chase ends) is not allowed to slow the
+    // battle in a tag team battle. Battle state only (the chase code, the host's option via noslow_now()): the same on every machine. PSPRECOMP_TAGTEAM_CHASESLOW=1 = retail's slow-downs.
+    if (g_bs && g_chase_ctl_now && ctx->r[5] == 1 && static_cast<uint32_t>(ctx->r[31]) >= 0x08AB5000u && static_cast<uint32_t>(ctx->r[31]) < 0x08AB6C00u && (tag_live() || g_enabled || g_menu_mode || g_group_mode) && noslow_now()) {
+        static int n = 0; if (g_log && n++ < 3) std::fprintf(stderr, "[CHASESLOW] t=%.2fs chase slow motion (channel 1, %.3f, ra %08X) not started: No chase slow-down\n", dissidia_battle_age() / 60.0f, static_cast<double>(ctx->f[12]), static_cast<uint32_t>(ctx->r[31]));
+        return;
+    }
     g_orig_slowset(rdram, ctx);
 }
 // debug (round 6): PSPRECOMP_TTCAM_EXTESTLOG=1: the actor input tests FUN_08B320A4 (brain bit 0x16) / FUN_08B3214C (0x14) / FUN_08B321F4 (0x1B): brain pad (brain +0x53C:
@@ -9495,13 +9506,24 @@ void xkocam_step() {
     else if (g_xko.stage == 2 && age >= 210.f) { g_xko.stage = 3; call(0x08A620B0u, sm, 0u); cam_restore("extra kill camera over"); g_cam_post = dissidia_battle_age() + 240.f; g_xko.t0 = -1.f; if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra kill camera over (slow motion released)\n", dissidia_battle_age() / 60.0f); }
     g_ctx->r[29] = static_cast<int32_t>(sp0);
 }
+// A human called in as an assist (round 9 call-in of a pad-driven fighter, or an Assist Off call of one): its slow motion ends at the called fighter's first hit on the foe's side
+// (battle state only: hit_victim_of reads the frame's hit book, the same on every machine); g_callfx_rel stays the fallback timeout. g_callfx_hum is the called fighter, g_callfx_hum_rel
+// the g_callfx_rel it belongs to (another slow motion starting in between invalidates it).
+uint32_t g_callfx_hum = 0; float g_callfx_hum_rel = -2.f;
+void callfx_release(const char* why) {
+    g_callfx_rel = -1.f; g_callfx_hum = 0; const uint32_t sm = rd(0x08A62280u); if (!ok(sm, 0x40)) return;
+    const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, sm, 6u); g_ctx->r[29] = static_cast<int32_t>(sp1);
+    std::fprintf(stderr, "[ASSISTOFF] t=%.2fs call effects: slow motion channel 6 released (%s)\n", dissidia_battle_age() / 60.0f, why);
+}
 void callfx_step() {
     if (g_callfx_rel < 0.f) return;
-    if (g_callfx_gen != g_battle_gen) { g_callfx_rel = -1.f; return; }
+    if (g_callfx_gen != g_battle_gen) { g_callfx_rel = -1.f; g_callfx_hum = 0; return; }
+    if (g_callfx_hum && g_callfx_hum_rel == g_callfx_rel && !std::getenv("PSPRECOMP_TTCAM_AO9HUMANSLOW_NOHIT")) {
+        const uint32_t v = ok(g_callfx_hum, 0x12D0) ? hit_victim_of(g_callfx_hum) : 0u;
+        if (v && v != g_callfx_hum && ok(v, 0x12D0) && side_of(v) != side_of(g_callfx_hum)) { callfx_release("the called human's first hit landed"); return; }
+    }
     if (dissidia_battle_age() < g_callfx_rel) return;
-    g_callfx_rel = -1.f; const uint32_t sm = rd(0x08A62280u); if (!ok(sm, 0x40)) return;
-    const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, sm, 6u); g_ctx->r[29] = static_cast<int32_t>(sp1);
-    std::fprintf(stderr, "[ASSISTOFF] t=%.2fs call effects: slow motion channel 6 released\n", dissidia_battle_age() / 60.0f);
+    callfx_release("timeout");
 }
 void appear_fx_step() {
     for (uint32_t k = 0; k < 2; k++) {
@@ -9995,7 +10017,7 @@ void assist_off_move(uint32_t k, uint32_t M, uint32_t kind) {
         if (!std::getenv("PSPRECOMP_TTCAM_NOCALLFX")) {   // round 4: what retail's controller FUN_08B031AC also does when a call starts (CALLLOG of a forced retail call, same frame, ra 08B042B0 / 08B042D4):
             // the slow motion with the blue tint FUN_08A62020(*0x08A62280, 6, 0x44, f12 = 0.4) and the HUD's "ASSIST" banner FUN_0888A154(side, 0, f12 = 5.0). Both run their own timers (one call each in retail).
             const uint32_t sm = rd(0x08A62280u); const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u);
-            if (ok(sm, 0x40)) { g_ctx->f[12] = 0.4f; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + 66.f; g_callfx_gen = g_battle_gen; }   // released 66 ticks later (retail: FUN_08A620B0(mgr, 6) from 08B023E4 at +1.10 s)
+            if (ok(sm, 0x40)) { g_ctx->f[12] = 0.4f; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + 66.f; g_callfx_gen = g_battle_gen; g_callfx_hum = pad_driven(P) ? P : 0u; g_callfx_hum_rel = g_callfx_rel; }   // released 66 ticks later (retail: FUN_08A620B0(mgr, 6) from 08B023E4 at +1.10 s)
             g_ctx->f[12] = 5.0f; call(0x0888A154u, k, 0u);
             g_ctx->r[29] = static_cast<int32_t>(sp1);
             std::fprintf(stderr, "[ASSISTOFF] t=%.2fs call effects: slow motion channel 6 (0.4, mgr %08X) and the ASSIST banner of side %u\n", age, sm, k);
@@ -10111,7 +10133,7 @@ bool ao9_call(uint32_t k, uint32_t E, uint32_t M, uint32_t kind, const char* by)
         // PSPRECOMP_TTCAM_AO9HUMANSLOW=<speed>:<ticks> (default 0.25:140); a CPU called in keeps the retail values.
         float spd = 0.4f, len = 66.f;
         if (human) { spd = 0.25f; len = 140.f; if (const char* e = std::getenv("PSPRECOMP_TTCAM_AO9HUMANSLOW")) { float a = 0, b = 0; if (std::sscanf(e, "%f:%f", &a, &b) == 2 && a > 0.f && b > 0.f) { spd = a; len = b; } } }
-        if (ok(sm, 0x40)) { g_ctx->f[12] = spd; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + len; g_callfx_gen = g_battle_gen; }
+        if (ok(sm, 0x40)) { g_ctx->f[12] = spd; call(0x08A62020u, sm, 6u, 0x44u); g_callfx_rel = dissidia_battle_age() + len; g_callfx_gen = g_battle_gen; g_callfx_hum = human ? M : 0u; g_callfx_hum_rel = g_callfx_rel; }
         if (human && g_log) std::fprintf(stderr, "[AO9] t=%.2fs side %u: the human is called in: slow motion %.2f for %.0f ticks\n", dissidia_battle_age() / 60.0f, k, static_cast<double>(spd), static_cast<double>(len));
         g_ctx->f[12] = 5.0f; call(0x0888A154u, k, 0u);
         g_ctx->r[29] = static_cast<int32_t>(sp1);
@@ -11383,7 +11405,7 @@ uint32_t dissidia_tagteam_fighter_sig() {
 uint8_t local_rule_flags() {
     static const char* e = std::getenv("PSPRECOMP_TAGTEAM_ASSIST");
     const bool assist_on = (e ? e[0] != '0' : g_sp_assist_on) || g_ffa;   // free-for-all: assists on for the group
-    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u) | ((g_duel || g_duel_notag) ? 0x20u : 0u) | (g_tagduel ? 0x40u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four), bit 5: Duel (no call-ins), bit 6: Tag Duel
+    return static_cast<uint8_t>((assist_on ? 1u : 0u) | (exb_rule_fight_env() ? 2u : 0u) | (g_ffa ? 4u : 0u) | (g_three ? 8u : 0u) | (g_ffa == 3 ? 0x10u : 0u) | ((g_duel || g_duel_notag) ? 0x20u : 0u) | (g_tagduel ? 0x40u : 0u) | (noslow_local() ? 0x80u : 0u));   // bit 2: free-for-all, bit 3: 3 v 3, bit 4: free-for-all of three (else four), bit 5: Duel (no call-ins), bit 6: Tag Duel
 }
 constexpr int kRosterRec = 54;   // per player: mac 6, party, flags (bit 0 host), mode, serial, n, regs 5, cpu, own, cfg 5 x 3, the CPU party (n, regs 5, cfg 5 x 3)
 bool dissidia_tagteam_roster_host() { return comms_battle() && g_me.host; }
@@ -11589,7 +11611,7 @@ bool dissidia_tagteam_group_on() { return g_group_mode || ((g_enabled || g_menu_
 //                       found by diffing the round dialog; retail's own dialog writes it at 0x08AB1D64), written on every machine while the screen runs.
 // Modes: 0 1 vs 1 duel, 1 team (size 2 or 3 per side), 2 tag duel (one fighter per side, the next party member comes in on a KO), 3 free-for-all
 // (size 3..4 fighters), 4 local (split screen on one PC: not online).
-struct LobbyCfg { uint8_t mode = 1, size = 2, cpu_fill = 0, cpu_str = 5, stage = 0, rules = 0, judge = 0, exb = 0, assist = 0; };
+struct LobbyCfg { uint8_t mode = 1, size = 2, cpu_fill = 0, cpu_str = 5, stage = 0, rules = 0, judge = 0, exb = 0, assist = 0, noslow = 1; };   // noslow: "No chase slow-down" (default on; the host's value decides online, roster flag 0x80)
 LobbyCfg g_lobby; bool g_lobby_init = false;
 uint8_t lobby_fill_strength() { return (g_lobby_init && g_lobby.cpu_fill) ? static_cast<uint8_t>(std::clamp<int>(g_lobby.cpu_str, 1, 9)) : 0; }
 bool dissidia_tagteam_sp_mode();   // below
@@ -11647,12 +11669,12 @@ void dissidia_tagteam_lobby_encode(uint8_t out[8]) {
     std::memset(out, 0, 8);
     if (!g_me.host || !g_lobby_init) return;
     out[0] = 'L'; out[1] = static_cast<uint8_t>(g_lobby.mode | (g_lobby.size << 4)); out[2] = static_cast<uint8_t>((g_lobby.cpu_fill & 1) | (g_lobby.cpu_str << 4));
-    out[3] = g_lobby.stage; out[4] = g_lobby.rules; out[5] = g_lobby.judge; out[6] = static_cast<uint8_t>((g_lobby.exb & 1) | ((g_lobby.assist & 1) << 1));
+    out[3] = g_lobby.stage; out[4] = g_lobby.rules; out[5] = g_lobby.judge; out[6] = static_cast<uint8_t>((g_lobby.exb & 1) | ((g_lobby.assist & 1) << 1) | ((g_lobby.noslow & 1) << 2));
 }
 bool lobby_decode(const uint8_t* in, LobbyCfg& c) {
     if (in[0] != 'L') return false;
     c.mode = in[1] & 15; c.size = in[1] >> 4; c.cpu_fill = in[2] & 1; c.cpu_str = std::clamp<uint8_t>(in[2] >> 4, 1, 9);
-    c.stage = std::min<uint8_t>(in[3], 34); c.rules = std::min<uint8_t>(in[4], 5); c.judge = std::min<uint8_t>(in[5], 4); c.exb = in[6] & 1; c.assist = (in[6] >> 1) & 1;
+    c.stage = std::min<uint8_t>(in[3], 34); c.rules = std::min<uint8_t>(in[4], 5); c.judge = std::min<uint8_t>(in[5], 4); c.exb = in[6] & 1; c.assist = (in[6] >> 1) & 1; c.noslow = (in[6] >> 2) & 1;
     // (1 vs 1 Duel is back: user 22 Nov "add duel back in for now")
     return c.mode <= 4;
 }
@@ -11664,12 +11686,20 @@ bool lobby_current(LobbyCfg& c) {
 }
 // settings.ini: the lobby is remembered between runs (key tagteam_lobby = mode,size,fill,strength,stage,rules,judgement,exb,assist).
 std::string lobby_to_ini(const LobbyCfg& c) {
-    char b[80]; std::snprintf(b, sizeof b, "%d,%d,%d,%d,%d,%d,%d,%d,%d", c.mode, c.size, c.cpu_fill, c.cpu_str, c.stage, c.rules, c.judge, c.exb, c.assist); return b;
+    char b[96]; std::snprintf(b, sizeof b, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", c.mode, c.size, c.cpu_fill, c.cpu_str, c.stage, c.rules, c.judge, c.exb, c.assist, c.noslow); return b;
 }
 bool lobby_from_ini(const std::string& v, LobbyCfg& c) {
-    int a[9]; if (std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d", a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7, a + 8) != 9) return false;
+    int a[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 1}; const int got = std::sscanf(v.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7, a + 8, a + 9); if (got != 9 && got != 10) return false;   // (9 values: a file from before "No chase slow-down", which then is on)
     if (a[0] < 1 || a[0] > 3 || a[1] < 1 || a[1] > 4 || a[3] < 1 || a[3] > 9 || a[4] < 0 || a[4] > 34 || a[5] < 0 || a[5] > 5 || a[6] < 0 || a[6] > 4) return false;
-    c = LobbyCfg{uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2] != 0), uint8_t(a[3]), uint8_t(a[4]), uint8_t(a[5]), uint8_t(a[6]), uint8_t(a[7] != 0), uint8_t(a[8] != 0)};
+    c = LobbyCfg{uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2] != 0), uint8_t(a[3]), uint8_t(a[4]), uint8_t(a[5]), uint8_t(a[6]), uint8_t(a[7] != 0), uint8_t(a[8] != 0), uint8_t(a[9] != 0)};
+    return true;
+}
+// "No chase slow-down" (tag team battles): this machine's own value = env PSPRECOMP_TAGTEAM_CHASESLOW (1 = retail's slow-downs stay, 0 = off) else the lobby row (the saved one before
+// the lobby was ever opened); default on. Online the host's value travels in the roster flags (0x80), see noslow_now().
+bool noslow_local() {
+    if (const char* e = std::getenv("PSPRECOMP_TAGTEAM_CHASESLOW")) return e[0] == '0';
+    if (g_lobby_init) return g_lobby.noslow != 0;
+    LobbyCfg sv; if (!std::getenv("PSPRECOMP_TAGTEAM_LOBBY_NOSAVE") && lobby_from_ini(psp_settings_saved_value("tagteam_lobby"), sv)) return sv.noslow != 0;
     return true;
 }
 void lobby_apply() {   // the host: the lobby's settings into the switches the battle reads
@@ -11759,18 +11789,18 @@ void dissidia_tagteam_sp_write_round(uint32_t screen) {
     }
     if (changed) std::fprintf(stderr, "[LOBBY] single player rounds (%d changed): stage %d rules %d judgement %d\n", changed, c.stage, c.rules, c.judge);
 }
-// tagteam_menu.cpp: the lobby as 9 bytes {mode, size, cpu_fill, cpu_str, stage, rules, judge, exb, assist}; false = the host has not set one yet
-bool dissidia_tagteam_lobby_get(uint8_t out[9]) {
+// tagteam_menu.cpp: the lobby as 10 bytes {mode, size, cpu_fill, cpu_str, stage, rules, judge, exb, assist, noslow}; false = the host has not set one yet
+bool dissidia_tagteam_lobby_get(uint8_t out[10]) {
     if (g_me.host || lobby_sp()) lobby_init_host();
     if (lobby_sp()) sp_mode_refresh();
     LobbyCfg c; if (!lobby_current(c)) return false;
-    const uint8_t v[9] = {c.mode, c.size, c.cpu_fill, c.cpu_str, c.stage, c.rules, c.judge, c.exb, c.assist}; std::memcpy(out, v, 9); return true;
+    const uint8_t v[10] = {c.mode, c.size, c.cpu_fill, c.cpu_str, c.stage, c.rules, c.judge, c.exb, c.assist, c.noslow}; std::memcpy(out, v, 10); return true;
 }
-void dissidia_tagteam_lobby_set(const uint8_t in[9]) {
+void dissidia_tagteam_lobby_set(const uint8_t in[10]) {
     if (!g_me.host && !lobby_sp()) return;
     lobby_init_host();
     const LobbyCfg before = g_lobby;
-    g_lobby = LobbyCfg{in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7], in[8]};
+    g_lobby = LobbyCfg{in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7], in[8], static_cast<uint8_t>(in[9] != 0)};
     lobby_apply();
     if (lobby_to_ini(before) != lobby_to_ini(g_lobby)) psp_settings_save_value("tagteam_lobby", lobby_to_ini(g_lobby));   // remembered for the next run
 }
