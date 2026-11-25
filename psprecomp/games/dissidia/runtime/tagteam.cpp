@@ -8018,8 +8018,9 @@ void slowset_hook(uint8_t* rdram, recomp_context* ctx) {
     // "No chase slow-down": retail's chase controller (FUN_08AB5xxx: state 2 sets slow-motion channel 1 to 0.05, state 4 to 0.133 every frame until the chase ends) is not allowed to slow the
     // battle in a tag team battle. Battle state only (the chase code, the host's option via noslow_now()): the same on every machine. PSPRECOMP_TAGTEAM_CHASESLOW=1 = retail's slow-downs.
     if (g_bs && g_chase_ctl_now && ctx->r[5] == 1 && static_cast<uint32_t>(ctx->r[31]) >= 0x08AB5000u && static_cast<uint32_t>(ctx->r[31]) < 0x08AB6C00u && (tag_live() || g_enabled || g_menu_mode || g_group_mode) && noslow_now()) {
-        static int n = 0; if (g_log && n++ < 3) std::fprintf(stderr, "[CHASESLOW] t=%.2fs chase slow motion (channel 1, %.3f, ra %08X) not started: No chase slow-down\n", dissidia_battle_age() / 60.0f, static_cast<double>(ctx->f[12]), static_cast<uint32_t>(ctx->r[31]));
-        return;
+        static int n = 0; if (g_log && n++ < 3) std::fprintf(stderr, "[CHASESLOW] t=%.2fs chase slow motion (channel 1, %.3f, ra %08X) kept at normal speed: No chase slow-down\n", dissidia_battle_age() / 60.0f, static_cast<double>(ctx->f[12]), static_cast<uint32_t>(ctx->r[31]));
+        // The call itself must still run: the chase code (attack input during the chase) depends on the channel being set. Only the speed factor becomes 1.0.
+        ctx->f[12] = 1.0f;
     }
     g_orig_slowset(rdram, ctx);
 }
