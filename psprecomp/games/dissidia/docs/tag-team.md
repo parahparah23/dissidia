@@ -5273,3 +5273,16 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   - `tt/orb3`: the CPU slot fighter summons at 25 s (orb gone). KO at 45 s, and the partner enters with his own use: `slot fighter char 31 -> 30, summon uses 0 -> 1`. The game re-creates the orb at 46.67 s; screenshots show the orb on Vaan's panel.
   - `tt/orb5`: the partner summons at 24.4 s (a real spend, booked). KO at 40 s, and he enters with his use spent: `uses 1 -> 0`. The game removes the orb at 41.67 s.
 - Debug aid: `PSPRECOMP_TAGTEAM_ORBLOG=1` logs every change of both orb records (`[ORBLOG]`).
+
+### Batch fourteen (25 Nov): menus flow back (user, RP6: "back does not return to the previous tag menu")
+- **Cause.** The chain is Battle Mode / Communications list > Mode Select > Party Select > CPU Select > setup screen (+ Battle Lobby, opened by the flow). Retail's Circle went
+  straight from Party Select back to the list (Mode Select skipped), and Circle on the setup screen left the lobby behind. Also, `tag_row_confirm` took Circle for a confirm
+  on the Tag Team Battle row (the sub-list's pad test is true for Circle: `PSPRECOMP_MENU_SUBLOG=1`, Circle = "sub args 1"), so Circle at the list opened the Mode Select again
+  (a loop with the Mode Select's own Circle).
+- **Fix** (`PSPRECOMP_TAGTEAM_MENUBACK_OLD=1` = old). Single player: Circle on the setup screen's list (no dialog; not in the Free-for-all) reopens the Battle Lobby
+  (`g_lob_flow`, settings kept), Circle in that lobby goes back to Party Select (one injected Circle for retail's screen; Cross = done as before; a lobby opened with Select
+  still closes with Circle/Cross); footer says so. `menu_settings.cpp`: after a tag mode was chosen (`g_ms_flow`), when the same group's list comes back (gap > 0.25 s) the Mode
+  Select opens again (SP and Communications; Circle there clears the flow and goes to the list); the confirm test ignores the sub-list's Circle.
+- **Tested** (host, one copy, `~/dissidia/tt/s2/ttmback/ctl.py`, screenshots in `o4`/`o7`/`o8`/`o9`): Team 2 vs 2 forward: Mode Select > Party Select > CPU Select > Lobby > setup;
+  back: setup > Lobby (stage change kept) > CPU Select > Party Select > Mode Select > list (cursor on Tag Team Battle) > main menu. Free-for-all: players > setup > CPU Select >
+  Party Select > Mode Select. Duel: Party Select > Mode Select. Communications: Mode Select > Group Battle room screen, Circle > Mode Select > list. Not run: two-copy online.
