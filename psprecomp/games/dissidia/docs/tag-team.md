@@ -4755,6 +4755,11 @@ User after play: the retail finish for a mid-battle KO changed the music (defeat
 - **Extras (no retail finish phase):** `xkocam_start` (at a lethal HP hit on an extra) runs state 2's camera work by hand: slow motion channel 0 0.02, `0883820C` position, `08B082B4(machine, cam, extra, 0x898, 0)`, camera program 0x898
   (cam = `*0x08B3D6B8 + 1872`), then 0.20 after 140 ticks and release after 210 (`[KOCAM] extra ... kill camera started / over`). The camera returns to normal by itself (shots `~/dissidia/tt/ttx_killcam2_extra_montage.png`:
   the camera frames the KO'd enemy extra, then the normal view). `PSPRECOMP_TAGTEAM_NOXKOCAM=1` off. The "KO Kill Camera" row switches both (off: no wait / no camera).
+- **Mid-battle KO, audio + banner (25 Nov, tree ttkc2):** the retail finish silences the match: `FUN_08895FE4(SE list)` (phase change `0888B21C`, ra `0888B2F8`; machine state 0, ra `08B06050`) stops every SE,
+  `FUN_0889F264(sound manager, 30)` (ra `08B06060`) fades the BGM out and releases it, the loop `FUN_088A1E44(player, 0.0)` (ra `08B060A0`) stops all players, and state 2's `FUN_08896558` (ra `08B06280`) starts a 5.9 s
+  stereo sting. All skipped for a mid-battle KO (`PSPRECOMP_TAGTEAM_NOSNDKEEP=1` = old). "THE FINAL BLOW!" (and the white speed lines) = `FUN_08B17014(machine + 96)`, started by state 2's update
+  `FUN_08B06370` (ra `08B063E8`) when its timer reaches 20: skipped (`PSPRECOMP_TAGTEAM_NOBANNERSKIP=1` = old). Debug: `PSPRECOMP_AUDIOCHK=1` (per-second peak of the audio sink),
+  `PSPRECOMP_TAGTEAM_KOSHOT=1` (screenshots at the finish start +0 / 0.5 / 1.5 s and +2 / 2.5 / 3.5 s), `FNLOG` / `FNSKIP` take up to 128 addresses.
 - Not done / unverified: the fade to black seen near the end of the retail slot presentation (state 3) is still there; the camera of an extra KO online (view only, the slow motion is battle state); EX Burst KO; subtitles of our own KO line.
 
 ## Kill camera, round 2: no fade, every route into the finish (22 Nov, tree ttx; host-only)

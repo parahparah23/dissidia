@@ -6603,7 +6603,7 @@ template <int... I> void install_end_log(std::integer_sequence<int, I...>) {
 }
 
 // debug (PSPRECOMP_TAGTEAM_FNLOG=<hex>,<hex>,...): log the calls of up to 24 functions (args r4..r7, caller, bs+72); PSPRECOMP_TAGTEAM_FNSKIP=<hex>,... also skips them while bs+72 == 4
-FuncPtr g_fnl_orig[24] = {}; uint32_t g_fnl_addr[24] = {}; bool g_fnl_skip[24] = {};
+FuncPtr g_fnl_orig[128] = {}; uint32_t g_fnl_addr[128] = {}; bool g_fnl_skip[128] = {};
 template <int N> void fnlog_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     std::fprintf(stderr, "[FNLOG] t=%.2fs %08X(%08X, %08X, %08X, %08X) ra %08X bs72 %u%s\n", dissidia_battle_age() / 60.0f, g_fnl_addr[N], static_cast<uint32_t>(ctx->r[4]), static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]), static_cast<uint32_t>(ctx->r[31]), g_bs ? rd(g_bs + 72u) : 99u, (g_fnl_skip[N] && g_bs && rd(g_bs + 72u) == 4u) ? " SKIPPED" : "");
@@ -6648,8 +6648,8 @@ void fadekey2_hook(uint8_t* rdram, recomp_context* ctx) {
 // retail chains), whether the match goes on: a slot fighter with no HP left whose side still has a living team mate, a reserve member or (FFA) others standing = a mid-battle KO -> camera-only treatment (the flag
 // is set / cleared HERE, so a stale flag never touches the match-ending finish). A fallen fighter with live HP is a forfeit: full retail.
 FuncPtr g_orig_finstart = nullptr;
-void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram; g_ctx = ctx;
+// Is the lethal HP a slot fighter has just taken a mid-battle KO (the match goes on)? Used by the finish start and by the sound stops of the phase change (0888B21C), which run before it.
+bool mid_ko_now(uint32_t* who_out = nullptr) {
     bool mid = false; uint32_t who = 0;
     if (g_oneround && g_tagin && g_bs && tag_live() && g_kocam && !std::getenv("PSPRECOMP_TAGTEAM_FULLFINISH") && !std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) {
         for (uint32_t k = 0; k < 2; k++) {
@@ -6658,10 +6658,51 @@ void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
             if (ffa_now() ? ffa_keep(S) : (mate || reserve_left(team_of(side_of(S))) > 0)) { mid = true; who = S; }
         }
     }
+    if (who_out) *who_out = who;
+    return mid;
+}
+void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    uint32_t who = 0; const bool mid = mid_ko_now(&who);
     g_midfin_gen = mid ? g_battle_gen : ~0u;
     if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish start (bs+72 %u): %s%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, mid ? "mid-battle KO of " : "match-ending / forfeit: full retail finish", mid ? role_of(who) : "");
     if (mid) cam_snap("finish start"); else g_camsnap.have = false;
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_KOSHOT")) { const float a = dissidia_battle_age() / 60.0f; tagteam_breakshot_event(a, g_battle_gen, "kofin", 0, "a", nullptr); tagteam_breakshot_event(a + 2.f, g_battle_gen, "kofin", 0, "b", nullptr); }   // debug: shots at the finish start +0 / 0.5 / 1.5 and +2 / 2.5 / 3.5 s
     g_orig_finstart(rdram, ctx);
+}
+// The finish also silences the battle (retail: nothing plays on to the results). For a mid-battle KO the match goes on, so these stops are skipped (user, RP6 25 Nov: all audio gone after the KO):
+//  - FUN_08895FE4(sound list, ...) stops every sound player of the SE list: called by the phase change FUN_0888B21C (ra 0888B2F8, before the finish start: decided with mid_ko_now) and by the finish machine's
+//    first state FUN_08B05F90 (ra 08B06050),
+//  - FUN_0889F264(sound manager, 30) (ra 08B06060): fades the BGM out over 30 frames (FUN_0889FF8C),
+//  - FUN_088A1E44(player, 0.0) (ra 08B060A0): the same loop stops every playing player of the manager's list.
+// PSPRECOMP_TAGTEAM_NOSNDKEEP=1 = old.
+FuncPtr g_orig_sndlist = nullptr, g_orig_bgmfade = nullptr, g_orig_sndstop = nullptr, g_orig_sting = nullptr;
+bool snd_keep_call(uint32_t ra) {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOSNDKEEP") != nullptr;
+    if (off) return false;
+    if (ra == 0x0888B2F8u) return mid_ko_now();
+    return g_midfin_gen == g_battle_gen && g_bs && !g_decided && (ra == 0x08B06050u || ra == 0x08B06060u || ra == 0x08B060A0u || ra == 0x08B06280u);
+}
+void sndlist_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (snd_keep_call(static_cast<uint32_t>(ctx->r[31]))) { if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs finish sound stop of the SE list skipped (ra %08X)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[31])); ctx->r[2] = 0; return; }
+    g_orig_sndlist(rdram, ctx);
+}
+void bgmfade_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (snd_keep_call(static_cast<uint32_t>(ctx->r[31]))) { if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs finish BGM fade-out skipped (ra %08X)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[31])); ctx->r[2] = 0; return; }
+    g_orig_bgmfade(rdram, ctx);
+}
+//  - FUN_08896558(sound list) (ra 08B06280, state 2): starts the finish sting (a 5.9 s stereo ATRAC jingle, 48844 bytes) on the SE list.
+void sting_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (static_cast<uint32_t>(ctx->r[31]) == 0x08B06280u && snd_keep_call(0x08B06280u)) { if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs finish sting skipped (ra 08B06280)\n", dissidia_battle_age() / 60.0f); return; }
+    g_orig_sting(rdram, ctx);
+}
+void sndstop_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    if (static_cast<uint32_t>(ctx->r[31]) == 0x08B060A0u && snd_keep_call(0x08B060A0u)) return;
+    g_orig_sndstop(rdram, ctx);
 }
 // FUN_089922FC(player): releases a sound player's ATRAC id (player + 4; also the streamed battle music). Retail's finish runs it from a second path besides the finish BGM step
 // (08B0998C, skipped above): in a mid-battle KO (Golbez, user 22 Nov: "THE FINAL BLOW", the music stopped) the battle music was released and never came back.
@@ -6675,19 +6716,34 @@ void bgmrel_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_log && g_bs && aid >= 0 && psp_atrac_is_streamed(aid)) std::fprintf(stderr, "[KOCAM] t=%.2fs battle music released (ra %08X, bs+72 %u)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[31]), rd(g_bs + 72u));
     g_orig_bgmrel(rdram, ctx);
 }
+// "THE FINAL BLOW!" banner: the finish machine's state 2 update (FUN_08B06370, ra 08B063E8) starts it once its timer reaches 20: FUN_08B17014(machine + 96, byte machine + 14) plays the
+// banner's two animations (the white speed lines keep running with the camera program). Skipped for a mid-battle KO: the battle goes on, so no "final blow" is announced.
+// PSPRECOMP_TAGTEAM_NOBANNERSKIP=1 = old.
+FuncPtr g_orig_banner = nullptr;
+void banner_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOBANNERSKIP") != nullptr;
+    if (!off && g_midfin_gen == g_battle_gen && g_bs && !g_decided && rd(g_bs + 72u) == 4u) { if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs THE FINAL BLOW banner skipped (mid-battle KO; ra %08X)\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[31])); ctx->r[2] = 0; return; }
+    g_orig_banner(rdram, ctx);
+}
 void finish_hooks_install() {
     if (!g_orig_bgmrel) { g_orig_bgmrel = fn(0x089922FCu); if (g_orig_bgmrel) psp_dispatch_register(0x089922FCu, bgmrel_hook); }
     if (!g_orig_finbgm) { g_orig_finbgm = fn(0x08B0998Cu); if (g_orig_finbgm) psp_dispatch_register(0x08B0998Cu, finbgm_hook); }
     if (!g_orig_fadekey) { g_orig_fadekey = fn(0x08873C20u); if (g_orig_fadekey) psp_dispatch_register(0x08873C20u, fadekey_hook); }
     if (!g_orig_fadekey2) { g_orig_fadekey2 = fn(0x08873DECu); if (g_orig_fadekey2) psp_dispatch_register(0x08873DECu, fadekey2_hook); }
     if (!g_orig_finstart) { g_orig_finstart = fn(0x08B09D88u); if (g_orig_finstart) psp_dispatch_register(0x08B09D88u, finstart_hook); }
+    if (!g_orig_sndlist) { g_orig_sndlist = fn(0x08895FE4u); if (g_orig_sndlist) psp_dispatch_register(0x08895FE4u, sndlist_hook); }
+    if (!g_orig_bgmfade) { g_orig_bgmfade = fn(0x0889F264u); if (g_orig_bgmfade) psp_dispatch_register(0x0889F264u, bgmfade_hook); }
+    if (!g_orig_sndstop) { g_orig_sndstop = fn(0x088A1E44u); if (g_orig_sndstop) psp_dispatch_register(0x088A1E44u, sndstop_hook); }
+    if (!g_orig_sting) { g_orig_sting = fn(0x08896558u); if (g_orig_sting) psp_dispatch_register(0x08896558u, sting_hook); }
+    if (!g_orig_banner) { g_orig_banner = fn(0x08B17014u); if (g_orig_banner) psp_dispatch_register(0x08B17014u, banner_hook); }
     if (!g_orig_finvoice) { g_orig_finvoice = fn(0x08B33F8Cu); if (g_orig_finvoice) psp_dispatch_register(0x08B33F8Cu, finvoice_hook); }
 }
 void fnlog_install() {
     std::vector<uint32_t> a; std::vector<bool> sk;
     for (const char* env : {"PSPRECOMP_TAGTEAM_FNLOG", "PSPRECOMP_TAGTEAM_FNSKIP"}) if (const char* e = std::getenv(env)) {
-        std::string t(e); size_t p0 = 0; while (p0 < t.size() && a.size() < 24) { size_t c = t.find(',', p0); if (c == std::string::npos) c = t.size(); const uint32_t v = static_cast<uint32_t>(std::strtoul(t.substr(p0, c - p0).c_str(), nullptr, 16)); if (v) { a.push_back(v); sk.push_back(env[20] == 'S'); } p0 = c + 1; } }
-    if (!a.empty()) fnlog_install_n(std::make_integer_sequence<int, 24>{}, a, sk);
+        std::string t(e); size_t p0 = 0; while (p0 < t.size() && a.size() < 128) { size_t c = t.find(',', p0); if (c == std::string::npos) c = t.size(); const uint32_t v = static_cast<uint32_t>(std::strtoul(t.substr(p0, c - p0).c_str(), nullptr, 16)); if (v) { a.push_back(v); sk.push_back(env[20] == 'S'); } p0 = c + 1; } }
+    if (!a.empty()) fnlog_install_n(std::make_integer_sequence<int, 128>{}, a, sk);
 }
 // debug (PSPRECOMP_TAGTEAM_HITLOG=1): FUN_08AEF284(event, attacker, victim) builds a hit event
 FuncPtr g_orig_hit = nullptr;
@@ -9587,6 +9643,7 @@ void xkocam_start(uint32_t victim) {
     g_ctx->f[12] = 0.0f; call(0x0880FD34u, cam, 0x898u, 0u);
     g_ctx->r[29] = static_cast<int32_t>(sp0);
     g_xko.gen = g_battle_gen; g_xko.t0 = dissidia_battle_age(); g_xko.stage = 1; g_xko.victim = victim;
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_KOSHOT")) { const float a0 = dissidia_battle_age() / 60.0f; tagteam_breakshot_event(a0, g_battle_gen, "xko", 0, "a", nullptr); tagteam_breakshot_event(a0 + 2.f, g_battle_gen, "xko", 0, "b", nullptr); }   // debug
     if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs extra %s %08X KO: kill camera started (slow motion 0.02, camera program 0x898 on it)\n", dissidia_battle_age() / 60.0f, role_of(victim), victim);
 }
 float g_cam_post = -1.f;   // debug: log the camera director's words for 4 s after a kill camera
