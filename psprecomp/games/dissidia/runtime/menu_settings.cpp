@@ -44,6 +44,7 @@ void dissidia_presence_sub(uint32_t state);
 
 void dissidia_tagteam_menu_mode(bool on);   // tagteam.cpp: Battle Mode > Tag Team Battle
 bool dissidia_tagteam_menu_mode_on();   // tagteam.cpp: the last Battle Mode / Communications entry chosen was Tag Team Battle
+uint32_t dissidia_tagteam_raw_pad();
 void dissidia_tagteam_modesel_open();   // tagteam_menu.cpp: the mode select screen after choosing Tag Team Battle
 bool dissidia_tagteam_modesel_active();
 int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool online);   // 0 open, 1 chosen, 2 cancelled
@@ -394,18 +395,22 @@ struct TagGroup { uint32_t group, rows, target, first_inst; };   // first_inst: 
 constexpr TagGroup kTagGroups[2] = {{1, 4, 1, 0x17}, {2, 5, 1, 0x20}};
 const TagGroup* tag_group(uint32_t st) { if (!st) return nullptr; const uint32_t g = r32(st + 0xA88); for (const auto& t : kTagGroups) if (t.group == g) return &t; return nullptr; }
 // a confirm on the Tag Team Battle row (called from the start menu's top-level and sub-list updates, before the game's code sees it)
-bool g_ms_go = false; int g_ms_go_age = 0; int g_ms_group = 0;   // the mode select chose a mode: the confirm is handed to the start menu (injected), the Tag Team Battle mode stays on
+bool g_ms_go = false; int g_ms_go_age = 0; int g_ms_group = 0;
+bool g_ms_reopen = false;
+bool g_ms_flow = false;   // 25 Nov: a tag mode was chosen from the Mode Select: when this group's list comes back (Circle out of Party Select / the room screens) the Mode Select opens again. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old   // the mode select chose a mode: the confirm is handed to the start menu (injected), the Tag Team Battle mode stays on
 bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st) {
     const TagGroup* tg = tag_group(st); if (!tg) return false;
     const uint32_t cur = st + 0xA58u;
     if (dissidia_tagteam_modesel_active()) {   // the mode select has the pad
         const int r = dissidia_tagteam_modesel_frame(rdram, ctx, g_ms_group == 2);
-        if (r == 1) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); g_ms_go = true; g_ms_go_age = 0; dissidia_tagteam_modesel_confirm(tg->group == 1); std::fprintf(stderr, "[MENUSET] mode select: chosen, the game goes on (group %u)\n", tg->group); }
-        else if (r == 2) { dissidia_tagteam_menu_mode(false); std::fprintf(stderr, "[MENUSET] mode select: cancelled\n"); }
+        if (r == 1) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); g_ms_go = true; g_ms_go_age = 0; g_ms_flow = true; dissidia_tagteam_modesel_confirm(tg->group == 1); std::fprintf(stderr, "[MENUSET] mode select: chosen, the game goes on (group %u)\n", tg->group); }
+        else if (r == 2) { g_ms_flow = false; dissidia_tagteam_menu_mode(false); std::fprintf(stderr, "[MENUSET] mode select: cancelled\n"); }
         return true;
     }
     if (r32(cur + 36) != tg->rows) { if (g_ms_go && ++g_ms_go_age > 200) g_ms_go = false; return false; }
-    const bool c1 = confirm_pressed_at(rdram, ctx, SUB_CONFIRM_ARGS), c2 = confirm_pressed(rdram, ctx);
+    // 25 Nov: the sub-list's test (c1) is true on a Circle press too (SUBLOG: Circle = sub args 1, Cross = main args 1), so Circle on the Tag Team Battle row opened the Mode Select
+    // again instead of backing out to the main menu (a loop with the Mode Select's own Circle). PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old.
+    const bool c1 = confirm_pressed_at(rdram, ctx, SUB_CONFIRM_ARGS) && (std::getenv("PSPRECOMP_TAGTEAM_MENUBACK_OLD") || !(dissidia_tagteam_raw_pad() & 0x2000u)), c2 = confirm_pressed(rdram, ctx);
     if (std::getenv("PSPRECOMP_MENU_SUBLOG") && (c1 || c2)) std::fprintf(stderr, "[SUBTICK] confirm seen (sub args %d, main args %d) idx %u\n", c1, c2, r32(cur + 4));
     if (g_ms_go) { if (++g_ms_go_age > 200) g_ms_go = false; if (c1 || c2) { g_ms_go = false; dissidia_tagteam_menu_mode(true); dissidia_tagteam_lobby_pending(true); std::fprintf(stderr, "[MENUSET] Tag Team Battle chosen (group %u)\n", tg->group); } return false; }
     if (!(c1 || c2)) return false;
@@ -436,6 +441,8 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         const auto now_t = std::chrono::steady_clock::now();
         const bool gap = std::chrono::duration<double>(now_t - last_tick).count() > 0.25 && !std::getenv("PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY");
         last_tick = now_t;
+        const bool reopen_ms = gap && g_ms_flow && tg && static_cast<int>(tg->group) == g_ms_group && !g_ms_go && !dissidia_tagteam_modesel_active() && !std::getenv("PSPRECOMP_TAGTEAM_MENUBACK_OLD");
+        if (reopen_ms) g_ms_reopen = true;
         if (g != open_group || gap) {
             open_group = g;
             if (tg && dissidia_tagteam_menu_mode_on() && !dissidia_tagteam_modesel_active() && r32(cur + 36) == tg->rows && r32(cur + 4) == tg->target && !std::getenv("PSPRECOMP_TAGTEAM_NOROWBACK")) {
@@ -443,6 +450,10 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 std::fprintf(stderr, "[MENUSET] group %u opened with Tag Team Battle on: cursor %u -> %u (the Tag Team Battle row)\n", tg->group, tg->target, tg->rows);
             }
         }
+    }
+    if (g_ms_flow && tg && static_cast<int>(tg->group) == g_ms_group && !g_ms_go && !dissidia_tagteam_modesel_active() && g_ms_reopen) {
+        g_ms_reopen = false; dissidia_tagteam_menu_mode(true); dissidia_tagteam_modesel_open();
+        std::fprintf(stderr, "[MENUSET] back from the chain: the Mode Select again (group %u)\n", tg->group);
     }
     if (std::getenv("PSPRECOMP_MENU_SUBLOG") && st) { static std::string last; char b[128]; std::snprintf(b, sizeof b, "group %u idx %u min %u max %u state0 %u", r32(st + 0xA88), r32(cur + 4), r32(cur + 32), r32(cur + 36), r32(st)); if (last != b) { last = b; std::fprintf(stderr, "[SUBTICK] %s\n", b); } }
     if (tag_row_confirm(rdram, ctx, st)) return;

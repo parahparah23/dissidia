@@ -110,6 +110,14 @@ constexpr uint32_t BTN_UP = 0x10u, BTN_RIGHT = 0x20u, BTN_DOWN = 0x40u, BTN_LEFT
 std::atomic<uint32_t> g_raw_pad{0};   // the pad as the filter saw it before the dialog took it
 std::atomic<bool> g_dlg_open{false};
 std::atomic<int> g_inject_cross{0};
+// 25 Nov (user, RP6: "back does not return to the previous tag menu"): the single player chain is Battle Mode list > Mode Select > Party Select > setup screen + Battle Lobby.
+// Circle on the setup screen's list (no dialog) now reopens the lobby (g_lob_flow), Circle in that lobby goes back to Party Select (one injected Circle for retail's screen),
+// and menu_settings.cpp reopens the Mode Select when the Battle Mode / Communications list comes back. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old.
+bool g_lob_flow = false;   // the lobby is a step of the menu chain (opened by the flow or by Circle on the setup screen): Circle goes back a screen, Cross goes on
+std::atomic<int> g_inject_circle{0};   // a Circle for retail's setup screen after the lobby closed (6 .. 1: down while 5 .. 3)
+std::atomic<int64_t> g_circle_stamp{0};   // steady-clock ms of the last setup screen tick that took Circle (the pad filter hides Circle from the screen for 100 ms after)
+int64_t steady_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+bool menuback_old() { static const bool o = std::getenv("PSPRECOMP_TAGTEAM_MENUBACK_OLD") != nullptr; return o; }
 std::atomic<int> g_script_t{-1};   // the Free-for-all's scripted pass through retail's Party Select and CPU Select (single player): polls since the confirm, -1 = off
 std::atomic<int> g_inject_late{0};   // a confirm for the start menu after the mode select closed: pressed once the dialog hold is over (6 .. 1: Cross is down while 5 .. 3)   // "Add CPU" (L on the free row) presses Cross for the screen: it opens Player Select for the new row
 std::atomic<uint32_t> g_pad_polls{0}, g_sq_stamp{0};   // pad polls; the poll at which the setup screen last ran with Square taken (the block ends a few polls after the screen stops ticking)
@@ -545,10 +553,15 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
         std::fprintf(stderr, "[FFA] lobby: Circle, back to the players screen\n");
         return;
     }
+    if ((pressed & BTN_CIRCLE) && g_lob_flow && sp && L[0] != 3 && !menuback_old()) {   // a step of the chain: back to Party Select (retail's setup screen gets one Circle once the hold is over)
+        std::fprintf(stderr, "[TTLOBBY] lobby: Circle, back to Party Select\n");
+        g_dlg_open = false; g_dlg_mode = 0; g_lob_flow = false; play_se(rdram, ctx, 1); g_inject_circle.store(6, std::memory_order_relaxed);
+        return;
+    }
     if (pressed & (BTN_CIRCLE | BTN_CROSS | BTN_OPEN)) {
         if ((pressed & BTN_CROSS) && vis[g_lob_row] == 8) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; play_se(rdram, ctx, 1); return; }   // PLAYERS: the Free-for-all setup
         std::fprintf(stderr, "[TTLOBBY] lobby closed by a press %04X (sp %d)\n", pressed, (int)sp);
-        g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1);
+        g_dlg_open = false; g_dlg_mode = 0; g_lob_flow = false; play_se(rdram, ctx, 1);
         if (g_ffa_flow && sp) { g_ffa_flow = false; g_ffa_autostart = true; g_cover_until = std::chrono::steady_clock::now() + std::chrono::seconds(8); }   // Free-for-all: the battle starts from here
         return;
     }
@@ -611,7 +624,7 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
         }
         if (np < need && L[0] != 3) g_layer.text("Waiting for " + std::to_string(need - np) + " more player(s)", true, 5.6f, cx0 + 10.f, 226.f, LayerColor{190, 100, 20, 1.f});
     }
-    gs_footer(g_ffa_flow && sp && L[0] == 3 ? "Up/Down: row   Left/Right: change   Cross: start the battle   Circle: back" : host ? "Up/Down: row   Left/Right: change   Cross / Circle: done" : "Set by the host   Circle: close");
+    gs_footer(g_ffa_flow && sp && L[0] == 3 ? "Up/Down: row   Left/Right: change   Cross: start the battle   Circle: back" : host ? (g_lob_flow && sp && L[0] != 3 && !menuback_old() ? "Up/Down: row   Left/Right: change   Cross: done   Circle: back" : "Up/Down: row   Left/Right: change   Cross / Circle: done") : "Set by the host   Circle: close");
     (void)have;
 }
 
@@ -961,7 +974,7 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     if (g_dlg_open && g_dlg_mode >= 2 && g_dlg_mode <= 4 && !list) g_dlg_open = false;
     bool opened_now = false;
     const bool lobby_ok = list && row >= 0 && row < 5 && !cpu_row && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF");   // Select on the player's own row: the battle lobby
-    if (!g_dlg_open && lobby_ok && (pressed & BTN_OPEN)) { opened_now = true; g_lob_sp = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }
+    if (!g_dlg_open && lobby_ok && (pressed & BTN_OPEN)) { opened_now = true; g_lob_flow = false; g_lob_sp = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; play_se(rdram, ctx, 1); }
     // Free-for-all, after the battle (23 Nov, PR #129 TODO "after the battle the player lands in the Group Battle menu, which makes no sense"): "Return to
     // Battle Setup" brought back retail's Group Battle setup screen, which the flow had only passed through. Now the Free-for-all players screen opens over
     // it again (fighters, then the lobby, then the next battle); Circle there leaves the flow as before. The setup screen's tick does not run during the
@@ -978,7 +991,13 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
         g_lobby_pending = false; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
         uint8_t L0[10] = {1, 2, 0, 5, 0, 0, 0, 0, 0, 1}; dissidia_tagteam_lobby_get(L0);
-        if (L0[0] == 3) { g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; } else g_dlg_mode = 2;
+        if (L0[0] == 3) { g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; } else { g_dlg_mode = 2; g_lob_flow = true; }
+    }
+    {   // Circle on the setup screen's list (no dialog): back to the Battle Lobby, the step before (the Free-for-all keeps retail's Circle)
+        uint8_t Lc[10] = {1, 2, 0, 5, 0, 0, 0, 0, 0, 1}; dissidia_tagteam_lobby_get(Lc);
+        const bool ours = list && Lc[0] != 3 && !g_ffa_flow && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF") && !menuback_old();
+        if (ours) g_circle_stamp.store(steady_ms(), std::memory_order_relaxed);   // (the pad filter hides Circle from the list while it is ticking)
+        if (ours && !g_dlg_open && (pressed & BTN_CIRCLE)) { opened_now = true; g_lob_sp = true; g_lob_flow = true; g_dlg_mode = 2; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0; play_se(rdram, ctx, 1); std::fprintf(stderr, "[TTLOBBY] setup screen: Circle, back to the Battle Lobby\n"); }
     }
     if (!g_dlg_open && cpu_row && (pressed & BTN_OPEN)) { opened_now = true; g_dlg_mode = 0; g_dlg_bp = false; g_dlg_sp = true; g_dlg_row = row; g_dlg_field = 0; g_dlg_hold = 0.f; dissidia_tagteam_sp_get_cfg(row, g_dlg_cfg); g_dlg_open = true; play_se(rdram, ctx, 1); }
     if (!g_dlg_open && switchable && (pressed & BTN_L)) { dissidia_tagteam_sp_toggle(row); play_se(rdram, ctx, 1); }   // L (Square: Assist On / Off, below)
@@ -1058,6 +1077,7 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
         else if (sr == 3) raw &= ~BTN_DOWN;
     }
     if (int ij = g_inject_cross.load(std::memory_order_relaxed); ij > 0) { g_inject_cross.store(ij - 1, std::memory_order_relaxed); raw = (ij == 2) ? (raw | BTN_CROSS) : (raw & ~BTN_CROSS); }   // Add CPU: one Cross press (edge) for the screen
+    if (steady_ms() - g_circle_stamp.load(std::memory_order_relaxed) < 100) raw &= ~BTN_CIRCLE;   // the setup screen's list: Circle is ours (back to the lobby)
     if (g_sp_sq_block.load(std::memory_order_relaxed) && g_pad_polls.fetch_add(1, std::memory_order_relaxed) - g_sq_stamp.load(std::memory_order_relaxed) < 40u) raw &= ~BTN_SQUARE;
     else g_pad_polls.fetch_add(1, std::memory_order_relaxed);
     if (const int eb = g_enter_block.load(std::memory_order_relaxed); eb && g_pad_polls.load(std::memory_order_relaxed) - g_enter_stamp.load(std::memory_order_relaxed) < 40u) { raw &= ~0x8u; if (eb == 2) raw &= ~BTN_CROSS; }   // the CPU party has no opponent yet: Start (and Cross on Enter Battle) do nothing
@@ -1074,11 +1094,13 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
     static std::atomic<int> hold{0};   // a button that closed a dialog stays down for a few polls: the screen under it must not see it
     if (g_dlg_open.load(std::memory_order_relaxed)) { hold.store(12, std::memory_order_relaxed); return 0u; }
     if (const int h = hold.load(std::memory_order_relaxed); h > 0) { hold.store(h - 1, std::memory_order_relaxed); return 0u; }
+    if (int ic = g_inject_circle.load(std::memory_order_relaxed); ic > 0) { g_inject_circle.store(ic - 1, std::memory_order_relaxed); raw = (ic >= 3 && ic <= 5) ? (raw | BTN_CIRCLE) : (raw & ~BTN_CIRCLE); }
     if (int il = g_inject_late.load(std::memory_order_relaxed); il > 0) { g_inject_late.store(il - 1, std::memory_order_relaxed); raw = (il >= 3 && il <= 5) ? (raw | BTN_CROSS) : (raw & ~BTN_CROSS); }
     return raw;
 }
 
 // The mode select (menu_settings.cpp calls these from the start menu's updates): the screen after choosing Tag Team Battle.
+uint32_t dissidia_tagteam_raw_pad() { return g_raw_pad.load(std::memory_order_relaxed); }   // the pad before the dialogs took it
 void dissidia_tagteam_modesel_open() { g_ms_first = true; g_dlg_mode = 5; g_dlg_open = true; }
 bool dissidia_tagteam_modesel_active() { return g_dlg_open.load() && g_dlg_mode == 5; }
 int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool online) {
