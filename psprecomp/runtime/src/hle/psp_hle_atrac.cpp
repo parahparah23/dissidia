@@ -650,9 +650,9 @@ uint32_t set_and_get_id(uint8_t* rdram, uint32_t buf, uint32_t rs, uint32_t bs) 
     if (!range_ok(buf, std::max<uint32_t>(rs, 1))) return ERR_ILLEGAL_ADDRESS;
     Track t;
     uint32_t e = analyze(rdram + (buf & PSP_ADDR_MASK), rs, t);
-    if (e) return e;
+    if (e) { std::fprintf(stderr, "[ATRAC] SetDataAndGetID failed: error 0x%08X (buf 0x%08X size %u)\n", e, buf, rs); return e; }
     int id = alloc_ctx(t.codec);
-    if (id < 0) return ERR_NO_ATRACID;
+    if (id < 0) { std::fprintf(stderr, "[ATRAC] SetDataAndGetID: no free atrac id (buf 0x%08X)\n", buf); return ERR_NO_ATRACID; }
     e = ctx_set_data(g_ctx[id], t, buf, rs, std::max(bs, rs), 2, rdram);
     if (e) { free_ctx(id); return e; }
     std::fprintf(stderr,
