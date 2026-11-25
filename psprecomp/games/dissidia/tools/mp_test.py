@@ -29,7 +29,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BTN = {'up': 0x10, 'down': 0x40, 'cross': 0x4000, 'circle': 0x2000, 'right': 0x20, 'left': 0x80}
-PORT = {'A': 9311, 'B': 9312}
+PORT = {'A': int(os.environ.get('MP_PORT_A', 9311)), 'B': int(os.environ.get('MP_PORT_B', 9312))}   # MP_PORT_A / MP_PORT_B: when another rig holds 9311 / 9312
 # the moves pressed on both sides: (stick x y ms) or (buttons ms); B runs the list three entries later
 MOVES = [('A', '255 128 900'), ('B', '8000 150'), ('A', '128 0 700'), ('B', '2000 150'), ('B', '0 128 600'), ('B', '4000 150'),
          ('B', '1000 150'), ('A', '128 255 800'), ('B', '8000 150'), ('B', '2000 150'), ('A', '255 255 500'), ('B', '2000 150')]

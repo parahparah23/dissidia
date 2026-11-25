@@ -187,6 +187,8 @@ bool g_oneround = true;   // KO rules, one continuous round: a KO'd slot fighter
 bool g_tagin = true;      // KO rules: a KO'd slot fighter with a living team mate is replaced by him (PSPRECOMP_TAGTEAM_TAGIN=0 turns it off)
 uint32_t side_of(uint32_t a);
 bool foes(uint32_t a, uint32_t b);
+bool xfoes(uint32_t a, uint32_t b);
+void audit_step();   // PSPRECOMP_TAGTEAM_HITAUDIT (below)
 bool hud_lethal(uint32_t a, int brv);
 void hud_gauges(TagHudFighter& f, uint32_t a);   // the small panel's EX / assist bars
 int g_hframe = 0;   // controller frames (hit attribution)
@@ -2468,6 +2470,8 @@ const char* brv_line() {
 // Free-for-all (PSPRECOMP_TAGTEAM_FFA=3 / 4): 3 or 4 fighters, everyone against everyone. The game still has two sides (its per-side tables), so two
 // opponents share a game side; friend / foe is per fighter. foes(a, b): may a and b fight each other (FFA: any two fighters; else: other sides).
 bool foes(uint32_t a, uint32_t b) { return a != b && (ffa_now() ? true : side_of(a) != side_of(b)); }
+// foes() for the free-for-all audit fixes (batch eighteen): PSPRECOMP_TAGTEAM_FFAFOES_OLD=1 = the old side test (same-side fighters of a free-for-all were not foes there)
+bool xfoes(uint32_t a, uint32_t b) { static const bool old = std::getenv("PSPRECOMP_TAGTEAM_FFAFOES_OLD") != nullptr; return old ? (a != b && side_of(a) != side_of(b)) : foes(a, b); }
 // FFA KO rules: the human's fall ends the battle (a loss); any other slot fighter's fall does not while somebody besides the human still fights
 // (ffa_keep: the fallen slot fighter stays down, the round held; the last of them KO'd = the human wins).
 uint32_t ffa_human() { return g_bs ? srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u)) : 0u; }
@@ -2793,7 +2797,7 @@ uint32_t trans(uint32_t v) {
 bool hud_lethal(uint32_t a, int brv) {
     if (brv <= 0 || std::getenv("PSPRECOMP_TAGTEAM_NOLETHALGLOW")) return false;
     uint32_t t = rd(a + 0x2FCu); if (!ok(t, 0x12D0) || t == a) t = rd(a + 0x300u);
-    if (!ok(t, 0x12D0) || t == a || !alive(t) || side_of(t) == side_of(a)) return false;
+    if (!ok(t, 0x12D0) || t == a || !alive(t) || !xfoes(t, a)) return false;
     uint32_t f[8]; const int n = all_fighters(f); bool on = false; for (int i = 0; i < n; i++) if (f[i] == t) on = true;
     return on && brv >= hp_eff(t);
 }
@@ -2832,7 +2836,7 @@ void hud_gauges(TagHudFighter& f, uint32_t a) {
 // retail way. Battle state only. XORBS=0 turns it off.
 void xgauge_hit_orbs(const Extra& e, uint32_t victim) {
     static const int n = std::getenv("PSPRECOMP_TAGTEAM_XORBS") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_XORBS")) : 5;
-    if (n <= 0 || std::getenv("PSPRECOMP_TAGTEAM_NOXGAUGE") || !victim || !ok(e.actor, 0x12D0) || side_of(victim) == side_of(e.actor)) return;
+    if (n <= 0 || std::getenv("PSPRECOMP_TAGTEAM_NOXGAUGE") || !victim || !ok(e.actor, 0x12D0) || !xfoes(victim, e.actor)) return;   // (FFA: every other fighter is a foe)
     const uint32_t a = (e.actor + 0x10CAu) & 0x07FFFFFFu; const uint16_t c = static_cast<uint16_t>(g_ram[a] | (g_ram[a + 1] << 8)) + static_cast<uint16_t>(n);
     g_ram[a] = static_cast<uint8_t>(c & 0xFF); g_ram[a + 1] = static_cast<uint8_t>(c >> 8);
 }
@@ -3897,7 +3901,7 @@ bool swap_slot_with(uint32_t S, uint32_t T, bool ko) {
         else { sp[0] = rdf(T + 0x80u); sp[1] = rdf(T + 0x84u); sp[2] = rdf(T + 0x88u); }
         rj.x = sp[0]; rj.y = sp[1]; rj.z = sp[2];
         const uint32_t jf0 = rj.foe;
-        if (ok(tf3, 0x12D0) && alive(tf3) && side_of(tf3) != side_of(S)) rj.foe = tf3;   // the mate's own foe (the slot fighter's may be down or another one)
+        if (ok(tf3, 0x12D0) && alive(tf3) && xfoes(tf3, S)) rj.foe = tf3;   // the mate's own foe (the slot fighter's may be down or another one)
         if (g_log) std::fprintf(stderr, "[MATE] t=%.2fs mate %08X (char %d) takes slot %08X (char %d -> %d): mate at (%.1f,%.1f,%.1f) foe %08X tgt %08X lockT %08X; slot fighter at (%.1f,%.1f,%.1f) foe %08X tgt %08X -> new body at (%.1f,%.1f,%.1f) foe %08X (was %08X)\n",
             dissidia_battle_age() / 60.0f, T, cT, S, cS, cT, rdf(T + 0x80u), rdf(T + 0x84u), rdf(T + 0x88u), tf3, tf2, ok(rd(T + 0x5ACu), 0x200) ? call(LOCK_GET, rd(T + 0x5ACu)) : 0u, ox, oy, oz, jf0, rd(rj.A + 0x2FCu), rj.x, rj.y, rj.z, rj.foe, jf0);
     }
@@ -4296,6 +4300,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             }
         }
     }
+    if (g_log && g_bs && g_nextra && owner == srd(g_bs + 56u)) audit_step();
     if (g_log && g_bs && g_nextra >= 2 && g_extra[0].started && g_extra[1].started && std::getenv("PSPRECOMP_TAGTEAM_HPMATRIX") && owner == srd(g_bs + 56u)) {
         // debug: every 5 s one attacker/victim pair of the four fighters: the victim is put in front of the attacker, the attacker starts an attack action
         // (PSPRECOMP_TAGTEAM_HPMATRIX=<first action id>), and the victim's HP / BRV are logged before and 2 s after.
@@ -4344,14 +4349,17 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
             const int base = std::atoi(std::getenv("PSPRECOMP_TAGTEAM_HPMATRIX"));
             // pairs: opposite sides only (0,2 = human team, 1,3 = enemy team)
             static const int P[8][2] = {{0, 1}, {0, 3}, {2, 1}, {2, 3}, {1, 0}, {3, 0}, {1, 2}, {3, 2}};
-            int pi = step % 8; const int round = step / 8;
-            if (const char* pl = std::getenv("PSPRECOMP_TAGTEAM_HPM_PAIRS")) { const size_t n = std::strlen(pl); if (n) pi = (pl[static_cast<size_t>(step) % n] - '0') & 7; }   // e.g. "604": only these pairs, in this order
+            int pi = std::getenv("PSPRECOMP_TAGTEAM_HPM_ALL") ? step % 12 : step % 8; const int round = step / (std::getenv("PSPRECOMP_TAGTEAM_HPM_ALL") ? 12 : 8);
+            if (const char* pl = std::getenv("PSPRECOMP_TAGTEAM_HPM_PAIRS")) { const size_t n = std::strlen(pl); if (n) pi = std::getenv("PSPRECOMP_TAGTEAM_HPM_ALL") ? (pl[static_cast<size_t>(step) % n] >= 'a' ? pl[static_cast<size_t>(step) % n] - 'a' + 10 : pl[static_cast<size_t>(step) % n] - '0') % 12 : (pl[static_cast<size_t>(step) % n] - '0') & 7; }   // (HPM_ALL: 0-9, a, b = the 12 ordered pairs)   // e.g. "604": only these pairs, in this order
             static const int PF[8][2] = {{2, 0}, {0, 2}, {3, 1}, {1, 3}, {2, 0}, {0, 2}, {3, 1}, {1, 3}};   // PSPRECOMP_TAGTEAM_HPM_FRIENDLY=1: same-side pairs (friendly fire)
             static const bool hpm_friendly = std::getenv("PSPRECOMP_TAGTEAM_HPM_FRIENDLY") != nullptr;
             const int ids[3] = {base, base + 1, base + 70};
             act = ids[round % 3];
             if (std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP")) { pi = std::atoi(std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP")); act = base + step; }   // one pair, action ids base, base+1, ...
-            const int (*PP)[2] = hpm_friendly ? PF : P;
+            // PSPRECOMP_TAGTEAM_HPM_ALL=1 (free-for-all test): all 12 ordered pairs of the four fighters (every fighter attacks each of the other three)
+            static const bool hpm_all = std::getenv("PSPRECOMP_TAGTEAM_HPM_ALL") != nullptr;
+            static const int PA[12][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 0}, {1, 2}, {1, 3}, {2, 0}, {2, 1}, {2, 3}, {3, 0}, {3, 1}, {3, 2}};
+            const int (*PP)[2] = hpm_all ? PA : hpm_friendly ? PF : P;
             const uint32_t a = F[PP[pi][0]], v = F[PP[pi][1]];
             if (ok(a, 0x12D0) && ok(v, 0x12D0)) {
                 att = a; vic = v; ra = R[PP[pi][0]]; rv = R[PP[pi][1]];
@@ -7344,7 +7352,7 @@ void chase_pair_set(uint32_t x, uint32_t other) {
     if (ok(L, 0x200) && call(LOCK_GET, L) != other) call(LOCK_SET, L, other);
 }
 void chase_pair_start(uint32_t att, uint32_t opp) {
-    if (!g_nextra || !g_bs || std::getenv("PSPRECOMP_TAGTEAM_NOCHASEPAIR") || !ok(att, 0x12D0) || !ok(opp, 0x12D0) || att == opp || side_of(att) == side_of(opp)) return;
+    if (!g_nextra || !g_bs || std::getenv("PSPRECOMP_TAGTEAM_NOCHASEPAIR") || !ok(att, 0x12D0) || !ok(opp, 0x12D0) || att == opp || !xfoes(att, opp)) return;
     if (g_cpair[0].a) {   // a chase chained from a running one: the first pair's own values are kept
         if (g_log) { std::fprintf(stderr, "[CHASEPAIR] t=%.2fs chained chase start %s %08X -> %s %08X (pair %08X / %08X kept); lock blocks:", dissidia_battle_age() / 60.0f, role_of(att), att, role_of(opp), opp, g_cpair[0].a, g_cpair[1].a);
             for (uint32_t x : {att, opp}) { const uint32_t L = rd(x + 0x5ACu); if (ok(L, 0x310)) std::fprintf(stderr, " %s mode %u (+272 %u, +281 %u)", role_of(x), rd(L + 264u), rd(L + 272u), rd(L + 281u) & 0xFFu); }
@@ -7432,7 +7440,7 @@ void chase_pair_step() {   // every frame: the pair is held while the chase runs
             }
             if (cs.cyc != c.cyc || cs.target != c.cyct) {   // switched during the chase
                 uint32_t f = 0;
-                if (cs.cyc == 1 && cs.target && alive(cs.target) && side_of(cs.target) != side_of(c.a)) f = cs.target;
+                if (cs.cyc == 1 && cs.target && alive(cs.target) && xfoes(cs.target, c.a)) f = cs.target;
                 else { cs.cyc = cs.cyc == 1 ? 0 : cs.cyc; if (cs.cyc != 2) cs.target = 0; f = slot_enemy(c.a); }
                 if (ok(f, 0x12D0)) { wr(c.a + 0x300u, f); wr(c.a + 0x2FCu, f); }
                 if (g_log) std::fprintf(stderr, "[CHASEPAIR] %s %08X: lock switch made during the chase kept: cycle %d, foe %08X\n", role_of(c.a), c.a, cs.cyc, f);
@@ -8959,6 +8967,35 @@ uint32_t hit_victim_of(uint32_t att) {
     for (int i = 0; i < g_nhits; i++) if (g_hits[i].att == att && g_hframe - g_hits[i].frame <= 2) return g_hits[i].vic;
     return 0;
 }
+// PSPRECOMP_TAGTEAM_HITAUDIT=1 (test aid, log only): for every hit the game registers (hitreg_hook) the attacker's / victim's BRV and HP now and 10 ticks later, so a hit whose damage
+// went to somebody else (or nowhere) shows. The free-for-all audit (every fighter a foe): one line per (attacker, victim) pair and hit, see "Batch eighteen".
+struct HitAudit { uint32_t att = 0, vic = 0; float age = 0; int vbrv = 0, vhp = 0, abrv = 0, ahp = 0; float aex = 0.f; int oth[4][2] = {}; uint32_t who[4] = {}; };
+std::vector<HitAudit> g_haudit;
+float audit_ex(uint32_t a) { const uint32_t st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0u; return ok(st, 0x40) ? rdf(st + 0x18u) : -1.f; }
+int audit_brv(uint32_t a) { const uint32_t st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0u; return ok(st, 0x40) ? static_cast<int>(rdh(st + 0x14u)) : -1; }
+void audit_record(uint32_t att, uint32_t vic) {
+    static const bool on = std::getenv("PSPRECOMP_TAGTEAM_HITAUDIT") != nullptr;
+    if (!on || !g_log) return;
+    for (const HitAudit& h : g_haudit) if (h.att == att && h.vic == vic) return;
+    if (g_haudit.size() > 32) return;
+    HitAudit h; h.att = att; h.vic = vic; h.age = dissidia_battle_age(); h.vbrv = audit_brv(vic); h.vhp = hp_eff(vic); h.abrv = audit_brv(att); h.ahp = hp_eff(att); h.aex = audit_ex(att);
+    uint32_t f[8]; const int n = all_fighters(f); int k = 0; for (int i = 0; i < n && k < 4; i++) if (f[i] != att && f[i] != vic) { h.who[k] = f[i]; h.oth[k][0] = audit_brv(f[i]); h.oth[k][1] = hp_eff(f[i]); k++; }
+    g_haudit.push_back(h);
+}
+void audit_step() {
+    if (g_haudit.empty()) return;
+    const float now = dissidia_battle_age();
+    for (size_t i = 0; i < g_haudit.size();) {
+        const HitAudit& h = g_haudit[i];
+        if (now - h.age < 10.f) { i++; continue; }
+        const int vb = audit_brv(h.vic), vh = hp_eff(h.vic), ab = audit_brv(h.att), ah = hp_eff(h.att);
+        std::fprintf(stderr, "[HITAUDIT] t=%.2fs %s %08X (side %u) -> %s %08X (side %u): victim BRV %d -> %d HP %d -> %d%s | attacker BRV %d -> %d HP %d -> %d EX %.0f -> %.0f | others:", h.age / 60.0f, role_of(h.att), h.att, side_of(h.att), role_of(h.vic), h.vic, side_of(h.vic),
+            h.vbrv, vb, h.vhp, vh, (vb == 0 && h.vbrv > 0) ? " BROKEN" : "", h.abrv, ab, h.ahp, ah, h.aex, audit_ex(h.att));
+        for (int k = 0; k < 4 && h.who[k]; k++) { const int b2 = audit_brv(h.who[k]), p2 = hp_eff(h.who[k]); if (b2 != h.oth[k][0] || p2 != h.oth[k][1]) std::fprintf(stderr, " %s(BRV %d->%d HP %d->%d)", role_of(h.who[k]), h.oth[k][0], b2, h.oth[k][1], p2); }
+        std::fprintf(stderr, "\n");
+        g_haudit.erase(g_haudit.begin() + static_cast<long>(i));
+    }
+}
 void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     const uint32_t att = static_cast<uint32_t>(ctx->r[4]), info = static_cast<uint32_t>(ctx->r[5]);
@@ -8994,6 +9031,7 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
             if (keep_foe && g_log) { static int c = 0; if (c++ < 60) std::fprintf(stderr, "[HITFOE] t=%.2fs %s %08X also hit %s %08X this frame: the hit on its foe %s %08X is kept for the damage step\n", dissidia_battle_age() / 60.0f, role_of(att), att, role_of(vic), vic, role_of(g_hits[i].vic), g_hits[i].vic); }
             if (i == g_nhits && g_nhits < 8) g_nhits++;
             if (i < 8 && !keep_foe) g_hits[i] = {vic, att, g_hframe};
+            if (!keep_foe) audit_record(att, vic);
             if (!keep_foe) {   // the EX Burst rule: the burster's last hit (an assist's hit counts for its master)
                 uint32_t own = att;
                 for (int q = 0; q < g_nextra; q++) if (g_extra[q].started && (att == g_extra[q].actor || att == xas_ptr(g_extra[q].actor) )) own = g_extra[q].actor;
@@ -9281,8 +9319,8 @@ void assist_aim_follow() {
         if (!ok(m, 0x12D0) || g_ram[(m + 0x542u) & 0x07FFFFFFu] != 0) continue;
         const uint32_t a = rd(m + 0x1108u);
         if (!ok(a, 0x12D0) || a == m || g_ram[(a + 0x542u) & 0x07FFFFFFu] != 1) continue;
-        auto good = [&](uint32_t x) { if (const uint32_t b = ao8_body_of(x)) return side_of(b) != side_of(m);   // an Assist Off call's assist actor (its partner is parked)
-            return x && x != m && ok(x, 0x12D0) && g_ram[(x + 0x542u) & 0x07FFFFFFu] == 0 && side_of(x) != side_of(m) && alive(x); };
+        auto good = [&](uint32_t x) { if (const uint32_t b = ao8_body_of(x)) return xfoes(b, m);   // an Assist Off call's assist actor (its partner is parked)
+            return x && x != m && ok(x, 0x12D0) && g_ram[(x + 0x542u) & 0x07FFFFFFu] == 0 && xfoes(x, m) && alive(x); };
         const uint32_t mL = rd(m + 0x5ACu);
         uint32_t t = ok(mL, 0x200) ? call(LOCK_GET, mL) : 0u;
         if (!good(t)) t = rd(m + 0x300u);
@@ -9321,7 +9359,7 @@ void aim_fix() {
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOAIMFIX") != nullptr, lg = g_log && std::getenv("PSPRECOMP_TAGTEAM_AIMLOG") != nullptr;
     if (off || !g_bs || !g_nextra) return;
     uint32_t f[6]; const int n = all_fighters(f);
-    auto valid = [&](uint32_t x, uint32_t self) { if (const uint32_t b = ao8_body_of(x)) return side_of(b) != side_of(self) && !exb_apart(b, self);   // an Assist Off call's assist actor (stands in for its parked partner)
+    auto valid = [&](uint32_t x, uint32_t self) { if (const uint32_t b = ao8_body_of(x)) return xfoes(b, self) && !exb_apart(b, self);   // an Assist Off call's assist actor (stands in for its parked partner)
         return x && x != self && ok(x, 0x12D0) && g_ram[(x + 0x542u) & 0x07FFFFFFu] == 0 && foes(x, self) && alive(x) && rdf(x + 0x84u) > -20.0f && std::fabs(rdf(x + 0x80u)) < 1000.0f && !exb_apart(x, self); };
     static std::map<uint32_t, std::array<uint32_t, 4>> last;
     for (int i = 0; i < n; i++) {
@@ -9770,7 +9808,7 @@ void callfx_step() {
     if (g_callfx_gen != g_battle_gen) { g_callfx_rel = -1.f; g_callfx_hum = 0; return; }
     if (g_callfx_hum && g_callfx_hum_rel == g_callfx_rel && !std::getenv("PSPRECOMP_TTCAM_AO9HUMANSLOW_NOHIT")) {
         const uint32_t v = ok(g_callfx_hum, 0x12D0) ? hit_victim_of(g_callfx_hum) : 0u;
-        if (v && v != g_callfx_hum && ok(v, 0x12D0) && side_of(v) != side_of(g_callfx_hum)) { callfx_release("the called human's first hit landed"); return; }
+        if (v && v != g_callfx_hum && ok(v, 0x12D0) && xfoes(v, g_callfx_hum)) { callfx_release("the called human's first hit landed"); return; }
     }
     if (dissidia_battle_age() < g_callfx_rel) return;
     callfx_release("timeout");
@@ -9872,7 +9910,7 @@ void place_at(uint32_t P, float x, float y, float z, const char* why) {
 // Round 7: a usable foe = a living enemy fighter that is on the stage now (all_fighters: the slot fighters + started extras). The 20 Nov host runs: after a
 // KO tag-in the caller's foe word still named the old body, parked at (0, 0, 0) in script 1 (alive() true): the partner attacked the empty spot 7 times.
 bool ao_foe_ok(uint32_t x, uint32_t M) {
-    if (!x || x == M || !ok(x, 0x12D0) || g_ram[(x + 0x542u) & 0x07FFFFFFu] != 0 || side_of(x) == side_of(M) || !alive(x)) return false;
+    if (!x || x == M || !ok(x, 0x12D0) || g_ram[(x + 0x542u) & 0x07FFFFFFu] != 0 || !xfoes(x, M) || !alive(x)) return false;
     uint32_t f[6]; const int n = all_fighters(f); for (int i = 0; i < n; i++) if (f[i] == x) return true;
     return false;
 }
@@ -10161,7 +10199,7 @@ int ao8_hit_test(uint8_t* rdram, recomp_context* ctx, uint32_t v) {
     for (uint32_t k = 0; k < 2; k++) { Ao8& a = g_ao8[k];
         if (!a.M || a.X != v || !a.parked || a.gen != g_battle_gen || !ok(a.P, 0x12D0) || !alive(a.P) || is_down(a.P)) continue;
         const uint32_t c = static_cast<uint32_t>(ctx->r[4]), rec0 = ok(c, 0x40) ? rd(c) : 0u, att = ok(rec0, 0x40) ? rd(rec0 + 24u) : 0u;
-        if (ok(att, 0x12D0) && side_of(att) == side_of(a.P)) { ctx->r[2] = 0; return 1; }   // (own side: never)
+        if (ok(att, 0x12D0) && !xfoes(att, a.P)) { ctx->r[2] = 0; return 1; }   // (own side: never)
         // (a stand-in test with the partner's position words at X's spot never hit: host K10, 8 tests; the collision reads the model's nodes, which stay at the parked spot)
         const uint32_t P = a.P; uint32_t snap[4]; for (int i = 0; i < 4; i++) snap[i] = rd(v + 0x380u + 4u * i);
         g_orig_hg(rdram, ctx); const int32_t hit = ctx->r[2];
@@ -10189,7 +10227,7 @@ uint32_t ao8_hit_switch(uint32_t x, uint32_t att) {
     if (forced_x && !ao8_body_of(x)) { bool in_call = false; for (const Ao8& c : g_ao8) if (c.M && c.X == x) in_call = true;
         if (!in_call) { if (g_log) { static int n = 0; if (n++ < 50) std::fprintf(stderr, "[AO8] t=%.2fs hit of %s %08X on the dismissed assist %08X dropped\n", dissidia_battle_age() / 60.0f, role_of(att), att, x); } return 0xFFFFFFFFu; } }
     for (uint32_t k = 0; k < 2; k++) { Ao8& a = g_ao8[k];
-        if (!a.M || a.X != x || !a.parked || a.gen != g_battle_gen || !ok(a.P, 0x12D0) || !alive(a.P) || is_down(a.P) || side_of(att) == side_of(a.P)) continue;
+        if (!a.M || a.X != x || !a.parked || a.gen != g_battle_gen || !ok(a.P, 0x12D0) || !alive(a.P) || is_down(a.P) || !xfoes(att, a.P)) continue;
         const uint32_t P = a.P;
         { Ao8XFix f; f.X = x; f.P = P; f.t = dissidia_battle_age(); for (int i = 0; i < 4; i++) f.snap[i] = rd(x + 0x380u + 4u * i); g_ao8_xfix.push_back(f); g_ao8_xwatch[P] = f.t; }
         std::fprintf(stderr, "[AO8] t=%.2fs side %u: %s %08X hits the assist %08X (script %d): the call ends, partner %08X takes its place and the hit\n", dissidia_battle_age() / 60.0f, k, role_of(att), att, x, static_cast<int16_t>(rd(x + 0x180u) & 0xFFFFu), P);
@@ -10337,7 +10375,7 @@ bool ao9_wall_pass(uint32_t c, uint32_t v) {
     static const bool off = [] { const char* e = std::getenv("PSPRECOMP_TTCAM_AO9WALLHIT"); return e && e[0] == '0'; }();
     if (off || !ok(v, 0x12D0) || !ok(c, 0x40)) return false;
     const int sc = static_cast<int16_t>(rd(v + 0x180u) & 0xFFFFu); if (sc != 703 && sc != 704 && sc != 753 && sc != 754) return false;
-    const uint32_t rec = rd(c), att = ok(rec, 0x40) ? rd(rec + 24u) : 0u; if (!ok(att, 0x12D0) || side_of(att) == side_of(v)) return false;
+    const uint32_t rec = rd(c), att = ok(rec, 0x40) ? rd(rec + 24u) : 0u; if (!ok(att, 0x12D0) || !xfoes(att, v)) return false;
     bool called = false; for (const Ao9Last& l : g_ao9_last) if (l.M == att && l.gen == g_battle_gen && dissidia_battle_age() - l.t0 < 360.f) called = true;
     if (!called) return false;
     const uint8_t b = g_ram[(v + 400u) & 0x07FFFFFFu]; if (!(b & 0x60u)) return false;
@@ -10475,7 +10513,7 @@ void ao9_extra_step(const Extra& e) {
         if (from < 0.f && std::getenv("PSPRECOMP_TTCAM_AO9STILLFROM") && age >= static_cast<float>(std::atof(std::getenv("PSPRECOMP_TTCAM_AO9STILLFROM")))) from = age;   // (earlier start: the foe hovers before the call)
         if (from < 0.f && g_ao9[k].E == E && g_ao9[k].human) from = g_ao9[k].t0 / 60.0f;
         if (from >= 0.f) { const bool hold = age - from < len; uint32_t f[8]; const int n = all_fighters(f);
-            for (int i = 0; i < n; i++) { const uint32_t Q = f[i]; if (!ok(Q, 0x12D0) || side_of(Q) == side_of(M) || g_ram[(Q + 0x542u) & 0x07FFFFFFu] != 0) continue; wr(Q + 0x380u, hold ? (rd(Q + 0x380u) | 2u) : (rd(Q + 0x380u) & ~2u));
+            for (int i = 0; i < n; i++) { const uint32_t Q = f[i]; if (!ok(Q, 0x12D0) || !xfoes(Q, M) || g_ram[(Q + 0x542u) & 0x07FFFFFFu] != 0) continue; wr(Q + 0x380u, hold ? (rd(Q + 0x380u) | 2u) : (rd(Q + 0x380u) & ~2u));
                 static const char* af = std::getenv("PSPRECOMP_TTCAM_AIRFOE"); static std::map<uint32_t, float> fy0;   // + PSPRECOMP_TTCAM_AIRFOE=<m>: they hover <m> m over their floor (an airborne foe), PLACEd every frame
                 if (af && hold) { if (!fy0.count(Q)) fy0[Q] = rdf(Q + 0x84u);
                     const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
@@ -10685,7 +10723,7 @@ void actl_hook(uint8_t* rdram, recomp_context* ctx) {
         if (from >= 0.f && ok(Mc, 0x12D0)) {
             const bool hold = age - from < len; static std::map<uint32_t, float> floor_y; static const char* af = std::getenv("PSPRECOMP_TTCAM_AIRFOE");
             uint32_t f[8]; const int n = all_fighters(f);
-            for (int i = 0; i < n; i++) { const uint32_t E = f[i]; if (!ok(E, 0x12D0) || side_of(E) == side_of(Mc) || g_ram[(E + 0x542u) & 0x07FFFFFFu] != 0) continue;
+            for (int i = 0; i < n; i++) { const uint32_t E = f[i]; if (!ok(E, 0x12D0) || !xfoes(E, Mc) || g_ram[(E + 0x542u) & 0x07FFFFFFu] != 0) continue;
                 wr(E + 0x380u, hold ? (rd(E + 0x380u) | 2u) : (rd(E + 0x380u) & ~2u));
                 if (af && af[0] == 'j' && hold) { static std::set<uint32_t> jumped; if (age - from >= static_cast<float>(std::atof(af + 1)) && !jumped.count(E)) { jumped.insert(E);   // "j<s>": a real jump (script 101) <s> s after the call
                     const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; call(START_ACTION, E + 304u, 101u, 0); g_ctx->r[29] = static_cast<int32_t>(sp1);
