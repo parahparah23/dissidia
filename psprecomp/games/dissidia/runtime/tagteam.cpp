@@ -10725,7 +10725,12 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 const bool spc = ffc < 0 && team == 0 && !no_real && !l.callin && l.info_slot < 100 && sp_cpu_battle();   // single player: his first CPU row is the partner
                 const int kth = (l.side < 2 && !l.callin && !std::getenv("PSPRECOMP_TAGTEAM_OLDTHIRD")) ? std::max(1, per_side_seen[l.side]) : 1;   // 3 v 3: the side's 1st / 2nd partner
                 int c = ffc >= 0 ? ffc : spc ? sp_next(false) : (no_real || l.callin || l.info_slot >= 100) ? 0 : (comms_battle() && ffa_now()) ? ffa_fill_or_player(static_cast<int>(l.side), &drv) : comms_battle() ? comms_partner_char(static_cast<int>(l.side), &drv) : (team == 0 && !sp_partner && !clones_allowed()) ? 0 : party_partner_char(team, hum, cpu, kth);
-                if (!c && ffc < 0 && !comms_battle() && !no_real && !l.callin && l.info_slot < 100 && cpu_fill_now() && l.side < 2) c = fill_pick(static_cast<int>(l.side));   // single player CPU fill (battle lobby): an empty place gets a CPU
+                // single player CPU fill (battle lobby): an empty place gets a CPU. User (25 Nov): the human's side only when his party has an empty
+                // place - a full party (5 members) stays 1 v 2, its members come in when he falls.
+                bool human_full = false;
+                if (team == 0 && !comms_battle()) human_full = read_party(g_human_rec).n >= 5;   // the human's party record (as the "party reserve ... lists n/n" log line), lead included
+                if (!c && human_full && cpu_fill_now() && g_log) std::fprintf(stderr, "[CPUFILL] side %u: the human's party is full, no CPU fill\n", l.side);
+                if (!c && !human_full && ffc < 0 && !comms_battle() && !no_real && !l.callin && l.info_slot < 100 && cpu_fill_now() && l.side < 2) c = fill_pick(static_cast<int>(l.side));
                 if (spc) { sp_mark(c, true); std::fprintf(stderr, "[TTSP] partner at the start: CPU member %d (%s)\n", c, c ? char_label(c, true).c_str() : "none loadable"); }
                 else if (!comms_battle() && team == 0 && !sp_partner && !clones_allowed() && g_log) std::fprintf(stderr, "[TAGTEAM] single player: no CPU row on the human's team, no partner (1 v 2)\n");
                 l.driver = drv;
