@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <vector>
+#include <algorithm>
 #include "menu_layer.h"
 #include "psp_ge_draw.h"
 #include "../../../runtime/src/hle/psp_savedata_dialog.h"
@@ -54,10 +56,21 @@ void draw_entrance(const float pos[3], float age) {
     const float col_a = smooth(t / 0.25f) * (tp < 0 ? 1.f : 1.f - smooth(tp / 0.5f)) * fade_out;
     if (col_a > 0.01f) {
         const float half = 0.85f * unit, x0 = fx - half * 2.4f, x1 = fx + half * 2.4f;
+        // The column is separable: core / edge depend on x only, the vertical profile on y only. Each is computed once per pixel column / row (lazily,
+        // from the very coordinates the band hands over) instead of once per pixel: at the entrance close-up the band is 100k+ pixels and the exp / pow /
+        // sin per pixel cost 25-40 ms a frame (the stutter after a call-in). PSPRECOMP_TAGTEAM_FXSLOW=1: per pixel as before.
+        static const bool slow = std::getenv("PSPRECOMP_TAGTEAM_FXSLOW") != nullptr;
+        const int sc = g_fx.scale(), nx = 480 * sc + 8, ny = 272 * sc + 8;
+        static std::vector<float> cc, ce, cv; cc.assign(size_t(nx), -1.f); ce.assign(size_t(nx), 0.f); cv.assign(size_t(ny), -1.f);
         g_fx.band(x0, std::min(ty, fy) , x1, fy + 2.f, [&](float x, float y) {
-            const float d = (x - fx) / half, h = (fy - y) / std::max(1.f, fy - ty);   // 0 at the feet, 1 at the top
-            const float core = std::exp(-d * d * 4.f), edge = std::exp(-d * d * 0.7f) * 0.5f;
-            const float vert = std::pow(std::max(0.f, 1.f - h), 0.7f) * (0.75f + 0.25f * std::sin(9.f * h - 10.f * t));
+            const float h = (fy - y) / std::max(1.f, fy - ty);   // 0 at the feet, 1 at the top
+            float core, edge, vert;
+            const int ix = int(std::floor(g_fx.PX(x))), iy = int(std::floor(g_fx.PY(y)));
+            const bool cached = !slow && ix >= 0 && ix < nx && iy >= 0 && iy < ny;
+            if (cached && cc[size_t(ix)] >= 0.f) { core = cc[size_t(ix)]; edge = ce[size_t(ix)]; }
+            else { const float d = (x - fx) / half; core = std::exp(-d * d * 4.f); edge = std::exp(-d * d * 0.7f) * 0.5f; if (cached) { cc[size_t(ix)] = core; ce[size_t(ix)] = edge; } }
+            if (cached && cv[size_t(iy)] >= 0.f) vert = cv[size_t(iy)];
+            else { vert = std::pow(std::max(0.f, 1.f - h), 0.7f) * (0.75f + 0.25f * std::sin(9.f * h - 10.f * t)); if (cached) cv[size_t(iy)] = vert; }
             const float a = (core * 1.0f + edge) * vert * col_a;
             return LayerColor{150.f + 100.f * core, 200.f + 50.f * core, 255.f, std::min(1.f, a)};
         });
