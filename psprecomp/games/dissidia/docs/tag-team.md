@@ -34,7 +34,7 @@
     - ~~Communications 2v2: the Battle Lobby closes instantly (`[LOBBY] single player: ...` logged in the online session).~~ Fixed 23 Nov [PR #129] (see "Batch four").
     - Cannot pause in the online tag battle: looks like retail (see "Batch four"); a pause for both players would be new work.
     - ~~LAN mode never finds the other player on the same WiFi (the relay does). Generic multiplayer (`rp6_lan_1122_2246`).~~ Fixed 23 Nov [PR #129] (see "Batch five"; the Android multicast lock needs a new APK skeleton).
-  - (23 Nov: likely cause found and changed, not reproduced on a device; see "Batch five".)
+  - (23 Nov: likely cause found and changed, not reproduced on a device; see "Batch five". 25 Nov: reproduced in the two-copy rig and shown to be the cause, see "Batch fourteen".)
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
     - (23 Nov: changed, the player's own next member now takes the slot back; see "Batch five".)
@@ -5273,3 +5273,29 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   - `tt/orb3`: the CPU slot fighter summons at 25 s (orb gone). KO at 45 s, and the partner enters with his own use: `slot fighter char 31 -> 30, summon uses 0 -> 1`. The game re-creates the orb at 46.67 s; screenshots show the orb on Vaan's panel.
   - `tt/orb5`: the partner summons at 24.4 s (a real spend, booked). KO at 40 s, and he enters with his use spent: `uses 1 -> 0`. The game removes the orb at 41.67 s.
 - Debug aid: `PSPRECOMP_TAGTEAM_ORBLOG=1` logs every change of both orb records (`[ORBLOG]`).
+
+### Batch fourteen (25 Nov): the white screen after leaving a tag battle online: reproduced, cause confirmed (tree ttwhite, branch tt-whitescreen)
+- **Rig** (`~/dissidia/tt/s2/ttwhite/scen.py`, uses `mp_cpu.py` / `ctl.py` there; own ADHOC port 48650): two copies (LAN) walk into a Group Battle,
+  each with three rows (row 1 a player, row 2 a CPU partner (`L`), row 3 a player = the reserve), `PSPRECOMP_TAGTEAM_KOLIST=slot0:12,slot1:14,slot0:30,slot1:32,slot1:55`
+  with `KOLIST_NAT=1` and random pad moves on both: the CPU partner takes the slot at the first KO, the player's own reserve member is LOADED mid battle at
+  the second (`[UNLOAD] char 27: this load made 2 file objects`), the last KO of side 1 ends the match. (The earlier rig had no CPU row, so no extra
+  stood on the stage and a KO'd slot fighter ended the match: nothing was ever loaded mid battle.) Modes: `drop` (B killed; `DROP_PAT` / `DROP_N` /
+  `DROP_DELAY` choose the moment), `normal` (play to the tally, both back out), `leave` (B leaves first), `second` (a second match in the same room),
+  `rejoin` (leave, create the room again, B joins). Samples: A's render target (`S`) white fraction every ~2 s plus screenshots `a_NNN.png` / `b_NNN.png`.
+- **Reproduced** (`dC_old`): B dropped 1.5 s after the final blow's finish start (the other copy is in the retail results: "Obtained material", "Received PP"),
+  with `PSPRECOMP_TAGTEAM_MENULEFTOVER=1` (old): after the results the menu overlay loads, 20 frames later the leftover unload releases the 4 mid-battle
+  characters' files, and the screen goes white for good (`S` capture all 255, 10 of 10 samples white; the debug socket answers `S` but not the game-thread
+  commands `I` / `V`, the log goes silent after `after the leftover unload`: the game thread hangs). The same run with the current code (`dC_new`): the
+  results, then the main menu (white only in the one-frame transition flash). Drops mid battle (`dA_*`, `dB_*`) and a normal end (`bN_*`) did NOT go white
+  in either code on the host: the race needs the menu still loading when the unload runs, so it depends on the timing of the results screen.
+  Draw count of the Group Battle menu is the same 132 draws/frame on the host (Vulkan on the GTX 1660 under Xvfb, `PSPRECOMP_RENDERER=vulkan`) as the 134 of the RP6 log.
+- Not checked: the Adreno / Android IO timing (the RP6 menu kept running there, 30 fps with 134 draws, so it may be a presentation variant of the same
+  early release); the real device needs a retest with a build that has the Batch five change (it is in tag-slot, not yet in an APK as far as known).
+- **Lobby flow checks** (same rig, both copies sampled): the match booked and the tally shown on both; "Disconnect from wireless and return to room
+  creation / search screen? YES" from the setup screen of A or B leaves the other copy in its room screen without a white or frozen frame; backing out
+  of Group Battle / Communications reaches the main menu (6 circle presses); a SECOND match in the same room (Enter Battle again, parties kept) plays to
+  its tally with 0 mismatched frames (1481 compared in battle 1, same in battle 2); leaving and creating / searching / joining a room again gives the
+  lobby with both players (parties start empty, as designed). Seen but not changed: the lobby setup screen prints `[TTGB] setup screen` from the
+  guest only once its screen is shown, so a script that presses Cross on the guest too early opens Player Select there (test artifact, not a game bug).
+- Regression: see the commit message.
+
