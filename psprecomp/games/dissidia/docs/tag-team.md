@@ -5390,7 +5390,7 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   the first entry of `keys` in the service config; the service rate-limits), the page in `psp_settings.cpp` (PAGE_REPORT), `psp_report::set_ram` in main.cpp,
   `note_gpu` in the event loop, game facts through `psp_report::set_state_hook` (framerate.cpp: in_battle, mode, frame rate). It is in RUNTIME_SOURCES, so the setup app's
   on-device compile has everything (zlib + `psp_http` + mbedTLS as the cloud sync uses; the URL opens with `SDL_OpenURL`: xdg-open / ShellExecute / open / an ACTION_VIEW intent).
-- The zip (<= 24 MB, deflate): report.json (title, description, `system`: version, git commit, build date, OS, device model, Android version / API, CPU, GPU + driver, renderer,
+- The zip (<= 24 MB, deflate): report.json (title, description, `system`: version, git commit, OS, device model, Android version / API, CPU, GPU + driver, renderer,
   resolution, game id / region, mods, texture packs, changed debug / tag team switches, in-battle flag, uptime), last_run.log + run.log + setup.log (tail 8 MB), settings.ini,
   env.txt, crash* files, and ram.bin (the used part of the PSP's 128 MB, from address 0; left out when it does not fit). NEVER cloud.ini / cloud/; lines that look like
   tokens / passwords are blanked; the home folder is replaced by `~` and the user name when it is a path component.

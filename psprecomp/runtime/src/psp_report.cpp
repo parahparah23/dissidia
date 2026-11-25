@@ -465,7 +465,6 @@ Pairs system_info() {
     Pairs v;
     v.push_back({"version", psp_release_version()});
     v.push_back({"git_commit", PSPRECOMP_GIT_COMMIT});
-    v.push_back({"build_date", std::string(__DATE__) + " " + __TIME__});
     v.push_back({"os", os_name()});
 #if defined(__ANDROID__)
     v.push_back({"device_model", prop("ro.product.manufacturer") + " " + prop("ro.product.model")});
