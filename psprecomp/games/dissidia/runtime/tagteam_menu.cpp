@@ -544,7 +544,7 @@ void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
         }
     }
     gs_row(150.f, 330.f, 220.f, 24.f, g_ffa_slot == 4, "DONE", "", false, 8.6f);
-    gs_footer(g_ffa_flow ? "Up/Down: player   Left/Right: field   Cross: change / Done   Circle: back" : "Up/Down: player   Left/Right: field   Cross: change   Done: Cross / Circle");
+    gs_footer(g_ffa_flow ? "Up/Down: player   Left/Right: field   Cross: change / Done   Circle: back to the selectors" : "Up/Down: player   Left/Right: field   Cross: change   Done: Cross / Circle");
 }
 
 void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a) {
@@ -882,6 +882,10 @@ void sp_dump(uint32_t screen) {   // debug (PSPRECOMP_TTSP_CURDUMP=1): small wor
     }
     prev = now; prevm = nowm; prev_scr = screen;
 }
+void sp_scrdump(uint32_t screen) {   // debug (PSPRECOMP_TTSP_SCRDUMP=<file>): the setup screen object (0x8000 bytes) once, 120 ticks in
+    static int tick = 0; if (++tick != 120) return;
+    if (FILE* f = std::fopen(std::getenv("PSPRECOMP_TTSP_SCRDUMP"), "wb")) { std::fwrite(g_ram + (screen & 0x07FFFFFFu), 1, 0x8000, f); std::fclose(f); }
+}
 void sp_partyscan(uint32_t screen) {   // debug (PSPRECOMP_TTSP_PARTYSCAN="c0,c1,c4"): where are the player's party members (first, second, fifth) while the screen runs
     static bool done = false; if (done) return; done = true;
     int c0 = 0, c1 = 0, c4 = 0; if (std::sscanf(std::getenv("PSPRECOMP_TTSP_PARTYSCAN"), "%d,%d,%d", &c0, &c1, &c4) != 3) return;
@@ -944,6 +948,21 @@ void sp_hide_bands() {   // the round dialog (every matchup, the lobby sets them
     for (const auto& r : {std::pair<float, float>{103.f, 125.f}, std::pair<float, float>{183.f, 229.f}})
         g_layer.band(66.f, r.first, 414.f, r.second, [&](float, float) { return LayerColor{208, 210, 219, 1.f}; });
 }
+// 25 Nov: the Free-for-all walks the game's own Party Select and CPU Select (no scripted pad presses). Arriving at the setup screen, the players screen is filled from them:
+// P1 = the party's first two members, P2 / P3 / P4 = CPU Select's 1st / 2nd / 3rd pick (the screen object keeps the picks at +0x8B4, 8 bytes apart, charId or 0 = empty;
+// found by diffing two screen dumps with different picks); P2 stays on (random when empty), an empty P3 / P4 is Off. Strength / tag-in settings are kept.
+void ffa_prefill(uint32_t screen, const uint8_t* rows, int n) {
+    uint8_t p1[2] = {0, 255}; dissidia_tagteam_ffa_p1_get(p1);
+    if (n >= 1 && rows[0]) { p1[0] = rows[0]; p1[1] = (n >= 2 && rows[1] && rows[1] != rows[0]) ? rows[1] : 255; dissidia_tagteam_ffa_p1_set(p1); }
+    for (int i = 0; i < 3; i++) {
+        const int c = g_ram[(screen + 0x8B4u + 8u * uint32_t(i)) & 0x07FFFFFFu];
+        uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(i, sl);
+        const uint8_t pick = (c >= 1 && c <= 33) ? static_cast<uint8_t>(c) : 0;
+        sl[0] = (i == 0 || pick) ? 1 : 0; sl[1] = pick; if (sl[2] == pick) sl[2] = 0;
+        dissidia_tagteam_ffa_set(i, sl);
+    }
+    std::fprintf(stderr, "[FFA] players filled from Party Select / CPU Select: P1 %d + %d, CPU picks %d %d %d\n", p1[0], p1[1], g_ram[(screen + 0x8B4u) & 0x07FFFFFFu], g_ram[(screen + 0x8BCu) & 0x07FFFFFFu], g_ram[(screen + 0x8C4u) & 0x07FFFFFFu]);
+}
 void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     g_sp_screen_last = screen;
     const auto now = std::chrono::steady_clock::now();
@@ -1000,7 +1019,10 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
         g_lobby_pending = false; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
         uint8_t L0[10] = {1, 2, 0, 5, 0, 0, 0, 0, 0, 1}; dissidia_tagteam_lobby_get(L0);
-        if (L0[0] == 3) { g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; } else { g_dlg_mode = 2; g_lob_flow = true; }
+        if (L0[0] == 3) {
+            g_ffa_flow = true; g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1;
+            if (!std::getenv("PSPRECOMP_TAGTEAM_FFA_SCRIPT") && !std::getenv("PSPRECOMP_TAGTEAM_FFA_NOPREFILL")) ffa_prefill(screen, rows, n);
+        } else { g_dlg_mode = 2; g_lob_flow = true; }
     }
     {   // Circle on the setup screen's list (no dialog): back to the Battle Lobby, the step before (the Free-for-all keeps retail's Circle)
         uint8_t Lc[10] = {1, 2, 0, 5, 0, 0, 0, 0, 0, 1}; dissidia_tagteam_lobby_get(Lc);
@@ -1066,6 +1088,7 @@ void sp_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     const bool hide = g_sp_dlg_ran && g_sp_hide_round >= 0;
     if (std::getenv("PSPRECOMP_TTSP_CURDUMP")) sp_dump(screen);
     if (std::getenv("PSPRECOMP_TTSP_PARTYSCAN")) sp_partyscan(screen);
+    if (std::getenv("PSPRECOMP_TTSP_SCRDUMP") && g_ram[(screen + 0x788u) & 0x07FFFFFFu]) sp_scrdump(screen);
     if (std::getenv("PSPRECOMP_TAGTEAM_NOSPCPU") || !dissidia_tagteam_sp_mode()) {
         if (g_dlg_open && (g_dlg_sp || (g_lob_sp && g_dlg_mode >= 2 && g_dlg_mode <= 4))) g_dlg_open = false;   // (not the Communications lobby: PR #129, it closed at once)
         if (hide || g_sp_layer_up) { g_layer.begin(std::max(2, psp_sddialog::output_scale())); if (hide) sp_hide_bands(); g_layer.publish(); g_sp_layer_up = hide; }
@@ -1120,7 +1143,7 @@ int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool onl
 void dissidia_tagteam_modesel_draw_frozen(bool online) { ge_draw_set_game_layer_ttl(450); modesel_draw(online); }   // after a choice: the Mode Select stays on screen, cursor on the chosen row, until the next menu opens (the layer expires 150 ms after the last draw)
 void dissidia_tagteam_modesel_confirm(bool sp) {
     g_inject_late.store(9, std::memory_order_relaxed);
-    if (sp && g_ms_ffa && !std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY")) g_script_t.store(0, std::memory_order_relaxed);   // Free-for-all: no 5-member Party Select / CPU Select: the screens are passed by a script
+    if (sp && g_ms_ffa && std::getenv("PSPRECOMP_TAGTEAM_FFA_SCRIPT") && !std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY")) g_script_t.store(0, std::memory_order_relaxed);   // (25 Nov: the scripted pad walk is opt-in now; the real Party Select / CPU Select are shown and their picks fill the players screen)   // Free-for-all: no 5-member Party Select / CPU Select: the screens are passed by a script
 }   // the start menu sees a Cross press after the hold
 void dissidia_tagteam_lobby_pending(bool on) { g_lobby_pending = on; }
 

@@ -46,9 +46,9 @@
   - Online: stuck on a white screen when leaving Communications mode (RP6 log `~/dissidia/tt/desk_logs/rp6_whitescreen_1122_2228.log`): after the tag battle, `[ADHOC] adhocctl event 2` (leave / disconnect) at log lines ~19923 / 19947, the battle teardown unloads every character (t=342.4, `after the leftover unload`), then `[HANGDUMP] game thread stuck` from line 20051 on (empty world list) while the GPU keeps drawing 30 fps - the game thread never returns after the teardown / leave.
   - Online (2 machines, RP6 log `~/dissidia/tt/desk_logs/rp6_spectate_terra_1122_2207.log`): after the human died, spectating was not right; then he came back as TERRA (`GET READY: YOU'RE UP NEXT - TERRA` 196.8 s, `CALLIN queued` 199.8 s) as an EXTRA this machine drives (`chase camera on the extra this machine drives 09D5E970`) instead of in his slot - the camera did not follow / turn correctly and L could not change the lock-on (camera and lock-on are bound to the slot fighter). At 229.6 s the slot was rebuilt as Terra and the chase camera went off.
     - (23 Nov: changed, the player's own next member now takes the slot back; see "Batch five".)
-  - FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.
+  - ~~FFA: the menus are very rough: they rely on a scripted menu walk (pad presses with fixed timing) - build the flow properly.~~ Done 25 Nov (see "Batch sixteen"): no pad script; the real Party Select / CPU Select are walked by the player.
   - ~~FFA: Circle (back) on the FFA players screen starts the battle; it must go back.~~ Fixed 23 Nov [PR #129] (see "Batch two").
-  - FFA: use the game's own character selector, not a list.
+  - FFA: use the game's own character selector, not a list. Mostly done 25 Nov ("Batch sixteen"): the fighters are picked in the game's Party Select / CPU Select; the list is only left for later edits and the tag-in column (not yet in the selector).
   - ~~FFA: after the battle the player lands in the Group Battle menu, which makes no sense.~~ Changed 23 Nov: the players screen comes back (see "Batch six").
   - ~~Battle lobby: a way to set the strength of all CPUs at once.~~ Done 23 Nov [PR #129]: the ALL CPUs row (see "Batch two").
   - ~~Tag team: the original CPU enemy can attack during the other players' battle-start banter.~~ Fixed 23 Nov [PR #129] (see "Batch two").
@@ -5316,3 +5316,17 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   and the retail list was visible until the next menu came. The Mode Select is now redrawn frozen (cursor on the chosen row, `g_ms_hold`) over the list from the sub-list's tick until the next screen
   (the layer lives 450 ms after the last draw: `ge_draw_set_game_layer_ttl`, psp_ge_draw.cpp; the retail list was visible for a few frames after the confirm). `PSPRECOMP_TAGTEAM_MENUBACK_OLD=1` = old for (1), `PSPRECOMP_TAGTEAM_MSHOLD_OFF=1` = old for (2).
   Tested (host, `~/dissidia/tt/s2/ffamenu`, shots `r2b_*`, `s1..s3`): 2v2: setup > lobby > Circle > CPU Select > Cross > lobby again; Mode Select click: 60 frames at ~30 ms: Mode Select straight to the Party Select fade, no list frame; FFA too; FFA players > Circle > Circle (CPU Select) > Cross: players screen again.
+
+### Batch sixteen (25 Nov): Free-for-all menus without the scripted walk, picks from the game's own selectors
+- **Cause.** Mode Select > Free-for-all injected pad presses by poll count (`g_script_t`: Cross at polls 220 / 340 / 460, five Downs, Cross at 720) to pass Party Select and CPU Select unseen, then showed the players screen with a text list.
+  Poll counts depend on frame rate and load (slow Android, online lag), and the user never chose anything in the game's own selector.
+- **Fix** (`PSPRECOMP_TAGTEAM_FFA_SCRIPT=1` = the old scripted walk, `PSPRECOMP_TAGTEAM_FFA_NOPREFILL=1` = walk the screens but keep the players screen's own values). The screens are no longer passed by script: the player walks the
+  real Party Select (P1's party) and CPU Select (1st / 2nd / 3rd = P2 / P3 / P4; the 4th / 5th picks are unused). Arriving at the setup screen the players screen opens and is filled by `ffa_prefill`:
+  P1 main / tag-in = the party's first two members (`screen + 0x788`, 8 bytes apart), P2..P4 mains = the CPU Select picks, kept by the setup screen object at `screen + 0x8B4` + 8 * i (charId, 0 = empty; found by diffing two screen dumps,
+  `PSPRECOMP_TTSP_SCRDUMP=<file>` dumps the screen object once). P2 is always on (random when empty); an empty P3 / P4 slot is Off (FFA of 3 = two picks). Strength / tag-in values stay as set.
+  Nothing depends on timing now except the short injected confirm after the Mode Select (existing for every mode). Circle on the players screen goes back (setup > CPU Select > Party Select > Mode Select, from Batch fourteen) and coming forward
+  again fills the players from the new picks (the re-arm of the follow-up above). Footer: "Circle: back to the selectors".
+- **Not done.** The players screen still has its list picker (Cross on a field) for later changes and for the tag-in column; a full replacement would open the game's CPU Select from the players screen (needs the screen object's
+  selector state restored, i.e. calling retail's CPU Select open step on demand: not located). Online FFA is unchanged (the room's players). Not tested: Android, online two copies, FFA 3 through to the battle in this route.
+- **Tested** (host, one copy, `~/dissidia/tt/s2/ffamenu/ctl.py`, 30 fps): FFA 4: Party A (Jecht, Squall...) + CPU picks Vaan / Laguna / Kain: players screen shows them (`e1_players.png`), lobby, Enter, loading screen Jecht vs Vaan, battle with
+  both extras spawned, `[FFA] player P3: LAGUNA`, `P4: KAIN`. FFA 3 (two picks): P4 Off on the players screen and in the lobby panel (`e2_players.png`, `e2_lobby2.png`); lobby > Circle > players > Circle > setup > Circle > CPU Select > Cross: filled again.
