@@ -4662,7 +4662,7 @@ void hp_hit_indicator(uint32_t victim, uint32_t att, int hp_before, bool ko_hold
     if (g_log) std::fprintf(stderr, "[HPDMG] t=%.2fs %s %s > %s %s: -%d (HP %d -> %d of %d)%s\n", dissidia_battle_age() / 60.0f, h.attacker ? role_of(att) : "?", h.aname.c_str(), role_of(victim), h.vname.c_str(), dmg, hp_before, h.hp_after, h.hp_max, h.ko ? " KO" : "");
 }
 bool g_clear_surv = false;   // debug row "Lethal HP Hits Kill": clear the retail survive-at-1-HP effects of a victim that would die (Tag Team group, default OFF = retail)
-bool g_kocam = false;   // off by default for now (user 22 Nov: Golbez KO -> "THE FINAL BLOW", music stopped, could not move; TODO) // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
+bool g_kocam = true;   // on by default again (24 Nov: the winner slot fighter was left in the finish's victory state, see "victory state cleared") // debug row "KO Kill Camera" (Tag Team group): slow motion at a lethal HP hit that does not end the match
 extern float g_callfx_rel; extern uint32_t g_callfx_gen;   // below (the call's slow motion release)
 void xkocam_start(uint32_t victim);   // below (callfx_step): the kill camera of a KO'd extra
 // The kill camera (retail finish state 2 / 3 for slot KOs, xkocam_start for extras) leaves the camera director (cam = *0x08B3D6B8 + 1872: look-at vector +64, flag word +188 bits 1 / 2 / 4,
@@ -6336,6 +6336,9 @@ void ko_oneround() {
         if (!ko_any) { if (fin_since == 0.f) fin_since = age; if (age - fin_since >= 5.f) {
             { const uint32_t mg = rd(0x08A62280u); if (ok(mg, 0x40) && rdf(mg + 4u) < 1.99f) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, mg, 0u); g_ctx->r[29] = static_cast<int32_t>(sp1); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs finish slow motion (channel 0) released by hand\n", age / 60.0f); } }
             cam_restore("finish over"); g_midfin_gen = ~0u; wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
+            // The finish also puts the WINNER's slot fighter into its victory state (+0x380 bit 2 and world flags +908 bit 2: win script, no pad, not moved by the world step): with the match going on that fighter stayed frozen for good
+            // (kill camera "stuck forever", the extras / other players still moved). Back to normal for every slot fighter that is standing. PSPRECOMP_TAGTEAM_NOWINCLEAR=1 = old.
+            if (!std::getenv("PSPRECOMP_TAGTEAM_NOWINCLEAR")) for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0) && !ko_state(a2) && hp_eff(a2) > 0 && ((rd(a2 + 0x380u) & 2u) || (rd(a2 + 908u) & 2u))) { const uint32_t f0 = rd(a2 + 0x380u), w0 = rd(a2 + 908u); wr(a2 + 0x380u, f0 & ~2u); wr(a2 + 908u, w0 & ~2u); if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs slot fighter %08X: victory state cleared (+0x380 %08X -> %08X, world flags +908 %08X -> %08X)\n", age / 60.0f, a2, f0, rd(a2 + 0x380u), w0, rd(a2 + 908u)); } }
             fin_since = 0.f; if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs KO flow done: battle phase 4 (finish) put back to 3\n", age / 60.0f); } }
         else fin_since = 0.f;
     }
@@ -11244,6 +11247,14 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             k++;
         }
     }
+    if (g_bs && g_log && std::getenv("PSPRECOMP_TAGTEAM_KCPOS")) {   // debug: once a second the slot fighters' world position / script / controller, bs+72, slow motion channel 0 (control check of the kill camera)
+        static uint32_t gen = ~0u; static int last = -1; if (gen != g_battle_gen) { gen = g_battle_gen; last = -1; }
+        const int sec = static_cast<int>(dissidia_battle_age() / 60.0f);
+        if (sec != last) { last = sec; const uint32_t mg = rd(0x08A62280u);
+            std::fprintf(stderr, "[KCPOS] t=%ds bs+72 %u ch0 %.2f", sec, rd(g_bs + 72u), ok(mg, 0x40) ? rdf(mg + 4u) : -1.f);
+            for (uint32_t k = 0; k < 2; k++) { const uint32_t a = srd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0)) std::fprintf(stderr, " | slot%u %08X c%d pos %.1f,%.1f,%.1f sc %d f380 %08X w %08X %08X hp %d", k, a, actor_char(a), rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u), static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu), rd(a + 0x380u), rd(a + 904u), rd(a + 908u), hp_eff(a)); }
+            std::fprintf(stderr, "\n"); }
+    }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_AGESHOTS")) {   // debug: "<dir>:<from s>:<to s>:<step s>": screenshots by battle age
         static std::string dir; static float from = 0, to = 0, step = 1, next = -1;
         if (next < 0) { char d[400] = {}; if (std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_AGESHOTS"), "%399[^:]:%f:%f:%f", d, &from, &to, &step) == 4) { dir = d; next = from; } else next = 1e9f; }
@@ -11442,14 +11453,14 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     { const char* l = std::getenv("PSPRECOMP_TAGTEAM_LATE"); g_late = !(l && l[0] == '0'); g_late_wait = !(l && l[0] == '1'); }   // default: spawn after the intro; LATE=1 right when the battle starts, LATE=0 during the intro setup
     g_oneround = !(std::getenv("PSPRECOMP_TAGTEAM_ONEROUND") && std::getenv("PSPRECOMP_TAGTEAM_ONEROUND")[0] == '0');
     g_tagin = !(std::getenv("PSPRECOMP_TAGTEAM_TAGIN") && std::getenv("PSPRECOMP_TAGTEAM_TAGIN")[0] == '0');
-    {   // The KO hold is the default again for now (user 22 Nov: a mid-battle KO ran retail's finish - "THE FINAL BLOW", the music stopped, no control;
-        // TODO): a lethal hit on a slot fighter whose side goes on never starts the finish phase. PSPRECOMP_TAGTEAM_KOHOLD=0: the hold-off path + kill camera.
+    {   // The kill camera (hold-off path + retail finish presentation) is the default; PSPRECOMP_TAGTEAM_KOHOLD=1 = the old KO hold (1 HP clamp, no finish phase) as the opt-out.
         const char* h = std::getenv("PSPRECOMP_TAGTEAM_KOHOLD");
 #ifdef _WIN32
-        if (!h) _putenv_s("PSPRECOMP_TAGTEAM_KOHOLD", "1"); else if (h[0] == '0') _putenv_s("PSPRECOMP_TAGTEAM_KOHOLD", "");
+        if (h && h[0] == '1') _putenv_s("PSPRECOMP_TAGTEAM_KOHOLD", "1"); else if (h) _putenv_s("PSPRECOMP_TAGTEAM_KOHOLD", "");
 #else
-        if (!h) setenv("PSPRECOMP_TAGTEAM_KOHOLD", "1", 1); else if (h[0] == '0') unsetenv("PSPRECOMP_TAGTEAM_KOHOLD");
+        if (h && h[0] != '1') unsetenv("PSPRECOMP_TAGTEAM_KOHOLD");
 #endif
+        if (std::getenv("PSPRECOMP_TAGTEAM_KOHOLD")) g_kocam = false;   // (the hold has no presentation: the row stays off with it)
     }
     if (std::getenv("PSPRECOMP_TAGTEAM_LOADLOG") && (g_orig_filerec = psp_dispatch_probe_lookup(0x088470B8u))) { psp_dispatch_register(0x088470B8u, filerec_hook); psp_mem_watch_set(0x0880FFF0u); install_chain(std::make_integer_sequence<int, 8>{}); if ((g_orig_ld1 = psp_dispatch_probe_lookup(0x08843014u))) psp_dispatch_register(0x08843014u, ld1_hook); if ((g_orig_ld2 = psp_dispatch_probe_lookup(0x08845230u))) psp_dispatch_register(0x08845230u, ld2_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_CPUREC") && (g_orig_fa2ac = psp_dispatch_probe_lookup(0x088FA2ACu))) psp_dispatch_register(0x088FA2ACu, fa2ac_hook);
