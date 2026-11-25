@@ -22,7 +22,7 @@
   - **Android: Settings > Install a Texture Pack says "this system has no file picker"** (user's phone). **PR #139 merged 25 Nov (retry + stale Android part rebuild), verify on the phone with the new APK.** The message means the game could not load its `org.psprecomp.game.FilePicker` class through the activity's class loader (`psp_file_dialog.cpp`); the picker itself is never asked, so `<queries>` is not the cause (FilePicker starts `ACTION_OPEN_DOCUMENT` without a resolve check). Two ways that can happen, both fixed (untested on a phone, no NDK here): (1) the first lookup failed (e.g. no activity yet, or a pending Java exception) and the result was cached for the whole run: now a failure is retried, once a second, up to 10 times, and each try logs why (`[FILEDLG] no FilePicker (try N of 10): <Java exception>`); (2) a release built in a reused work dir kept an Android part from before FilePicker (2026-11-19, `build_release.py` built it once per work dir): the part is now rebuilt when `android/game_java` changes (`android-part/java.sha1`). CI releases (fresh runner) since v0.1.23 have it. **Needed:** the phone's log line `[FILEDLG] ...` (a `ClassNotFoundException` means the installed APK's skeleton has no FilePicker: rebuild the APK from the current setup app). Generic, not tag-specific.
   - [PR #137 claims fixed: each member summons his own stone; not tested yet] Summonstones work, but every enemy uses the SAME summon; each fighter should use his own stone (probably the same on the player's team): per-member stones are still missing (one stone per side, built at battle start by FUN_08890BB8). **Done 24 Nov (Batch eleven):** each member summons his own stone.
   - ~~Going to the second menu still puts the cursor on Quick Battle (Party), not Tag Team Battle (the PR #129 menu-row fix does not cover this path).~~ Fixed 24 Nov (see "Batch ten").
-  - 3v3: the 2nd partner is a duplicate taken from the enemy team - maybe only the wrong model: it looked like Jecht but used Terra's moves. The 3v3 banter audio is still wrong. [PR #138] fixes a related bug: with single player CPU rows the reserve list skipped the next member and listed the partners already on the field. The partners are now left out by character (see "Batch twelve"). The wrong model (enemy Gabranth drawn as Jecht) is still open.
+  - ~~3v3: the 2nd partner is drawn with the wrong model (enemy Gabranth drawn as Jecht / Kain).~~ Fixed 25 Nov (cause: the graphics table claim gave two late extras the same entry, see "Batch fourteen"). The 3v3 banter audio: second line silent, fixed 25 Nov (same batch). [PR #138] fixed a related reserve-list bug (see "Batch twelve").
   - The called-in partner's assist voice can be cut off by banter audio (two voices in the same sound slot / the banter pool).
   - Game froze on the Bartz customization screen (Bartz D1 moves mod installed; RP6 log `~/dissidia/tt/desk_logs/rp6_bartz_custom_1123_1056.log`): tag team not involved (menus); the log ends with package reads (`sceIoLseek fd=4 ... 0x10846800` right after a Cross press) and 369 `[atrac3plus] Invalid start bit / Invalid number of transmitted units / Channel unit extension is not implemented` lines before it - an ATRAC3plus stream the decoder cannot read (the D1 mod's audio?) while previewing. No HANGDUMP (not in battle). Generic / mod issue, not tag-specific.
   - Tested 23 Nov (headless, `~/dissidia/tt/ttest`, 05a28a4): partner EX Burst put back PASS on a normal stage (the high-stage case via EXBLIFT did not fire, not reproduced); no FMA fusion flag in place + PC 2-copy 0 mismatched PASS; online lobby stays open PASS (screens; no [TTLOBBY] lines); white screen after a dropped peer PASS; LAN between two copies PASS (the APK skeleton was rebuilt with the multicast permission 23 Nov). **Slot take online FAILS**: after the human's slot KO the mate took the slot (AI), the human's next member came in as an extra he drives (`chase camera on the extra this machine drives`), no `slot take` line - `slot_take()` returned false (guards: l.driver >= 0, slot's home driver == newcomer's driver, current driver different, mate alive / not rebuilding, rebuild_begin).
@@ -49,13 +49,13 @@
     single player (see "Batch two"); online it stays positional.
   - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov [PR #129] (see "Menu row and failed-call notice").
   - 3v3: many partner fixes do not apply to the second partner (the code assumes one extra per side). 23 Nov: the Assist Off partner pick, the overhead
-    panels and the HUD refresh fixed (see "Batch six"); the clone-only SELECT swap still always takes the last partner.
+    panels and the HUD refresh fixed (see "Batch six"); the clone-only SELECT swap and the KO take-over always took the LAST partner: fixed 25 Nov ("Batch fourteen").
   - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov [PR #129] (see "Batch two").
   - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov [PR #129] for the calls the tag code refuses
     (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing, as retail (user, 23 Nov).
   - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
 - **Low priority (user, 22 Nov; not started):**
-  - 3v3: the banter intros do not play the correct audio (maybe other 3v3 intro issues). 23 Nov: one silent banter found and retried (see "Batch eight").
+  - ~~3v3: the banter intros do not play the correct audio.~~ 23 Nov: one silent banter retried ("Batch eight"); 25 Nov: the second line (cut short by the next entrance) was silent, fixed ("Batch fourteen"). Whether each line is the matchup-specific one is not checked.
   - Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.
     23 Nov: changed, not checked on screen (see "Batch eight").
   - Final screen: remove the options the Battle Lobby now covers (stage, rules, judgment). 23 Nov: changed, not checked on screen (see "Batch eight").
@@ -5273,3 +5273,29 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   - `tt/orb3`: the CPU slot fighter summons at 25 s (orb gone). KO at 45 s, and the partner enters with his own use: `slot fighter char 31 -> 30, summon uses 0 -> 1`. The game re-creates the orb at 46.67 s; screenshots show the orb on Vaan's panel.
   - `tt/orb5`: the partner summons at 24.4 s (a real spend, booked). KO at 40 s, and he enters with his use spent: `uses 1 -> 0`. The game removes the orb at 41.67 s.
 - Debug aid: `PSPRECOMP_TAGTEAM_ORBLOG=1` logs every change of both orb records (`[ORBLOG]`).
+
+
+### Batch fourteen (25 Nov): 3v3 second partner: wrong model, swap / KO pick, silent banter (tree tt3v3, branch tt-3v3p2)
+- **Wrong model (cause found).** The fighters' graphics objects (`actor +0x394`) are entries of a table of 192 x 0x13C bytes (`*(0x089D5F94) + 28`). `FUN_0886D0D8(name)`
+  finds the template entry by the info row's picture name ("P_GST200_1P") and gives the caller the first entry whose word +12 is 0 (a copy of the template). A new
+  fighter's entry keeps +12 == 0 until a later step fills it (retail makes one fighter at a time; Gabranth, Cloud: still 0 after the constructor), and the late extras are made
+  in one frame, so the NEXT extra got the SAME entry: two actors on one graphics object, the later one's model drawn for both (enemy Gabranth as Kain / Jecht; the earlier
+  agent's "Jecht model, Terra's moves" and the RP6 Batch twelve screenshot). 2v2 never showed it: the last-made extra has no successor. Found with `PSPRECOMP_TAGTEAM_GFXOBJ=1|4`
+  (`[GFXOBJ]` / `[GFXTAB]`: +0x394 per extra, shared entries; the ctor's own file objects were right) and `PSPRECOMP_TAGTEAM_MODELAUDIT=1`.
+- **Fix** (`gfxclaim_hook` on `0x0886D0D8`, `PSPRECOMP_TAGTEAM_GFXCLAIM_OLD=1`: old): entries it handed out stay held (+12 = 1 during later calls) so none is given twice; log `[GFXCLAIM]`.
+  Test aids added: `PSPRECOMP_TAGTEAM_TESTPART="24,13;15,22"` (k-th start partner of team 0 ; team 1 by character), `PSPRECOMP_TAGTEAM_LINEUP=all|<extra index>` (extras frozen in a row /
+  one near the human, to look at their models), `PSPRECOMP_TAGTEAM_WATCH_SPAWN=<n>:<hex off>`.
+- **Verified** (host, `party_battle_walk.txt`, `PSPRECOMP_TAGTEAM_3V3=1 SP_PARTNER=1 TESTPART=24,13;15,22`, `~/dissidia/tt/s2/tt3v3`): before, `after the spawns: x1(c22)=08C068B0 x2(c24)=08C068B0`
+  and the lined-up Gabranth looked like Kain (`p_all.png`, `r6/f16.png`: three Jecht-like figures); after, every extra has its own entry (`b2`), lineup `v10.png` shows Kain, Gabranth
+  (armour, cape) and Squall each with their own model.
+- **Other one-extra-per-side places** (audit of `g_extra` users): the HUD tick, the overhead panels and the Assist Off call were fixed in Batch six. Now: the clone-only SELECT swap
+  (`swap_partner_pick`, partners take turns; `PSPRECOMP_TAGTEAM_SWAPLAST=1` old) and the KO take-over (`te`, the FIRST living partner comes in, as the party order lists them, not the last;
+  `PSPRECOMP_TAGTEAM_KOLASTMATE=1` old). 2v2 has one partner: unchanged. Not changed: debug-only paths that use `g_extra[0]` / `[g_nextra-1]` (HPMATRIX, swap probes).
+  Not tested here: the KO order and the swap rotation in a played 3v3 (logic only, `[TAGTEAM] swap: N living partners, taking extra k`).
+- **Silent second banter line.** The host reproduces the RP6 25 Nov case (`rp6_jecht_banter_1125_1533.log`): in a 3v3 start the line of the second (and often third) entrant is "loaded" but
+  the game's start (`FUN_0889F8D4`, from `FUN_08B0D938`) makes no ATRAC stream (no `[ATRAC] id=..` line, sound pool slot object ignoring the start): the previous entrant's line was freed
+  in the SAME frame the new one is loaded and played ("entrance of X cut short by the entrance of Y"). Now the previous line is stopped (`FUN_08B0D9B0`) and freed first and the new line is
+  loaded 8 frames later (`g_intro_pend_*`, log "the new line follows in 8 frames"; `PSPRECOMP_TAGTEAM_INTRODEFER_OLD=1` old; `PSPRECOMP_TAGTEAM_INTROFREE_OLD=1` for the added stop in `intro_free`).
+  Host runs `bn_old` / `bn2` / `bn3`: ATRAC set-up missing for the 2nd (and 3rd) line; `bn4` (fixed): all four lines have `[ATRAC] id=1 ...` before "intro line playing". Not heard (no audio
+  capture): the check is the stream being made. The HLE also logs a failed `sceAtracSetDataAndGetID` now.
+- **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_tt3v3 --baseline` PASS (`~/dissidia/tt/s2/tt3v3/reg1`).
