@@ -5988,17 +5988,21 @@ bool reuse_parked(Extra& e, int charId, uint32_t anchor, uint32_t foe) {
 int player_of_mac(const uint8_t* m) { std::vector<const NetPlayer*> ps = players_sorted(g_snap); for (size_t k = 0; k < ps.size(); k++) if (std::memcmp(ps[k]->mac, m, 6) == 0) return static_cast<int>(k); return -2; }
 bool slot_take(const Late& l, uint32_t S, uint32_t foe, uint32_t cpu_side) {
     if (!comms_handover() || l.driver < 0 || std::getenv("PSPRECOMP_TTLOCK_NOSLOTTAKE")) return false;
+    auto no = [&](const char* why, int a = 0, int b = 0) { std::fprintf(stderr, "[TTLOCK] t=%.1fs slot take refused (%s: %d %d) for %s (driver %d, slot fighter %08X)\n", dissidia_battle_age() / 60.0f, why, a, b, char_label(l.charId, true).c_str(), l.driver, S); return false; };
     int slot = -1; for (uint32_t k = 0; k < 2; k++) if (srd(g_bs + 56u + 4u * k) == S) slot = static_cast<int>(k);
-    if (slot < 0 || !ok(S, 0x12D0) || is_rebuilding(S) || is_down(S) || !alive(S)) return false;
+    if (slot < 0) return no("anchor is not a slot fighter");
+    if (!ok(S, 0x12D0)) return no("slot fighter not readable");
+    if (is_rebuilding(S)) return no("slot is rebuilding");
+    if (is_down(S) || !alive(S)) return no("slot fighter down", is_down(S), alive(S));
     uint8_t m[6];
     const int home = dissidia_ttnet_driver_mac(slot, 0, true, m) ? player_of_mac(m) : -2;
     const int now = dissidia_ttnet_driver_mac(slot, dissidia_ttnet_frame(), false, m) ? player_of_mac(m) : -1;
-    if (home != l.driver || now == l.driver) return false;
+    if (home != l.driver || now == l.driver) return no("home/now driver", home, now);
     const int mate = actor_char(S); const uint32_t st = rd(S + 0x52Cu);
-    if (mate <= 0 || !ok(st, 0x40)) return false;
+    if (mate <= 0 || !ok(st, 0x40)) return no("mate char/stats", mate);
     const int hp = static_cast<int>(rd(st + 0xCu)); const uint32_t brv = rd(st + 0x14u);
-    if (hp <= 0) return false;
-    if (!rebuild_begin(S, l.charId, static_cast<int>(rd(S + 0x10B0u)), static_cast<int>(((rd(S + 0x10ACu) & 0xFFFFu) << 16) | (rd(S + 0x10ACu) & 0xFFFFu)))) return false;
+    if (hp <= 0) return no("mate hp", hp);
+    if (!rebuild_begin(S, l.charId, static_cast<int>(rd(S + 0x10B0u)), static_cast<int>(((rd(S + 0x10ACu) & 0xFFFFu) << 16) | (rd(S + 0x10ACu) & 0xFFFFu)))) return no("rebuild_begin");
     g_rebuild.back().own_stats = true; g_rebuild.back().entr = char_label(l.charId, true);
     slot_handover(S, l.driver);
     Late x; x.side = l.side; x.foe = foe; x.cpu_side = cpu_side; x.info_slot = static_cast<uint32_t>(100 + mate); x.slot_actor = S; x.callin = true; x.charId = mate;
