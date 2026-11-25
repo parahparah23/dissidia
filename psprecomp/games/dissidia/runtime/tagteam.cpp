@@ -527,6 +527,7 @@ std::map<uint32_t, uint32_t> g_exb_fc;   // lock block -> its +0xFC word cleared
 struct ExbHit { uint32_t vic = 0; float age = -1e9f; };
 std::map<uint32_t, ExbHit> g_exb_lasthit;   // burster (the fighter itself; an assist's hit counts for its master) -> the last fighter its attack really hit (hit registration)
 bool g_exb_debug_call = false;   // the EXBAT test aid starts a burst without a hit
+float g_exb_struct_at = -1.f;    // PSPRECOMP_TAGTEAM_EXBSTRUCT debug dump time
 std::set<uint32_t> g_exb_frozen;   // fighters held out of a running EX Burst (their pad input is dropped: dissidia_tagteam_pad_blocked)
 std::map<uint32_t, float> g_xbreak_show;   // extra -> battle age of its last break (the BREAK flash on its own small panel)
 std::map<uint32_t, uint32_t> g_extra_hdl;   // extra actor -> its damage handler copy (hitreact_hook)
@@ -4023,6 +4024,22 @@ void exb_debug_start() {
         if (!foe && ok(a, 0x12D0)) foe = srd(g_bs + 56u + 4u * (side_of(a) == side_of(srd(g_bs + 56u)) ? 1u : 0u));
         if (!ok(a, 0x12D0) || !ok(foe, 0x12D0) || !alive(a) || !alive(foe)) { std::fprintf(stderr, "[EXBAT] t=%.2fs %s -> %s: no such fighter / down\n", dissidia_battle_age() / 60.0f, sp.who, sp.foe); continue; }
         if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_EXBWATCHLB")) { const uint32_t lb = rd(a + 0x5ACu); if (ok(lb, 0x400)) { psp_mem_watch_set(lb + static_cast<uint32_t>(std::strtoul(w, nullptr, 16))); std::fprintf(stderr, "[EXBAT] watching burster lock block %08X + %s (now %08X)\n", lb, w, rd(lb + static_cast<uint32_t>(std::strtoul(w, nullptr, 16)))); } }   // debug
+        if (std::getenv("PSPRECOMP_TAGTEAM_FILEIDS")) {   // debug: every file object of the file manager at the burst start: id, refs
+            const uint32_t mgr = rd(FILE_MGR_PTR); std::string ids; for (const uint32_t o : file_objects(mgr)) { char b[40]; std::snprintf(b, sizeof b, " %u(r%d", ok(rd(o), 8) ? rdh(rd(o)) : 0u, static_cast<int>(rdh(o + 226u))); ids += b; std::snprintf(b, sizeof b, " pack h%u inst %08X)", rd(o + 52u + 32u), rd(o + 52u + 40u)); ids += b; }
+            std::fprintf(stderr, "[FILEIDS] t=%.2fs burst %s: file objects:%s\n", dissidia_battle_age() / 60.0f, sp.who, ids.c_str()); }
+        g_exb_struct_at = dissidia_battle_age() + 60.f;   // (PSPRECOMP_TAGTEAM_EXBSTRUCT: dumped one second later)
+        if (std::getenv("PSPRECOMP_TAGTEAM_EXBENTRIES")) {   // debug: the controller's 20 per-character entries (24 B each at c + 24 * k, FUN_08A3D720) and the burster's index
+            const uint32_t ad = rd(a + 1444u); const uint32_t k = ok(ad, 0x10) ? (g_ram[(ad + 6u) & 0x07FFFFFFu]) : 99u;
+            std::fprintf(stderr, "[EXBENT] burster %s %08X char byte6 %u (costume %u), controller %08X\n", sp.who, a, k, ok(ad, 0x10) ? g_ram[(ad + 7u) & 0x07FFFFFFu] : 99u, c);
+            { uint32_t f[8]; const int nf = all_fighters(f); for (int i = 0; i < nf; i++) { const uint32_t h = rd(f[i] + 912u); if (!ok(h, 0x300)) continue; const uint32_t cx = rd(h + 208u);
+                std::fprintf(stderr, "[EXBCTX] %s %08X holder(+912) %08X +204 %08X +208 %08X:", role_of(f[i]), f[i], h, rd(h + 204u), cx);
+                if (ok(cx, 0x40)) for (uint32_t o = 0; o < 0x40u; o += 4) std::fprintf(stderr, " %08X", rd(cx + o));
+                std::fprintf(stderr, "\n"); } }
+            for (uint32_t who : {a, srd(g_bs + 56u), srd(g_bs + 60u)}) { const uint32_t lb = rd(who + ACT_LOCKBLK); if (!ok(lb, 0x400)) continue;
+                std::fprintf(stderr, "[EXBLB] %s %08X lock block %08X:", role_of(who), who, lb);
+                for (uint32_t o = 0x180u; o < 0x2C0u; o += 4) { const uint32_t v = rd(lb + o); if (v) std::fprintf(stderr, " +%X=%08X%s", o, v, (v >= lb && v < lb + 0x600u) ? "(in)" : ""); }
+                std::fprintf(stderr, "\n"); }
+            for (uint32_t e = 0; e < 20; e++) { std::fprintf(stderr, "[EXBENT] entry %u:", e); for (uint32_t o = 0; o < 24; o += 4) std::fprintf(stderr, " %08X", rd(c + 24u * e + o)); std::fprintf(stderr, "\n"); } }
         if (!std::getenv("PSPRECOMP_TAGTEAM_EXBNOFOEFORCE")) { wr(a + 0x2FCu, foe); wr(a + 0x300u, foe); }   // (the start takes the attacker's own foe word as the victim: the asked foe is what it frames)
         // test aid: PSPRECOMP_TAGTEAM_EXBRULE=1 starts the burst through the hit rule (no bypass); PSPRECOMP_TAGTEAM_EXBHITSEED="<who>=<victim>" first books a hit of who on victim
         const bool through_rule = std::getenv("PSPRECOMP_TAGTEAM_EXBRULE") != nullptr;
@@ -11500,6 +11517,12 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 std::snprintf(b, sizeof b, " [%s c%d id%u rec %08X v96 %08X@%08X+%u v212 %08X@%08X]", role_of(a), c, id, r, h96, h96 ? call(0x088A0CF8u, h96) : 0u, ok(r, 0xF0) ? rd(r + 124u) : 0u, h212, h212 ? call(0x088A0CF8u, h212) : 0u); now += b; } }
         if (now != last) { last = now; std::fprintf(stderr, "[BANKLOG] t=%.2fs%s\n", dissidia_battle_age() / 60.0f, now.c_str()); }
     }
+    if (g_bs && g_exb_struct_at > 0.f && dissidia_battle_age() >= g_exb_struct_at && std::getenv("PSPRECOMP_TAGTEAM_EXBSTRUCT")) {   // debug: the burst controller's scene struct (+672, 0x340 B) and entry (+532) words
+        g_exb_struct_at = -1.f; const uint32_t c = rd(0x08A405E0u);
+        if (ok(c, 0x300)) { std::fprintf(stderr, "[EXBSTRUCT] controller %08X burster %08X victim %08X entry %08X\n", c, rd(c + 620u), rd(c + 624u), rd(c + 532u));
+            for (uint32_t o = 0; o < 0x340u; o += 4) { const uint32_t v = rd(c + 672u + o); if (v) std::fprintf(stderr, "[EXBSTRUCT] +%X %08X\n", o, v); }
+            const uint32_t e = rd(c + 532u); if (ok(e, 0x40)) for (uint32_t o = 0; o < 24u; o += 4) std::fprintf(stderr, "[EXBSTRUCT] entry+%X %08X\n", o, rd(e + o));
+            for (uint32_t o = 0x1E0u; o < 0x300u; o += 4) { const uint32_t v = rd(c + o); if (v) std::fprintf(stderr, "[EXBSTRUCT] ctl+%X %08X\n", o, v); } } }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_EXBDUMP")) {   // debug: the EX Burst controller (*0x08A405E0) words that change
         static uint32_t last[256] = {}; static bool first = true; const uint32_t c = rd(0x08A405E0u);
         if (ok(c, 0x400)) { bool any = false; for (int q = 0; q < 256; q++) if (rd(c + 4u * q) != last[q]) any = true;
@@ -11799,6 +11822,52 @@ bool dissidia_tagteam_roster_adopt(const uint8_t* d, int n) {   // a member: the
 bool dissidia_tagteam_decided() { return g_decided; }
 int dissidia_tagteam_fighters(uint32_t* out, int max) { if (!g_bs || !g_ram) return 0; uint32_t f[8]; const int n = all_fighters(f); int k = 0; for (int i = 0; i < n && k < max; i++) out[k++] = f[i]; return k; }
 uint32_t dissidia_tagteam_battle_gen() { return g_battle_gen; }
+// Debug (PSPRECOMP_TAGTEAM_EXBFXLOG=1): every effect the game starts (FUN_088A9DE8(manager, id, node, a3, a4) -> handle) while an EX Burst runs, with the
+// result: a 0 handle = the effect did not start (its pack is not bound / the id is unknown to the pack).
+FuncPtr g_orig_fxspawn_dbg = nullptr;
+FuncPtr g_orig_fxspawn_low = nullptr;
+void fxspawn_low_hook(uint8_t* rdram, recomp_context* ctx) {   // FUN_088AA5B8(manager, out, count, id, node, ..): the effect table scan under FX_SPAWN
+    const uint32_t mgr = static_cast<uint32_t>(ctx->r[4]), id = static_cast<uint32_t>(ctx->r[7]), node = static_cast<uint32_t>(ctx->r[8]), ra = static_cast<uint32_t>(ctx->r[31]);
+    const uint32_t cnt = rd(mgr + 24u);
+    g_orig_fxspawn_low(rdram, ctx);
+    const uint32_t c = rd(0x08A405E0u);
+    static const bool all = std::getenv("PSPRECOMP_TAGTEAM_EXBFXLOG")[0] == '2';
+    if (all || (ok(c, 0x300) && rd(c + 0x278u) != 0)) std::fprintf(stderr, "[EXBFXL] t=%.2fs mgr %08X (%u entries) effect id 0x%X node %08X ra %08X -> started %u\n", dissidia_battle_age() / 60.0f, mgr, cnt, id, node, ra, static_cast<uint32_t>(ctx->r[2]));
+}
+void fxspawn_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t id = static_cast<uint32_t>(ctx->r[5]), node = static_cast<uint32_t>(ctx->r[6]), ra = static_cast<uint32_t>(ctx->r[31]);
+    g_orig_fxspawn_dbg(rdram, ctx);
+    const uint32_t c = rd(0x08A405E0u);
+    static const bool all = std::getenv("PSPRECOMP_TAGTEAM_EXBFXLOG")[0] == '2';
+    if (all || (ok(c, 0x300) && rd(c + 0x278u) != 0)) {
+        const char* who = "-"; uint32_t f[8]; const int nf = all_fighters(f);
+        for (int i = 0; i < nf; i++) if (node >= f[i] && node < f[i] + 0x1300u) who = role_of(f[i]);
+        std::fprintf(stderr, "[EXBFX] t=%.2fs effect id 0x%X node %08X (owner %s) ra %08X -> handle %08X\n", dissidia_battle_age() / 60.0f, id, node, who, ra, static_cast<uint32_t>(ctx->r[2]));
+    }
+}
+// Debug (PSPRECOMP_TAGTEAM_LOADFILELOG=1): every file group load the game makes (FUN_08844C14(file id, heap, flag)), with the file's own name/kind row
+FuncPtr g_orig_lfg_dbg = nullptr;
+void lfg_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t id = static_cast<uint32_t>(ctx->r[4]), heap = static_cast<uint32_t>(ctx->r[5]), fl = static_cast<uint32_t>(ctx->r[6]), ra = static_cast<uint32_t>(ctx->r[31]);
+    std::fprintf(stderr, "[LFG] file id %u heap %08X flag %u ra %08X (loading char %d, age %.1f)\n", id, heap, fl, ra, g_loading_char, dissidia_battle_age() / 60.0f);
+    g_orig_lfg_dbg(rdram, ctx);
+}
+// Debug (PSPRECOMP_TAGTEAM_EXBBGLOG=1): the burst class step FUN_08A3624C(entry) creates the scene object (FUN_08A3DBD0) only while the burster's motion is
+// younger than 120 frames (motion frame from FUN_0882FC20(actor + 304, -1) minus actor +424) and a virtual of the burster's class (actor +1348, slot +320) says yes.
+FuncPtr g_orig_bgstep = nullptr;
+void bgstep_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t entry = static_cast<uint32_t>(ctx->r[4]); const uint32_t a = ok(entry, 0x10) ? rd(entry) : 0u;
+    if (ok(a, 0x12D0)) {
+        static int n = 0;
+        const uint32_t sp0 = static_cast<uint32_t>(ctx->r[29]); ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u);
+        call(0x0882FC20u, a + 304u, 0xFFFFFFFFu); const float f0 = ctx->f[0];
+        uint32_t vr = 0; { const uint32_t t = rd(a + 1348u) + 320u; const int16_t adj = static_cast<int16_t>(rdh(t)); const uint32_t fnp = rd(t + 4u); (void)adj; (void)fnp;
+            if (ok(t, 8) && fnp) { if (FuncPtr f = fn(fnp)) { ctx->r[4] = static_cast<int32_t>(a + static_cast<uint32_t>(static_cast<int32_t>(adj))); f(rdram, ctx); vr = static_cast<uint32_t>(ctx->r[2]); } else vr = 0xDEAD; } }
+        ctx->r[29] = static_cast<int32_t>(sp0); ctx->r[4] = static_cast<int32_t>(entry);
+        if (n++ < 60 || (n % 30) == 0) std::fprintf(stderr, "[EXBBG] t=%.2fs burster %s %08X: motion frame %.1f, +424 %.1f, diff %.1f (need < 120), class virtual +320 (fn %08X) -> %u\n", dissidia_battle_age() / 60.0f, role_of(a), a, static_cast<double>(f0), static_cast<double>(rdf(a + 424u)), static_cast<double>(f0 - rdf(a + 424u)), rd(rd(a + 1348u) + 324u), vr);
+    }
+    g_orig_bgstep(rdram, ctx);
+}
 void dissidia_tagteam_install(uint8_t* rdram) {
     dissidia_ttnet_install(rdram);
     const char* e = std::getenv("PSPRECOMP_TAGTEAM");
@@ -11844,6 +11913,9 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     g_orig_alloc = psp_dispatch_probe_lookup(ALLOC_CORE);
     if (g_orig_alloc) psp_dispatch_register(ALLOC_CORE, alloc_hook);
     if ((g_orig_fxpack = psp_dispatch_probe_lookup(0x0883EB10u))) psp_dispatch_register(0x0883EB10u, fxpack_hook);
+    if (std::getenv("PSPRECOMP_TAGTEAM_LOADFILELOG") && (g_orig_lfg_dbg = psp_dispatch_probe_lookup(LOAD_FILE_GROUP))) psp_dispatch_register(LOAD_FILE_GROUP, lfg_dbg_hook);
+    if (std::getenv("PSPRECOMP_TAGTEAM_EXBFXLOG") && (g_orig_fxspawn_dbg = psp_dispatch_probe_lookup(0x088A9DE8u))) psp_dispatch_register(0x088A9DE8u, fxspawn_dbg_hook);
+    if (std::getenv("PSPRECOMP_TAGTEAM_EXBFXLOG") && (g_orig_fxspawn_low = psp_dispatch_probe_lookup(0x088AA5B8u))) psp_dispatch_register(0x088AA5B8u, fxspawn_low_hook);
     g_orig_setup = psp_dispatch_probe_lookup(BATTLE_SETUP);
     if (!g_orig_setup) { std::fprintf(stderr, "[TAGTEAM] setup function not found\n"); return; }
     g_orig_flow = psp_dispatch_probe_lookup(FLOW_STEP);
@@ -11870,6 +11942,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
         if (!std::getenv("PSPRECOMP_TAGTEAM_HITLOG")) { g_orig_hudref = fn(0x089DEDB0u); if (g_orig_hudref) psp_dispatch_register(0x089DEDB0u, hudref_hook); } }
     if (!g_orig_accui && !std::getenv("PSPRECOMP_TAGTEAM_NOACCUI")) { g_orig_accui = fn(0x089E1FD0u); if (g_orig_accui) psp_dispatch_register(0x089E1FD0u, accui_hook); }
     if (!g_orig_chase) { g_orig_chase = fn(0x08AB6348u); if (g_orig_chase) psp_dispatch_register(0x08AB6348u, chase_hook); }
+    if (std::getenv("PSPRECOMP_TAGTEAM_EXBBGLOG") && !g_orig_bgstep) { g_orig_bgstep = fn(0x08A3624Cu); if (g_orig_bgstep) psp_dispatch_register(0x08A3624Cu, bgstep_dbg_hook); }
     if (!g_orig_exbstart) { g_orig_exbstart = fn(EXB_START); if (g_orig_exbstart) psp_dispatch_register(EXB_START, exbstart_hook); }
     if (!g_orig_portrait) { g_orig_portrait = fn(0x08B21588u); if (g_orig_portrait) psp_dispatch_register(0x08B21588u, portrait_hook); }
     if (!g_orig_hitreact2) { g_orig_hitreact2 = fn(0x08AE3320u); if (g_orig_hitreact2) psp_dispatch_register(0x08AE3320u, hitreact2_hook); }
