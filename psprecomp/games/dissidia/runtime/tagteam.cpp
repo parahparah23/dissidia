@@ -856,7 +856,16 @@ bool run_cpu_record(uint32_t G, uint32_t ch, uint32_t tier, uint32_t lvl, uint32
     g_ctx->r[4] = static_cast<int32_t>(side); g_ctx->r[5] = static_cast<int32_t>(ch); g_ctx->r[6] = static_cast<int32_t>(tier); g_ctx->r[7] = static_cast<int32_t>(lvl);
     g_ctx->r[8] = static_cast<int32_t>(type); g_ctx->r[9] = static_cast<int32_t>(L0); g_ctx->r[10] = static_cast<int32_t>(a6); g_ctx->r[11] = static_cast<int32_t>(a7);
     if (fix_time) { if (!g_orig_systime) { g_orig_systime = fn(0x089C5FB8u); if (g_orig_systime) psp_dispatch_register(0x089C5FB8u, systime_hook); } g_fix_time = g_orig_systime ? fix_time : 0; }
+    // fix_time != 0 (a lock-step battle's CPU row): the builder also draws from the game's rand() LCG (0x09AF84D0, found 24 Nov: a probe saw only this word move
+    // besides the records): the loadout / summonstone then followed that word's state on THIS machine at the moment of the build (desktop: Terra stone 4, BRV 991;
+    // RP6: stone -1, BRV 1030 -> desync at the first hit she landed). It now starts from the same fixed seed and the battle's word is put back afterwards, so the
+    // record is the same everywhere and the build does not move the battle's random sequence. PSPRECOMP_TAGTEAM_CPUREC_LCG=1: old.
+    static const bool lcg_old = std::getenv("PSPRECOMP_TAGTEAM_CPUREC_LCG") != nullptr;
+    constexpr uint32_t GAME_LCG = 0x09AF84D0u;
+    const bool pin = fix_time && !lcg_old; const uint32_t lcg = rd(GAME_LCG);
+    if (pin) wr(GAME_LCG, fix_time ^ 0x2545F491u);
     f(g_ram, g_ctx);
+    if (pin) wr(GAME_LCG, lcg);
     g_fix_time = 0;
     *g_ctx = sv;
     wr(sp, s0); wr(sp + 4u, s1);
@@ -928,8 +937,9 @@ bool make_comms_cpu_record(uint32_t G, int charId) {
     g_rec_cpu_made = true;
     g_comms_cache[key].assign(g_ram + (g_rec_scratch & 0x07FFFFFFu), g_ram + (g_rec_scratch & 0x07FFFFFFu) + 0x1060u);
     uint32_t h = 2166136261u; for (uint32_t o = 0; o < 0x1060u; o++) h = (h ^ g_ram[(g_rec_scratch + o) & 0x07FFFFFFu]) * 16777619u;
-    std::fprintf(stderr, "[MATCHUP] comms side %u char %d: CPU row, strength %u (tier %u) level %u (0 = Auto) type %d (-1 = Random), base level %u, seed %08X -> record level %u, type %u, brain params %u %u, hash %08X\n",
-        side, charId, tier + 1u, tier, lvlArg, static_cast<int>(typeArg), L0, seed, g_ram[(g_rec_scratch + 1u) & 0x07FFFFFFu], rdh(g_rec_scratch + 3892u), rdh(g_rec_scratch + 3894u), rdh(g_rec_scratch + 3896u), h);
+    std::fprintf(stderr, "[MATCHUP] comms side %u char %d: CPU row, strength %u (tier %u) level %u (0 = Auto) type %d (-1 = Random), base level %u, seed %08X -> record level %u, type %u, brain params %u %u, stone %d, hash %08X (battle LCG %08X)\n",
+        side, charId, tier + 1u, tier, lvlArg, static_cast<int>(typeArg), L0, seed, g_ram[(g_rec_scratch + 1u) & 0x07FFFFFFu], rdh(g_rec_scratch + 3892u), rdh(g_rec_scratch + 3894u), rdh(g_rec_scratch + 3896u),
+        static_cast<int8_t>(g_ram[(g_rec_scratch + 0x10u + 0xC6u * (g_ram[(g_rec_scratch + 0x773u) & 0x07FFFFFFu] > 4 ? 0u : g_ram[(g_rec_scratch + 0x773u) & 0x07FFFFFFu]) + 0xBAu) & 0x07FFFFFFu]), h, rd(0x09AF84D0u));
     return true;
 }
 bool make_sp_cpu_record(uint32_t G, int charId);   // below (single player CPU rows)
@@ -2233,7 +2243,11 @@ int fill_pick(int side) {
     std::vector<NetPlayer> tmp; uint32_t h = 2166136261u;   // the host's roster: players' MACs and rows
     for (const NetPlayer* q : players_sorted(snap_or_live(tmp))) { for (int i = 0; i < 6; i++) h = (h ^ q->mac[i]) * 16777619u; for (int r = 0; r < q->n; r++) h = (h ^ q->regs[r]) * 16777619u; }
     h = (h ^ static_cast<uint32_t>(side * 31 + static_cast<int>(g_fill_keys.size()) * 7 + 1)) * 16777619u;
-    const int c = cand[h % cand.size()];
+    int c = cand[h % cand.size()];
+    if (const char* fc = std::getenv("PSPRECOMP_TAGTEAM_FILLCHAR")) {   // test aid "<side 0 char>,<side 1 char>": the first fill of each side (when free)
+        int w[2] = {0, 0}; std::sscanf(fc, "%d,%d", &w[0], &w[1]);
+        bool first = true; for (int k : g_fill_keys) if (k / 64 == side) first = false;
+        if (first && w[side] > 0 && std::find(cand.begin(), cand.end(), w[side]) != cand.end()) c = w[side]; }
     g_fill_keys.push_back(side * 64 + c);
     std::fprintf(stderr, "[CPUFILL] side %d: an empty place, CPU %s (strength %d)\n", side, char_label(c, true).c_str(), cpu_fill_now());
     return c;
@@ -3101,6 +3115,13 @@ void fix_assist() {
     // old behaviour (extras deal damage, the real assist is lost); PSPRECOMP_TAGTEAM_KEEPASSIST=1 never touches it.
     static const bool force = std::getenv("PSPRECOMP_TAGTEAM_SWAPASSIST") != nullptr;
     if (std::getenv("PSPRECOMP_TAGTEAM_KEEPASSIST")) return;
+    // 24 Nov (online, RP6 Lightning without an assist: a level-1 save record): the take-over of an EMPTY assist place made the partner Laguna the slot's
+    // assist (slot +0x1108 = extra) and retail then ran him as one: his CPU brain was never ticked again (1 tick in 47 s), he stood invisible, dealt and took no
+    // damage, and the mate takeover carried the stale pointer into the rebuilt slot (its attacks hit nothing either) until a later rebuild left a non-zero word
+    // there (~55 s, "he didn't show up until a minute into the battle"). The extras deal damage through their own damage module copies now (Terra did on the
+    // side whose slot keeps its real assist), so the take-over is off. PSPRECOMP_TAGTEAM_EXTRA_ASSISTLINK=1: old (an empty place is taken).
+    static const bool link_empty = std::getenv("PSPRECOMP_TAGTEAM_EXTRA_ASSISTLINK") != nullptr;
+    if (!force && !link_empty) return;
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
         if (!e.started || !ok(e.actor, 0x12D0) || !ok(e.slot_actor, 0x12D0)) continue;
@@ -10749,6 +10770,9 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         for (uint32_t a : g) { const uint32_t cur = rd(a); uint32_t f[6]; const int n = all_fighters(f); bool en = false; for (int i = 0; i < n; i++) if (f[i] == cur && side_of(f[i]) != side_of(hum)) en = true; if (en && foe && foe != cur) wr(a, foe); }
     }
     g_ram = rdram; g_ctx = ctx;
+    if (const char* na = std::getenv("PSPRECOMP_TAGTEAM_TEST_NOASSIST"); na && g_bs) {   // test aid "<side>": that slot fighter's assist place is emptied once at 2 s (a slot without an assist, as a level-1 save record)
+        static uint32_t done_gen = ~0u; const int sd = std::atoi(na) & 1; const uint32_t S = srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd));
+        if (done_gen != g_battle_gen && dissidia_battle_age() / 60.0f > 2.0f && ok(S, 0x12D0)) { done_gen = g_battle_gen; std::fprintf(stderr, "[TAGTEAM] test: slot %d %08X assist place %08X -> 0\n", sd, S, rd(S + 0x1108u)); wr(S + 0x1108u, 0); } }
     if (g_nextra && g_bs && dissidia_battle_age() / 60.0f > 3.0f) fix_assist(); if (g_nextra && g_bs && dissidia_battle_age() / 60.0f > 3.0f) assist_aim_follow(); xas_frame(); ao8_tick(); aim_debug_force(); aim_fix(); ai_target();   // (not at once: the retail setup of the assist actors has to run first)
     rebuild_frame();
     if (g_log && g_bs && std::getenv("PSPRECOMP_TAGTEAM_WORLDPTR")) {   // debug: fighter pointers held in the world object (HUD number groups at +36 / +120 / +204), logged when they change
