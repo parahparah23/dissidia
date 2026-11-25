@@ -4786,13 +4786,15 @@ static std::vector<uint32_t> g_gl_px;
 static int g_gl_w = 0, g_gl_h = 0;
 static bool g_gl_dirty = false;
 static std::chrono::steady_clock::time_point g_gl_time;
+static int g_gl_next_ttl = 150, g_gl_ttl = 150;   // ms the layer stays without a new publish (ge_draw_set_game_layer_ttl: for the next publish only)
+void ge_draw_set_game_layer_ttl(int ms) { std::lock_guard<std::mutex> lk(g_gl_mu); g_gl_next_ttl = std::clamp(ms, 50, 2000); }
 static std::vector<GeLayerCopy> g_gl_copies;
 void ge_draw_set_game_layer(const uint32_t* rgba, int w, int h) {
     if (!rgba || w <= 0 || h <= 0) { ge_draw_clear_game_layer(); return; }
     std::lock_guard<std::mutex> lk(g_gl_mu);
     g_gl_px.assign(rgba, rgba + size_t(w) * size_t(h));
     g_gl_w = w; g_gl_h = h; g_gl_dirty = true;
-    g_gl_time = std::chrono::steady_clock::now();
+    g_gl_time = std::chrono::steady_clock::now(); g_gl_ttl = g_gl_next_ttl; g_gl_next_ttl = 150;
 }
 void ge_draw_clear_game_layer() {
     std::lock_guard<std::mutex> lk(g_gl_mu);
@@ -4809,7 +4811,7 @@ static void present_game_layer_copies(GLuint src_tex, int spw, int h272, const P
     std::vector<GeLayerCopy> copies;
     {
         std::lock_guard<std::mutex> lk(g_gl_mu);
-        if (g_gl_w <= 0 || std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) return;
+        if (g_gl_w <= 0 || std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(g_gl_ttl)) return;
         copies = g_gl_copies;
     }
     if (copies.empty() || !src_tex || spw <= 0 || h272 <= 0) return;
@@ -4833,7 +4835,7 @@ static void present_game_layer(const PresentRect& band) {
     static bool shown = false;
     {
         std::lock_guard<std::mutex> lk(g_gl_mu);
-        if (g_gl_w > 0 && std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(150)) { g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true; }
+        if (g_gl_w > 0 && std::chrono::steady_clock::now() - g_gl_time > std::chrono::milliseconds(g_gl_ttl)) { g_gl_px.clear(); g_gl_w = g_gl_h = 0; g_gl_dirty = true; }
         if (g_gl_dirty) {
             g_gl_dirty = false;
             shown = g_gl_w > 0;

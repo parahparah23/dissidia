@@ -14,6 +14,7 @@
 #include "recomp.h"
 #include "hle/psp_hle.h"
 #include "menu_layer.h"
+#include "psp_ge_draw.h"
 #include "../../../runtime/src/hle/psp_savedata_dialog.h"
 #include <algorithm>
 #include <chrono>
@@ -407,6 +408,7 @@ const char* const kModeSelHelp[] = {
     "Everyone for himself, up to 4 players with a character each (and a tag-in). Party Select, then the Free-for-all player setup.",
 };
 std::atomic<int> g_ms_result{0};
+void modesel_draw(bool group_online);
 // Returns 0 while open, 1 = chosen (the lobby holds the mode now), 2 = cancelled.
 int modesel_frame(uint8_t* rdram, recomp_context* ctx, bool group_online) {
     const auto now = std::chrono::steady_clock::now();
@@ -422,6 +424,10 @@ int modesel_frame(uint8_t* rdram, recomp_context* ctx, bool group_online) {
     if (pressed & BTN_DOWN) { g_ms_sel = (g_ms_sel + 1) % kLobbyModeCount; play_se(rdram, ctx, 1); }
     if (pressed & BTN_CROSS) { g_ms_ffa = kLobbyModes[g_ms_sel].mode == 3; L[0] = kLobbyModes[g_ms_sel].mode; L[1] = kLobbyModes[g_ms_sel].size; dissidia_tagteam_lobby_set(L); play_se(rdram, ctx, 2); result = 1; }
     else if (pressed & BTN_CIRCLE) { play_se(rdram, ctx, 1); result = 2; }
+    modesel_draw(group_online);
+    return result;
+}
+void modesel_draw(bool group_online) {
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
     gs_background(); gs_title("MODE SELECT", group_online ? "Communications  >  Tag Team Battle" : "Battle Mode  >  Tag Team Battle");
     const float x0 = 70.f, x1 = 410.f, y0 = 56.f, h = 28.f;
@@ -435,7 +441,6 @@ int modesel_frame(uint8_t* rdram, recomp_context* ctx, bool group_online) {
     if (!l2.empty()) g_layer.text(l2, true, 6.4f, 50.f, 232.f, LayerColor{40, 42, 80, 1.f});
     gs_footer("Up/Down: choose   Cross: confirm   Circle: back");
     g_layer.publish();
-    return result;
 }
 
 // ---- The Free-for-all player setup (single player): up to four players, each with his own colour. P1 is you (his characters are the first two rows of your party from Party Select),
@@ -443,6 +448,7 @@ int modesel_frame(uint8_t* rdram, recomp_context* ctx, bool group_online) {
 const LayerColor kSlotCol[4] = {{40, 90, 220, 1.f}, {210, 50, 60, 1.f}, {40, 160, 80, 1.f}, {220, 150, 20, 1.f}};
 const char* const kSlotName[4] = {"P1", "P2", "P3", "P4"};
 int g_ffa_slot = 0, g_ffa_field = 0;   // the cursor: slot 0..3, field 0 TYPE, 1 MAIN, 2 TAG-IN, 3 STRENGTH
+bool g_rearm = false;   // 25 Nov (user: back out past the lobby, then forward again skipped it): set when the flow was backed out of; once the setup screen has been gone for 0.5 s the lobby (FFA: the players screen) is pending again. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old
 bool g_ffa_then_lobby = false, g_lobby_pending = false, g_ffa_flow = false, g_ffa_autostart = false;
 int g_ffa_after = 0;   // a Free-for-all battle started from the flow: 1 = started, 2 = the setup screen went away (the battle ran), 0 = off
 std::chrono::steady_clock::time_point g_cover_until{};   // the Free-for-all starts without the retail setup screen: it is covered meanwhile
@@ -483,7 +489,7 @@ void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
     auto finish = [&]() { g_dlg_open = false; g_dlg_mode = 0; play_se(rdram, ctx, 1); if (g_ffa_then_lobby) { g_ffa_then_lobby = false; g_dlg_mode = 2; g_dlg_open = true; } };
     if ((pressed & BTN_CIRCLE) && g_ffa_flow && !std::getenv("PSPRECOMP_TAGTEAM_FFA_OLDBACK")) {   // user 23 Nov: "Circle on the players screen starts the battle instead of going back":
         // in the Free-for-all flow Circle leaves the flow (no battle starts); the setup screen under it is back (Select: the lobby, Circle: retail's way back)
-        g_dlg_open = false; g_dlg_mode = 0; g_ffa_then_lobby = false; g_ffa_flow = false; play_se(rdram, ctx, 1);
+        g_dlg_open = false; g_dlg_mode = 0; g_ffa_then_lobby = false; g_ffa_flow = false; g_rearm = true; play_se(rdram, ctx, 1);
         std::fprintf(stderr, "[FFA] players screen: Circle, back to the setup screen (no battle)\n");
         return;
     }
@@ -555,7 +561,7 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
     }
     if ((pressed & BTN_CIRCLE) && g_lob_flow && sp && L[0] != 3 && !menuback_old()) {   // a step of the chain: back to Party Select (retail's setup screen gets one Circle once the hold is over)
         std::fprintf(stderr, "[TTLOBBY] lobby: Circle, back to Party Select\n");
-        g_dlg_open = false; g_dlg_mode = 0; g_lob_flow = false; play_se(rdram, ctx, 1); g_inject_circle.store(6, std::memory_order_relaxed);
+        g_dlg_open = false; g_dlg_mode = 0; g_lob_flow = false; g_rearm = true; play_se(rdram, ctx, 1); g_inject_circle.store(6, std::memory_order_relaxed);
         return;
     }
     if (pressed & (BTN_CIRCLE | BTN_CROSS | BTN_OPEN)) {
@@ -988,6 +994,9 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
             std::fprintf(stderr, "[FFA] back from the battle: the players screen again (not the Group Battle setup)\n");
         }
     }
+    {   static auto last_sp = std::chrono::steady_clock::now(); const auto nw = std::chrono::steady_clock::now();
+        if (g_rearm && nw - last_sp > std::chrono::milliseconds(500) && !menuback_old()) { g_rearm = false; g_lobby_pending = true; std::fprintf(stderr, "[TTLOBBY] the setup screen is back after backing out: the lobby again\n"); }
+        last_sp = nw; }
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
         g_lobby_pending = false; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
         uint8_t L0[10] = {1, 2, 0, 5, 0, 0, 0, 0, 0, 1}; dissidia_tagteam_lobby_get(L0);
@@ -1108,6 +1117,7 @@ int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool onl
     if (r) { g_dlg_open = false; g_dlg_mode = 0; }
     return r;
 }
+void dissidia_tagteam_modesel_draw_frozen(bool online) { ge_draw_set_game_layer_ttl(450); modesel_draw(online); }   // after a choice: the Mode Select stays on screen, cursor on the chosen row, until the next menu opens (the layer expires 150 ms after the last draw)
 void dissidia_tagteam_modesel_confirm(bool sp) {
     g_inject_late.store(9, std::memory_order_relaxed);
     if (sp && g_ms_ffa && !std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY")) g_script_t.store(0, std::memory_order_relaxed);   // Free-for-all: no 5-member Party Select / CPU Select: the screens are passed by a script
