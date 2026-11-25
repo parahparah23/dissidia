@@ -1235,6 +1235,7 @@ void hang_arm();   // below (debug: PSPRECOMP_TAGTEAM_HANGDUMP)
 int actor_char(uint32_t a);
 void pool_dump(const char* tag);
 void intro_release(const char* why);
+extern float g_callline_t, g_intro_play_at;   // (intro line waits for the call line, below)
 void reset_battle_state();   // below: every per-battle container of the tag code (a new setup / the teardown)
 void leftover_unload(bool force);
 void leftover_unload_fwd() { leftover_unload(true); }
@@ -1248,7 +1249,7 @@ void files_state_dump(const char* tag) {   // debug (PSPRECOMP_TAGTEAM_LOG=1): t
 void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t bs = static_cast<uint32_t>(ctx->r[4]);
     g_ram = rdram; g_ctx = ctx;
-    pool_dump("setup start"); intro_release("setup");
+    pool_dump("setup start"); intro_release("setup"); g_callline_t = -1e9f; g_intro_play_at = 0.f;
     sumgate::install();
     if (std::getenv("PSPRECOMP_TAGTEAM_STONETAB")) for (uint32_t id = 0; id < 0x50; id++) {   // debug: the stone parameter records FUN_088C6CA4(id) (88 bytes each)
         const uint32_t r = call(0x088C6CA4u, id); if (!ok(r, 88)) continue;
@@ -5019,7 +5020,7 @@ void intro_free() {
     // (FUN_08B0D9B0(obj, 0), as intro_release does) before it is freed, else its ATRAC stream still holds the player. PSPRECOMP_TAGTEAM_INTROFREE_OLD=1: old.
     static const bool old = std::getenv("PSPRECOMP_TAGTEAM_INTROFREE_OLD") != nullptr;
     if (!old && rd(g_intro_obj + 4u)) call(0x08B0D9B0u, g_intro_obj, 0);
-    call(0x08B0D8D8u, g_intro_obj); g_intro_free_at = 0.f;
+    call(0x08B0D8D8u, g_intro_obj); g_intro_free_at = 0.f; g_intro_play_at = 0.f;
 }
 // A battle that ends before the intro line is freed (a KO within 8 s of an entrance, a forfeit during one: RP6 log 21 Nov, call-in at 140.0 s, KO at 147.0 s)
 // left our line object holding one of the pool's two slots: the next battle's banter got only one slot (Kuja's line silent). The line is stopped and freed
@@ -5057,6 +5058,7 @@ void banter_hook(uint8_t* rdram, recomp_context* ctx) { g_ram = rdram; g_banter_
 uint32_t g_intro_pend_A = 0; float g_intro_pend_at = 0.f; bool g_intro_pend_play = false;
 void intro_load(uint32_t A) {
     if (std::getenv("PSPRECOMP_TAGTEAM_NOINTROVOICE")) return;
+    g_intro_play_at = 0.f;   // (a new line: the earlier one is stopped below; the wait of the earlier one is over)
     static const bool defer_old = std::getenv("PSPRECOMP_TAGTEAM_INTRODEFER_OLD") != nullptr;
     if (!defer_old && g_intro_obj && (rd(g_intro_obj) || rd(g_intro_obj + 4u)) && g_intro_pend_A != A) {
         if (rd(g_intro_obj + 4u)) call(0x08B0D9B0u, g_intro_obj, 0);
@@ -5088,7 +5090,24 @@ void intro_load(uint32_t A) {
     pool_dump("intro_load after");
     if (g_log) { const uint32_t r = rd(g_intro_obj + 12u); std::fprintf(stderr, "[TAGTEAM] entrance of %08X: intro line %s %s\n", A, ok(r, 0x20) ? reinterpret_cast<const char*>(g_ram + (r & 0x07FFFFFFu)) : "(none)", rd(g_intro_obj + 4u) ? "loaded" : "NOT loaded"); }
 }
+// 25 Nov (RP6 23 Nov: "the called-in partner's assist voice can be cut off by banter audio"): the call line (a SAS clip, ~0.9 - 1.2 s) starts at the warp-in and the
+// entrant's intro line (the banter's ATRAC stream) at the pose 1.2 s later, i.e. the two overlapped whenever the clip was longer than the warp-in (slow device, long clip)
+// and the stream's louder voice drowned it. The intro line now waits until kCallLineHold battle ticks after the call line was requested (battle ticks only: the same on
+// every machine; the stream's heap use moves with it, so it must not follow a clock). PSPRECOMP_TAGTEAM_CALLHOLD_OLD=1: old (the line plays at the pose).
+float g_callline_t = -1e9f, g_intro_play_at = 0.f;
+constexpr float kCallLineHold = 2.1f * 60.f;
+void intro_play_now();
 void intro_play() {
+    static const bool old = std::getenv("PSPRECOMP_TAGTEAM_CALLHOLD_OLD") != nullptr;
+    const float age = dissidia_battle_age();
+    if (!old && g_intro_obj && rd(g_intro_obj + 4u) && age - g_callline_t < kCallLineHold && age >= g_callline_t) {
+        g_intro_play_at = g_callline_t + kCallLineHold;
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] intro line waits for the call line: plays at t=%.2fs (now %.2fs)\n", g_intro_play_at / 60.f, age / 60.f);
+        return;
+    }
+    g_intro_play_at = 0.f; intro_play_now();
+}
+void intro_play_now() {
     if (!g_intro_obj || !rd(g_intro_obj + 4u)) return;
     if (g_log) std::fprintf(stderr, "[TAGTEAM] intro line obj before play: [%08X %08X %08X %08X] (+16..: %08X %08X)\n", rd(g_intro_obj), rd(g_intro_obj + 4u), rd(g_intro_obj + 8u), rd(g_intro_obj + 12u), rd(rd(g_intro_obj) + 0u), rd(rd(g_intro_obj + 4u) + 0u));
     call(0x08B0D938u, g_intro_obj);
@@ -5102,6 +5121,7 @@ void intro_play() {
 // voice records but no bank, so its call line and attack shouts were silent. The banks are read and registered the same way (FUN_08842420(obj, name,
 // buffer, size, flag) copies them into sound-manager memory) and released (FUN_08842450(obj)) when the battle ends.
 std::vector<uint32_t> g_vbanks; std::set<int> g_vbank_chars, g_vbank_released;
+std::map<uint32_t, float> g_callbank_hold;   // bank block -> battle tick until which a call line playing from it must keep its registry slot (sndreg_make_room)
 void voice_banks_release() {
     TtStep tt_step_("voice_banks_release");
     for (uint32_t o : g_vbanks) if (rd(o + 24u)) call(0x08842450u, o);
@@ -5242,8 +5262,15 @@ void sndreg_make_room(int need, uint32_t keep, const char* why) {
     if (!g_bs || std::getenv("PSPRECOMP_TAGTEAM_NOSLOTROOM") || sndreg_free() >= need) return;
     std::set<uint32_t> use, fighters; records_in_use(use, fighters);
     const std::vector<uint32_t> blocks = bank_blocks();
-    for (int tier = 1; tier <= 2 && sndreg_free() < need; tier++)
+    // 25 Nov: a call line plays from its member's assist (`_a`) bank for ~1 s after the request; a second entrance within 4 s used to take that bank's registry slot
+    // while the line was still playing (tier 2). Held banks are taken last (tier 3), only when nothing else frees a slot. PSPRECOMP_TAGTEAM_CALLHOLD_OLD=1: old.
+    static const bool hold_old = std::getenv("PSPRECOMP_TAGTEAM_CALLHOLD_OLD") != nullptr;
+    const float now = dissidia_battle_age();
+    for (int tier = 1; tier <= (hold_old ? 2 : 3) && sndreg_free() < need; tier++)
         for (const uint32_t blk : blocks) {
+            const auto hold = g_callbank_hold.find(blk); const bool held = !hold_old && hold != g_callbank_hold.end() && now < hold->second;
+            if (tier == 2 && held) continue;
+            if (tier == 3 && !held) continue;
             if (sndreg_free() >= need) break;
             const bool own_voice = std::find(g_vbanks.begin(), g_vbanks.end(), blk) != g_vbanks.end();
             const uint32_t rec = own_voice ? 0u : blk - 96u;
@@ -5251,13 +5278,13 @@ void sndreg_make_room(int need, uint32_t keep, const char* why) {
             int reg = 0; rec_banks(blk, &reg, nullptr); if (!reg) continue;
             const bool assist = own_voice || rec_is_assist(rec);
             if (tier == 1 && (own_voice || use.count(rec))) continue;    // tier 1: nobody runs on it any more
-            if (tier == 2 && (!assist || fighters.count(rec) || std::getenv("PSPRECOMP_TAGTEAM_NOSNDTIER2"))) continue; // tier 2: assist banks, also while the assist is out
+            if (tier >= 2 && (!assist || fighters.count(rec) || std::getenv("PSPRECOMP_TAGTEAM_NOSNDTIER2"))) continue; // tier 2: assist banks, also while the assist is out (tier 3: the held call-line banks)
             if (!own_voice && rec_bank_name(rec).compare(0, 2, "p_") != 0) continue;   // only characters' banks
             const int before = sndreg_free();
             call(0x08842650u, blk);
             if (g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs room for %s: banks of %s %s (%s) unregistered, free slots %d -> %d\n", dissidia_battle_age() / 60.f, why,
                                     own_voice ? "own assist voice bank" : "record", own_voice ? "" : rec_bank_name(rec).c_str(),
-                                    tier == 1 ? "no actor uses it" : "an assist's banks: the assist goes without sound so a fighter has its own", before, sndreg_free());
+                                    tier == 1 ? "no actor uses it" : tier == 3 ? "a call line bank still held: nothing else was left" : "an assist's banks: the assist goes without sound so a fighter has its own", before, sndreg_free());
         }
     if (sndreg_free() < need && g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs room for %s: only %d of %d slots could be freed (every slot holds a fighter's or the system's banks)\n", dissidia_battle_age() / 60.f, why, sndreg_free(), need);
 }
@@ -5534,7 +5561,8 @@ void voice_banks_load(uint32_t A) {
         const uint32_t as = xas_any(A); const uint32_t ra = as ? actor_record(as) : 0u;   // (the extra's own assist, g_xas)
         if (ra && rec_is_assist(ra)) { int reg = 0, failed = 0; rec_banks(ra + 96u, &reg, &failed);
             if (g_log) std::fprintf(stderr, "[SNDREG] t=%.2fs call line of %08X: assist record %08X (%s): %d bank(s) registered, %d without a slot\n", dissidia_battle_age() / 60.f, A, ra, rec_bank_name(ra).c_str(), reg, failed);
-            if (failed) sndreg_fix_record(ra, "call line", true, true); }
+            if (failed) sndreg_fix_record(ra, "call line", true, true);
+            g_callbank_hold[ra + 96u] = dissidia_battle_age() + 4.f * 60.f; }
     }
     if (g_vbank_chars.count(c)) return;
     g_vbank_chars.insert(c);
@@ -5625,7 +5653,7 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
             const uint32_t H = (!far && !comms_battle() && g_bs) ? srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u)) : 0u;
             if (H && H != A && ok(H, 0x12D0) && alive(H)) { call(0x0884EA08u, H + 3312u, id, 1); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line %u played at the human fighter %08X (near the listener)\n", A, id, H); }
             else { const uint32_t f380 = rd(A + 0x380u); wr(A + 0x380u, f380 & ~2u); call(0x08B33F8Cu, A, id, 0, 0); wr(A + 0x380u, f380); }
-        }   /* (the AI gate bit also silenced its voice) */ if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line voice %u\n", A, id); }
+        }   /* (the AI gate bit also silenced its voice) */ g_callline_t = dissidia_battle_age(); if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: call line voice %u\n", A, id); }
         else if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: no call line (voice params %08X)\n", A, vp);
     }
     bool warp = false;
@@ -5728,6 +5756,7 @@ void entrance_step(float age) {   // the warp-in is over: the battle-start pose 
     if (g_intro_pend_A && age >= g_intro_pend_at) { const uint32_t A = g_intro_pend_A; g_intro_pend_A = 0; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
         if (ok(A, 0x12D0) && !is_down(A)) { intro_load(A); if (g_intro_pend_play) intro_play(); }
         g_ctx->r[29] = static_cast<int32_t>(sp0); }
+    if (g_intro_play_at > 0.f && age >= g_intro_play_at) { g_intro_play_at = 0.f; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); intro_play_now(); g_ctx->r[29] = static_cast<int32_t>(sp0); }
     if (g_intro_free_at > 0.f && age >= g_intro_free_at) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); intro_free(); g_ctx->r[29] = static_cast<int32_t>(sp0); }
     if (!g_entrant || g_entr_pose_at <= 0.f || age < g_entr_pose_at) return;
     g_entr_pose_at = 0.f;
@@ -9924,7 +9953,7 @@ uint32_t ao_partner_of(uint32_t M) {
 // forced: the assist file of the partner's character) takes the caller's assist place for the call: the real controller FUN_08B031AC plays everything (place, appear, slow motion,
 // banner, gauge, attack with its homing, leave) and the retail hit module books the hits on the caller's side; the partner's body steps out (parked) meanwhile and comes back after.
 // Needs X ready (spawned 4 s into the battle); else round 7's attack. PSPRECOMP_TTCAM_ASSISTMOVE=0: round 7. PSPRECOMP_TTCAM_NOPARK=1: the partner's body stays where it is.
-struct Ao8 { uint32_t M = 0, P = 0, X = 0, prev = 0, gen = 0; float t0 = 0; bool seen = false, parked = false; float px = 0, py = 0, pz = 0, idle = -1.f, atk = -1.f; } g_ao8[2];
+struct Ao8 { uint32_t M = 0, P = 0, X = 0, prev = 0, gen = 0; float t0 = 0; bool seen = false, parked = false, pair = false; float px = 0, py = 0, pz = 0, pyaw = 0, idle = -1.f, atk = -1.f; } g_ao8[2];
 bool g_ao8_hitfinish = false;   // ao8_finish from a hit on the assist: the partner keeps its hit reaction
 std::map<uint32_t, float> g_ao8_xwatch;
 struct Ao8XFix { uint32_t X = 0, P = 0, snap[4] = {}; float t = 0; }; std::vector<Ao8XFix> g_ao8_xfix;   // assist actors hit at a switch: their own reaction is undone when it starts   // dismissed assist actors (debug log of their state for 2 s, PSPRECOMP_TTCAM_AO8LOG)
@@ -9989,7 +10018,7 @@ bool ao8_try(uint32_t k, uint32_t M, uint32_t kind) {
         wr(M + 0x1108u, a.prev); a = Ao8(); wr(g_amgr + 8u + 24u * k, 0xFFFFFFFFu); return true;   // (request dropped here: the retail assist must not take it)
     }
     if (!std::getenv("PSPRECOMP_TTCAM_NOPARK")) {
-        a.px = rdf(P + 0x80u); a.py = rdf(P + 0x84u); a.pz = rdf(P + 0x88u); a.parked = true;
+        a.px = rdf(P + 0x80u); a.py = rdf(P + 0x84u); a.pz = rdf(P + 0x88u); a.parked = true; a.pyaw = rdf(P + 0x9Cu); a.pair = game_airborne(P);   // (the spot it leaves from: it comes back to exactly this, ao8_finish)
         const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
         wrf(vec, 5000.0f); wrf(vec + 4, a.py); wrf(vec + 8, 5000.0f); wrf(vec + 12, 1.0f); tp_vec("assist off r8: partner steps out", P, vec); call(PLACE, P, vec, 1); g_ctx->r[29] = static_cast<int32_t>(sp0);
         wr(P + 0x380u, rd(P + 0x380u) | 2u); g_appear_guard_gen = g_battle_gen; g_appear_guard[P] = dissidia_battle_age() + 1500.f;
@@ -10005,7 +10034,12 @@ void ao8_finish(uint32_t k, const char* why) {
     // Round 9 (user report): the partner's body takes over where the assist actor stands when the call ends (position, height, facing, air state), not the old spot. The assist's state is read BEFORE it is dismissed.
     static const bool oldback = std::getenv("PSPRECOMP_TTCAM_AO8BACK") != nullptr;
     bool handover = false; float hx = 0, hy = 0, hz = 0, hyaw = 0; bool hair = false; uint32_t hfoe = 0;
-    if (!oldback && a.gen == g_battle_gen && a.parked && ok(a.X, 0x12D0) && ok(a.P, 0x12D0) && alive(a.P) && !is_down(a.P)) {
+    // 25 Nov (user TODO: "the original CPU fighter does not come back in exactly the position it left from"; the round 8 hand-over put it at the assist's last spot): the partner
+    // comes back where it left from, facing as it did, in its stand / air state with no fall speed gathered while parked at (5000, 5000). Not after a hit on the assist (it keeps
+    // its hit reaction at the assist's spot). PSPRECOMP_TTCAM_AO8HANDOVER=1: the round 8 hand-over (the partner takes the assist's place).
+    static const bool handover_old = std::getenv("PSPRECOMP_TTCAM_AO8HANDOVER") != nullptr;
+    const bool want_handover = handover_old || g_ao8_hitfinish;
+    if (!oldback && want_handover && a.gen == g_battle_gen && a.parked && ok(a.X, 0x12D0) && ok(a.P, 0x12D0) && alive(a.P) && !is_down(a.P)) {
         hx = rdf(a.X + 0x80u); hy = rdf(a.X + 0x84u); hz = rdf(a.X + 0x88u); hyaw = rdf(a.X + 0x9Cu); hfoe = rd(a.X + 0x300u); hair = game_airborne(a.X);
         if (std::isfinite(hx) && std::isfinite(hy) && std::isfinite(hz) && std::fabs(hx) < 3000.f && std::fabs(hz) < 3000.f) {
             GPos g{}; const char* how = "the assist's own spot";
@@ -10029,7 +10063,19 @@ void ao8_finish(uint32_t k, const char* why) {
     } else
     if (a.gen == g_battle_gen && a.parked && ok(a.P, 0x12D0)) {
         wr(a.P + 0x380u, rd(a.P + 0x380u) & ~2u); g_appear_guard.erase(a.P);
-        if (alive(a.P) && !is_down(a.P)) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
+        if (alive(a.P) && !is_down(a.P) && !oldback) {   // back to the spot it left from (see above)
+            float bx = a.px, by = a.py, bz = a.pz; const char* how = "exactly where it left from";
+            if (!std::isfinite(bx) || !std::isfinite(by) || !std::isfinite(bz) || std::fabs(bx) > 3000.f || std::fabs(bz) > 3000.f) { bx = rdf(a.M + 0x80u); by = rdf(a.M + 0x84u); bz = rdf(a.M + 0x88u); how = "its departure spot was unusable: next to the caller"; }
+            else if (!a.pair) {   // a ground spot that is no longer on known floor (the floor was never sampled there / the spot is off the map): the nearest known floor
+                GPos g{}; if (!ground_near(bx, bz, &g, false)) { GPos n{}; const float d = nearest_sample(bx, bz, &n, false);
+                    if (d >= 0.f && d <= 12.f) { bx = n.x; bz = n.z; by = n.y; how = "its spot is off known floor: the nearest known floor"; } else how = "no floor known near its spot: its spot anyway"; } }
+            std::fprintf(stderr, "[AO8] t=%.2fs side %u partner %08X leaves from (%.3f,%.3f,%.3f) yaw %.3f%s, returns to (%.3f,%.3f,%.3f): %s\n", dissidia_battle_age() / 60.0f, k, a.P, static_cast<double>(a.px), static_cast<double>(a.py), static_cast<double>(a.pz), static_cast<double>(a.pyaw), a.pair ? " (in the air)" : "", static_cast<double>(bx), static_cast<double>(by), static_cast<double>(bz), how);
+            place_at(a.P, bx, by, bz, "assist off r8: partner steps back");
+            wrf(a.P + 0x9Cu, a.pyaw); wrf(a.P + 0x320u, a.pyaw); model_face_yaw(a.P);
+            start_script(a.P, a.pair ? 102u : 1u);   // (its fall speed from the parked time and the script it had are dropped; the AI goes on from the stand / air state)
+            std::fprintf(stderr, "[AO8] t=%.2fs side %u partner %08X now at (%.3f,%.3f,%.3f)\n", dissidia_battle_age() / 60.0f, k, a.P, static_cast<double>(rdf(a.P + 0x80u)), static_cast<double>(rdf(a.P + 0x84u)), static_cast<double>(rdf(a.P + 0x88u)));
+            a.px = bx; a.py = by; a.pz = bz; }
+        else if (alive(a.P) && !is_down(a.P)) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
             wrf(vec, a.px); wrf(vec + 4, a.py); wrf(vec + 8, a.pz); wrf(vec + 12, 1.0f); tp_vec("assist off r8: partner steps back", a.P, vec); call(PLACE, a.P, vec, 1); g_ctx->r[29] = static_cast<int32_t>(sp0); }
     }
     if (a.gen == g_battle_gen && a.parked && ok(a.P, 0x12D0) && alive(a.P)) ao8_retarget(a.X, a.P, side_of(a.P), "the call is over: back to the partner");

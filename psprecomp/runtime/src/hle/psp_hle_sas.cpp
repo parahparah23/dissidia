@@ -112,6 +112,15 @@ bool trace_on() {
 #define SAS_TRACE(...) do { if (trace_on()) { \
     std::fprintf(stderr, "[SAS] " __VA_ARGS__); std::fputc('\n', stderr); } } while (0)
 
+
+/// PSPRECOMP_SAS_TRACE=1: a voice that is started / re-set / keyed off while it still plays is a sound cut short (the game reused the voice).
+void trace_cut(const char* what, int vi, const SasVoice& v) {
+    if (!trace_on() || !v.playing || v.env_state == ENV_OFF || v.src_end || v.size == 0 || v.type != SRC_VAG) return;
+    const double pct = 100.0 * (static_cast<double>(v.block) * 16.0) / static_cast<double>(v.size);
+    if (pct >= 98.0) return;
+    SAS_TRACE("CUT %s v=%d addr=%08x size=%u: %.0f%% played", what, vi, v.addr, v.size, pct);
+}
+
 /// Voice index is always a1. Returns nullptr for out-of-range voices.
 SasVoice* voice_arg(recomp_context* ctx) {
     uint32_t v = static_cast<uint32_t>(ctx->r[5]);
@@ -416,6 +425,7 @@ void hle_sceSasSetVoice(uint8_t* rdram, recomp_context* ctx) {
             addr += 0x30;
             if (size >= 0x30) size -= 0x30;
         }
+        trace_cut("SetVoice", ctx->r[5], *v);
         v->type = SRC_VAG;
         v->noise = false;
         v->addr = addr;
@@ -587,6 +597,7 @@ void hle_sceSasSetKeyOn(uint8_t* rdram, recomp_context* ctx) {
                 v->addr, v->size, v->loop ? 1 : 0, v->pitch,
                 v->vol_l, v->vol_r);
         }
+        trace_cut("KeyOn", ctx->r[5], *v);
         voice_key_on(*v);
         {   // PSPRECOMP_SAS_TRACE=1: when (ms on the host clock) and from where (return address) a voice is started,
             // so a sound that repeats too fast can be traced to the game code that retriggers it
@@ -604,6 +615,7 @@ void hle_sceSasSetKeyOff(uint8_t* rdram, recomp_context* ctx) {
     std::lock_guard<std::mutex> lock(g_sas_mtx);
     SasVoice* v = voice_arg(ctx);
     if (v != nullptr && v->playing) {
+        trace_cut("KeyOff", ctx->r[5], *v);
         v->keyed = false;
         env_enter(*v, ENV_RELEASE);
         SAS_TRACE("KeyOff v=%d", ctx->r[5]);
