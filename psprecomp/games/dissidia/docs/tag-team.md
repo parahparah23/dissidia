@@ -6,7 +6,7 @@
 
 - **Turned off for now, to fix (22 Nov):**
   - **Summonstones: FIXED (23 Nov) [PR #129], on again** (see "Summonstones, twelfth round"). Tested 23 Nov (headless, `~/dissidia/tt/ttest`): one summon per member PASS; partners summoning FAILS (the extra is presented to the summon step, no summon starts) although the PR #129 text claims it works. 24 Nov: partners (extras) summon now (see "Batch nine"). Per-member STONES done 24 Nov (see "Batch eleven").
-    Still open: the big retail orb not refreshing after a swap.
+    ~~Still open: the big retail orb not refreshing after a swap.~~ Fixed 25 Nov (see "Batch thirteen"): the orb was right, the use booking was wrong.
   - **Kill camera / KO without the hold is off**: the KO hold is the default again; [PR #129] fixes the music part (the streamed battle BGM released by FUN_089922FC during the finish is now kept), the stuck camera / no control is still open (`PSPRECOMP_TAGTEAM_KOHOLD=0` = the hold-off path + kill camera). User: Golbez died, "THE FINAL BLOW" showed, the music stopped and the player could not move. Log `~/dissidia/tt/desk_logs/rp6_golbez_1222.log` (RP6, build before e5a414c): t=82.31 `retail finish start: mid-battle KO of slotC` (Golbez), BGM step and KO line skipped as designed, BUT at 82.4 an ATRAC track (id 1, 48 KB, no loop: a jingle) is opened and the battle BGM is released (`[ATRAC] release id=0 (streamed ...)`) by another part of the finish - so the music stop comes from a second path, not 08B0998C. Fader skipped 86.78, camera restored and phase put back to 3 at 88.24; the player then paused (HANGDUMP = the pause). "Could not move" between 82 and 88 = the ~6 s presentation; user: it stayed stuck forever, all other audio was gone too, and the other players could still move. **23 Nov: the music part found and fixed** (see "Kill camera: the battle music"); the KO hold stays the default until the "stuck" part is reproduced.
 - **New (22 Nov, not started):**
 - **User play-test 23 Nov (RP6, after PR #129 merge), not started:**
@@ -5254,3 +5254,17 @@ Free-for-all needs its own player setup (players, characters, teams clear).
   ANOTHER battle (25 Nov: Kain's 1243 / 10171 and Sephiroth's 961 / 9972 are start values; the enemy Squall's max HP 9644 vs 10196 and the reserve icons
   differ), not a HUD bug: a 3v3 CPU-row walk with a panel log (`~/dissidia/tt/hud1`) named every partner right from the first frame. Not reproduced (`~/dissidia/tt/dup1`: Gabranth clones as partners on both sides, no Jecht
   loaded in between, all on file 260). Needs that run's log.
+
+### Batch thirteen (25 Nov): the big summon orb after a swap (cause: the use booking)
+TODO "the big retail orb not refreshing after a swap". **The orb is right; the booking of who has summoned was wrong.**
+- **How the orb works (battle overlay, decoded this round).** The summon manager (`FUN_08A220F4`, this = manager) owns a HUD object at manager + 256.
+  - It holds one orb record per side at HUD + 356 + 52 * side.
+  - The record's effect handle sits at +8. The debug log below shows it as "+4" because its base is 4 bytes early.
+  - The per-frame step `FUN_08A06370` (`FUN_08A06524` / `FUN_08A06684` / `FUN_08A0676C`) creates the orb effect when `FUN_08A06A18` says the side can summon. That check goes through `FUN_0889120C`, the gate that reads the slot fighter's uses (+0x10CE). It deletes the effect when the side can't.
+  - So the orb follows the CURRENT slot fighter's uses by itself. A refill path exists too: item 0xEF in `FUN_08A220F4` calls `FUN_08A07320(manager + 256, side)` -> `FUN_08A0641C`, which re-creates the effect, then sets the uses to 1. It is not needed.
+- **Cause.** `sum_track` booked a member as "summon used" whenever his uses read 0. After a KO rebuild, the partner's actor reads 0 for a moment. Test `~/dissidia/tt/orb2`: the CPU's partner (char 30) was booked "summon used" at 46.6 s without summoning. He then came into the slot with 0 uses, so the game showed no orb, which was correct for 0 uses.
+- **Fix** (`tagteam.cpp`). `stock_hook` records each use the game's summon step really spends in `g_sum_spent_real` (side, character). The tracker books a member as spent only on such a spend. `PSPRECOMP_TAGTEAM_SUMUSED_ANYZERO=1` gives the old behaviour.
+- **Tested** (headless, `sumtest.py`, `sp_cpu_walk.txt`, side 1 given stones 15 / 18 with `TESTSTONE=15,18`):
+  - `tt/orb3`: the CPU slot fighter summons at 25 s (orb gone). KO at 45 s, and the partner enters with his own use: `slot fighter char 31 -> 30, summon uses 0 -> 1`. The game re-creates the orb at 46.67 s; screenshots show the orb on Vaan's panel.
+  - `tt/orb5`: the partner summons at 24.4 s (a real spend, booked). KO at 40 s, and he enters with his use spent: `uses 1 -> 0`. The game removes the orb at 41.67 s.
+- Debug aid: `PSPRECOMP_TAGTEAM_ORBLOG=1` logs every change of both orb records (`[ORBLOG]`).

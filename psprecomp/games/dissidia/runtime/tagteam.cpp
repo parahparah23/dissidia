@@ -4402,6 +4402,7 @@ bool stone_held_for_other(uint32_t side, uint32_t a) { return side < 2 && g_ston
 bool stone_settling(uint32_t side) { static const int w = std::getenv("PSPRECOMP_TAGTEAM_STONEWAIT") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_STONEWAIT")) : 30; return side < 2 && g_hframe - g_stone_built[side] < w; }
 extern std::set<uint32_t> g_sum_req; uint32_t sum_uses(uint32_t a);
 uint32_t g_sum_mgr = 0;   // the summon manager (FUN_08A23DA8's this): a heap object, so its address is taken from the call, not fixed
+std::set<std::pair<int, int>> g_sum_spent_real;   // (side, character id) whose summon use the game's summon step really spent (stock_hook); cleared per battle in sum_track
 void rules_hook(uint8_t* rdram, recomp_context* ctx) {
     if (static_cast<uint32_t>(ctx->r[4]) != g_sum_mgr) { g_sum_mgr = static_cast<uint32_t>(ctx->r[4]); if (g_log) std::fprintf(stderr, "[SUMUSED] summon manager at %08X\n", g_sum_mgr); }
     g_in_rules = true; g_sum_pres[0] = g_sum_pres[1] = 0; g_sum_req.clear();
@@ -4771,6 +4772,7 @@ void stock_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     if (g_in_rules && g_sum_req.count(a) && !std::getenv("PSPRECOMP_TAGTEAM_OLDSUMSTOCK")) {   // the summon step spends this fighter's summon use (see sum_track): keep it spent
         g_orig_stock(rdram, ctx);
+        if (ok(a, 0x12D0)) g_sum_spent_real.insert({static_cast<int>(side_of(a)), actor_char(a)});
         if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs %08X (char %d): summon use spent (uses left %u)\n", dissidia_battle_age() / 60.0f, a, actor_char(a), sum_uses(a));
         return;
     }
@@ -6757,7 +6759,12 @@ void sum_track() {
         int xi = 0, hf = 0; if (std::sscanf(fs, "%d:%d", &xi, &hf) == 2 && g_hframe >= hf && g_hframe < hf + (std::getenv("PSPRECOMP_TAGTEAM_FORCESUMMON_ONCE") ? 1 : 90) && xi >= 0 && xi < g_nextra && ok(g_extra[xi].actor, 0x12D0) && !g_sum_req.count(g_extra[xi].actor)) { g_ram[(g_extra[xi].actor + 0x5B3u) & 0x07FFFFFFu] |= 0x10u; if (g_log && g_hframe == hf) std::fprintf(stderr, "[SUMUSED] t=%.1fs test: extra %d (%08X) asks for a summon\n", dissidia_battle_age() / 60.0f, xi, g_extra[xi].actor); }
     }
     if (off) return;
-    if (g_bs != last_bs) { last_bs = g_bs; used.clear(); last_key[0] = last_key[1] = -1; }
+    if (g_bs != last_bs) { last_bs = g_bs; used.clear(); last_key[0] = last_key[1] = -1; g_sum_spent_real.clear(); }
+    // A use is booked as spent only when the game's summon step spent it (stock_hook). Reading 0 uses is not enough: a KO rebuild hands the partner's actor
+    // over and it reads 0 for a moment (`~/dissidia/tt/orb2`: the CPU's partner was booked "summon used" at 46.6 s without summoning, so he came into the slot
+    // with no use and no orb); a fighter without a stone has 0 from the start. PSPRECOMP_TAGTEAM_SUMUSED_ANYZERO=1: old (any 0 books the use).
+    static const bool any_zero = std::getenv("PSPRECOMP_TAGTEAM_SUMUSED_ANYZERO") != nullptr;
+    auto really_spent = [&](const std::pair<int, int>& id) { return any_zero || g_sum_spent_real.count(id) != 0; };
     for (uint32_t k = 0; k < 2; k++) {
         const uint32_t F = srd(g_bs + 56u + 4u * k); if (!ok(F, 0x12D0) || is_rebuilding(F)) continue;
         const int key = actor_char(F); const std::pair<int, int> id{static_cast<int>(k), key};
@@ -6767,11 +6774,21 @@ void sum_track() {
             const uint32_t want = spent ? 0u : (u == 0 && last_key[k] != -1 ? 1u : u);
             if (want != u) { sum_set_uses(F, want); if (g_log) std::fprintf(stderr, "[SUMUSED] side %u: slot fighter char %d -> %d, summon uses %u -> %u (%s)\n", k, last_key[k], key, u, want, spent ? "his use is spent" : "his use is left"); }
             last_key[k] = key;
-        } else if (u == 0 && !(used.count(id) && used[id])) {
+        } else if (u == 0 && !(used.count(id) && used[id]) && really_spent(id)) {
             used[id] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u char %d: summon used\n", dissidia_battle_age() / 60.0f, k, key);
         } else if (u > 0 && used.count(id) && used[id]) {   // put back by something else (a rebuild of the same character, a KO call-in): the use stays spent
             sum_set_uses(F, 0); if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u char %d: summon uses %u -> 0 (already spent)\n", dissidia_battle_age() / 60.0f, k, key, u);
         }
+    }
+    if (g_log && ok(MGR, 0x800) && std::getenv("PSPRECOMP_TAGTEAM_ORBLOG")) {   // debug: the big summon orb's HUD record per side (manager + 256 + 356 + 52 * side, 13 words), every change
+        static uint32_t lbs = 0, prev[2][13];
+        for (uint32_t k = 0; k < 2; k++) {
+            const uint32_t O = MGR + 256u + 356u + 52u * k; uint32_t cur[13]; for (uint32_t i = 0; i < 13; i++) cur[i] = rd(O + 4u * i);
+            if (lbs != g_bs) { std::memcpy(prev[k], cur, sizeof cur); std::fprintf(stderr, "[ORBLOG] side %u orb record %08X: %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n", k, O, cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7], cur[8], cur[9], cur[10], cur[11]); }
+            std::string d; for (uint32_t i = 0; i < 13; i++) if (cur[i] != prev[k][i]) { char t[48]; std::snprintf(t, sizeof t, " +%u %08X>%08X", 4u * i, prev[k][i], cur[i]); d += t; prev[k][i] = cur[i]; }
+            if (!d.empty()) { const uint32_t F = srd(g_bs + 56u + 4u * k); std::fprintf(stderr, "[ORBLOG] t=%.2fs side %u (slot char %d, uses %u):%s\n", dissidia_battle_age() / 60.0f, k, ok(F, 0x12D0) ? actor_char(F) : -1, ok(F, 0x12D0) ? sum_uses(F) : 99u, d.c_str()); }
+        }
+        lbs = g_bs;
     }
     // 24 Nov (user, 23 Nov play-test: "every enemy uses the SAME summon; each fighter should use his own stone"): retail builds ONE summon entry per side at the
     // battle start (FUN_0888C4C8 -> FUN_08890BB8(bs + 0x754 + 40 * side, side, the slot record's stone): +20 the stone id, +24 the resolved summon, its parts set up
@@ -6836,7 +6853,7 @@ void sum_track() {
             given[X] = key;
             const uint32_t want = spent ? 0u : 1u;
             if (u != want) { sum_set_uses(X, want); if (g_log) std::fprintf(stderr, "[SUMUSED] side %u partner %08X char %d: summon uses %u -> %u (%s)\n", side_of(X), X, key, u, want, spent ? "his use is spent" : "his own use"); }
-        } else if (u == 0 && !spent) {
+        } else if (u == 0 && !spent && really_spent(id)) {
             used[id] = true; if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u partner char %d: summon used\n", dissidia_battle_age() / 60.0f, side_of(X), key);
         } else if (u > 0 && spent) {
             sum_set_uses(X, 0); if (g_log) std::fprintf(stderr, "[SUMUSED] t=%.2fs side %u partner char %d: summon uses %u -> 0 (already spent)\n", dissidia_battle_age() / 60.0f, side_of(X), key, u);
