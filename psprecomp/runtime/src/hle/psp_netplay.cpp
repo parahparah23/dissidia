@@ -39,7 +39,7 @@ std::map<Mac, std::map<uint32_t, Values>> g_remote;
 uint32_t g_last_local = 0;
 bool g_have_local = false;
 uint64_t g_compared = 0, g_mismatched = 0;
-bool g_reported = false;                       // the first mismatch of this battle has been reported
+int g_reports = 0;                             // mismatching frames reported in full so far (the first few: tells a fixed difference, e.g. leftover memory, from a growing one, e.g. float drift)
 int64_t g_next_summary = 0;
 
 int64_t now_ms() {
@@ -67,8 +67,8 @@ void compare(const Mac& peer, uint32_t frame, const Values& mine, const Values& 
     if (mine.size() != theirs.size()) differ++;
     if (!differ) return;
     g_mismatched++;
-    if (g_reported) return;
-    g_reported = true;
+    if (g_reports >= 3) return;
+    g_reports++;
     char msg[160];
     if (first >= 0) {
         std::fprintf(stderr, "[NETSYNC] DESYNC at frame %u with %s: %d of %zu fields differ, first %s local %08X remote %08X\n", frame,
@@ -138,7 +138,7 @@ void psp_netplay_submit_state(uint32_t frame, const uint32_t* values, int count)
             for (auto& [mac, m] : g_remote)
                 for (auto it = m.begin(); it != m.end();) it = it->first >= frame + KEEP_FRAMES ? m.erase(it) : std::next(it);
             g_compared = g_mismatched = 0;
-            g_reported = false;
+            g_reports = 0;
         }
         g_have_local = true;
         g_last_local = frame;
