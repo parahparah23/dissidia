@@ -33,7 +33,7 @@
   - [PR #137 claims fixed: each member summons his own stone; not tested yet] Summonstones work, but every enemy uses the SAME summon; each fighter should use his own stone (probably the same on the player's team): per-member stones are still missing (one stone per side, built at battle start by FUN_08890BB8). **Done 24 Nov (Batch eleven):** each member summons his own stone.
   - ~~Going to the second menu still puts the cursor on Quick Battle (Party), not Tag Team Battle (the PR #129 menu-row fix does not cover this path).~~ Fixed 24 Nov (see "Batch ten").
   - ~~3v3: the 2nd partner is drawn with the wrong model (enemy Gabranth drawn as Jecht / Kain).~~ Fixed 25 Nov (cause: the graphics table claim gave two late extras the same entry, see "Batch seventeen"). The 3v3 banter audio: second line silent, fixed 25 Nov (same batch). [PR #138] fixed a related reserve-list bug (see "Batch twelve").
-  - The called-in partner's assist voice can be cut off by banter audio (two voices in the same sound slot / the banter pool).
+  - ~~The called-in partner's assist voice can be cut off by banter audio.~~ 25 Nov (host, no cut itself reproduced; two overlaps closed, see "Batch nineteen"; verify by ear on the RP6).
   - Game froze on the Bartz customization screen (Bartz D1 moves mod installed; RP6 log `~/dissidia/tt/desk_logs/rp6_bartz_custom_1123_1056.log`): tag team not involved (menus); the log ends with package reads (`sceIoLseek fd=4 ... 0x10846800` right after a Cross press) and 369 `[atrac3plus] Invalid start bit / Invalid number of transmitted units / Channel unit extension is not implemented` lines before it - an ATRAC3plus stream the decoder cannot read (the D1 mod's audio?) while previewing. No HANGDUMP (not in battle). Generic / mod issue, not tag-specific.
   - Tested 23 Nov (headless, `~/dissidia/tt/ttest`, 05a28a4): partner EX Burst put back PASS on a normal stage (the high-stage case via EXBLIFT did not fire, not reproduced); no FMA fusion flag in place + PC 2-copy 0 mismatched PASS; online lobby stays open PASS (screens; no [TTLOBBY] lines); white screen after a dropped peer PASS; LAN between two copies PASS (the APK skeleton was rebuilt with the multicast permission 23 Nov). **Slot take online FAILS** (25 Nov re-check, batch fourteen: not reproduced at tag-slot head, 12 two-copy runs take the slot; the 23 Nov test build probably predates the take): after the human's slot KO the mate took the slot (AI), the human's next member came in as an extra he drives (`chase camera on the extra this machine drives`), no `slot take` line - `slot_take()` returned false (guards: l.driver >= 0, slot's home driver == newcomer's driver, current driver different, mate alive / not rebuilding, rebuild_begin).
   - From the PR #129 play-test comment (RP6, online through the relay, logs on the upstream branch `logs/tagteam-rp6-22nov`):
@@ -61,7 +61,7 @@
   - ~~3v3: the 3rd enemy is a duplicate of the 2nd.~~ Fixed 23 Nov [PR #129] (see "Batch two").
   - ~~When an assist call fails (refused / busy partner / no gauge / no partner), show a notification saying why.~~ Done 23 Nov [PR #129] for the calls the tag code refuses
     (see "Menu row and failed-call notice"); retail's own refusals (no gauge) show nothing, as retail (user, 23 Nov).
-  - A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.
+  - ~~A CPU assist (Assist Off partner call): the original CPU fighter does not come back in exactly the position it left from.~~ Fixed 25 Nov ("Batch nineteen"; the round 8 hand-over is now opt-in).
 - **Low priority (user, 22 Nov; not started):**
   - ~~3v3: the banter intros do not play the correct audio.~~ 23 Nov: one silent banter retried ("Batch eight"); 25 Nov: the second line (cut short by the next entrance) was silent, fixed ("Batch seventeen"). Whether each line is the matchup-specific one is not checked.
   - Final (setup) screen: the stage preview only shows on the first player's row; it should show whatever row is selected, and it should show the stage picked in the Battle Lobby.
@@ -5399,3 +5399,21 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   429, network) show the server's text; the zip is then saved in `<game folder>/reports/report-<time>.zip` and the path is shown. `PSPRECOMP_REPORT_NO_OPEN=1` skips the browser (tests).
 - Tests: `runtime/tests/run_report.sh` (SHA / HMAC vectors, scrub, a real build + signed upload to report_service.py on port 18791 with `make_issue` faked, checks the stored zip,
   403 for a wrong key / old time). Menu run with the game: see the coordinator notes in the commit message / report.
+### Batch nineteen (25 Nov): Assist Off partner returns where it left; call line vs banter audio (tree ttassist, branch tt-assistfix)
+- **Partner return (Assist Off call).** The partner that plays the call leaves (PLACE to 5000,5000 while its assist X acts) and used to be put at X's last spot ("round 8 hand-over", `[AO8] hand-over`),
+  never where it left from. Now `ao8_finish` returns it to the spot it left from: x / y / z, facing (+0x9C, +0x320, model yaw), stand state (script 1) or air state (102) when it left
+  airborne (`game_airborne` read before the PLACE), so the fall speed gathered while parked is dropped. A spot that is off known floor now (nothing sampled within 1.5 m) becomes the nearest known
+  floor within 12 m; an unusable departure value becomes a spot next to the caller. A call ended by a hit on the assist keeps the hand-over (the partner takes the hit at the assist's place, as
+  before). Log: `[AO8] .. partner P leaves from (x,y,z) yaw .. returns to (..): exactly where it left from`, then `partner P now at (..)`.
+  `PSPRECOMP_TTCAM_AO8HANDOVER=1`: the round 8 hand-over; `_AO8BACK=1`: the older PLACE-only return. **Design note:** the round 8 text quotes the user ("The assist disappears and the CPU is
+  back where it was before the call") and the agent read it as a complaint, building the hand-over; the 22 Nov TODO then asks for the exact return, which is what this does.
+  Host runs (`~/dissidia/tt/s2/ttassist/a3`, clones, `ASSIST=0 FORCECALL=1:14,1:26,0:34`): three returns, departure == return to 3 decimals, first frames after it at the spot (the AI moves from there).
+  Two copies, Assist Off online (`mp_ao.py mpao1`, team2, fill, `FORCECALL=1:14,0:26`): both copies print the same departure / return lines, `[NETSYNC] frames compared 1497, mismatched 0`.
+- **Call line vs banter audio.** Not reproduced as an actual cut: the new SAS trace (`PSPRECOMP_SAS_TRACE=1` now logs `[SAS] CUT SetVoice|KeyOn|KeyOff v= addr= size=: N% played` for a clip stopped
+  or overwritten while it plays) shows no call line (one SAS clip, 7.9 - 10.4 KB, ~0.9 - 1.2 s at its pitch) cut in 5 call-ins (`b2`, `b3`, `b4`: KO call-ins during / after the start banters,
+  `KOLIST=cpu:9,human:9.5,partner:10 CALLIN_DELAY=1 SP_PARTNER=1`); the intro line (ATRAC, pool slot) and the call line (SAS) are different engines, not one slot. Two real overlaps are closed:
+  (1) the entrant's intro line used to start at the pose 1.2 s after the call line, so a clip longer than the warp-in (slow device / long clip) was talked over by the louder stream: the intro line now
+  waits until 2.1 battle seconds after the call line request (`g_callline_t`, `g_intro_play_at`, log `intro line waits for the call line`, battle ticks only: same on every machine);
+  (2) a second entrance within 4 s could take the registry slot of the first call line's `_a` bank (`sndreg_make_room` tier 2): banks of a call line requested < 4 s ago are taken last (tier 3).
+  `PSPRECOMP_TAGTEAM_CALLHOLD_OLD=1`: both old. **Not verified by ear / on a device.**
+- **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_ttassist --baseline` PASS (`~/dissidia/tt/s2/ttassist/reg1`).
