@@ -7,6 +7,7 @@
 #include "psp_scheduler.h"
 #include "psp_ge_draw.h"
 #include "psp_settings.h"
+#include "psp_report.h"
 #include "psp_tex_pack.h"
 #include "hle/psp_savedata_dialog.h"   // on-screen keyboard: host typing
 #include "hle/psp_cloud_service.h"      // cloud sync sign-in helper
@@ -994,6 +995,7 @@ int psp_runtime_init_sdl() {
         glGetString(GL_VERSION));
     std::fprintf(stderr, "[RT] GL renderer: %s (%s)\n",
         glGetString(GL_RENDERER), glGetString(GL_VENDOR));
+    if (!use_vk) psp_report::note_gpu(reinterpret_cast<const char*>(glGetString(GL_VERSION)), reinterpret_cast<const char*>(glGetString(GL_RENDERER)), reinterpret_cast<const char*>(glGetString(GL_VENDOR)));
     if (gl_debug && !use_vk) gl_debug_install();
 
     // 7. Clear to black and swap — show initial frame

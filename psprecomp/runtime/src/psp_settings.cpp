@@ -21,6 +21,7 @@
 #include "psp_gpu_driver.h"
 #include "psp_gl_window.h"
 #include "psp_discord.h"
+#include "psp_report.h"
 #include "psp_texpacks.h"
 #include "psp_file_dialog.h"
 
@@ -198,6 +199,7 @@ enum Row { ROW_DISPLAY, ROW_RES, ROW_SCALE, ROW_FPS, ROW_FPSCOUNT, ROW_VSYNC, RO
            ROW_NET_MODE, ROW_NET_SERVER, ROW_NET_ROOM, ROW_NET_PEERS, ROW_NET_DELAY, ROW_NET_STATUS, ROW_NET_UPNP, ROW_NET_UPNP_STATUS, ROW_NET_PING, ROW_DISCORD, ROW_DISCORD_STATUS,   // Network page
            ROW_CLOUD_PROVIDER, ROW_CLOUD_FOLDER, ROW_CLOUD_URL, ROW_CLOUD_USER, ROW_CLOUD_PASS, ROW_CLOUD_GOOGLE,
            ROW_CLOUD_AUTO, ROW_CLOUD_REPLAYS, ROW_CLOUD_NOW, ROW_CLOUD_STATUS,   // Cloud page
+           ROW_REPORT, ROW_REP_TITLE, ROW_REP_DESC, ROW_REP_DUMP, ROW_REP_FILES, ROW_REP_SEND, ROW_REP_STATUS,   // Debug > Report an issue
            ROW_PERF, ROW_FX, ROW_SYNC, ROW_RING, ROW_GLOWSOFT, ROW_GLOWPASS, ROW_FXL_INT, ROW_FXL_RAD,   // Debug page
            ROW_DBG_CHORD, ROW_RESET_ALL, ROW_GRP0, ROW_GRP_END = ROW_GRP0 + 15,   // Debug page: chord window in ms, Reset All, one submenu row per game toggle group
            ROW_DBG0, ROW_DBG_END = ROW_DBG0 + 255,   // Debug page rows a game module adds (psp_settings_add_debug_toggle)
@@ -232,10 +234,10 @@ int p1_index(const std::vector<std::pair<std::string, std::string>>& v);
 int g_sel = 0;
 // Pages: the categories shown in the sidebar, and the sub-menus a row can open (PAGE_HDR under Image, PAGE_RT under Effects).
 enum Page { PAGE_DISPLAY, PAGE_GRAPHICS, PAGE_IMAGE, PAGE_EFFECTS, PAGE_CONTROLS, PAGE_NETWORK, PAGE_CLOUD, PAGE_SYSTEM, PAGE_GPU, PAGE_DEBUG, PAGE_MODS,
-            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_KEYS, PAGE_DBGGRP, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
+            PAGE_SAVES, PAGE_HDR, PAGE_RT, PAGE_KEYS, PAGE_DBGGRP, PAGE_REPORT, PAGE_ENV0, PAGE_ENV_END = PAGE_ENV0 + 10, PAGES };
 constexpr int k_env_cats = 11;   // = EC_COUNT (psp_env_options.inc)
 const char* const k_page_names[PAGES] = {"Display", "Graphics", "Image", "Effects", "Controls", "Network", "Cloud", "System", "Drivers", "Debug", "Mods", "Saves",
-                                         "HDR", "Ray Tracing", "Keyboard Controls", "Group",
+                                         "HDR", "Ray Tracing", "Keyboard Controls", "Group", "Report an issue",
                                          "Camera", "Input", "Timing", "Graphics", "Effects tuning", "Vulkan", "Textures", "Audio / video", "Game data", "Game logs", "Engine logs"};
 int g_page = 0;                        // the category (an index into page_list()): L / R, Q / E or Tab, the sidebar
 int g_sub = -1;                        // the open sub-menu page, -1 = none
@@ -259,7 +261,7 @@ const std::vector<int>& page_list() {
 }
 int page_id() { return g_sub >= 0 ? g_sub : page_list()[size_t(g_page)]; }
 // Sidebar icon of a page (settings_render.inc draw_icon).
-int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page == PAGE_KEYS ? PAGE_CONTROLS : page == PAGE_DBGGRP ? PAGE_DEBUG : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
+int page_icon(int page) { return page <= PAGE_SAVES ? page : (page == PAGE_HDR ? PAGE_IMAGE : page == PAGE_KEYS ? PAGE_CONTROLS : page == PAGE_DBGGRP || page == PAGE_REPORT ? PAGE_DEBUG : page >= PAGE_ENV0 ? PAGE_DEBUG : PAGE_EFFECTS); }
 int g_ring_next = -1;                  // vertex upload mode saved for the next launch (-1 = unchanged)
 bool g_quit_armed = false;
 bool g_dirty = true;
@@ -386,18 +388,18 @@ int64_t g_status_next = 0;
 // the settings view) is driven by pad, mouse or touch.
 struct Edit {
     bool active = false;
-    int field = 0;          // 0 server, 1 room, 2 peers, 3 sync folder, 4 WebDAV address, 5 WebDAV user, 6 WebDAV password, 7 a Saves page question
+    int field = 0;          // 0 server, 1 room, 2 peers, 3 sync folder, 4 WebDAV address, 5 WebDAV user, 6 WebDAV password, 7 a Saves page question, 8 report title, 9 report description
     std::string buf;
     int row = 1, col = 0;   // the focused key of the on-screen keyboard
     bool shift = false, symbols = false;
 } g_edit;
 const char* edit_label() {
-    static const char* const n[] = {"Server", "Room", "Direct Peers", "Sync Folder", "WebDAV Address", "WebDAV User", "WebDAV Password"};
+    static const char* const n[] = {"Server", "Room", "Direct Peers", "Sync Folder", "WebDAV Address", "WebDAV User", "WebDAV Password", "", "Short title (optional)", "Describe the issue"};
     if (g_edit.field == 7) { static std::string t; psp_saves::TextAsk a; g_saves.text(&a); t = a.title; return t.c_str(); }
     return n[g_edit.field];
 }
 size_t edit_max() {
-    static const size_t m[] = {63, 31, 127, 255, 255, 63, 63, 400};
+    static const size_t m[] = {63, 31, 127, 255, 255, 63, 63, 400, 100, 1500};
     return m[g_edit.field];
 }
 
@@ -430,9 +432,13 @@ void net_apply() {   // use and remember the Network page's values
     g_status_next = 0;
 }
 std::string g_ext_text;   // field 7
+std::string g_rep_title, g_rep_desc;   // fields 8, 9 (Debug > Report an issue)
+bool g_rep_dump = true;
 std::string& edit_target() {
     switch (g_edit.field) {
     case 7: return g_ext_text;
+    case 8: return g_rep_title;
+    case 9: return g_rep_desc;
     case 0: return g_net_server;
     case 1: return g_net_room;
     case 2: return g_net_peers;
@@ -469,7 +475,8 @@ void edit_commit() {
     if (g_edit.field == 0 && v.empty()) v = NET_DEFAULT_SERVER;
     edit_target() = v;
     edit_end();
-    if (g_edit.field >= 3) cloud_apply();
+    if (g_edit.field >= 8) {}
+    else if (g_edit.field >= 3) cloud_apply();
     else net_apply();
 }
 void edit_append(char c) {
@@ -1328,6 +1335,52 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
             m.help = "Button chord window, fine (debug)\nHow long a face button pressed alone in battle is held back so that R or L pressed just after it still counts as one chord (R + Cross dodge, R + Square EX Mode ...). Off, or 10 to 200 ms in steps of 10. The same saved setting as Controls > Button Chord Window (70 ms by default); it applies at once.";
             break;
         }
+        case ROW_REPORT:
+            m.label = "Report an issue";
+            m.value = "";
+            m.help = "Report an issue\nSomething wrong? Describe it, and the game sends the developers a report: your text, the game's log, your settings and what device you use (and, if you leave it on, a copy of the game's memory). It opens a GitHub issue. Press Cross to open.";
+            break;
+        case ROW_REP_TITLE:
+            m.label = "Short title";
+            m.value = g_rep_title.empty() ? "optional" : tail_fit(g_rep_title, 30);
+            m.help = "Short title (optional)\nA few words for the issue's title. Press Cross to type it. " + g_rep_title;
+            break;
+        case ROW_REP_DESC:
+            m.label = "What went wrong";
+            m.value = g_rep_desc.empty() ? "type here" : tail_fit(g_rep_desc, 30);
+            m.help = "Describe the issue\nWhat you did, what you expected and what happened. Press Cross to type it (keyboard, or the on-screen keyboard with a pad or touch). " + g_rep_desc;
+            break;
+        case ROW_REP_DUMP:
+            m.label = "Include memory dump";
+            m.value = g_rep_dump ? "On" : "Off";
+            m.can_dec = g_rep_dump; m.can_inc = !g_rep_dump;
+            m.help = "Memory dump\nA compressed copy of the game's memory as it is right now. It helps the developers see what the game was doing; it can contain whatever the game had loaded (save data, your player name), nothing from outside the game. Left out when too big.";
+            break;
+        case ROW_REP_FILES: {
+            const auto fl = psp_report::preview(g_rep_dump);
+            size_t tot = 0;
+            std::string names;
+            for (const auto& f : fl) { tot += f.size; names += (names.empty() ? "" : ", ") + f.name; }
+            m.label = "Files to send";
+            m.value = std::to_string(fl.size()) + " files";
+            m.help = "What will be sent (before compression, " + std::to_string(tot >> 20) + " MB): " + names + ".\nYour user name and home folder are replaced by ~ in the text files; passwords and cloud sync settings are never included. The issue text is public on GitHub; the files are reachable through the link in the issue.";
+            break;
+        }
+        case ROW_REP_SEND: {
+            const bool busy = psp_report::status().state == psp_report::Status::Working;
+            m.label = "Send report";
+            m.value = busy ? "sending..." : "";
+            m.disabled = busy || g_rep_desc.empty();
+            m.help = g_rep_desc.empty() ? "Send report\nType what went wrong first (What went wrong)." : "Send report\nPress Cross to send it. Back leaves without sending.";
+            break;
+        }
+        case ROW_REP_STATUS: {
+            const psp_report::Status st = psp_report::status();
+            m.label = "Status";
+            m.value = st.state == psp_report::Status::Working ? "working..." : st.state == psp_report::Status::Done ? "sent" : "problem";
+            m.help = "Report status\n" + st.text + (st.issue_url.empty() ? "" : "\n" + st.issue_url);
+            break;
+        }
         case ROW_RESET_ALL:
             m.label = "Reset All";
             m.value = "";
@@ -1672,7 +1725,11 @@ psp_sddialog::SetKind row_kind(Row r) {
     if (const EnvOpt* o = env_row_opt(r)) return o->type == 'c' ? K::Choice : K::Toggle;
     if (r >= ROW_DBG0 && r <= ROW_DBG_END) return K::Toggle;
     if (r >= ROW_GRP0 && r <= ROW_GRP_END) return K::Submenu;
-    if (r == ROW_RESET_ALL) return K::Action;
+    if (r == ROW_RESET_ALL || r == ROW_REP_SEND) return K::Action;
+    if (r == ROW_REPORT) return K::Submenu;
+    if (r == ROW_REP_TITLE || r == ROW_REP_DESC) return K::Text;
+    if (r == ROW_REP_FILES || r == ROW_REP_STATUS) return K::Info;
+    if (r == ROW_REP_DUMP) return K::Choice;
     if (r == ROW_DBG_CHORD) return K::Choice;
     switch (r) {
     case ROW_RT_REFL_FX:
@@ -1935,6 +1992,7 @@ std::vector<size_t> texpack_deletable() {
     return v;
 }
 void build_rows();
+bool report_wanted();
 // ---- Graphics page: install a texture pack archive (file picker -> worker thread -> psp_texpacks_install) ------------------------------
 void texpack_install_start(const std::string& path) {
     if (g_tpi_busy.exchange(true)) return;
@@ -2271,6 +2329,8 @@ void change(int d) {   // left / right on the selected row
         break;
     }
     case ROW_NET_SERVER: case ROW_NET_ROOM: case ROW_NET_PEERS: case ROW_NET_STATUS: case ROW_NET_UPNP_STATUS: case ROW_DISCORD_STATUS: break;
+    case ROW_REP_DUMP: g_rep_dump = d > 0; break;
+    case ROW_REPORT: case ROW_REP_TITLE: case ROW_REP_DESC: case ROW_REP_FILES: case ROW_REP_SEND: case ROW_REP_STATUS: break;
     case ROW_CLOUD_PROVIDER: {
         const int cur = int(g_cloud.provider), nx = std::clamp(cur + d, 0, 3);
         if (nx != cur) {
@@ -2583,6 +2643,7 @@ void build_rows() {
         if (!uninstallable().empty()) add(ROW_MOD_UNINSTALL);
         break;
     case PAGE_DEBUG:
+        if (report_wanted()) add(ROW_REPORT);
         add(ROW_PERF); add(ROW_FX);
         for (size_t i = 0; i < g_dbg_toggles.size(); i++) if (g_dbg_toggles[i].under_fx) g_rows.push_back(Row(ROW_DBG0 + int(i)));   // (the Jecht combo helper)
         add(ROW_SYNC); add(ROW_RING); add(ROW_GLOWSOFT); add(ROW_GLOWPASS); add(ROW_FXL_INT); add(ROW_FXL_RAD);
@@ -2592,6 +2653,10 @@ void build_rows() {
         add(ROW_SEC_DEV);
         for (int c = 0; c < EC_COUNT; c++) g_rows.push_back(Row(ROW_SUB_ENV0 + c));
         add(ROW_RESET_ALL);
+        break;
+    case PAGE_REPORT:
+        add(ROW_REP_DESC); add(ROW_REP_TITLE); add(ROW_REP_DUMP); add(ROW_REP_FILES); add(ROW_REP_SEND);
+        if (psp_report::status().state != psp_report::Status::Idle) add(ROW_REP_STATUS);
         break;
     case PAGE_DBGGRP:
         for (size_t i = 0; i < g_dbg_toggles.size(); i++)
@@ -2681,6 +2746,54 @@ void test_tick(int64_t t) {   // the holds: Start + Select 2 s leaves, L + R 1 s
         if (!g_test.view_t0) g_test.view_t0 = t;
         if (!g_test.view_done && t - g_test.view_t0 >= 1000) { g_test.view_done = true; g_test.view ^= 1; g_dirty = true; }
     } else { g_test.view_t0 = 0; g_test.view_done = false; }
+}
+bool report_wanted() { const char* o = std::getenv("PSPRECOMP_REPORT_OLD"); return !(o && o[0] && o[0] != '0'); }
+// Debug > Report an issue > Send: hands the text and the facts only this file knows to psp_report (worker thread).
+void report_send() {
+    if (g_rep_desc.empty() || psp_report::status().state == psp_report::Status::Working) return;
+    psp_report::Params p;
+    p.title = g_rep_title;
+    p.description = g_rep_desc;
+    p.include_dump = g_rep_dump;
+    if (SDL_Window* w = win()) {
+        int dw = 0, dh = 0, ww = 0, wh = 0;
+        SDL_GetWindowSize(w, &ww, &wh);
+        psp_gl_drawable_size(w, &dw, &dh);
+        p.extra.push_back({"resolution", std::to_string(ww) + "x" + std::to_string(wh) + " (drawable " + std::to_string(dw) + "x" + std::to_string(dh) + ")"});
+        p.extra.push_back({"video_driver", SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : ""});
+    }
+    p.extra.push_back({"renderer", renderer_vulkan_at_start() ? "Vulkan" : "OpenGL"});
+    std::string on, groups;
+    for (const PspDebugToggle& t : g_dbg_toggles) {
+        if (t.get() == t.def) continue;
+        on += std::string(on.empty() ? "" : ", ") + (t.group ? std::string(t.group) + ": " : std::string()) + t.label + "=" + (t.get() ? "on" : "off");
+    }
+    p.extra.push_back({"tag_team_and_debug_switches_changed", on.empty() ? "none" : on});
+    p.extra.push_back({"fps_setting", g_fps.get ? std::to_string(g_fps.get()) : ""});
+    p.extra.push_back({"net_mode", g_net_internet ? "internet" : "lan"});
+    p.extra.push_back({"cloud_sync", "provider " + std::to_string(int(g_cloud.provider))});
+    for (const auto& kv : g_saved) {   // the saved settings are in settings.ini; a few that decide how the game looks
+        if (kv.first == "renderer" || kv.first == "gpu_driver") p.extra.push_back({"saved_" + kv.first, kv.second});
+    }
+    if (!psp_report::start(p)) return;
+    g_sel_page[page_id()] = g_sel;
+    build_rows();
+    g_dirty = true;
+}
+// Every tick (also with the menu closed): a finished report opens its issue and says so.
+void report_tick() {
+    if (!psp_report::take_finished()) { static unsigned seen = 0; const unsigned r = psp_report::status().rev; if (r != seen) { seen = r; g_dirty = true; } return; }
+    const psp_report::Status st = psp_report::status();
+    g_dirty = true;
+    if (st.state == psp_report::Status::Done) {
+        std::fprintf(stderr, "[REPORT] opening %s\n", st.issue_url.c_str());
+        ge_draw_toast(st.text.c_str(), 5000);
+        if (!std::getenv("PSPRECOMP_REPORT_NO_OPEN") && SDL_OpenURL(st.issue_url.c_str()) != 0)
+            ge_draw_toast(("Open " + st.issue_url + " in a browser").c_str(), 6000);
+    } else {
+        ge_draw_toast("The report was not sent: see Debug > Report an issue", 5000);
+    }
+    if (g_open.load()) { g_sel_page[page_id()] = g_sel; build_rows(); }
 }
 bool restart_supported() {
 #if defined(_WIN32) || defined(__ANDROID__)
@@ -3037,6 +3150,12 @@ void confirm_row() {
     case ROW_SUB_HDR: enter_sub(PAGE_HDR); return;
     case ROW_SUB_RT: enter_sub(PAGE_RT); return;
     case ROW_KEYS_INFO: enter_sub(PAGE_KEYS); return;
+    case ROW_REPORT: enter_sub(PAGE_REPORT); return;
+    case ROW_REP_TITLE: edit_begin(8); return;
+    case ROW_REP_DESC: edit_begin(9); return;
+    case ROW_REP_DUMP: change(g_rep_dump ? -1 : 1); return;
+    case ROW_REP_FILES: case ROW_REP_STATUS: return;
+    case ROW_REP_SEND: report_send(); return;
     case ROW_RESET_ALL: g_dlg_kind = 1; g_dlg_open = true; g_dlg_sel = 1; g_dlg_hover = -1; g_dirty = true; return;   // No is pre-selected
     case ROW_QUIT:
         if (!g_quit_armed) { g_quit_armed = true; g_dirty = true; return; }
@@ -3714,6 +3833,7 @@ static void apply_default_frame_rate() {
 
 void psp_settings_tick() {
     apply_default_frame_rate();
+    report_tick();
     if (g_request_open.exchange(false) && !g_open.load()) { set_open(true); g_gate_dirty.store(true); }
     if (g_request_saves.exchange(false)) {
         if (!g_open.load()) { set_open(true); g_gate_dirty.store(true); }

@@ -2,7 +2,7 @@
 
 ## TODO (kept up to date; newest first)
 
-- **Debug menu: "Report an issue" button at the top** (user, 25 Nov; next job): asks the player to describe the issue (text input), collects everything useful (last_run.log / current log, setup.log, crash report, settings / env, version + commit, device / OS / GPU, battle state, a compressed memory dump of the PSP RAM if size allows), zips it, then opens a pre-filled GitHub issue (title + body with the description and system info) in the browser. GitHub issue URLs cannot carry files: save the zip and show / open its folder (PC) or share it (Android) so the player drags it into the issue. PC + Android. Related: the installers' "report a problem on GitHub" item below.
+- ~~Debug menu: Report an issue button~~ DONE (25 Nov, branch report-issue, see the "Report an issue" section below; live test against the real service still to do by the coordinator).
 
 - **[FIXED 25 Nov on the host, see "Batch seventeen"; verify on the RP6] Partner banter silent: Jecht (2nd partner extra) had no line at battle start** (RP6, single player, 25 Nov 15:33, log `~/dissidia/tt/desk_logs/rp6_jecht_banter_1125_1533.log`): lines 10147-10155 Laguna plays (`[SNDPOOL] intro_load` before slot1=09B4D3E4, after 00000000); lines 10453-10460 Jecht: intro_load before slot1=00000000, after still 00000000 (the load filled nothing), then `banter of 09D64D80 (JECHT): pose + intro line + close-up`. The 2nd partner's intro line load comes back empty, likely the first banter freed the slot / pool (compare Batch eight).
 
@@ -5379,3 +5379,23 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   device, this line names the cause. Behaviour is unchanged (`PSPRECOMP_TTLOCK_NOSLOTTAKE=1`: old, no take).
 - Test rig: `tools/mp_take.py --work-a A --work-b B [--kolist slot0:20] [--reg A|B] [--regn 1] [--secs 70]` (the "tools_dbg/mp_take.py" of the
   batch five notes was never committed); prints the `slot take` lines of both copies, NETSYNC and PASS / FAIL.
+
+## Report an issue (25 Nov, branch report-issue)
+
+Settings > Debug > **Report an issue** (first row; PC and Android, release builds; `PSPRECOMP_REPORT_OLD=1` hides it). A sub-page: What went wrong (text,
+the existing Edit machinery: host keyboard / Android IME through SDL text input, the on-screen keyboard with a pad or touch), Short title (optional), Include memory dump
+(default On), Files to send (the list, in the row's description), Send report (Back = cancel), Status.
+
+- Code: `runtime/src/psp_report.cpp` + `include/psp_report.h` (collect, zip, sign, upload; worker thread), `src/report_key.h` (the pre-shared key, committed on purpose:
+  the first entry of `keys` in the service config; the service rate-limits), the page in `psp_settings.cpp` (PAGE_REPORT), `psp_report::set_ram` in main.cpp,
+  `note_gpu` in the event loop, game facts through `psp_report::set_state_hook` (framerate.cpp: in_battle, mode, frame rate). It is in RUNTIME_SOURCES, so the setup app's
+  on-device compile has everything (zlib + `psp_http` + mbedTLS as the cloud sync uses; the URL opens with `SDL_OpenURL`: xdg-open / ShellExecute / open / an ACTION_VIEW intent).
+- The zip (<= 24 MB, deflate): report.json (title, description, `system`: version, git commit, build date, OS, device model, Android version / API, CPU, GPU + driver, renderer,
+  resolution, game id / region, mods, texture packs, changed debug / tag team switches, in-battle flag, uptime), last_run.log + run.log + setup.log (tail 8 MB), settings.ini,
+  env.txt, crash* files, and ram.bin (the used part of the PSP's 128 MB, from address 0; left out when it does not fit). NEVER cloud.ini / cloud/; lines that look like
+  tokens / passwords are blanked; the home folder is replaced by `~` and the user name when it is a path component.
+- Upload: POST `<base>/v1/report` (`PSPRECOMP_REPORT_URL` overrides the base; default https://party.schindlershadow.com/dissidia-report), headers X-Report-Time and
+  X-Report-Sig = HMAC-SHA256(key, "<time>\n<sha256 body>"). Answer `{ok, issue_url}`: the browser opens the issue and a toast says "Issue #N opened". Errors (403 clock, 413,
+  429, network) show the server's text; the zip is then saved in `<game folder>/reports/report-<time>.zip` and the path is shown. `PSPRECOMP_REPORT_NO_OPEN=1` skips the browser (tests).
+- Tests: `runtime/tests/run_report.sh` (SHA / HMAC vectors, scrub, a real build + signed upload to report_service.py on port 18791 with `make_issue` faked, checks the stored zip,
+  403 for a wrong key / old time). Menu run with the game: see the coordinator notes in the commit message / report.

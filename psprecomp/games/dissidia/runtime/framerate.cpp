@@ -39,6 +39,7 @@
 #include "psp_game_module.h"
 #include "psp_runtime.h"
 #include "psp_settings.h"
+#include "psp_report.h"
 #include "recomp.h"
 #include "hle/psp_hle.h"
 #include "hle/psp_hle_adhoc.h"
@@ -2689,6 +2690,11 @@ void dissidia_framerate_install(uint8_t* rdram) {
     if (const char* sm = std::getenv("PSPRECOMP_STEER_MOVE"); !(sm && sm[0] == '0') && (g_orig_steer_move = dissidia_ovl_battle_lookup(STEER_MOVE))) { psp_dispatch_register(STEER_MOVE, steer_move_hook); std::fprintf(stderr, "[FPS] steered-move hook installed\n"); }
     if (g_log && (g_orig_skel = psp_dispatch_probe_lookup(SKEL_BUILD))) psp_dispatch_register(SKEL_BUILD, skel_build_hook);
     fx_install();
+    psp_report::set_state_hook(+[]() -> std::string {   // the report button's "what was the game doing"
+        const uint32_t ovl = overlay_id();
+        return std::string("in_battle=") + (battle_running() ? "yes" : "no") + "\ncurrent_mode=" + (ovl == 0 ? "menu" : ovl == 1 ? "battle overlay" : "overlay " + std::to_string(ovl)) +
+               "\nframe_rate=" + std::to_string(g_target.load()) + "\nlogic30=" + (g_logic30 ? "on" : "off") + "\n";
+    });
     psp_settings_set_frame_rate_hook({k_rates, static_cast<int>(std::size(k_rates)), fps_get, fps_set});
     psp_adhoc_set_local_fps(g_target.load());
     psp_present_set_target_fps(g_target.load());
