@@ -10251,6 +10251,101 @@ void callfx_release(const char* why) {
     const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, sm, 6u); g_ctx->r[29] = static_cast<int32_t>(sp1);
     std::fprintf(stderr, "[ASSISTOFF] t=%.2fs call effects: slow motion channel 6 released (%s)\n", dissidia_battle_age() / 60.0f, why);
 }
+// ---- EX Revenge (retail EX_REVENGE_MANAGER, singleton *0x08ACA350, +0 / +32 enable bytes, +8 state -1 idle / 0 running, +12 timer, +16 owner = the fighter who revenges) ----
+// The start FUN_08AC997C(mgr, fighter) (from the fighter update FUN_08B3526C when the EX button is pressed while the fighter is being hit) sets slow-motion channel 5 to
+// 0.002, raises the owner's clock, flags owner +0x5B6 bit 0x10 / the attacker's bit 0x20; the per-frame update FUN_08AC9D7C counts the timer with the owner's own step and
+// ends the revenge through FUN_08AC9034 (releases channel 5, clears the flags, mgr +8 = -1). BOTH bail out without ending when the owner is gone (owner pointer 0 or the
+// owner's component check FUN_0883739C fails: the fighter was swapped out / rebuilt / KO'd away): the manager then stays "running" forever and channel 5 stays at 0.002.
+// Test aid PSPRECOMP_TAGTEAM_REVENGE=<role>:<s>[,..] starts a revenge for that fighter (the retail start sequence: FUN_08AC997C then FUN_08ACA66C) at battle second s.
+// Log PSPRECOMP_TAGTEAM_REVLOG=1: `[EXREV]` every change of the manager (state, owner) and of slow-motion channel 5.
+FuncPtr g_orig_exrev_start = nullptr; void exrev_start_hook(uint8_t* rdram, recomp_context* ctx);
+uint32_t exrev_mgr() { const uint32_t m = rd(0x08ACA350u); return ok(m, 0x40) ? m : 0u; }
+// Fix (PSPRECOMP_TAGTEAM_NOEXREV=1 = old behaviour): the manager has ONE owner slot and no way out when the owner is gone. (1) `exrev_start_hook` on FUN_08AC997C: a second
+// revenge while one runs (4+ fighters) first ends the running one properly (retail has two fighters, one hit at a time, so it never overlaps there; the old owner's flags
+// and clocks were left behind). (2) `exrev_guard()` every frame: a running revenge whose owner left (not a fighter of the battle any more, another character in the slot
+// after a swap / rebuild, battle restarted) or that runs longer than PSPRECOMP_TAGTEAM_EXREVLEN ticks (default 480; retail's own timer ends it within ~5 s) is ended:
+// retail's end FUN_08AC9034 when the owner is still valid, else the same steps by hand (channel 5 released, globals restored, flags cleared, manager idle).
+struct ExRev { uint32_t gen = 0, owner = 0; int ch = -1; float t0 = 0.f; bool on = false; } g_exrev;
+bool exrev_running() { const uint32_t m = exrev_mgr(); return m && rd(m + 8u) == 0u; }
+void exrev_end(const char* why) {
+    const uint32_t m = exrev_mgr(); if (!m) return;
+    const uint32_t ow = rd(m + 16u); const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x100u);
+    if (ok(ow, 0x12D0)) call(0x08AC9034u, m);
+    const bool still = rd(m + 8u) == 0u;
+    if (still) {   // the owner is gone: what the retail end does, without the owner
+        const uint32_t sm = rd(0x08A62280u); if (ok(sm, 0x40)) call(0x08A620B0u, sm, 5u);
+        wrf(0x089D4920u, 1.0f); const uint32_t p = rd(0x089D6DC8u); if (ok(p, 0x40)) wrf(p + 8u, 0.f); const uint32_t q = rd(0x089D6D80u); if (ok(q, 0x400)) wrf(q + 300u, 0.f);
+        if (rd(m + 28u)) { call(0x088A6AA4u, rd(m + 28u)); wr(m + 28u, 0u); }
+        const uint32_t h = rd(0x089D6AC8u); if (ok(h, 0x40)) call(0x088931D0u, h, 0u);
+        wr(m + 8u, 0xFFFFFFFFu); wrf(m + 12u, 0.f); wr(m + 16u, 0u); wr(m + 20u, 0xFFFFFFFFu); wrf(m + 24u, 0.f);
+    }
+    g_ctx->r[29] = static_cast<int32_t>(sp1);
+    uint32_t f[8]; const int nf = all_fighters(f);   // flags the retail end clears (owner +0x5B6 bit 0x10, the target's bit 0x20) on every fighter, now that nothing runs
+    for (int i = 0; i < nf; i++) g_ram[(f[i] + 0x5B6u) & 0x07FFFFFFu] &= static_cast<uint8_t>(~0x30u);
+    g_exrev.on = false;
+    std::fprintf(stderr, "[EXREV] t=%.2fs revenge ended by hand (%s): owner %08X %s, %s\n", dissidia_battle_age() / 60.f, why, ow, ok(ow, 0x12D0) ? role_of(ow) : "-", still ? "owner gone, manual end" : "retail end");
+}
+void exrev_start_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOEXREV") != nullptr;
+    const uint32_t m = static_cast<uint32_t>(ctx->r[4]), a = static_cast<uint32_t>(ctx->r[5]);
+    if (!off && g_bs && m == exrev_mgr() && rd(m + 8u) == 0u && rd(m + 16u) != a) { const uint32_t ra = static_cast<uint32_t>(ctx->r[31]); exrev_end("another fighter starts a revenge"); ctx->r[4] = static_cast<int32_t>(m); ctx->r[5] = static_cast<int32_t>(a); ctx->r[31] = static_cast<int32_t>(ra); }
+    g_orig_exrev_start(rdram, ctx);
+    if (m == exrev_mgr() && rd(m + 8u) == 0u) { g_exrev.on = true; g_exrev.gen = g_battle_gen; g_exrev.owner = rd(m + 16u); g_exrev.ch = actor_char(g_exrev.owner); g_exrev.t0 = dissidia_battle_age();
+        if (g_log) std::fprintf(stderr, "[EXREV] t=%.2fs revenge starts: owner %08X %s (char %d)\n", g_exrev.t0 / 60.f, g_exrev.owner, ok(g_exrev.owner, 0x12D0) ? role_of(g_exrev.owner) : "-", g_exrev.ch); }
+}
+void exrev_guard() {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOEXREV") != nullptr;
+    if (off || !g_bs) return;
+    const uint32_t m = exrev_mgr(); if (!m || rd(m + 8u) != 0u) { g_exrev.on = false; return; }
+    const float age = dissidia_battle_age(); const uint32_t ow = rd(m + 16u);
+    if (!g_exrev.on || g_exrev.owner != ow) { g_exrev.on = true; g_exrev.gen = g_battle_gen; g_exrev.owner = ow; g_exrev.ch = ok(ow, 0x12D0) ? actor_char(ow) : -1; g_exrev.t0 = age; }
+    static const float cap = std::getenv("PSPRECOMP_TAGTEAM_EXREVLEN") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_EXREVLEN"))) : 480.f;
+    bool mine = false; if (ok(ow, 0x12D0)) { for (int k = 0; k < 2; k++) if (srd(g_bs + 56u + 4u * k) == ow) mine = true; for (int i = 0; i < g_nextra; i++) if (g_extra[i].actor == ow) mine = true; }
+    const char* why = g_exrev.gen != g_battle_gen ? "battle restarted" : !mine ? "the owner is not a fighter of this battle any more" : actor_char(ow) != g_exrev.ch ? "the owner's slot holds another character (swapped / rebuilt)" : age - g_exrev.t0 > cap ? "revenge ran past its limit" : nullptr;
+    if (why) exrev_end(why);
+}
+void exrev_test_step() {
+    static const char* env = std::getenv("PSPRECOMP_TAGTEAM_REVENGE");
+    static const bool lg = std::getenv("PSPRECOMP_TAGTEAM_REVLOG") != nullptr;
+    if (!g_bs || (!env && !lg)) return;
+    const uint32_t m = exrev_mgr(); if (!m) return;
+    const float age = dissidia_battle_age(); const uint32_t sm = rd(0x08A62280u);
+    if (lg) {
+        static uint32_t lst = 7, lown = 7; static float l5 = -9.f; static uint32_t lgen = 0;
+        if (lgen != g_battle_gen) { lgen = g_battle_gen; lst = 7; lown = 7; l5 = -9.f; }
+        const uint32_t st = rd(m + 8u), ow = rd(m + 16u); const float c5 = ok(sm, 0x40) ? rdf(sm + 4u + 20u) : -1.f;
+        if (st != lst || ow != lown || c5 != l5) { lst = st; lown = ow; l5 = c5;
+            std::fprintf(stderr, "[EXREV] t=%.2fs mgr %08X state %d owner %08X %s timer %.2f ch5 %.3f flags %02X/%02X\n", age / 60.f, m, static_cast<int32_t>(st), ow, ok(ow, 0x12D0) ? role_of(ow) : "-", static_cast<double>(rdf(m + 12u)), static_cast<double>(c5),
+                         static_cast<unsigned>(ok(m, 0x40) ? g_ram[m & 0x07FFFFFFu] : 0u), static_cast<unsigned>(g_ram[(m + 32u) & 0x07FFFFFFu])); }
+        static float lf = -1e9f; if (age - lf >= 60.f && rd(m + 8u) == 0xFFFFFFFFu) { lf = age; uint32_t f[8]; const int nf = all_fighters(f);   // fighters' revenge flags (+0x5B6 bits 0x10 owner / 0x20 target) while idle
+            for (int i = 0; i < nf; i++) { const unsigned fl = g_ram[(f[i] + 0x5B6u) & 0x07FFFFFFu]; if (fl & 0x30u) std::fprintf(stderr, "[EXREV] t=%.2fs IDLE but %s %08X has revenge flags %02X (stale)\n", age / 60.f, role_of(f[i]), f[i], fl); } }
+    }
+    if (const char* gz = std::getenv("PSPRECOMP_TAGTEAM_REVENGE_GONE")) {   // test aid: the owner pointer vanishes at battle second s (what a swap / rebuild / unload of the owner leaves)
+        static bool did = false; if (!did && rd(m + 8u) == 0u && age / 60.f >= std::atof(gz)) { did = true; wr(m + 16u, 0u); std::fprintf(stderr, "[EXREV] t=%.2fs test aid: owner pointer zeroed\n", age / 60.f); } }
+    if (env) {
+        static std::vector<bool> done; std::vector<std::string> items; { std::string cur; for (const char* q = env; ; q++) { if (*q == ',' || !*q) { if (!cur.empty()) items.push_back(cur); cur.clear(); if (!*q) break; } else cur += *q; } }
+        done.resize(items.size(), false);
+        for (size_t q = 0; q < items.size(); q++) { if (done[q]) continue; char role[16] = {}; float at = 0; char fo[4] = {};
+            const int ns = std::sscanf(items[q].c_str(), "%15[^:]:%f:%3s", role, &at, fo);
+            if (ns < 2 || age / 60.f < at) continue;
+            if (rd(m + 8u) == 0u && ns < 3) continue;   // one at a time (retail has one manager); ":f" forces a second start (test of the overlap)
+            uint32_t f[8]; const int nf = all_fighters(f); uint32_t a = 0;
+            for (int i = 0; i < nf; i++) if (!std::strcmp(role_of(f[i]), role)) { a = f[i]; break; }
+            if (!a && !std::strncmp(role, "slot", 4) && (role[4] == '0' || role[4] == '1')) a = srd(g_bs + 56u + 4u * static_cast<uint32_t>(role[4] - '0'));   // absolute names (same on every machine): slot0 / slot1 / extra0 / extra1
+            if (!a && !std::strncmp(role, "extra", 5) && (role[5] == '0' || role[5] == '1') && g_nextra > role[5] - '0') a = g_extra[role[5] - '0'].actor;
+            if (a && !ok(a, 0x12D0)) a = 0;
+            if (!a) { static int nn = 0; if (nn++ < 3) std::fprintf(stderr, "[EXREV] test aid: no fighter %s (%d fighters)\n", role, nf); continue; }
+            done[q] = true;
+            const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x100u);
+            uint32_t r = 0; if (g_orig_exrev_start) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(m); g_ctx->r[5] = static_cast<int32_t>(a); exrev_start_hook(g_ram, g_ctx); r = static_cast<uint32_t>(g_ctx->r[2]); *g_ctx = sv; } else r = call(0x08AC997Cu, m, a);   // (through the hook, like the game's call)
+            call(0x08ACA66Cu, a + 1924u);
+            g_ctx->r[29] = static_cast<int32_t>(sp1);
+            std::fprintf(stderr, "[EXREV] t=%.2fs test aid: revenge started for %s %08X (start returned %d) state %d\n", age / 60.f, role, a, static_cast<int32_t>(r), static_cast<int32_t>(rd(m + 8u)));
+            break;
+        }
+    }
+}
 // Issue #136 video 1: a call that overlaps an EX Burst's start (v0.1.25, ~1 in 3 forced calls 1 s before a burst) left slow-motion channel 6 at 0.4 (and,
 // with the retail call, channel 3 at 0) for the rest of the battle: the call's own release was lost to the burst. Safety net: channels 3..9 that stay
 // below normal speed for 5 s while no call, burst, finish phase or chase is running are given back (retail's FUN_08A620B0). Log `[SLOWWATCH]`.
@@ -10266,7 +10361,7 @@ void slow_watchdog() {
     const bool quiet = g_callfx_rel < 0.f && !exb_busy() && !finish_busy() && !g_chase_ctl_now && rd(g_bs + 72u) != 4u;
     for (uint32_t ch = 3; ch < 10; ch++) {
         const float v = rdf(sm + 4u + 4u * ch);
-        if (!quiet || !(v < 1.9f)) { since[ch] = -1.f; continue; }
+        if (!quiet || !(v < 1.9f) || (ch == 5 && exrev_running() && !std::getenv("PSPRECOMP_TAGTEAM_NOEXREV"))) { since[ch] = -1.f; continue; }   // (a running EX Revenge owns channel 5: exrev_guard ends it)
         if (since[ch] < 0.f || age < since[ch]) { since[ch] = age; continue; }
         if (age - since[ch] < 300.f) continue;
         const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, sm, ch); g_ctx->r[29] = static_cast<int32_t>(sp1);
@@ -10277,6 +10372,8 @@ void slow_watchdog() {
 
 void callfx_step() {
     TtStep tt_step_("callfx_step");
+    exrev_test_step();
+    exrev_guard();
     slow_watchdog();
     if (g_callfx_rel < 0.f) return;
     if (g_callfx_gen != g_battle_gen) { g_callfx_rel = -1.f; g_callfx_hum = 0; return; }
@@ -12468,6 +12565,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (std::getenv("PSPRECOMP_TAGTEAM_DMGLOG")) { g_orig_apply = fn(0x08AE6D2Cu); if (g_orig_apply) psp_dispatch_register(0x08AE6D2Cu, apply_hook); }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOAFD")) { g_orig_afd424 = fn(0x08AFD424u); if (g_orig_afd424) psp_dispatch_register(0x08AFD424u, afd424_hook); }
     calllog_install();
+    if (!g_orig_exrev_start) { g_orig_exrev_start = fn(0x08AC997Cu); if (g_orig_exrev_start) psp_dispatch_register(0x08AC997Cu, exrev_start_hook); }
     if (!g_orig_slowset) { g_orig_slowset = fn(0x08A62020u); if (g_orig_slowset) psp_dispatch_register(0x08A62020u, slowset_hook); }
     if (!g_orig_chclr) { g_orig_chclr = fn(0x08AE398Cu); if (g_orig_chclr) psp_dispatch_register(0x08AE398Cu, chclear_hook); }
     if (std::getenv("PSPRECOMP_TTCAM_EXTESTLOG") && !g_orig_ext[0]) { if ((g_orig_ext[0] = fn(0x08B320A4u))) psp_dispatch_register(0x08B320A4u, extest_hook<0>); if ((g_orig_ext[1] = fn(0x08B3214Cu))) psp_dispatch_register(0x08B3214Cu, extest_hook<1>); if ((g_orig_ext[2] = fn(0x08B321F4u))) psp_dispatch_register(0x08B321F4u, extest_hook<2>); }
