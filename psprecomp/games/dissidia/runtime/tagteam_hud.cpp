@@ -483,3 +483,7 @@ void tagteam_layer_frame(bool in_battle) {
     g_layer.publish(); L.lap("publish");
     g_layer_shown = true;
 }
+
+const uint32_t* dissidia_tagteam_face_px(const std::string& code, int* w, int* h) {   // the Free-for-all selector's tiles (the menu layer draws them itself)
+    const dissidia::GimImage* g = face(code); if (!g) return nullptr; *w = g->w; *h = g->h; return g->rgba.data();
+}
