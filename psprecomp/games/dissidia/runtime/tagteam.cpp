@@ -8482,6 +8482,53 @@ FuncPtr g_orig_slowset = nullptr;
 struct XrevSpan { float t0 = 0.f, last = 0.f; };
 std::map<uint32_t, XrevSpan> g_xrev_t0; uint32_t g_xrev_gen = 0;
 bool is_cpu_extra(uint32_t a) { for (int i = 0; i < g_nextra; i++) if (g_extra[i].actor == a && g_extra[i].started) return !pad_driven(a); return false; }
+// "Chase slow: chasers only" (lobby row CHASE SLOW, default; 25 Nov ttchase): retail's chase controller slows the whole battle (slow-motion channel 1 = 0.05 / 0.133). The slow-motion manager
+// (*0x08A62280) multiplies its channels (idle 2.0) into the global step; an actor's step is its clock x that global step (FUN_08838300, hooked in framerate.cpp). The chase keeps retail's
+// slow motion (its own timing relies on it: forcing 1.0 made it play as fast forward and broke it), and every actor that does not belong to the chase (a fighter / assist / shot of the
+// other pair) gets its step multiplied by 2 / channel1, i.e. the product of all the other channels = the step it would have without the chase. Battle state only (chase controller, channel
+// value, the host's option): the same on every machine. PSPRECOMP_TAGTEAM_CHASESLOW_FORCE1=1 = the old behaviour (channel 1 forced to 1.0 for everybody).
+bool chase_force1() { static const bool f = std::getenv("PSPRECOMP_TAGTEAM_CHASESLOW_FORCE1") != nullptr; return f; }
+bool chase_member(uint32_t actor) {
+    const uint32_t ctl = g_chase_ctl_now;
+    for (int k = 0; k < 2; k++) {
+        const uint32_t m = rd(ctl + 28u + 4u * static_cast<uint32_t>(k));
+        if (!m) continue;
+        if (actor == m || actor == ao8_x_of_slot(m)) return true;
+        for (int q = 0; q < g_nextra; q++) if (g_extra[q].actor == m && actor == xas_ptr(m)) return true;
+    }
+    return false;
+}
+float chase_other_scale(float ticks) {   // 2 / channel 1 while a chase slows the battle for the chasers only, else 1
+    if (!g_bs || !g_chase_ctl_now || chase_force1() || !ok(g_chase_ctl_now, 0x40) || rd(g_chase_ctl_now) == 0) return 1.0f;
+    if (!(tag_live() || g_enabled || g_menu_mode || g_group_mode) || !noslow_now()) return 1.0f;
+    const uint32_t mg = rd(0x08A62280u); if (!ok(mg, 0x40)) return 1.0f;
+    const float c1 = rdf(mg + 8u);
+    if (!(c1 > 0.001f && c1 < 1.99f)) return 1.0f;
+    // The actor's step is clock x the global step G, which is copied a frame late and so may not carry channel 1 yet (or any more). The step the actor should have without the chase is
+    // 2 x the product of the OTHER channels (x ticks / 2 at other frame rates): scale by that / G (at least 1).
+    float other = 2.0f * ticks * 0.5f; for (int ch = 0; ch < 10; ch++) { if (ch == 1) continue; const float c = rdf(mg + 4u + 4u * static_cast<uint32_t>(ch)); if (c == c && c < 2.0f) other *= c * 0.5f; }
+    const float G = rdf(0x089D5EACu); if (!(G > 1e-6f)) return 1.0f;
+    return std::max(other / G, 1.0f);
+}
+}  // namespace
+// framerate.cpp: actor_dt_hook / cam_dt_hook ask for the factor of one actor's step / the camera's step.
+float dissidia_tt_chase_actor_scale(uint32_t actor, float ticks) {
+    const float sc = chase_other_scale(ticks); if (sc == 1.0f) return 1.0f;
+    uint32_t a = actor;
+    for (int d = 0; d < 3 && ok(a, 0x12D0); d++) { if (chase_member(a)) return 1.0f; a = rd(a + 0x1108u); }   // the actor, then its master (shots, effects actors)
+    return sc;
+}
+void dissidia_tt_chase_step_log(uint32_t actor, float before, float after) {   // debug PSPRECOMP_TAGTEAM_CHASESTEPLOG=1: every fighter's step while a chase runs
+    static const bool on = std::getenv("PSPRECOMP_TAGTEAM_CHASESTEPLOG") != nullptr;
+    if (!on || !g_bs || !g_chase_ctl_now || !ok(g_chase_ctl_now, 0x40) || rd(g_chase_ctl_now) == 0 || !ok(actor, 0x12D0) || g_ram[(actor + 0x542u) & 0x07FFFFFFu] != 0) return;
+    std::fprintf(stderr, "[CHSTEP] t=%.3fs %s %08X chase %s step %.4f (game %.4f) clk %.3f ch1 %.3f state %u pos %.2f %.2f %.2f\n", dissidia_battle_age() / 60.0f, role_of(actor), actor, chase_member(actor) ? "IN " : "out", after, before, rdf(actor + 0x3C8u), ok(rd(0x08A62280u), 0x40) ? rdf(rd(0x08A62280u) + 8u) : -1.f, rd(g_chase_ctl_now), rdf(actor + 0x80u), rdf(actor + 0x84u), rdf(actor + 0x88u));
+}
+float dissidia_tt_chase_cam_scale(float ticks) {   // the view of a local fighter outside the chase runs at normal speed; the chasers' view keeps retail's look
+    const float sc = chase_other_scale(ticks); if (sc == 1.0f) return 1.0f;
+    const uint32_t H = srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u));
+    return (ok(H, 0x12D0) && !chase_member(H)) ? sc : 1.0f;
+}
+namespace {
 void slowset_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     {   static const bool lg = std::getenv("PSPRECOMP_TTCAM_EXCHLOG") != nullptr;   // debug: every frame of the EX chance, any fighter: EX controller words, clock step, actor flags
@@ -8503,7 +8550,7 @@ void slowset_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_SLOWSETLOG")) std::fprintf(stderr, "[SLOWSET] t=%.2fs channel %u speed %.3f flags %X ra %08X chase ctl %08X state %u\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[5]), static_cast<double>(ctx->f[12]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[31]), g_chase_ctl_now, g_chase_ctl_now && ok(g_chase_ctl_now, 8) ? rd(g_chase_ctl_now) : 0u);
     // "No chase slow-down": retail's chase controller (FUN_08AB5xxx: state 2 sets slow-motion channel 1 to 0.05, state 4 to 0.133 every frame until the chase ends) is not allowed to slow the
     // battle in a tag team battle. Battle state only (the chase code, the host's option via noslow_now()): the same on every machine. PSPRECOMP_TAGTEAM_CHASESLOW=1 = retail's slow-downs.
-    if (g_bs && g_chase_ctl_now && ctx->r[5] == 1 && static_cast<uint32_t>(ctx->r[31]) >= 0x08AB5000u && static_cast<uint32_t>(ctx->r[31]) < 0x08AB6C00u && (tag_live() || g_enabled || g_menu_mode || g_group_mode) && noslow_now()) {
+    if (g_bs && g_chase_ctl_now && ctx->r[5] == 1 && static_cast<uint32_t>(ctx->r[31]) >= 0x08AB5000u && static_cast<uint32_t>(ctx->r[31]) < 0x08AB6C00u && (tag_live() || g_enabled || g_menu_mode || g_group_mode) && noslow_now() && chase_force1()) {
         static int n = 0; if (g_log && n++ < 3) std::fprintf(stderr, "[CHASESLOW] t=%.2fs chase slow motion (channel 1, %.3f, ra %08X) kept at normal speed: No chase slow-down\n", dissidia_battle_age() / 60.0f, static_cast<double>(ctx->f[12]), static_cast<uint32_t>(ctx->r[31]));
         // The call itself must still run: the chase code (attack input during the chase) depends on the channel being set. Only the speed factor becomes 1.0.
         ctx->f[12] = 1.0f;
@@ -11597,7 +11644,8 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static uint32_t last_open = 0;
         const std::string who = std::getenv("PSPRECOMP_TAGTEAM_FORCECHASE");
         const uint32_t hs = rd(g_bs + 84u); uint32_t a = 0;
-        if (who == "cpu") a = srd(g_bs + 56u + 4u * (1u - hs));
+        if (who.compare(0, 4, "slot") == 0 && who.size() == 5) a = srd(g_bs + 56u + 4u * static_cast<uint32_t>(who[4] == '1'));   // absolute (the same on every machine of a lock-step test)
+        else if (who == "cpu") a = srd(g_bs + 56u + 4u * (1u - hs));
         else for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && side_of(g_extra[i].actor) != side_of(srd(g_bs + 56u + 4u * hs))) a = g_extra[i].actor;
         const uint32_t ctl = rd(0x08AB6738u);
         if (ok(a, 0x12D0) && ok(ctl, 0x40) && rd(ctl) == 0) {
@@ -11615,6 +11663,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             if (open && last_open != a) {
                 uint32_t foe = rd(a + 0x300u);
                 if (std::getenv("PSPRECOMP_TAGTEAM_FORCECHASE_HUMAN")) { const uint32_t hh = srd(g_bs + 56u + 4u * rd(g_bs + 84u)); if (ok(hh, 0x12D0) && side_of(hh) != side_of(a)) foe = hh; }   // debug: the chase is against the human's fighter
+                if (const char* ff = std::getenv("PSPRECOMP_TAGTEAM_FORCECHASE_FOE")) if (!std::strncmp(ff, "slot", 4) && ff[4]) { const uint32_t f2 = srd(g_bs + 56u + 4u * static_cast<uint32_t>(ff[4] == '1')); if (ok(f2, 0x12D0)) foe = f2; }   // debug: the foe by absolute slot
                 if (ok(foe, 0x12D0)) {
                     { std::fprintf(stderr, "[G63310] t=%.2fs:", dissidia_battle_age() / 60.0f); for (uint32_t o = 0; o < 0x100u; o += 4) std::fprintf(stderr, " %08X", rd(0x08B63310u + o)); std::fprintf(stderr, "\n");
                       uint32_t f[6]; const int nf = all_fighters(f); for (int i = 0; i < nf; i++) std::fprintf(stderr, "[G63310]   %s %08X\n", role_of(f[i]), f[i]); }

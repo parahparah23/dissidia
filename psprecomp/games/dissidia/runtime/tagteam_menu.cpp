@@ -324,7 +324,7 @@ int lobby_visible(const uint8_t* L, int out[kLobbyRows]) {
     for (int r = 1; r < kLobbyRows; r++) { if (r == 5 && sp) continue; if (r == 7 && !L[2]) continue; if (r == 8 && !(sp && L[0] == 3)) continue; if (r == 9 && (g_no_allcpu || !dissidia_tagteam_lobby_editable())) continue; out[n++] = r; }
     return n;
 }
-const char* kLobbyRowName[kLobbyRows] = {"MODE", "STAGE", "RULES", "JUDGMENT", "EX BURST", "ASSIST", "CPU FILL", "CPU STRENGTH", "PLAYERS", "ALL CPUs", "NO CHASE SLOW"};
+const char* kLobbyRowName[kLobbyRows] = {"MODE", "STAGE", "RULES", "JUDGMENT", "EX BURST", "ASSIST", "CPU FILL", "CPU STRENGTH", "PLAYERS", "ALL CPUs", "CHASE SLOW"};
 std::string lobby_value(int r, const uint8_t* L) {
     switch (r) {
     case 0: return kLobbyModes[lobby_mode_index(L)].label;
@@ -334,7 +334,7 @@ std::string lobby_value(int r, const uint8_t* L) {
     case 4: return L[7] ? "Keep fighting" : "Freeze";
     case 5: return L[8] ? "On" : "Off";
     case 6: return L[2] ? "On" : "Off";
-    case 10: return L[9] ? "On" : "Off";
+    case 10: return L[9] ? "Chasers only" : "Everyone (retail)";
     case 8: return "P1 + " + std::to_string(dissidia_tagteam_ffa_players() - 1) + " CPU  >";
     case 9: return kStrName[std::clamp(g_all_str, 1, 9) - 1];
     default: return kStrName[std::clamp<int>(L[3], 1, 9) - 1];
@@ -787,7 +787,7 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
     const int cur = vis[g_lob_row];
     const std::string help = [&]() -> std::string {
         static const char* const kRowHelp[] = {"", "The stage of the battle. Random picks one when it starts.", "The rules of the match (None, Official, or a centred rule set).", "The judgment setting of the match (None, Cosmos, Chaos, Double, Random).", "How the EX Burst behaves in this battle.", "How the Assist gauge behaves in this battle.", "On: empty places are filled with CPU fighters.", "Strength of the CPU fill fighters.", "", "", ""};
-        std::string h = cur == 0 ? kLobbyModes[lobby_mode_index(L)].help : cur == 8 ? "Cross: choose the players of the free-for-all" : cur == 9 ? "Left/Right: every CPU (fill, partners, enemies, free-for-all) gets this strength" : cur == 10 ? "On: no slow motion during a Chase (the host decides online)" : (cur >= 6 ? "Empty places are filled with CPU fighters of this strength" : "");
+        std::string h = cur == 0 ? kLobbyModes[lobby_mode_index(L)].help : cur == 8 ? "Cross: choose the players of the free-for-all" : cur == 9 ? "Left/Right: every CPU (fill, partners, enemies, free-for-all) gets this strength" : cur == 10 ? "Chasers only: the slow motion of a Chase affects only the two fighters in it. Everyone: retail, the whole battle slows (the host decides online)" : (cur >= 6 ? "Empty places are filled with CPU fighters of this strength" : "");
         if (h.empty() && cur >= 1 && cur <= 7) h = kRowHelp[cur];
         return h;
     }();
