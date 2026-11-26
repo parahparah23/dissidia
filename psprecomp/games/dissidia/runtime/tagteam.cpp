@@ -832,7 +832,11 @@ void load_character(int charId) {
     for (uint32_t id : ids) {
         if (id == 0xFFFFu) continue;
         const uint32_t have = call(FILE_FIND, mgr, id);
-        if (!have) { TtStep tt_lfg_("LOAD_FILE_GROUP"); call(LOAD_FILE_GROUP, id, heap, 0); loaded = true; }
+        if (!have) { { TtStep tt_lfg_("LOAD_FILE_GROUP"); call(LOAD_FILE_GROUP, id, heap, 0); } loaded = true;
+            if (id == ids[0]) { const uint32_t row2 = call(CHAR_INFO, id);   // retail's loading screen (FUN_0888CD5C..): a model whose info row has flag 0x10 (+8) gets the second stage FUN_08844F50(id, heap, flag)
+                const bool st2 = ok(row2, 0x10) && (g_ram[(row2 + 8u) & 0x07FFFFFFu] & 0x10u);
+                if (g_log) std::fprintf(stderr, "[TAGTEAM] load_character(%d): file %u info row %08X flags +8 %02X: second stage %s\n", charId, id, row2, ok(row2, 0x10) ? g_ram[(row2 + 8u) & 0x07FFFFFFu] : 0xFF, st2 ? "needed" : "not needed");
+                (void)st2; } }
         if (g_log && std::getenv("PSPRECOMP_TAGTEAM_FILEOBJ")) { dump_file_obj("cloud-after", mgr, id); dump_file_obj("squall", mgr, 2); dump_file_obj("squallD", mgr, 189); }
         if (g_log) std::fprintf(stderr, "[TAGTEAM] load_character(%d): file id %u %s -> object %08X\n", charId, id, have ? "already loaded" : "loaded", call(FILE_FIND, mgr, id));
     }
@@ -4034,7 +4038,9 @@ void exb_debug_start() {
             { uint32_t f[8]; const int nf = all_fighters(f); for (int i = 0; i < nf; i++) { const uint32_t h = rd(f[i] + 912u); if (!ok(h, 0x300)) continue; const uint32_t cx = rd(h + 208u);
                 std::fprintf(stderr, "[EXBCTX] %s %08X holder(+912) %08X +204 %08X +208 %08X:", role_of(f[i]), f[i], h, rd(h + 204u), cx);
                 if (ok(cx, 0x40)) for (uint32_t o = 0; o < 0x40u; o += 4) std::fprintf(stderr, " %08X", rd(cx + o));
-                std::fprintf(stderr, "\n"); } }
+                std::fprintf(stderr, "\n");
+                const uint32_t c4 = rd(h + 204u); std::fprintf(stderr, "[EXBCTX]   +204 object %08X:", c4); if (ok(c4, 0x40)) for (uint32_t o = 0; o < 0x40u; o += 4) std::fprintf(stderr, " %08X", rd(c4 + o)); std::fprintf(stderr, "\n");
+                const uint32_t pk = ok(c4, 8) ? rd(c4 + 4u) : 0u; std::fprintf(stderr, "[EXBCTX]   package %08X:", pk); if (ok(pk, 0x60)) for (uint32_t o = 0; o < 0x60u; o += 4) std::fprintf(stderr, " %08X", rd(pk + o)); std::fprintf(stderr, "\n"); } }
             for (uint32_t who : {a, srd(g_bs + 56u), srd(g_bs + 60u)}) { const uint32_t lb = rd(who + ACT_LOCKBLK); if (!ok(lb, 0x400)) continue;
                 std::fprintf(stderr, "[EXBLB] %s %08X lock block %08X:", role_of(who), who, lb);
                 for (uint32_t o = 0x180u; o < 0x2C0u; o += 4) { const uint32_t v = rd(lb + o); if (v) std::fprintf(stderr, " +%X=%08X%s", o, v, (v >= lb && v < lb + 0x600u) ? "(in)" : ""); }
@@ -11517,12 +11523,22 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
                 std::snprintf(b, sizeof b, " [%s c%d id%u rec %08X v96 %08X@%08X+%u v212 %08X@%08X]", role_of(a), c, id, r, h96, h96 ? call(0x088A0CF8u, h96) : 0u, ok(r, 0xF0) ? rd(r + 124u) : 0u, h212, h212 ? call(0x088A0CF8u, h212) : 0u); now += b; } }
         if (now != last) { last = now; std::fprintf(stderr, "[BANKLOG] t=%.2fs%s\n", dissidia_battle_age() / 60.0f, now.c_str()); }
     }
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_EXBDT")) {   // debug "<battle second>:<prims>": arm the GE per-draw trace ([DT] lines) once at that tag-clock second
+        static bool armed = false; float at = 0; int n = 0; extern void ge_draw_dyn_trace(int);
+        if (!armed && std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_EXBDT"), "%f:%d", &at, &n) == 2 && dissidia_battle_age() / 60.0f >= at) { armed = true; ge_draw_dyn_trace(n); std::fprintf(stderr, "[EXBDT] t=%.2fs per-draw trace armed for %d prims\n", dissidia_battle_age() / 60.0f, n); } }
+    if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_EXBFC")) {   // debug "<s1>:<s2>:<path>" (with PSPRECOMP_PC_TRACE=1): dump the function entry counts at tag-clock seconds s1 and s2 (path.1 / path.2)
+        static bool d1 = false, d2 = false; float a = 0, b = 0; char path[300] = {}; extern void psp_dump_func_counts(const char*);
+        if (std::sscanf(std::getenv("PSPRECOMP_TAGTEAM_EXBFC"), "%f:%f:%299s", &a, &b, path) == 3) {
+            const float t = dissidia_battle_age() / 60.0f; char f[330];
+            if (!d1 && t >= a) { d1 = true; std::snprintf(f, sizeof f, "%s.1", path); psp_dump_func_counts(f); }
+            if (!d2 && t >= b) { d2 = true; std::snprintf(f, sizeof f, "%s.2", path); psp_dump_func_counts(f); } } }
     if (g_bs && g_exb_struct_at > 0.f && dissidia_battle_age() >= g_exb_struct_at && std::getenv("PSPRECOMP_TAGTEAM_EXBSTRUCT")) {   // debug: the burst controller's scene struct (+672, 0x340 B) and entry (+532) words
         g_exb_struct_at = -1.f; const uint32_t c = rd(0x08A405E0u);
         if (ok(c, 0x300)) { std::fprintf(stderr, "[EXBSTRUCT] controller %08X burster %08X victim %08X entry %08X\n", c, rd(c + 620u), rd(c + 624u), rd(c + 532u));
             for (uint32_t o = 0; o < 0x340u; o += 4) { const uint32_t v = rd(c + 672u + o); if (v) std::fprintf(stderr, "[EXBSTRUCT] +%X %08X\n", o, v); }
             const uint32_t e = rd(c + 532u); if (ok(e, 0x40)) for (uint32_t o = 0; o < 24u; o += 4) std::fprintf(stderr, "[EXBSTRUCT] entry+%X %08X\n", o, rd(e + o));
-            for (uint32_t o = 0x1E0u; o < 0x300u; o += 4) { const uint32_t v = rd(c + o); if (v) std::fprintf(stderr, "[EXBSTRUCT] ctl+%X %08X\n", o, v); } } }
+            for (uint32_t o = 0x1E0u; o < 0x300u; o += 4) { const uint32_t v = rd(c + o); if (v) std::fprintf(stderr, "[EXBSTRUCT] ctl+%X %08X\n", o, v); }
+            for (uint32_t off : {0x228u, 0x24Cu}) { const uint32_t ob = rd(c + off); if (ok(ob, 0x100)) for (uint32_t o = 0; o < 0x100u; o += 4) std::fprintf(stderr, "[EXBSTRUCT] obj@ctl+%X +%X %08X\n", off, o, rd(ob + o)); } } }
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_EXBDUMP")) {   // debug: the EX Burst controller (*0x08A405E0) words that change
         static uint32_t last[256] = {}; static bool first = true; const uint32_t c = rd(0x08A405E0u);
         if (ok(c, 0x400)) { bool any = false; for (int q = 0; q < 256; q++) if (rd(c + 4u * q) != last[q]) any = true;
@@ -11868,6 +11884,14 @@ void bgstep_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     g_orig_bgstep(rdram, ctx);
 }
+// Debug (PSPRECOMP_TAGTEAM_EXBFXLOG): the particle / effect script creator FUN_0887D868(manager, a1, script, ...) and its result (0 = not created)
+FuncPtr g_orig_partc = nullptr;
+void partc_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    const uint32_t scr = static_cast<uint32_t>(ctx->r[6]), ra = static_cast<uint32_t>(ctx->r[31]);
+    g_orig_partc(rdram, ctx);
+    const uint32_t c = rd(0x08A405E0u);
+    if (ok(c, 0x300) && rd(c + 0x278u) != 0) { std::fprintf(stderr, "[EXBPART] t=%.2fs create script %08X ra %08X -> %08X :", dissidia_battle_age() / 60.0f, scr, ra, static_cast<uint32_t>(ctx->r[2])); if (ok(scr, 0x40)) for (uint32_t o = 0; o < 0x40u; o += 4) std::fprintf(stderr, " %08X", rd(scr + o)); std::fprintf(stderr, "\n"); }
+}
 void dissidia_tagteam_install(uint8_t* rdram) {
     dissidia_ttnet_install(rdram);
     const char* e = std::getenv("PSPRECOMP_TAGTEAM");
@@ -11942,6 +11966,7 @@ void dissidia_tagteam_install(uint8_t* rdram) {
         if (!std::getenv("PSPRECOMP_TAGTEAM_HITLOG")) { g_orig_hudref = fn(0x089DEDB0u); if (g_orig_hudref) psp_dispatch_register(0x089DEDB0u, hudref_hook); } }
     if (!g_orig_accui && !std::getenv("PSPRECOMP_TAGTEAM_NOACCUI")) { g_orig_accui = fn(0x089E1FD0u); if (g_orig_accui) psp_dispatch_register(0x089E1FD0u, accui_hook); }
     if (!g_orig_chase) { g_orig_chase = fn(0x08AB6348u); if (g_orig_chase) psp_dispatch_register(0x08AB6348u, chase_hook); }
+    if (std::getenv("PSPRECOMP_TAGTEAM_EXBFXLOG") && !g_orig_partc) { g_orig_partc = fn(0x0887D868u); if (g_orig_partc) psp_dispatch_register(0x0887D868u, partc_dbg_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_EXBBGLOG") && !g_orig_bgstep) { g_orig_bgstep = fn(0x08A3624Cu); if (g_orig_bgstep) psp_dispatch_register(0x08A3624Cu, bgstep_dbg_hook); }
     if (!g_orig_exbstart) { g_orig_exbstart = fn(EXB_START); if (g_orig_exbstart) psp_dispatch_register(EXB_START, exbstart_hook); }
     if (!g_orig_portrait) { g_orig_portrait = fn(0x08B21588u); if (g_orig_portrait) psp_dispatch_register(0x08B21588u, portrait_hook); }
