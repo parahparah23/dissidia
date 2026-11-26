@@ -29,6 +29,8 @@ final class BuildRunner {
     }
 
     static volatile BuildRunner current;
+    /** Exists while a plan runs (set by the activity): found at the next start with no runner = the app was killed or crashed mid-install. */
+    static volatile File marker;
 
     final String kind;
     final JSONArray plan;
@@ -89,6 +91,7 @@ final class BuildRunner {
             if (out != null) {
                 out.write(s);
                 out.write('\n');
+                out.flush();   // a line is on disk before the next runs: a crash or a kill still leaves the log
             }
         } catch (Exception e) {
             // the log file is a convenience
@@ -127,6 +130,17 @@ final class BuildRunner {
             out = new OutputStreamWriter(new FileOutputStream(log, true), "UTF-8");
         } catch (Exception e) {
             out = null;
+        }
+        try {
+            File m = marker;
+            if (m != null) {
+                m.getParentFile().mkdirs();
+                try (FileOutputStream mo = new FileOutputStream(m)) {
+                    mo.write((kind + "\n").getBytes("UTF-8"));
+                }
+            }
+        } catch (Exception e) {
+            // no marker: the next start cannot tell
         }
         String stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
         say("===== psprecomp_setup run (" + kind + ", " + stamp + ") =====");
@@ -184,6 +198,8 @@ final class BuildRunner {
         } catch (Exception e) {
             // closed anyway
         }
+        File m = marker;
+        if (m != null) m.delete();
         ok = fail == null;
         error = fail == null ? "" : fail;
         running = false;

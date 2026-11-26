@@ -221,7 +221,8 @@ def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
     flags = ["-target", "aarch64-linux-android", "-nostdinc++", "-I" + sysroot + "/usr/include/c++/v1",
              "-isystem", sysroot + "/usr/include/aarch64-linux-android", "-isystem", sysroot + "/usr/include",
              "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % api, "-fdata-sections", "-ffunction-sections", "-funwind-tables",
-             "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-std=gnu++17", "-fPIC", "-O2", "-fno-lto", "-fno-strict-aliasing", "-Wno-everything"]
+             "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-std=gnu++17", "-fPIC", "-O2", "-fno-lto", "-fno-strict-aliasing", "-Wno-everything",
+             "-ffp-contract=off"]   # lock-step online play: no fused multiply-add (clang for ARM fuses a * b + c by default), same rounding as the PC build
     # Objects are kept by what they were compiled from (objcache.py: the source's bytes, the generated headers it includes, the compiler
     # and the flags without folder paths), so an update compiles only the files whose code changed. Before, the object names carried a
     # hash of the flags and of zig's path, which are inside the release folder: every update compiled all files again.

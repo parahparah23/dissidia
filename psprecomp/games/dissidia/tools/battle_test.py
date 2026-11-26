@@ -242,6 +242,11 @@ def walk_direct(g, ff_menus=4):
     if ff_menus != 0:
         g.cmd('FF 120000 %d' % max(ff_menus, 0))
     g.wait_log(r'\[DIRECT\] replay finished', 240)
+    if os.environ.get('BT_NOPROBE'):                   # test aid: no HUD probing (its screenshots collide with the runtime's own PSPRECOMP_TAGTEAM_AGESHOTS captures in the intro)
+        g.touch_go()
+        g.wait_log(r'\[TEST\] battle started', 90)
+        g.cmd('FF 0')
+        return
     seen = 0
     for _ in range(90):
         if not g.alive():

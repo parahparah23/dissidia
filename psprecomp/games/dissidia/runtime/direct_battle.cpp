@@ -68,22 +68,26 @@ uint32_t save_record(int charId) {   // the save record of a charId (0 = none)
     }
     return 0;
 }
-int model_id(int charId) {   // object table id of a character's first-costume player model entry (P_<code>_1P), -1 = none
+int model_id(int charId, int costume = 1) {   // object table id of a character's player model entry for that LOOK (P_<code>_<n>P, else P_<code>_<n>P_PUB: the DLC looks), -1 = none
     const uint32_t t = g_w32(0x089D4968u);
     if (t < 0x08800000u || t >= 0x0A000000u) return -1;
     const uint32_t h = g_w32(t);
     if (h < 0x08800000u || h >= 0x0A000000u) return -1;
-    const uint32_t n = g_w32(h + 4u);
+    const uint32_t n = g_w32(h + 4u); int pub = -1;
     for (uint32_t i = 0; i < n && i < 4000u; i++) {
         const uint8_t* r = g_at(h + 8u + 0x44u * i);
-        if (r[6] != charId || r[7] != 1 || r[8] == 5 || r[8] == 8 || r[8] == 13) continue;   // costume 1, not an assist (8 / 13) or manikin (5): Prishe's is type 16
+        if (r[6] != charId || r[8] == 5 || r[8] == 8 || r[8] == 13) continue;   // not an assist (8 / 13) or manikin (5): Prishe's is type 16
         const char* name = reinterpret_cast<const char*>(r + 36);
         const size_t len = strnlen(name, 16);
-        if (len < 4 || std::strncmp(name, "P_", 2) != 0 || std::strncmp(name + len - 3, "_1P", 3) != 0) continue;
+        if (len < 6 || std::strncmp(name, "P_", 2) != 0) continue;
+        const bool is_pub = len >= 4 && std::strcmp(name + len - 4, "_PUB") == 0;
+        const size_t e = is_pub ? len - 4 : len;   // ... _<n>P
+        if (e < 3 || name[e - 1] != 'P' || name[e - 3] != '_' || name[e - 2] != '0' + costume) continue;
         uint16_t id; std::memcpy(&id, r, 2);
-        return id;
+        if (!is_pub) return id;
+        if (pub < 0) pub = id;
     }
-    return -1;
+    return pub;
 }
 // PSPRECOMP_TEST_ASSIST_SET=<side>=<charId>[:<object id>]: test aid, the retail assist of that side becomes that character's assist entry
 // (record +0xF3E = object id of the first entry with byte 6 = charId and type 8 / 13 (assist), or the id given; +4186 = charId, +4187 = 0).
@@ -175,7 +179,15 @@ void force_human_chars(const uint8_t* c, int n) {
         rec[0] = static_cast<uint8_t>(to);
         std::fprintf(stderr, "[FFA] human fighter record: charId -> %d (%s)\n", to, src ? "its own save record" : "charId only");
     }
-    const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
+    // 25 Nov (user: FFA fighters wore the default outfit): the LOOK Player Select shows ("LOOK: Normal / Alt 1 / DLC 1", Square there) is the byte at +0x774 of the character's 0x778-byte save
+    // record (found by pressing Square in Quick Battle's Player Select and diffing all 31 records: Lightning 4 -> 1). The retail 1-on-1 battle with Lightning on "DLC 1" has model id 596 (the
+    // plain P_GST130_1P entry, not the _PUB one) and the look in the record's +0x774 (4): the loader applies it. So the model stays the first entry and the record's +0x774 is the save's look,
+    // also when the record already holds this character (the Party Select lead's look was kept before). PSPRECOMP_TAGTEAM_FFA_COSTUME_OLD=1: not copied.
+    int want = model_id(to); uint8_t lkv = 1;
+    if (!std::getenv("PSPRECOMP_TAGTEAM_FFA_COSTUME_OLD")) { const uint32_t src = save_record(to); if (src) { const uint8_t lk = *g_at(src + 0x774u); lkv = lk;
+        if (lk >= 2 && lk <= 3) { const int mm = model_id(to, lk); if (mm >= 0) want = mm; }   // retail (checked with Lightning in 1-on-1: Alt 1 = look 2 -> model id 597 = P_GST130_2P, DLC 1 = look 4 -> 596 = the 1P entry + look 4 in the record)
+        if (lk >= 1 && lk <= 8 && rec[0x774] != lk) { rec[0x774] = lk; static int lg = 0; if (lg++ < 6) std::fprintf(stderr, "[FFA] human main %d: look %d (model id %d)\n", to, lk, want); } } }
+    uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
     if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
     if (ids[-6] != n || ids[0] != c[0] || (n > 1 && ids[1] != c[1])) { ids[-6] = static_cast<uint8_t>(n); ids[0] = c[0]; ids[1] = n > 1 ? c[1] : 0xFF; for (int k = 2; k < 5; k++) ids[k] = 0xFF; std::fprintf(stderr, "[FFA] human team: %d %d\n", c[0], n > 1 ? c[1] : -1); }
 }

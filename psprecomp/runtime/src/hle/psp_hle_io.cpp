@@ -1,3 +1,5 @@
+#include <chrono>
+#include <atomic>
 #include <cctype>
 #include "psp_platform.h"
 #include "hle/psp_hle.h"
@@ -85,6 +87,16 @@ static void tag_fd_for_overlay(int psp_fd, const char* psp_path) {
 
 // If the game module supplies this read, advance the fd position and return
 // true with the byte count in *out.
+// Read statistics (the hitch aid in the game module asks for them): wall time and bytes of the game's file reads since the last query.
+static std::atomic<uint64_t> g_io_ns{0}, g_io_bytes{0}, g_io_n{0};
+static void io_stat_note(std::chrono::steady_clock::time_point t0, ssize_t bytes) {
+    g_io_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+    g_io_bytes.fetch_add(bytes > 0 ? static_cast<uint64_t>(bytes) : 0u, std::memory_order_relaxed); g_io_n.fetch_add(1, std::memory_order_relaxed);
+}
+void psp_io_read_stats_take(double* ms, uint64_t* bytes, uint64_t* n) {
+    *ms = static_cast<double>(g_io_ns.exchange(0)) / 1e6; *bytes = g_io_bytes.exchange(0); *n = g_io_n.exchange(0);
+}
+
 static bool try_overlay_read(PspFileDesc& d, uint8_t* dest, uint32_t size, ssize_t* out) {
     if (d.overlay_tag == 0 || d.host_fd < 0 || d.is_slice || g_io_policy.overlay_read == nullptr) return false;
     off_t cur = ::lseek(d.host_fd, 0, SEEK_CUR);
@@ -484,8 +496,10 @@ static void hle_sceIoRead(
     uint8_t* dest = rdram + (buf_ptr & PSP_ADDR_MASK);
     size = clamp_read_to_slice(it->second, size);
     ssize_t bytes_read;
+    const auto io_t0 = std::chrono::steady_clock::now();
     if (!try_overlay_read(it->second, dest, size, &bytes_read))
         bytes_read = ::read(it->second.host_fd, dest, size);
+    io_stat_note(io_t0, bytes_read);
     if (bytes_read < 0) {
         ctx->r[2] = SCE_ERROR_ERRNO_EIO;
         sched_yield_point();
@@ -991,8 +1005,10 @@ static void hle_sceIoReadAsync(
     uint8_t* dest = rdram + (buf_ptr & PSP_ADDR_MASK);
     size = clamp_read_to_slice(it->second, size);
     ssize_t bytes_read;
+    const auto io_t0 = std::chrono::steady_clock::now();
     if (!try_overlay_read(it->second, dest, size, &bytes_read))
         bytes_read = ::read(it->second.host_fd, dest, size);
+    io_stat_note(io_t0, bytes_read);
     if (bytes_read < 0) {
         it->second.asyncResult = static_cast<int64_t>(
             SCE_ERROR_ERRNO_EIO);

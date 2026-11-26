@@ -237,6 +237,7 @@ set(RUNTIME_SOURCES
     src/psp_event_loop.cpp
     src/psp_present_sync.cpp
     src/psp_settings.cpp
+    src/psp_report.cpp
     src/psp_ge.cpp
     src/psp_ge_vertex.cpp
     src/psp_ge_texture.cpp
@@ -337,6 +338,13 @@ if(NOT PSPRECOMP_RELEASE_VERSION)
     endif()
 endif()
 set_source_files_properties(src/psp_ge_draw.cpp PROPERTIES COMPILE_DEFINITIONS "PSPRECOMP_RELEASE_VERSION=\"${PSPRECOMP_RELEASE_VERSION}\"")
+# The commit the report button states (psp_report.cpp); "unknown" where there is no git (the setup app's on-device build of a source archive).
+execute_process(COMMAND git rev-parse --short=12 HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                OUTPUT_VARIABLE PSP_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE PSP_GIT_COMMIT_RC)
+if(NOT PSP_GIT_COMMIT_RC EQUAL 0 OR NOT PSP_GIT_COMMIT)
+    set(PSP_GIT_COMMIT "unknown")
+endif()
+set_source_files_properties(src/psp_report.cpp PROPERTIES COMPILE_DEFINITIONS "PSPRECOMP_GIT_COMMIT=\"${PSP_GIT_COMMIT}\"")
 add_library(psprecomp_core STATIC ${RUNTIME_SOURCES})
 add_executable(psprecomp_runtime src/main.cpp)
 target_link_libraries(psprecomp_runtime PRIVATE psprecomp_core)

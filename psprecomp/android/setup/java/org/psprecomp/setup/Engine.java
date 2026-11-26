@@ -40,6 +40,10 @@ final class Engine {
     static native String parseUpdate(String line);
     static native void inheritFd(int fd);
     static native long freeSpace(String path);
+    // Report an issue (the game's psp_report.cpp): files = rel, path, rel, path ...; facts = key, value ...
+    static native String[] reportPreview(String version, String spaceDir, String[] files, String[] facts);
+    static native String reportBuild(String version, String spaceDir, String[] files, String[] facts, String title, String desc, String outZip);
+    static native String reportSign(String time, String zipFile);
 
     private Engine() {}
 }

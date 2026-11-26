@@ -37,6 +37,7 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -157,6 +158,12 @@ public class SetupActivity extends Activity {
         });
         setContentView(root);
 
+        BuildRunner.marker = new File(getFilesDir(), "build.running");
+        if (BuildRunner.current == null && BuildRunner.marker.isFile()) {   // a plan was running when the app last ended and it never finished: killed or crashed
+            interruptedKind = readText(BuildRunner.marker, 64).trim();
+            if (interruptedKind.isEmpty()) interruptedKind = "install";
+            BuildRunner.marker.delete();
+        }
         stateFile = new File(getFilesDir(), "install.ini").getPath();   // where the SDL wizard kept it (its pref path): old installs carry over
         workdir = new File(getFilesDir(), "work").getPath();
         UpdateCheckService.schedule(this);
@@ -654,6 +661,7 @@ public class SetupActivity extends Activity {
             em.setMode(ProgressEmblem.FAILED);
             backdrop.setMood(BackdropView.MOOD_CHAOS);
             p.head("Setup", "Something is missing", problem);
+            p.card(new Card(this, Card.ACTION, Icons.BUG, "Report an issue", "Tell the developer about this problem.")).onClick(v -> beginReport(this::backHome, problem, "", ""));
             p.card(new Card(this, Card.ACTION, Icons.LOG, "Logs and reports", "Look at, save or share what the app wrote down.")).onClick(v -> go(this::showLogs));
             p.card(new Card(this, Card.ACTION, Icons.QUIT, "Close", null).style(Card.STYLE_QUIET)).onClick(v -> finishAndRemoveTask());
         } else if (installed()) {
@@ -673,6 +681,7 @@ public class SetupActivity extends Activity {
             p.card(new Card(this, Card.ACTION, Icons.SLIDERS, "Change extras", "HD textures, texture pack, Japanese voices or Bartz's Dissidia 1 moves, without building again.")).onClick(v -> beginExtras());
             p.card(new Card(this, Card.ACTION, Icons.DISC, "Build it again", "Pick your game file and build from scratch. Your saves are kept.")).onClick(v -> beginPick(PICK_ISO, this::backHome));
             p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Check for updates", "Looks for a newer version of this app on github.com. Nothing about you or your game is sent.")).onClick(v -> beginCheck(true));
+            p.card(new Card(this, Card.ACTION, Icons.BUG, "Report an issue", "Something wrong? Tell the developer: you see what is sent first.").style(Card.STYLE_QUIET)).onClick(v -> beginReport(this::backHome, "", "", ""));
             p.card(new Card(this, Card.ACTION, Icons.LOG, "Logs and reports", "The build log, the game's last run and crash reports: view, save or share them.").style(Card.STYLE_QUIET)).onClick(v -> go(this::showLogs));
         } else {
             em.setMode(ProgressEmblem.SPIN);
@@ -680,6 +689,7 @@ public class SetupActivity extends Activity {
             p.card(new Card(this, Card.ACTION, Icons.BUILD, "Build the game", "About 10 to 20 minutes. You can use your phone meanwhile; the build keeps going.").style(Card.STYLE_PRIMARY).pulse())
                     .onClick(v -> beginPick(PICK_ISO, this::backHome));
             p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Check for updates", "Looks for a newer version of this app on github.com. Nothing about you or your game is sent.")).onClick(v -> beginCheck(true));
+            p.card(new Card(this, Card.ACTION, Icons.BUG, "Report an issue", "Something wrong? Tell the developer: you see what is sent first.").style(Card.STYLE_QUIET)).onClick(v -> beginReport(this::backHome, "", "", ""));
             p.card(new Card(this, Card.ACTION, Icons.LOG, "Logs and reports", "The build log, the game's last run and crash reports.").style(Card.STYLE_QUIET)).onClick(v -> go(this::showLogs));
         }
         show(p, dirOf(p));
@@ -1205,6 +1215,11 @@ public class SetupActivity extends Activity {
         backdrop.setSlow(false);
         if (!ok) {
             if (!resumed) BuildService.finished(this, false, error);
+            try {
+                failStage = r.lastProgress == null ? "" : r.lastProgress.optString("stage");
+            } catch (Exception e) {
+                failStage = "";
+            }
             failPage(error, r.recentText());
             return;
         }
@@ -1281,7 +1296,8 @@ public class SetupActivity extends Activity {
         go(this::showFailed);
     }
 
-    private String failMsg = "", failTail = "";
+    private String failMsg = "", failTail = "", failStage = "";
+    private String interruptedKind = "";   // set at start when the last install did not end (offered once)
 
     private void showFailed() {
         Page p = new Page(this, "failed");
@@ -1311,6 +1327,8 @@ public class SetupActivity extends Activity {
                     if (runKind.equals("install") && iso.isEmpty()) { beginPick(PICK_ISO, this::backHome); return; }
                     startPlan(runKind, iso, Options.parse(runOpts), runPrev);
                 });
+        p.card(new Card(this, Card.ACTION, Icons.BUG, "Report an issue", "Tell the developer what went wrong: you see what is sent first, then it opens a GitHub issue.").style(Card.STYLE_PRIMARY))
+                .onClick(v -> beginReport(() -> goBackTo(this::showFailed), failMsg, failStage, failTail));
         p.card(new Card(this, Card.ACTION, Icons.SHARE, "Share the log", "Send it to another app: messages, e-mail, a cloud drive...")).onClick(v -> shareFile(log, "dissidia-setup-log.txt", "Dissidia Recomp setup log"));
         p.card(new Card(this, Card.ACTION, Icons.SAVE, "Save the log", "Save it as a file where you choose.")).onClick(v -> saveFile(log, "dissidia-setup-log.txt"));
         p.card(new Card(this, Card.ACTION, Icons.EYE, "View the full log", null).style(Card.STYLE_QUIET)).onClick(v -> viewLog(log, "Build log"));
@@ -1786,6 +1804,8 @@ public class SetupActivity extends Activity {
             if (e.file == null) k.onClick(v -> go(this::showPermission));
             else k.onClick(v -> viewLog(e.file, e.title, e.shareName));
         }
+        p.card(new Card(this, Card.ACTION, Icons.BUG, "Report an issue", "Send these logs and your description to the developer as a GitHub issue.").style(Card.STYLE_PRIMARY))
+                .onClick(v -> beginReport(() -> goBackTo(this::showLogs), "", "", ""));
         show(p, dirOf(p));
     }
 
@@ -1932,12 +1952,167 @@ public class SetupActivity extends Activity {
     /** The app closed unexpectedly last time: offer the report once. */
     private void offerCrashReport() {
         final File f = CrashReports.unseen(this);
-        if (f == null || overlay.getChildCount() > 0) return;
+        final String killed = interruptedKind;
+        if (overlay.getChildCount() > 0) return;
+        if (f == null && !killed.isEmpty()) {   // no crash report, but a run never ended: Android killed the app (memory?) or the device restarted
+            interruptedKind = "";
+            dialog("The last " + (killed.equals("install") ? "build" : killed) + " did not finish", "The app was closed while it worked (Android may have stopped it, or it crashed). The build log is kept. Sending it to the developer helps to fix this; you see what is sent first.", Icons.BUG,
+                    new Btn("Report an issue", Icons.BUG, Card.STYLE_PRIMARY, () -> beginReport(this::backHome, "The last " + killed + " did not finish: the app was closed while it worked.", "", "")),
+                    new Btn("Not now", Icons.CLOSE, Card.STYLE_NORMAL, null));
+            return;
+        }
+        if (f == null) return;
+        interruptedKind = "";
         CrashReports.markSeen(f);
         dialog("The setup app closed unexpectedly", "It wrote a crash report. Sharing it helps to fix the problem. You find it later under Logs and reports too.", Icons.BUG,
-                new Btn("Share the report", Icons.SHARE, Card.STYLE_PRIMARY, () -> shareFile(f, f.getName(), "Dissidia Recomp setup crash report")),
+                new Btn("Report an issue", Icons.BUG, Card.STYLE_PRIMARY, () -> beginReport(this::backHome, "The setup app closed unexpectedly (crash report " + f.getName() + ").", "", "")),
+                new Btn("Share the report", Icons.SHARE, Card.STYLE_NORMAL, () -> shareFile(f, f.getName(), "Dissidia Recomp setup crash report")),
                 new Btn("Save the report", Icons.SAVE, Card.STYLE_NORMAL, () -> saveFile(f, f.getName())),
                 new Btn("Not now", Icons.CLOSE, Card.STYLE_NORMAL, null));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------- report an issue
+
+    private String reportText = "", reportFailure = "", reportStage = "", reportLines = "", reportStatus = "";
+    private boolean reportSending;
+    private Runnable reportBack;
+    private ReportClient.Spec reportSpec;
+    private ReportClient.Result reportResult;
+
+    private void beginReport(Runnable back, String failure, String stage, String lines) {
+        reportBack = back;
+        reportFailure = failure == null ? "" : failure;
+        reportStage = stage == null ? "" : stage;
+        reportLines = lines == null ? "" : lines;
+        reportStatus = "";
+        reportResult = null;
+        if (!reportSending) reportText = "";
+        go(this::showReport);
+    }
+
+    private void showReport() {
+        Page p = new Page(this, "report");
+        p.back = reportSending ? null : reportBack;
+        backdrop.setMood(BackdropView.MOOD_CRYSTAL);
+        final boolean done = reportResult != null && reportResult.ok;
+        p.head("Report an issue", done ? "Sent" : "What went wrong?", done
+                ? "Thank you. The issue is open on GitHub, where you can follow it."
+                : "Describe the problem in a few words: what you did, what you expected, what happened. The developer reads it on GitHub.");
+        if (!done) {
+            final EditText et = new EditText(this);
+            et.setText(reportText);
+            et.setHint("For example: the build stops at 40 percent");
+            et.setHintTextColor(Theme.TEXT_FAINT);
+            et.setTextColor(Theme.TEXT);
+            et.setTextSize(15);
+            et.setTypeface(Theme.body);
+            et.setMinLines(3);
+            et.setGravity(Gravity.TOP | Gravity.START);
+            et.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+            et.setEnabled(!reportSending);
+            et.setPadding(Theme.dp(12), Theme.dp(10), Theme.dp(12), Theme.dp(10));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0xC0101830);
+            bg.setStroke(Theme.dp(1), 0x90E2C47A);
+            bg.setCornerRadius(Theme.dp(8));
+            et.setBackground(bg);
+            et.addTextChangedListener(new android.text.TextWatcher() {
+                public void beforeTextChanged(CharSequence a, int b, int c, int d) {}
+                public void onTextChanged(CharSequence a, int b, int c, int d) { reportText = a.toString(); }
+                public void afterTextChanged(android.text.Editable a) {}
+            });
+            p.headerExtra.add(et);
+            p.focus = null;
+        }
+        // what is sent, exactly
+        reportSpec = ReportClient.spec(this, new File(stWorkdir()), appVersion(), runKind, reportFailure, reportStage, reportLines, hasAllFilesAccess());
+        StringBuilder sent = new StringBuilder("Your description; system information (app version, device, Android version, CPU, memory, free space");
+        sent.append(reportFailure.isEmpty() ? "" : ", which step failed").append("); ");
+        List<String> files = ReportClient.preview(reportSpec);
+        if (files.isEmpty()) sent.append("no log files yet. ");
+        else sent.append("files: ").append(android.text.TextUtils.join(", ", files)).append(". ");
+        sent.append("Never sent: your game file, your saves, cloud settings. Paths and tokens in the logs are scrubbed.");
+        p.card(new Card(this, Card.INFO, Icons.EYE, "What is sent", sent.toString()));
+        if (!reportStatus.isEmpty()) p.card(new Card(this, Card.INFO, reportResult != null && reportResult.ok ? Icons.CHECK : Icons.WARN, reportSending ? "Sending" : reportResult != null && reportResult.ok ? reportStatus : "Not sent", reportSending ? reportStatus : reportResult != null && reportResult.ok ? "The issue opens in your browser." : reportStatus));
+        if (reportResult != null && !reportResult.ok && !reportResult.savedPath.isEmpty()) {
+            final File z = new File(reportResult.savedPath);
+            p.card(new Card(this, Card.ACTION, Icons.SHARE, "Share the saved report", "A copy is saved at " + z.getPath() + ". Send it to the developer by hand.")).onClick(v -> shareZip(z));
+            p.card(new Card(this, Card.ACTION, Icons.SAVE, "Save the report as a file", "Save the zip where you choose.")).onClick(v -> saveZip(z));
+        }
+        if (done) {
+            final String u = reportResult.issueUrl;
+            p.card(new Card(this, Card.ACTION, Icons.EYE, "Open the issue again", u).style(Card.STYLE_PRIMARY)).onClick(v -> openUrl(u));
+        } else {
+            Card send = p.card(new Card(this, Card.ACTION, Icons.UP, reportSending ? "Sending..." : "Send the report", "Sends it to the developer's issue tracker, then opens the new issue in your browser.").style(Card.STYLE_PRIMARY));
+            if (!reportSending) send.onClick(v -> sendReport());
+        }
+        if (!reportSending) p.card(new Card(this, Card.ACTION, Icons.BACK, done ? "Done" : "Back", null).style(Card.STYLE_QUIET)).onClick(v -> { if (reportBack != null) reportBack.run(); });
+        show(p, dirOf(p));
+    }
+
+    private void sendReport() {
+        if (reportSending) return;
+        if (reportText.trim().isEmpty() && reportFailure.isEmpty()) { snack("Write a few words about what went wrong first."); return; }
+        reportSending = true;
+        reportStatus = "Collecting and sending the report...";
+        final String desc = reportText.trim() + (reportFailure.isEmpty() ? "" : (reportText.trim().isEmpty() ? "" : "\n\n") + "Failed: " + (reportStage.isEmpty() ? "" : reportStage + ": ") + reportFailure);
+        final String title = "Installer (Android): " + ReportClient.first(reportText.trim().isEmpty() ? reportFailure : reportText, 70);
+        final ReportClient.Spec spec = reportSpec;
+        refreshPage();
+        new Thread(() -> {
+            final ReportClient.Result r = ReportClient.send(this, spec, title, desc);
+            ui.post(() -> {
+                reportSending = false;
+                reportResult = r;
+                reportStatus = r.text;
+                if (r.ok) {
+                    reportText = "";
+                    if (!ReportClient.isTestService(this)) openUrl(r.issueUrl);   // (a test service's fake issue address is not worth a browser)
+                    snack(r.text);
+                }
+                if (page != null && page.id.equals("report")) refreshPage();
+            });
+        }, "report").start();
+    }
+
+    private void openUrl(String u) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            snack("No browser found. The issue is at " + u);
+        }
+    }
+
+    private void shareZip(File z) {
+        try {
+            File dst = new File(ShareProvider.dir(this), z.getName());
+            try (InputStream in = new FileInputStream(z); OutputStream out = new FileOutputStream(dst)) {
+                copy(in, out);
+            }
+            Uri u = ShareProvider.uri(z.getName());
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("application/zip");
+            send.putExtra(Intent.EXTRA_STREAM, u);
+            send.putExtra(Intent.EXTRA_SUBJECT, "Dissidia Recomp setup report");
+            send.setClipData(ClipData.newRawUri(z.getName(), u));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(send, "Share the report"));
+        } catch (Exception e) {
+            snack("Could not share: " + e.getMessage());
+        }
+    }
+
+    private void saveZip(File z) {
+        saveSource = z.getPath();
+        try {
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("application/zip");
+            i.putExtra(Intent.EXTRA_TITLE, z.getName());
+            startActivityForResult(i, REQ_SAVE);
+        } catch (Exception e) {
+            snack("Could not open the file picker: " + e.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------------------------------------------------- activity results
