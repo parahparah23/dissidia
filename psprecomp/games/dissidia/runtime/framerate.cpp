@@ -120,7 +120,17 @@ double g_exb_t0 = 0;   // play time the current burst began (log only)
 const bool g_exb_log_on = std::getenv("PSPRECOMP_EXB_LOG") != nullptr;
 bool g_exb_poll = false;   // polling the burst's button tests on a held update (exb_poll_held)
 FuncPtr g_orig_ui_param = nullptr, g_orig_steer_move = nullptr, g_orig_pressed = nullptr, g_orig_rootmotion = nullptr, g_orig_slowmo = nullptr, g_orig_frame_end = nullptr, g_orig_pad = nullptr, g_orig_actor_dt = nullptr, g_orig_cam_dt = nullptr, g_orig_exb_ctrl = nullptr, g_orig_exb_pressed = nullptr, g_orig_exb_pressed2 = nullptr, g_orig_exb_prompt = nullptr, g_orig_exb_ui = nullptr, g_orig_face_step = nullptr;
-std::atomic<int> g_target{30};     // requested rate (settings / env)
+std::atomic<int> g_target{30};     // requested rate (settings / env); kUnlocked = the "Unlocked" choice (see below)
+// "Unlocked" frame rate (settings: Frame Rate -> Unlocked, saved fps=1000; PSPRECOMP_FPS=1000). In the fight (30 Hz logic running) the frame
+// loop is not paced: no vblank wait (psp_display_set_unlocked), frames come as fast as the machine draws them, the logic stays at 30 Hz by
+// the real-time clock and the frames between are interpolated (the phase follows the clock). To the game and the other players it is 240
+// (g_rate, the advertised rate); where it cannot hold (30 Hz logic off, a test pacing by frame count, a player at 30 / the lowest-rate rule
+// online, any menu / movie / loading screen) it simply is 240 fps with the normal vblank pacing. Vertical sync is the user's own setting:
+// on = frames come at the display's refresh rate (what the swap waits for), off = as fast as possible (capped at PSPRECOMP_UNLOCK_MAX fps,
+// default 1000, so a trivial scene does not spin a core at 5000 fps). PSPRECOMP_UNLOCK=0: the Unlocked choice acts as 240 fps.
+constexpr int kUnlocked = 1000;
+bool g_unlock_ok = true;
+double g_unl_frame_ms = 4.0;       // measured frame time while unlocked (smoothed): replaces 1000 / g_rate in the 30 Hz pacing
 int g_interval = 2;                // interval written on the last frame end (2 = 30 Hz, 1 = 60 Hz and above)
 int g_rate = 30;                   // logic rate in effect (30, 60, 90, ... one frame per vblank above 30)
 double g_play_ms = 0;              // wall-independent play time: advances by the frame's ticks (every frame, menus and battle)
@@ -177,6 +187,8 @@ uint64_t g_tick = 1;               // frame ends seen (the effect system updates
 // logic-rate log
 int64_t g_win_t0 = 0;
 int g_win_frames = 0;
+int g_win_logic = 0;               // PSPRECOMP_FPS_LOG: gameplay frames (30 Hz logic) in the window
+uint64_t g_win_steps = 0;
 
 uint32_t r32(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
 float rdf(uint32_t a) { float f; std::memcpy(&f, g_ram + (a & 0x07FFFFFFu), 4); return f; }
@@ -1079,7 +1091,8 @@ void note_negotiated_rate(int cap, bool own_rate) {
     static bool shown_own = false;
     if (cap == shown && own_rate == shown_own) return;
     shown_own = own_rate;
-    const int own = g_target.load(std::memory_order_relaxed);
+    int own = g_target.load(std::memory_order_relaxed);
+    if (own == kUnlocked) own = 240;   // advertised as 240
     char msg[96];
     if (cap && own_rate) {
         std::snprintf(msg, sizeof msg, "Online: %d fps (everyone above 30 keeps their own rate)", own);
@@ -1130,7 +1143,7 @@ bool l30_decide_next() {
     }
     // Timed from the end of the last frame, not from now: this runs part way through the frame, later on a gameplay frame (more work
     // before it) than on a drawn-only one, and timing from there gave uneven phases (0, 0.26, 0.73, 0.23 at a steady 60 fps: jitter).
-    const double frame = 1000.0 / g_rate, period = 1000.0 / 30.0;
+    const double frame = psp_display_unlocked() ? std::clamp(g_unl_frame_ms, 0.25, 16.0) : 1000.0 / g_rate, period = 1000.0 / 30.0;
     const double now = l30_now_ms();
     const double shown = g_l30_end_ms > 0 && now - g_l30_end_ms < 4 * frame ? g_l30_end_ms + 2 * frame : now + frame;   // the frame after this one reaches the screen about two frame times after the last frame ended
     if (g_l30_due_ms == 0 || shown - g_l30_due_ms > 100.0) g_l30_due_ms = shown;   // start, or far behind (a hitch): catch up at once
@@ -1188,6 +1201,8 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
             if (cap > 0 && cap < rate && !own_rate) rate = cap;   // never above what the slowest player asked for
         }
         if (rate < 30) rate = 30;
+        const bool unlocked_cfg = g_target.load(std::memory_order_relaxed) == kUnlocked;
+        if (unlocked_cfg && rate >= kUnlocked) rate = 240;
         const int interval = rate > 30 ? 1 : 2;      // vblanks per frame: the vblank clock itself runs faster above 60
         psp_display_set_vblank_hz(rate > 60 ? rate : 60);
         if (r32(timer + 0x10u) != static_cast<uint32_t>(interval) || g_rate != rate) {
@@ -1204,6 +1219,7 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         g_logic_step = g_ticks;
         if (l30_active()) { g_ticks = 2.0f; g_logic_step = g_l30_logic_now ? 2.0f : 0.0f; }
         g_fx_period = rate / 30;
+        psp_display_set_unlocked(unlocked_cfg && g_unlock_ok && rate == 240 && l30_active() && l30_clock_paced() && !g_scope_all);
     }
     g_orig_frame_end(rdram, ctx);
     psp_netplay_frame_end(battle_running());
@@ -1275,7 +1291,11 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         }
         const bool next_logic = l30_decide_next();
         const float next_phase = g_l30_next_phase;
-        g_l30_end_ms = l30_now_ms();
+        {
+            const double t = l30_now_ms();
+            if (g_l30_end_ms > 0 && t - g_l30_end_ms < 100.0) g_unl_frame_ms += (std::min(t - g_l30_end_ms, 33.0) - g_unl_frame_ms) * 0.05;
+            g_l30_end_ms = t;
+        }
         g_l30_frame++;
         g_l30_logic_now = next_logic;
         wrf(timer + 0x18u, g_l30_logic_now ? 2.0f : 0.0f);   // the coming frame's step (read directly by 85 battle sites); the global step follows via global_step_hook
@@ -1303,6 +1323,7 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
         const int64_t t = now_ms();
         if (!g_win_t0) g_win_t0 = t;
         g_win_frames++;
+        if (l30_active() && g_logic_step > 0.0f) g_win_logic++;
         g_frame_no++;
         if (t - g_win_t0 >= 5000) {
             const int pose_n = g_pose_changed + g_pose_same;
@@ -1311,6 +1332,9 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
                          g_win_frames * 1000.0 / double(t - g_win_t0), g_interval, rdf(timer + 0x18u), rdf(FRAME_STEP),
                          overlay_id(), g_pose_changed, pose_n, pose_n ? 100.0 * g_pose_changed / pose_n : 0.0,
                          g_press_calls, g_press_edges, g_press_latched, g_press_dropped);
+            if (l30_active()) std::fprintf(stderr, "[FPS] 30 Hz logic: %.2f gameplay frames per second (%.1f frames per second drawn%s)\n", g_win_logic * 1000.0 / double(t - g_win_t0),
+                                           g_win_frames * 1000.0 / double(t - g_win_t0), psp_display_unlocked() ? ", unlocked" : "");
+            g_win_logic = 0;
             g_win_t0 = t;
             g_win_frames = 0;
             g_pose_changed = g_pose_same = 0;
@@ -2440,12 +2464,13 @@ void fx_install() {
 
 int fps_get() { return g_target.load(); }
 void fps_set(int fps) {
-    fps = fps < 30 ? 30 : fps > 240 ? 240 : (fps + 15) / 30 * 30;   // a multiple of 30
-    if (g_target.exchange(fps) != fps) std::fprintf(stderr, "[FPS] target frame rate %d\n", fps);
-    psp_adhoc_set_local_fps(fps);   // told to the other players
-    psp_present_set_target_fps(fps);   // Android: ask the display for a matching refresh rate
+    fps = fps >= kUnlocked ? kUnlocked : fps < 30 ? 30 : fps > 240 ? 240 : (fps + 15) / 30 * 30;   // a multiple of 30, or Unlocked
+    if (g_target.exchange(fps) != fps) std::fprintf(stderr, "[FPS] target frame rate %d%s\n", fps, fps == kUnlocked ? " (unlocked)" : "");
+    const int eff = fps == kUnlocked ? 240 : fps;
+    psp_adhoc_set_local_fps(eff);   // told to the other players (Unlocked: 240)
+    psp_present_set_target_fps(eff);   // Android: ask the display for a matching refresh rate (Unlocked: the highest it has)
 }
-const int k_rates[] = {30, 60, 90, 120, 150, 180, 210, 240};
+const int k_rates[] = {30, 60, 90, 120, 150, 180, 210, 240, kUnlocked};
 
 }  // namespace
 
@@ -2581,7 +2606,9 @@ void dissidia_framerate_install(uint8_t* rdram) {
         }
     }
     const char* e = std::getenv("PSPRECOMP_FPS");
-    if (e && std::atoi(e) >= 30) g_target = (std::min(std::atoi(e), 240) + 15) / 30 * 30;
+    if (e && std::atoi(e) >= kUnlocked) g_target = kUnlocked;
+    else if (e && std::atoi(e) >= 30) g_target = (std::min(std::atoi(e), 240) + 15) / 30 * 30;
+    if ((e = std::getenv("PSPRECOMP_UNLOCK")) && e[0] == '0') g_unlock_ok = false;
     g_scope_all = (e = std::getenv("PSPRECOMP_FPS_SCOPE")) && std::strcmp(e, "all") == 0;
     g_log = (e = std::getenv("PSPRECOMP_FPS_LOG")) && e[0] && e[0] != '0';
     g_actor_log = (e = std::getenv("PSPRECOMP_ASSIST_LOG")) && e[0] && e[0] != '0';
@@ -2696,8 +2723,8 @@ void dissidia_framerate_install(uint8_t* rdram) {
                "\nframe_rate=" + std::to_string(g_target.load()) + "\nlogic30=" + (g_logic30 ? "on" : "off") + "\n";
     });
     psp_settings_set_frame_rate_hook({k_rates, static_cast<int>(std::size(k_rates)), fps_get, fps_set});
-    psp_adhoc_set_local_fps(g_target.load());
-    psp_present_set_target_fps(g_target.load());
+    psp_adhoc_set_local_fps(g_target.load() == kUnlocked ? 240 : g_target.load());
+    psp_present_set_target_fps(g_target.load() == kUnlocked ? 240 : g_target.load());
     std::fprintf(stderr, "[FPS] frame rate %d (battle logic; scope %s)\n", g_target.load(), g_scope_all ? "all" : "battle");
 }
 
