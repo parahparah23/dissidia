@@ -49,6 +49,10 @@ void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style = 1
 // Called every HUD tick; an empty `by` (or me == 0) removes the markers. oh_style = the overhead bar style (0..3), to place the eye above the bar.
 struct TagHudLockInd { uint32_t me = 0; std::vector<uint32_t> by, fresh; int oh_style = 0; };
 void tagteam_hud_lockind(const TagHudLockInd& li);
+// Height of a fighter's top (head / horns, metres above its feet, margin included), from tagteam.cpp; every marker drawn above a fighter is anchored with it.
+void tagteam_hud_set_top_fn(float (*fn)(uint32_t actor));
+// true until the fight has started (battle-start banters / retail intro): the side panels are not drawn.
+void tagteam_hud_set_intro(bool intro_running);
 // Guest memory, for the bars' positions (tagteam.cpp, every frame before tagteam_layer_frame).
 void tagteam_hud_set_ram(const uint8_t* rdram);
 
