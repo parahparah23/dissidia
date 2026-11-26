@@ -245,6 +245,7 @@ void load_ui_sheet();
 void draw_hand(float x, float y, float alpha) { draw_hand_on(g_layer, x, y, alpha); }
 float g_sel_anim = 0.f;               // 0..1, the selected look fading in
 std::chrono::steady_clock::time_point g_last_draw;
+std::chrono::steady_clock::time_point g_last_sub_tick;   // when the group sub-list's tick last ran (sub_tick_hook)
 const char* const kMainHelp = "Display, graphics, controls and other settings of this port.";
 
 void load_ui_sheet() {
@@ -301,7 +302,8 @@ void draw_settings_row(float ox, float oy, bool selected, float alpha) {
     g_layer.publish();
 }
 
-bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st);   // below (Battle Mode > Tag Team Battle): true = the mode select owns this frame, the start menu's update is skipped
+bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st, bool from_main = false);   // below (Battle Mode > Tag Team Battle): true = the mode select owns this frame, the start menu's update is skipped
+extern bool g_ms_go, g_ms_reopen, g_ms_hold, g_ms_flow;   // (the tag menu flow flags, below)
 void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(MAIN_TICK)) f(rdram, ctx); return; }
     const uint32_t state = r32(static_cast<uint32_t>(ctx->r[4]) + 320);
@@ -312,6 +314,14 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     g_main_state = state;
     g_main_seen_frames = 0;
+    // 25 Nov (user, RP6: "opening Communications opened the battle menu"): the tag menu flow's flags (g_ms_flow / g_ms_reopen / g_ms_hold / g_ms_go and the Tag Team Battle mode)
+    // outlived the flow when it was left some other way than the Mode Select's Circle (after a battle, ...), and the next time a group's list opened the Mode Select came back.
+    // The top level of the start menu running means no flow is on. PSPRECOMP_TAGTEAM_FLOWRESET_OFF=1: old.
+    if (state && (g_ms_flow || g_ms_reopen || g_ms_hold || g_ms_go) && !dissidia_tagteam_modesel_active() && !std::getenv("PSPRECOMP_TAGTEAM_FLOWRESET_OFF") &&
+        std::chrono::steady_clock::now() - g_last_sub_tick > std::chrono::milliseconds(500)) {
+        std::fprintf(stderr, "[MENUSET] start menu top level: tag menu flow flags cleared (flow %d reopen %d hold %d go %d)\n", g_ms_flow, g_ms_reopen, g_ms_hold, g_ms_go);
+        g_ms_flow = g_ms_reopen = g_ms_hold = g_ms_go = false; dissidia_tagteam_menu_mode(false);
+    }
     dissidia_presence_main(state);
     if (state && r32(cur + 4) == 7 && r32(cur + 36) == 7 && !psp_settings_menu_open() && confirm_pressed(rdram, ctx)) {
         call(g_play_se, rdram, ctx, {2});
@@ -320,7 +330,7 @@ void main_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         return;   // this frame's update is skipped: the retail code would read past its 7-entry mode table
     }
     const uint32_t menu = static_cast<uint32_t>(ctx->r[4]);
-    if (tag_row_confirm(rdram, ctx, state)) return;
+    if (tag_row_confirm(rdram, ctx, state, true)) return;
     g_orig_main_tick(rdram, ctx);
     if (state && std::getenv("PSPRECOMP_MENU_CURDUMP")) {   // debug: cursor helpers (+4 index, +32 min, +36 max) in the start menu state
         static std::string last; std::string now; char b[64];
@@ -402,9 +412,15 @@ bool g_ms_go = false; int g_ms_go_age = 0; int g_ms_group = 0;
 bool g_ms_reopen = false;
 bool g_ms_hold = false;   // 25 Nov (user): after a Mode Select choice the list cursor jumped to Quick Battle (Party) before the next menu opened: the Mode Select stays drawn until then. PSPRECOMP_TAGTEAM_MSHOLD_OFF=1: old
 bool g_ms_flow = false;   // 25 Nov: a tag mode was chosen from the Mode Select: when this group's list comes back (Circle out of Party Select / the room screens) the Mode Select opens again. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old   // the mode select chose a mode: the confirm is handed to the start menu (injected), the Tag Team Battle mode stays on
-bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st) {
+bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st, bool from_main) {
     const TagGroup* tg = tag_group(st); if (!tg) return false;
     const uint32_t cur = st + 0xA58u;
+    // 25 Nov (user, RP6: "opening Communications mode opened the battle menu"): the start menu's top level calls this too, and the group sub-list's fields (group, rows, cursor) stay in the
+    // state after the list was left: with the cursor last on Tag Team Battle (index == rows) the Cross that opens ANY other top-level row (Communications Mode) looked like a confirm on
+    // that row and opened the Mode Select ("Battle Mode > Tag Team Battle"). The top level only counts while a sub-list is ticking (its tick ran within the last 0.15 s).
+    // PSPRECOMP_TAGTEAM_FLOWRESET_OFF=1: old.
+    if (from_main && !dissidia_tagteam_modesel_active() && !std::getenv("PSPRECOMP_TAGTEAM_FLOWRESET_OFF") &&
+        std::chrono::steady_clock::now() - g_last_sub_tick > std::chrono::milliseconds(150)) return false;
     if (dissidia_tagteam_modesel_active()) {   // the mode select has the pad
         const int r = dissidia_tagteam_modesel_frame(rdram, ctx, g_ms_group == 2);
         if (r == 1) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); g_ms_go = true; g_ms_go_age = 0; g_ms_flow = true; g_ms_hold = !std::getenv("PSPRECOMP_TAGTEAM_MSHOLD_OFF"); dissidia_tagteam_modesel_confirm(tg->group == 1); std::fprintf(stderr, "[MENUSET] mode select: chosen, the game goes on (group %u)\n", tg->group); }
@@ -431,6 +447,7 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (overlay_id() != 2) { if (FuncPtr f = dissidia_ovl_battle_lookup(SUB_TICK)) f(rdram, ctx); return; }
     const uint32_t menu = static_cast<uint32_t>(ctx->r[4]), st = r32(menu + 320);
     dissidia_presence_sub(r32(menu + 320));   // discord_presence.cpp: the row the cursor is on
+    g_last_sub_tick = std::chrono::steady_clock::now();
     const TagGroup* tg = tag_group(st);
     const uint32_t cur = st + 0xA58u;
     if (tg && r32(cur + 32) == 0 && r32(cur + 36) == tg->rows - 1) std::memcpy(rdram + ((cur + 36) & 0x07FFFFFFu), &tg->rows, 4);   // one more row
