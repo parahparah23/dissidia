@@ -5378,6 +5378,15 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   capture): the check is the stream being made. The HLE also logs a failed `sceAtracSetDataAndGetID` now.
 - **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_tt3v3 --baseline` PASS (`~/dissidia/tt/s2/tt3v3/reg1`).
 
+### Batch twenty-three (25 Nov): 3v3 play-test of the Batch seventeen logic (tree tt3v3b, branch tt-3v3play): PASS, no change needed
+Host, `party_battle_walk.txt`, `PSPRECOMP_TAGTEAM_3V3=1 SP_PARTNER=1 TESTPART="24,13;15,22"` (human Jecht + Kain + Cloud vs Lightning + Squall + Gabranth, reserves Squall/CoD/Terra/Yuna and Vaan/Laguna), logs in `~/dissidia/tt/s2/tt3v3b`:
+- **(a) SELECT rotation** (`b2`, `SWAP_BUTTON=1`, SELECT at 17.5 / 21 / 24.5 s): `swap: 2 living partners, taking extra 2 (char 24)`, then `extra 3 (char 13)`, then `extra 2 (char 20)` (the original now in extra 2): the partners take turns and wrap. A SELECT during an EX Burst is refused as before. Shots `b2/montage.png` (Jecht, Kain, Cloud, Jecht).
+- **(b) KO take-over** (`c1`, `KOLIST_NAT=1`): slot 0 KO at 20 s: Kain (party order, first partner) comes in (`rebuild char 20 -> 24`), not Cloud; enemy slot KO at 68 s: Squall (first extra) comes in; with no mate the reserve in party order follows (Squall, Cloud of Darkness, Terra, Yuna; Vaan, Laguna).
+- **(c) full chain** (`c1`): KOLIST slot0 x3, slot1, extra1, slot1, extra1, slot1: all five enemy members fell, `side 1 has nobody left: the battle is decided` at 132 s, tally from the ledger 9 falls, result screens reached.
+- **(d)** L cycle (`b2`, `d1`): `lock cycle ... other enemy`, `(FFA / 3v3): next opponent (2 of 2)`, back to the first; after an enemy fell the cycle is over the living two. Per-partner panels: window captures (`d2/v/v03_big.png`, debug socket V) show two small panels per side (Cloud, Kain; Gabranth, Squall) plus reserve strips. Assist Off calls (`d1`, `FORCECALL=0:19:31:43:52`): first partner in hitstun -> the call goes to the second (Cloud), the next call to Kain, a call while Kain was knocked down was refused.
+- **Two copies** (`m1`, `mp_test.py --menu-mode team3 --fill`, ports 9331/9332, KOLIST slot0:25,slot1:40,slot0:55,slot1:70,..,slot1:115): all four slot KOs took the mate on both copies at the same times, decided at 115 s, NETSYNC 3288 frames compared, 0 mismatched.
+- Seen, not a bug of this batch: the test script clock restarts at each slot rebuild (`[TEST] battle started` again), so timed shots after a KO drift; CALLINLOG repeats Vaan 240->1100 / Terra 1100->240 every frame during an overlapping entrance (log only). Regression `tagteam_test.py --baseline` PASS (`reg1`).
+
 ### Batch eighteen (25 Nov): slot take re-check (tree ttslot, branch tt-slottake)
 - The 23 Nov "slot take online FAILS" (`ttest/mp2`: slot 0 KO'd at 20 s, mate CPU Emperor, Vaan comes in as an extra at 41.6 s, no `slot take` line)
   was **not reproducible** at tag-slot head (313b37a). Two copies on the host (LAN, Team 2 v 2, CPU fill, A registers more characters, natural KO of
