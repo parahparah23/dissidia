@@ -68,7 +68,7 @@ uint32_t save_record(int charId) {   // the save record of a charId (0 = none)
     }
     return 0;
 }
-int model_id(int charId) {   // object table id of a character's first-costume player model entry (P_<code>_1P), -1 = none
+int model_id(int charId, int costume = 1) {   // object table id of a character's player model entry of that costume (P_<code>_<n>P), -1 = none
     const uint32_t t = g_w32(0x089D4968u);
     if (t < 0x08800000u || t >= 0x0A000000u) return -1;
     const uint32_t h = g_w32(t);
@@ -76,10 +76,10 @@ int model_id(int charId) {   // object table id of a character's first-costume p
     const uint32_t n = g_w32(h + 4u);
     for (uint32_t i = 0; i < n && i < 4000u; i++) {
         const uint8_t* r = g_at(h + 8u + 0x44u * i);
-        if (r[6] != charId || r[7] != 1 || r[8] == 5 || r[8] == 8 || r[8] == 13) continue;   // costume 1, not an assist (8 / 13) or manikin (5): Prishe's is type 16
+        if (r[6] != charId || r[7] != costume || r[8] == 5 || r[8] == 8 || r[8] == 13) continue;   // costume 1, not an assist (8 / 13) or manikin (5): Prishe's is type 16
         const char* name = reinterpret_cast<const char*>(r + 36);
         const size_t len = strnlen(name, 16);
-        if (len < 4 || std::strncmp(name, "P_", 2) != 0 || std::strncmp(name + len - 3, "_1P", 3) != 0) continue;
+        if (len < 4 || std::strncmp(name, "P_", 2) != 0 || (name[len - 3] != '_' || name[len - 1] != 'P')) continue;
         uint16_t id; std::memcpy(&id, r, 2);
         return id;
     }
@@ -175,8 +175,12 @@ void force_human_chars(const uint8_t* c, int n) {
         rec[0] = static_cast<uint8_t>(to);
         std::fprintf(stderr, "[FFA] human fighter record: charId -> %d (%s)\n", to, src ? "its own save record" : "charId only");
     }
-    const int want = model_id(to); uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
-    if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); }
+    // 25 Nov (user: FFA fighters wore the default outfit): the outfit is the one the player's save has chosen for the character's Set A (the costume byte at +201 of the 0x778-byte save
+    // record: 1 default, 2 / 3 the other outfits; found by listing the bytes that are 1..3 in all 31 records: +201 / +399 / +597 / +795 / +993 = sets A..E). PSPRECOMP_TAGTEAM_FFA_COSTUME_OLD=1: costume 1.
+    int cost = 1; if (!std::getenv("PSPRECOMP_TAGTEAM_FFA_COSTUME_OLD")) { const uint32_t src = save_record(to); if (src) { const int cb = *g_at(src + 201u); if (cb >= 1 && cb <= 3) cost = cb; } }
+    int want = model_id(to, cost); if (want < 0) want = model_id(to);
+    uint16_t m; std::memcpy(&m, rec + 0xF3A, 2);
+    if (want >= 0 && m != want) { const uint16_t w = static_cast<uint16_t>(want); std::memcpy(rec + 0xF3A, &w, 2); static int lg = 0; if (lg++ < 6) std::fprintf(stderr, "[FFA] human main %d: costume %d (model id %d)\n", to, cost, want); }
     if (ids[-6] != n || ids[0] != c[0] || (n > 1 && ids[1] != c[1])) { ids[-6] = static_cast<uint8_t>(n); ids[0] = c[0]; ids[1] = n > 1 ? c[1] : 0xFF; for (int k = 2; k < 5; k++) ids[k] = 0xFF; std::fprintf(stderr, "[FFA] human team: %d %d\n", c[0], n > 1 ? c[1] : -1); }
 }
 }  // namespace

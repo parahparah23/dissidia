@@ -2406,7 +2406,7 @@ int g_overhead = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD");
 // g_hide_ui = hide our side panels. Both default off; the env override (the test scripts) and the 3v3 / FFA switches turn them on with the style.
 bool g_oh_assist = [] { const char* a = std::getenv("PSPRECOMP_TAGTEAM_OH_ASSIST"); if (a) return std::atoi(a) != 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e && std::atoi(e) != 0; }();   // PSPRECOMP_TAGTEAM_OH_ASSIST=0|1 and _HIDE_UI=0|1 set them alone
 bool g_hide_ui = [] { const char* a = std::getenv("PSPRECOMP_TAGTEAM_HIDE_UI"); if (a) return std::atoi(a) != 0; const char* e = std::getenv("PSPRECOMP_TAGTEAM_OVERHEAD"); return e && std::atoi(e) != 0; }();
-void overhead_default_on(bool hide_ui = true) { if (g_overhead == 0) { g_overhead = 1; g_oh_assist = true; g_hide_ui = hide_ui; } }   // 3v3 / free-for-all: the side panels cover only two foes
+void overhead_default_on(bool hide_ui = true) { (void)hide_ui; if (g_overhead == 0) { g_overhead = 1; g_oh_assist = true; if (std::getenv("PSPRECOMP_TAGTEAM_FFA_HIDEUI_OLD") && hide_ui) g_hide_ui = true; } }   // (25 Nov, user: "Hide tag team UI" is never switched on by a mode: the 3v3 / free-for-all switches used to set it; only the player's own setting or PSPRECOMP_TAGTEAM_HIDE_UI=1 does)   // 3v3 / free-for-all: the side panels cover only two foes
 void overhead_update() {
     std::vector<TagHudOverhead> bars;
     if (g_overhead && g_bs && !exb_running()) {
@@ -2463,6 +2463,23 @@ void hud_update() {
     // sides in the HUD: the human's team on the left (side value of the human's slot), the other on the right
     const uint32_t hum_side = g_bs ? rd(g_bs + 84u) : 0u;
     for (TagHudFighter& f : fs) f.side = (static_cast<uint32_t>(f.side) == hum_side) ? 0 : 1;
+    if (g_bs && ffa_now() && !std::getenv("PSPRECOMP_TAGTEAM_FFA_HUD_OLD")) {   // 25 Nov (user): the fighters that are not on a big panel (not you, not the one locked on) are stacked on the right side
+        const uint32_t big0 = hud_panel_fighter(hum_side & 1u), big1 = hud_panel_fighter(1u - (hum_side & 1u));
+        std::vector<uint32_t> cand; for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); if (ok(S, 0x12D0)) cand.push_back(S); }
+        for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && !g_extra[i].replaced && ok(g_extra[i].actor, 0x12D0)) cand.push_back(g_extra[i].actor);
+        std::vector<TagHudFighter> nf;
+        for (const uint32_t a : cand) {
+            if (a == big0 || a == big1) continue;
+            TagHudFighter f; f.id = a; f.side = 1; const int ch = g_label_char.count(a) ? g_label_char[a] : actor_char(a);
+            f.code = code_for_char(ch); f.name = char_label(ch, true);
+            const uint32_t st = rd(a + 0x52Cu); const bool dn = is_down(a) && !is_slot_fighter(a);
+            f.hp = (ok(st, 0x40) && !dn) ? std::max(0, hp_eff(a)) : 0; f.hp_max = std::max(static_cast<int>(rd(a + 0x10B0u)), std::max(f.hp, 1));
+            f.brv = ok(st, 0x40) && !dn && f.hp > 0 ? static_cast<int>(rdh(st + 0x14u)) : -1;
+            hud_gauges(f, a); f.lethal = hud_lethal(a, f.brv);
+            nf.push_back(f);
+        }
+        fs = nf;
+    }
     if (g_bs) tagteam_hud_big_panels(hud_panel_fighter(hum_side & 1u), hud_panel_fighter(1u - (hum_side & 1u)));
     tagteam_hud_set_banner(dissidia_battle_age() < g_banner_until ? g_banner_text : std::string());
     {   // members already called in are not in reserve any more
@@ -4753,12 +4770,15 @@ void hit_last(uint32_t att, uint32_t& vic, int& age);
 struct KoRec { int team = -1, ch = 0, by_team = -1, by_ch = 0; float age = 0.f; };
 struct MemberStat { uint8_t lv = 0; uint32_t s8 = 0, sC = 0; int16_t s18 = 0; bool fought = false, down = false; };
 std::vector<KoRec> g_kolog;
+std::map<uint32_t, std::pair<int, bool>> g_ffa_roster;   // Free-for-all: every fighter of the battle (actor -> charId, is the human), for the result screen's rows
+std::map<int, int> g_ffa_lvl; std::vector<int> g_ffa_fell;   // char -> level seen on the stage; the falls (chars) as they stood when the battle was decided
+bool g_ffa_res_on = false, g_ffa_human_lost = false;   // a Free-for-all battle was decided: the result screen's tally rows are written from the ledger (ffa_result_tick)
 std::map<std::pair<int, int>, MemberStat> g_mstat;
 std::map<std::pair<int, int>, std::pair<int, float>> g_last_hp_hit;   // victim (team, char) -> (attacker char, battle age)
 uint32_t g_ledger_gen = 0xFFFFFFFFu; bool g_ledger_closed = false;   // closed once the battle is decided (the finish's falls are not rounds)
 void job_notice(const KoRec& k);   // below (the tally code): the job powers this fall gained, on the HUD
 bool g_pow_have = false;
-void ledger_reset_if_new() { if (g_ledger_gen != g_battle_gen) { g_ledger_gen = g_battle_gen; g_ledger_closed = false; g_pow_have = false; g_kolog.clear(); g_mstat.clear(); g_last_hp_hit.clear(); } }
+void ledger_reset_if_new() { if (g_ledger_gen != g_battle_gen) { g_ledger_gen = g_battle_gen; g_ledger_closed = false; g_pow_have = false; g_kolog.clear(); g_mstat.clear(); g_last_hp_hit.clear(); g_ffa_roster.clear(); g_ffa_lvl.clear(); g_ffa_fell.clear(); g_ffa_res_on = false; } }
 void aohit_hp(uint32_t victim, uint32_t att);   // below (round 7 measurement)
 void ledger_hp_hit(uint32_t victim, uint32_t att) {
     aohit_hp(victim, att);
@@ -4797,6 +4817,7 @@ void ledger_step() {   // every battle frame, before the KO handling (a KO is se
     std::vector<uint32_t> acts;
     for (uint32_t k = 0; k < 2; k++) { const uint32_t a = srd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0)) acts.push_back(a); }
     for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && ok(g_extra[i].actor, 0x12D0) && std::find(acts.begin(), acts.end(), g_extra[i].actor) == acts.end()) acts.push_back(g_extra[i].actor);
+    if (ffa_now()) for (uint32_t A : acts) { const int ch = actor_char(A); if (ch > 0) { g_ffa_roster[A] = {ch, A == ffa_human()}; const uint32_t st = rd(A + 0x52Cu); if (ok(st, 0x40)) { const int l1 = g_ram[(st + 1u) & 0x07FFFFFFu] ? g_ram[(st + 1u) & 0x07FFFFFFu] : g_ram[st & 0x07FFFFFFu]; if (l1 > 0 && l1 <= 100) g_ffa_lvl[ch] = l1; } } }
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOEXTRAHPLEDGER")) {   // HP hits by extras (their damage modules never reach hpstep_hook): a fighter whose HP dropped this frame while
         // another fighter's registered hit is on it gets that fighter as its last HP attacker (19 Nov: Terra's KO of Ultimecia was booked on Jecht)
         static std::map<uint32_t, int> prev_hp; static uint32_t gen = ~0u; if (gen != g_battle_gen) { gen = g_battle_gen; prev_hp.clear(); }
@@ -5966,6 +5987,37 @@ void tally_write(bool post) {
     for (int i = 0; i < T.cnt[T.wrec] && i < 10; i++) g_ram[(Rw + 3u + static_cast<uint32_t>(i)) & 0x07FFFFFFu] = static_cast<uint8_t>(T.down[T.wrec][i] ? 2 : (T.fought[T.wrec][i] ? 1 : 0));
     for (int i = 0; i < T.cnt[T.lrec] && i < 10; i++) g_ram[(Rl + 3u + static_cast<uint32_t>(i)) & 0x07FFFFFFu] = 2;
 }
+// 25 Nov: the result screen of a Free-for-all (the Tournament round result, "Party A 1 - 0 Enemy Party") listed the retail parties (Party Select's five members, the CPU Select's pick) instead of the
+// fighters. Once the battle is decided and the menu has the tally up, its rows are written from the ledger: the human's record = him (1 row), the other record = the CPU fighters in placing order
+// (the last one standing / the last to fall first), flag 2 = fell. Row wins stay what the verdict needs (the human's row = the opponents' count when he won, else 0; the others' 0), the order of
+// the rows is the ranking. PSPRECOMP_TAGTEAM_FFA_TALLY_OLD=1: the retail rows.
+void ffa_result_tick() {
+    if (!g_ram || rd(0x089DD4C0u) != 2u) return;   // (the menu's result screen, not the battle)
+    const uint32_t base = rd(0x089D8508u); if (!ok(base, 0x3000)) return;
+    const uint32_t G = base + 10208u; if (rd(G + 4u) != 0) return;
+    const int hr = g_human_rec & 1;
+    std::vector<std::pair<int, bool>> ros; for (const auto& kv : g_ffa_roster) ros.push_back(kv.second);   // (char, human)
+    if (ros.size() < 3 || ros.size() > 4) return;
+    int hch = 0; for (const auto& r : ros) if (r.second) hch = r.first;
+    // fall order of the others (ledger order), the human's fall decides the match
+    std::vector<int> fell = g_ffa_fell;
+    const bool human_fell = g_ffa_human_lost;
+    std::vector<int> opp;   // 2nd place first: survivors, then the later falls first
+    for (const auto& r : ros) if (!r.second) opp.push_back(r.first);
+    std::stable_sort(opp.begin(), opp.end(), [&](int a, int b) { auto pos = [&](int c) { for (int i = int(fell.size()) - 1; i >= 0; i--) if (fell[i] == c) return i; return 1000; }; return pos(a) > pos(b); });
+    const int nopp = static_cast<int>(opp.size());
+    auto put = [&](int r, int i, int ch, int wins, bool fell_) {
+        const uint32_t row = tally_row(base, r, i); const uint8_t lv0 = g_ram[(row + 1u) & 0x07FFFFFFu];
+        g_ram[row & 0x07FFFFFFu] = static_cast<uint8_t>(ch);
+        if (g_ram[row & 0x07FFFFFFu] != ch || true) { const auto il = g_ffa_lvl.find(ch); const uint8_t lv = il != g_ffa_lvl.end() ? static_cast<uint8_t>(il->second) : save_level_of(ch); g_ram[(row + 1u) & 0x07FFFFFFu] = lv ? lv : (lv0 ? lv0 : 100); }
+        g_ram[(row + 2u) & 0x07FFFFFFu] = static_cast<uint8_t>(wins); g_ram[(row + 3u) & 0x07FFFFFFu] = fell_ ? 2 : 0;
+    };
+    g_ram[(G + 8u + 104u * static_cast<uint32_t>(hr) + 100u) & 0x07FFFFFFu] = 1;
+    g_ram[(G + 8u + 104u * static_cast<uint32_t>(1 - hr) + 100u) & 0x07FFFFFFu] = static_cast<uint8_t>(nopp);
+    put(hr, 0, hch, human_fell ? 0 : nopp, human_fell);
+    for (int i = 0; i < nopp; i++) { bool f = false; for (int c : fell) if (c == opp[i]) f = true; put(1 - hr, i, opp[i], 0, f); }
+    static int lg = 0; if (lg++ < 3) std::fprintf(stderr, "[FFA] result rows written: you %d (%s), others in placing order:%s\n", hch, human_fell ? "fell" : "won", [&] { std::string t; for (int c : opp) t += " " + char_label(c, true); return t; }().c_str());
+}
 // The job powers of one fall, on the HUD (retail shows them between the group battles of a tournament, "Party received powers of a Warrior"; a tag match
 // is one group battle, so each fall shows its own and the notice clears by itself). The powers are worked out the booking's way (FUN_0891ED04 on a
 // private copy of the scorer's party block, kept for the whole battle: the real block is only booked at the end, tally_from_ledger).
@@ -6097,6 +6149,7 @@ void tally_post_step() {   // every frame: once the booking has added its win to
         std::fprintf(stderr, "\n"); }
 }
 void group_decided(int loser_team) {
+    if (ffa_now() && !std::getenv("PSPRECOMP_TAGTEAM_FFA_TALLY_OLD")) { ledger_step(); g_ledger_closed = true; g_ffa_fell.clear(); for (const KoRec& k : g_kolog) g_ffa_fell.push_back(k.ch); g_ffa_human_lost = g_bs && team_of(side_of(ffa_human())) == loser_team; g_ffa_res_on = true; }
     if (std::getenv("PSPRECOMP_TAGTEAM_NOGROUPEND") || !g_bs) return;
     g_dissidia_entr_actor = 0;   // the entrance close-up camera must not reach the finish / victory pose
     g_win_team = 1 - loser_team;
@@ -12506,6 +12559,9 @@ int dissidia_tagteam_bp_pick_list(uint8_t out[64]) {
     return n;
 }
 std::string dissidia_tagteam_char_name(int id) { return char_label(id, true); }
+void dissidia_tagteam_result_tick() { if (g_ffa_res_on) ffa_result_tick(); }
+void dissidia_tagteam_result_done() { g_ffa_res_on = false; }
+std::string dissidia_tagteam_char_code(int id) { return code_for_char(id); }   // the file code ("gst120"): the face strip of the Free-for-all selector
 // Enter Battle on the setup screen: not before the CPU party has a row and its owner is known.
 bool dissidia_tagteam_bp_enter_blocked() {
     const std::vector<NetPlayer> pl = group_players(); const NetPlayer* h = nullptr; const int cp = bp_party(pl, &h);
