@@ -45,6 +45,7 @@ void dissidia_presence_sub(uint32_t state);
 void dissidia_tagteam_menu_mode(bool on);   // tagteam.cpp: Battle Mode > Tag Team Battle
 bool dissidia_tagteam_menu_mode_on();   // tagteam.cpp: the last Battle Mode / Communications entry chosen was Tag Team Battle
 uint32_t dissidia_tagteam_raw_pad();
+void dissidia_training_set(bool on); bool dissidia_training_chosen(); void dissidia_training_inject_cross();   // training.cpp
 void dissidia_tagteam_modesel_open();   // tagteam_menu.cpp: the mode select screen after choosing Tag Team Battle
 bool dissidia_tagteam_modesel_active();
 int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool online);   // 0 open, 1 chosen, 2 cancelled
@@ -364,17 +365,19 @@ const char* const kTagLabel = "Tag Team Battle";
 const char* const kTagHelp = "Two on two with your party: your team mates join the fight, the fallen are replaced.";
 std::chrono::steady_clock::time_point g_sub_last_draw{};
 float g_sub_sel = 0.f;
-void draw_sub_row(float ox, float oy, bool selected) {
+void draw_sub_row(float ox, float oy0, int sel, bool two) {   // sel: 0 = Tag Team Battle, 1 = Training, -1 = neither; two: the Training row is there too
     using dissidia::LayerColor;
     const auto now = std::chrono::steady_clock::now();
     const float dt = std::min(0.1f, std::chrono::duration<float>(now - g_sub_last_draw).count());
     g_sub_last_draw = now;
     static float appear = 0.f;
     appear = dt >= 0.1f ? 0.f : std::min(1.f, appear + dt / 0.2f);
-    g_sub_sel = selected ? std::min(1.f, g_sub_sel + dt / 0.12f) : 0.f;
+    g_sub_sel = sel >= 0 ? std::min(1.f, g_sub_sel + dt / 0.12f) : 0.f;
     load_ui_sheet();
     g_layer.begin(std::max(2, psp_sddialog::output_scale()));
-    const float sa = g_sub_sel * appear, ia = (1.f - g_sub_sel) * appear;
+    for (int rr = 0; rr < (two ? 2 : 1); rr++) {
+        const float oy = oy0 + 16.f * static_cast<float>(rr); const char* label = rr == 0 ? kTagLabel : "Training"; const char* help = rr == 0 ? kTagHelp : "Practice in a one-on-one battle: no KO, refills, CPU actions, last-hit numbers (pause, Select).";
+    const float sa = rr == sel ? g_sub_sel * appear : 0.f, ia = rr == sel ? (1.f - g_sub_sel) * appear : appear;
     if (ia > 0.f) {   // idle: the thin line under the row, like the retail sub-rows
         g_layer.band(ox + 12.f, oy + 10.4f, 470.f, oy + 11.1f, [&](float x, float) {
             const float fade = x < 430.f ? 1.f : std::max(0.f, 1.f - (x - 430.f) / 40.f);
@@ -391,14 +394,15 @@ void draw_sub_row(float ox, float oy, bool selected) {
         });
     }
     const float tx = ox + 26.f, base = oy + 8.6f, em = 7.6f;
-    if (ia > 0.f) g_layer.text(kTagLabel, true, em, tx, base, LayerColor{40, 42, 65, ia});
+    if (ia > 0.f) g_layer.text(label, true, em, tx, base, LayerColor{40, 42, 65, ia});
     if (sa > 0.f) {
         for (const auto& o : {std::pair<float, float>{0.6f, 0.6f}, {0.6f, 0.f}, {0.f, 0.6f}, {-0.4f, 0.f}, {0.f, -0.4f}})
-            g_layer.text(kTagLabel, true, em, tx + o.first, base + o.second, LayerColor{30, 24, 80, 0.75f * sa});
-        g_layer.text(kTagLabel, true, em, tx, base, LayerColor{255, 255, 255, sa});
+            g_layer.text(label, true, em, tx + o.first, base + o.second, LayerColor{30, 24, 80, 0.75f * sa});
+        g_layer.text(label, true, em, tx, base, LayerColor{255, 255, 255, sa});
         draw_hand(ox - 13.f, oy - 2.6f, sa);
-        const float hw = g_layer.text(kTagHelp, true, 7.9f, 0, 0, LayerColor{0, 0, 0, 0}, true);
-        g_layer.text(kTagHelp, true, 7.9f, 232.f - hw / 2.f, 239.3f, LayerColor{108, 102, 128, sa});
+        const float hw = g_layer.text(help, true, 7.9f, 0, 0, LayerColor{0, 0, 0, 0}, true);
+        g_layer.text(help, true, 7.9f, 232.f - hw / 2.f, 239.3f, LayerColor{108, 102, 128, sa});
+    }
     }
     g_layer.publish();
 }
@@ -406,7 +410,15 @@ void draw_sub_row(float ox, float oy, bool selected) {
 // (group 2: 5 rows, instances 0x20.., it starts Group Battle, index 1: the multiplayer tag battle, to come).
 struct TagGroup { uint32_t group, rows, target, first_inst; };   // first_inst: scene instance of the group's first row (rows 16 apart)
 constexpr TagGroup kTagGroups[2] = {{1, 4, 1, 0x17}, {2, 5, 1, 0x20}};
+// 25 Nov: Battle Mode > Training (training.cpp): one more row under Tag Team Battle (group 1 only, index rows + 1). Confirming it sets the Training flag and starts
+// Quick Battle (1-on-1) (index 0) by the game's own code (a fresh Cross is replayed for the list). Any other confirm in the group clears the flag.
+// PSPRECOMP_TRAINING_OFF=1: no row. `ext` = the cursor's highest index of the list with the extra rows.
+
+bool train_row_on() { static const bool on = std::getenv("PSPRECOMP_TRAINING_OFF") == nullptr; return on; }
+uint32_t tag_ext(const TagGroup* tg);
+bool g_train_go = false; int g_train_go_age = 0;
 const TagGroup* tag_group(uint32_t st) { if (!st) return nullptr; const uint32_t g = r32(st + 0xA88); for (const auto& t : kTagGroups) if (t.group == g) return &t; return nullptr; }
+uint32_t tag_ext(const TagGroup* tg) { return tg->rows + (tg->group == 1 && train_row_on() ? 1u : 0u); }
 // a confirm on the Tag Team Battle row (called from the start menu's top-level and sub-list updates, before the game's code sees it)
 bool g_ms_go = false; int g_ms_go_age = 0; int g_ms_group = 0;
 bool g_ms_reopen = false;
@@ -427,7 +439,7 @@ bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st, bool from
         else if (r == 2) { g_ms_flow = false; dissidia_tagteam_menu_mode(false); std::fprintf(stderr, "[MENUSET] mode select: cancelled\n"); }
         return true;
     }
-    if (r32(cur + 36) != tg->rows) { if (g_ms_go && ++g_ms_go_age > 200) g_ms_go = false; return false; }
+    if (r32(cur + 36) != tag_ext(tg)) { if (g_ms_go && ++g_ms_go_age > 200) g_ms_go = false; return false; }
     // 25 Nov: the sub-list's test (c1) is true on a Circle press too (SUBLOG: Circle = sub args 1, Cross = main args 1), so Circle on the Tag Team Battle row opened the Mode Select
     // again instead of backing out to the main menu (a loop with the Mode Select's own Circle). PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old.
     const bool c1 = confirm_pressed_at(rdram, ctx, SUB_CONFIRM_ARGS) && (std::getenv("PSPRECOMP_TAGTEAM_MENUBACK_OLD") || !(dissidia_tagteam_raw_pad() & 0x2000u)), c2 = confirm_pressed(rdram, ctx);
@@ -435,6 +447,11 @@ bool tag_row_confirm(uint8_t* rdram, recomp_context* ctx, uint32_t st, bool from
     if (g_ms_go) { if (++g_ms_go_age > 200) g_ms_go = false; if (c1 || c2) { g_ms_go = false; dissidia_tagteam_menu_mode(true); dissidia_tagteam_lobby_pending(true); std::fprintf(stderr, "[MENUSET] Tag Team Battle chosen (group %u)\n", tg->group); } return false; }
     if (!(c1 || c2)) return false;
     const uint32_t idx = r32(cur + 4);
+    if (tg->group == 1 && train_row_on()) {
+        if (g_train_go) { g_train_go = false; return false; }   // (the replayed Cross: the game starts Quick Battle (1-on-1))
+        if (idx == tg->rows + 1) { dissidia_tagteam_menu_mode(false); dissidia_training_set(true); const uint32_t z = 0; std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &z, 4); g_train_go = true; g_train_go_age = 0; dissidia_training_inject_cross(); std::fprintf(stderr, "[MENUSET] Training chosen: Quick Battle (1-on-1)\n"); return true; }
+        dissidia_training_set(false);
+    }
     dissidia_tagteam_menu_mode(idx == tg->rows);
     if (idx == tg->rows) {
         if (std::getenv("PSPRECOMP_TAGTEAM_NOMODESEL")) { std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->target, 4); std::fprintf(stderr, "[MENUSET] Tag Team Battle chosen (group %u)\n", tg->group); dissidia_tagteam_lobby_pending(true); return false; }
@@ -450,7 +467,8 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     g_last_sub_tick = std::chrono::steady_clock::now();
     const TagGroup* tg = tag_group(st);
     const uint32_t cur = st + 0xA58u;
-    if (tg && r32(cur + 32) == 0 && r32(cur + 36) == tg->rows - 1) std::memcpy(rdram + ((cur + 36) & 0x07FFFFFFu), &tg->rows, 4);   // one more row
+    if (tg && r32(cur + 32) == 0 && r32(cur + 36) == tg->rows - 1) { const uint32_t e = tag_ext(tg); std::memcpy(rdram + ((cur + 36) & 0x07FFFFFFu), &e, 4); }   // one more row (two with Training)
+    if (g_train_go && ++g_train_go_age > 120) g_train_go = false;
     {   // back from a tag battle (or its lobby): the game puts the cursor on the row it started (Group Battle / Quick Battle (Party)); put it on Tag Team Battle
         // (user 22 Nov: "returning to the main menu selects Group Battle instead of Tag Team Battle"). Once per opening of the group's sub-list.
         static uint32_t open_group = 0;
@@ -467,9 +485,12 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         if (gap) g_ms_hold = false;   // (another screen ran in between: the next menu has been and gone)
         if (g != open_group || gap) {
             open_group = g;
-            if (tg && dissidia_tagteam_menu_mode_on() && !dissidia_tagteam_modesel_active() && r32(cur + 36) == tg->rows && r32(cur + 4) == tg->target && !std::getenv("PSPRECOMP_TAGTEAM_NOROWBACK")) {
+            if (tg && dissidia_tagteam_menu_mode_on() && !dissidia_tagteam_modesel_active() && r32(cur + 36) == tag_ext(tg) && r32(cur + 4) == tg->target && !std::getenv("PSPRECOMP_TAGTEAM_NOROWBACK")) {
                 std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &tg->rows, 4);
                 std::fprintf(stderr, "[MENUSET] group %u opened with Tag Team Battle on: cursor %u -> %u (the Tag Team Battle row)\n", tg->group, tg->target, tg->rows);
+            }
+            else if (tg && tg->group == 1 && train_row_on() && dissidia_training_chosen() && r32(cur + 36) == tag_ext(tg) && r32(cur + 4) == 0) {   // back from a Training battle: the cursor on the Training row
+                const uint32_t t = tg->rows + 1; std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &t, 4);
             }
         }
     }
@@ -480,16 +501,21 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (std::getenv("PSPRECOMP_MENU_SUBLOG") && st) { static std::string last; char b[128]; std::snprintf(b, sizeof b, "group %u idx %u min %u max %u state0 %u", r32(st + 0xA88), r32(cur + 4), r32(cur + 32), r32(cur + 36), r32(st)); if (last != b) { last = b; std::fprintf(stderr, "[SUBTICK] %s\n", b); } }
     if (g_ms_hold && std::getenv("PSPRECOMP_MENU_SUBLOG")) std::fprintf(stderr, "[MSHOLD] sub tick (go %d rows %u)\n", g_ms_go, tg ? r32(cur + 36) : 0u);
     if (tag_row_confirm(rdram, ctx, st)) return;
+    // Training row (index rows + 1): the game shows its hand and its help text for an index past the table; with the cursor one lower (the Tag Team Battle row, which it draws nothing for)
+    // the game stays quiet. So for the game's update the cursor is put on that row and its move is translated back: up = Tag Team Battle, down = the first row, none = still Training.
+    const bool sw = tg && tg->group == 1 && train_row_on() && r32(cur + 36) == tag_ext(tg) && r32(cur + 4) == tg->rows + 1;
+    if (sw) { const uint32_t v = tg->rows; std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &v, 4); }
     g_orig_sub_tick(rdram, ctx);
+    if (sw) { const uint32_t now = r32(cur + 4); const uint32_t v = now == tg->rows ? tg->rows + 1 : now == tg->rows + 1 ? 0u : tg->rows; std::memcpy(rdram + ((cur + 4) & 0x07FFFFFFu), &v, 4); }
     const uint32_t st2 = r32(menu + 320);
     const TagGroup* tg2 = tag_group(st2);
-    if (tg2 && r32(st2 + 0xA58 + 36) == tg2->rows) {   // the extra row, one row under the last (the sub-list's first row is instance 0x17, rows 16 apart)
+    if (tg2 && r32(st2 + 0xA58 + 36) == tag_ext(tg2)) {   // the extra row, one row under the last (the sub-list's first row is instance 0x17, rows 16 apart)
         const uint32_t inst = r32(st2 + 0x408 + 4 * tg2->first_inst);
         float ox = 271.f, oy = 101.f;
         if (inst >= 0x08800000u && inst < 0x0A000000u) { std::memcpy(&ox, rdram + ((inst + 0x10) & 0x07FFFFFFu), 4); std::memcpy(&oy, rdram + ((inst + 0x14) & 0x07FFFFFFu), 4); }
         oy += 16.f * static_cast<float>(tg2->rows);
         if (g_ms_hold) { dissidia_tagteam_modesel_draw_frozen(g_ms_group == 2); if (std::getenv("PSPRECOMP_MENU_SUBLOG")) std::fprintf(stderr, "[MSHOLD] frozen draw\n"); }
-        else if (std::isfinite(ox) && std::isfinite(oy) && ox > 100.f && ox < 400.f && oy > 0.f && oy < 240.f) draw_sub_row(ox, oy, r32(st2 + 0xA58 + 4) == tg2->rows);
+        else if (std::isfinite(ox) && std::isfinite(oy) && ox > 100.f && ox < 400.f && oy > 0.f && oy < 240.f) draw_sub_row(ox, oy, r32(st2 + 0xA58 + 4) == tg2->rows ? 0 : r32(st2 + 0xA58 + 4) == tg2->rows + 1 && tag_ext(tg2) > tg2->rows ? 1 : -1, tag_ext(tg2) > tg2->rows);
     }
 }
 
