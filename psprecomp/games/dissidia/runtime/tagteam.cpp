@@ -660,11 +660,34 @@ FuncPtr g_orig_gfxclaim = nullptr; std::set<uint32_t> g_gfx_claimed;
 void gfxclaim_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram;
     std::vector<uint32_t> held;
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")) { const uint32_t nm = static_cast<uint32_t>(ctx->r[4]); std::fprintf(stderr, "[GFXCALL] t=%.2fs claim '%.15s' from ra %08X owner %08X\n", dissidia_battle_age() / 60.f, ok(nm, 16) ? reinterpret_cast<const char*>(g_ram + (nm & 0x07FFFFFFu)) : "?", static_cast<uint32_t>(ctx->r[31]), g_own_ctx); }
     for (const uint32_t e : g_gfx_claimed) if (ok(e, 316) && rd(e + 12u) == 0u) { wr(e + 12u, 1u); held.push_back(e); }
     g_orig_gfxclaim(rdram, ctx);
     for (const uint32_t e : held) if (rd(e + 12u) == 1u) wr(e + 12u, 0u);
     const uint32_t r = static_cast<uint32_t>(ctx->r[2]);
     if (r && ok(r, 316)) { g_gfx_claimed.insert(r); if (g_log && !held.empty()) std::fprintf(stderr, "[GFXCLAIM] entry %08X for the caller (%zu entries held back)\n", r, held.size()); }
+}
+// The second graphics table allocator, FUN_0886D2C4(name, a1, a2) (called by FUN_0884333C: a fighter's model object, name at *(obj) + 36), also takes the FIRST entry whose
+// word +12 is 0. A fighter whose entry came back unfilled (+12 == 0: Gabranth, Cloud...; retail fills it right after, one fighter at a time) lost it to ANOTHER object's call when
+// the extras were made in one frame: the entry then carried the other model's name / data (3 v 3, 26 Nov: the 2nd / 4th extra drawn with Squall's / Gabranth's model: Cloud looked
+// like Gabranth). Now the entries this side claimed but has not got filled yet are held (+12 = 1) during the call, except one whose name the asked name starts with (the owner's own assist object takes it,
+// as in retail where one fighter is made at a time). PSPRECOMP_TAGTEAM_GFXCLAIM2_OLD=1: old.
+FuncPtr g_orig_gfxalloc2 = nullptr;
+void gfxalloc2_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram;
+    const uint32_t nm = static_cast<uint32_t>(ctx->r[4]);
+    std::vector<uint32_t> held;
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")) std::fprintf(stderr, "[GFXCALL2] t=%.2fs alloc2 '%.15s' ra %08X owner %08X\n", dissidia_battle_age() / 60.f, ok(nm, 16) ? reinterpret_cast<const char*>(g_ram + (nm & 0x07FFFFFFu)) : "?", static_cast<uint32_t>(ctx->r[31]), g_own_ctx);
+    static const bool old2 = std::getenv("PSPRECOMP_TAGTEAM_GFXCLAIM2_OLD") != nullptr;
+    if (!old2) for (const uint32_t e : g_gfx_claimed) {
+        if (!ok(e, 316) || rd(e + 12u) != 0u) continue;
+        const char* want = ok(nm, 16) ? reinterpret_cast<const char*>(g_ram + (nm & 0x07FFFFFFu)) : "", *own = reinterpret_cast<const char*>(g_ram + ((e + 272u) & 0x07FFFFFFu));
+        if (*own && std::strncmp(want, own, std::min<size_t>(std::strlen(own), 15)) == 0) continue;   // the owner's own call: his name, or his assist's ("P_GST200_1P" / "P_GST200_1P_A")
+        wr(e + 12u, 1u); held.push_back(e);
+    }
+    g_orig_gfxalloc2(rdram, ctx);
+    for (const uint32_t e : held) if (rd(e + 12u) == 1u) wr(e + 12u, 0u);
+    if (g_log && !held.empty()) std::fprintf(stderr, "[GFXCLAIM2] '%.15s': entry %08X (%zu unfilled entries held back)\n", ok(nm, 16) ? reinterpret_cast<const char*>(g_ram + (nm & 0x07FFFFFFu)) : "?", static_cast<uint32_t>(ctx->r[2]), held.size());
 }
 void ctor_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t mem = static_cast<uint32_t>(ctx->r[4]), prev = g_own_ctx;
@@ -1405,6 +1428,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     if (!g_orig_dmg && std::getenv("PSPRECOMP_TAGTEAM_LETHALCLAMP")) { g_orig_dmg = fn(0x08AE6D2Cu); if (g_orig_dmg) psp_dispatch_register(0x08AE6D2Cu, dmg_hook); }   // opt-in experiment: HP attacks do not go through FUN_08AE6D2C (never fired)
     if (!g_orig_rules && !std::getenv("PSPRECOMP_TAGTEAM_NOROUNDGUARD")) { g_orig_rules = fn(0x08A23DA8u); g_orig_slotactor = fn(0x08A22C78u); if (g_orig_rules && g_orig_slotactor) { psp_dispatch_register(0x08A23DA8u, rules_hook); psp_dispatch_register(0x08A22C78u, slotactor_hook); } }
     if (!g_orig_gfxclaim && !std::getenv("PSPRECOMP_TAGTEAM_GFXCLAIM_OLD")) { g_orig_gfxclaim = fn(0x0886D0D8u); if (g_orig_gfxclaim) psp_dispatch_register(0x0886D0D8u, gfxclaim_hook); }
+    if (!g_orig_gfxalloc2 && !std::getenv("PSPRECOMP_TAGTEAM_GFXCLAIM_OLD")) { g_orig_gfxalloc2 = fn(0x0886D2C4u); if (g_orig_gfxalloc2) psp_dispatch_register(0x0886D2C4u, gfxalloc2_hook); }
     if (!g_orig_ast3) { g_orig_ast3 = fn(0x08AED83Cu); if (g_orig_ast3) psp_dispatch_register(0x08AED83Cu, ast3_hook); }
     sumgate::install();
     if (!g_orig_bctl) { g_orig_bctl = fn(0x08886C88u); if (g_orig_bctl) psp_dispatch_register(0x08886C88u, bctl_hook); }
@@ -2809,6 +2833,10 @@ void gfx_dump(const char* tag) {   // debug (PSPRECOMP_TAGTEAM_GFXOBJ=1): each e
     if (!g_log || !std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")) return;
     if (std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")[0] == '2') { std::fprintf(stderr, "[GFXPOOL] %s:", tag); for (uint32_t o = 0; o < 0x80u; o += 4) std::fprintf(stderr, "%s%08X", o % 32 == 0 ? "\n[GFXPOOL]   " : " ", rd(0x08C00000u + o)); std::fprintf(stderr, "\n"); }
     if (std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")[0] == '3') for (int i = 0; i < g_nextra; i++) { std::fprintf(stderr, "[GFXOWN] %s x%d(c%d) +394=%08X owned:", tag, i, actor_char(g_extra[i].actor), rd(g_extra[i].actor + 0x394u)); for (const Blk& b : g_owned[g_extra[i].actor]) if (b.addr >= 0x08C00000u && b.addr < 0x08D00000u) std::fprintf(stderr, " %08X/%X", b.addr, b.size); std::fprintf(stderr, "\n"); }
+    if (std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")[0] == '6' && std::strcmp(tag, "after the spawns") == 0 && g_nextra > 1 && ok(g_extra[1].actor, 0x12D0)) { psp_mem_watch_set(rd(g_extra[1].actor + 0x394u) + 272u); std::fprintf(stderr, "[GFXWATCH] watching x1's entry name at %08X\n", rd(g_extra[1].actor + 0x394u) + 272u); }
+    if (std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")[0] == '5') for (int i = 0; i < g_nextra; i++) if (ok(g_extra[i].actor, 0x12D0)) {   // each extra's entry (0x13C bytes) as words
+        const uint32_t e = rd(g_extra[i].actor + 0x394u); if (!ok(e, 316)) continue; std::fprintf(stderr, "[GFXENT] %s x%d(c%d) %08X:", tag, i, actor_char(g_extra[i].actor), e);
+        for (uint32_t o = 0; o < 316u; o += 4) std::fprintf(stderr, "%s%08X", o % 32 == 0 ? "\n[GFXENT]   " : " ", rd(e + o)); std::fprintf(stderr, "\n"); }
     if (std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")[0] == '4') {   // the graphics table's entries (192 x 0x13C at *(0x089D5F94) + 28): used ones, with +12, flags +144, name +272
         const uint32_t t = rd(0x089D5F94u) + 28u; std::fprintf(stderr, "[GFXTAB] %s table %08X:\n", tag, t);
         for (uint32_t i = 0; i < 192; i++) { const uint32_t e = t + 316u * i; if (!ok(e, 316)) break; if (rd(e + 12u) == 0 && rd(e + 144u) == 0) continue; char nm[17] = {}; for (int k = 0; k < 16; k++) { const char c = static_cast<char>(g_ram[(e + 272u + k) & 0x07FFFFFFu]); nm[k] = (c >= 32 && c < 127) ? c : 0; }
@@ -4570,7 +4598,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         static float last = -9.f; const float age = dissidia_battle_age() / 60.0f;
         if (age - last >= 1.0f) { last = age; std::fprintf(stderr, "[GFXOBJ] t=%.1fs", age);
             std::vector<uint32_t> fs; for (int k = 0; k < 2; k++) fs.push_back(srd(g_bs + 56u + 4u * k)); for (int i = 0; i < g_nextra; i++) fs.push_back(g_extra[i].actor);
-            for (uint32_t a : fs) if (ok(a, 0x12D0)) std::fprintf(stderr, " c%d:%08X", actor_char(a), rd(a + 0x394u)); std::fprintf(stderr, "\n"); }
+            for (uint32_t a : fs) if (ok(a, 0x12D0)) { const uint32_t ge = rd(a + 0x394u); std::fprintf(stderr, " c%d:%08X", actor_char(a), ge); if (std::getenv("PSPRECOMP_TAGTEAM_GFXOBJ")[0] == '5' && ok(ge, 316)) { const uint32_t ob = rd(ge + 12u); std::fprintf(stderr, "(+12=%08X fid %u '%.11s')", ob, ok(ob, 16) && ok(rd(ob), 8) ? rdh(rd(ob)) : 0u, reinterpret_cast<const char*>(g_ram + ((ge + 272u) & 0x07FFFFFFu))); } } std::fprintf(stderr, "\n"); }
     }
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_MODELAUDIT") && g_bs && g_nextra && ok(owner, 0x12D0)) {   // debug: which file objects (the model) each fighter's data points at, vs its char id (two levels deep), once per battle at 10 s
         static uint32_t done_gen = ~0u;
