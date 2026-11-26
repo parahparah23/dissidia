@@ -33,6 +33,10 @@ std::vector<TagHudFighter> g_fighters;
 std::vector<TagHudReserve> g_reserves;
 std::vector<TagHudOverhead> g_overhead; int g_overhead_style = 0; bool g_hide_panels = false;
 const uint8_t* g_hud_ram = nullptr;
+float (*g_top_fn)(uint32_t) = nullptr;
+float top_of(uint32_t a) { return g_top_fn ? g_top_fn(a) : 2.05f; }
+double g_vig_t0 = -10.0, g_vig_dur = 0.4; float g_vig_str = 0.f; int g_vig_side = 0;   // the lock-on screen pulse (red-orange edges)
+bool g_intro_running = false;
 TagHudLockInd g_lockind; std::map<uint32_t, double> g_lock_new; double g_lock_me_new = -10.0;   // actor -> wall-clock time it newly locked on
 std::string g_banner;
 struct Notice { std::string text; int kind; double until, start; };   // wall-clock seconds
@@ -212,7 +216,7 @@ void hit_floating(double tnow) {
     if (hpdmg_mode() < 2) return;
     for (const HitRec& r : g_hits) {
         const double age = tnow - r.t0; if (age >= 1.1 || !r.h.have_pos) continue;
-        const float p[3] = {r.h.pos[0], r.h.pos[1] + 2.1f, r.h.pos[2]}; float sx, sy; if (!tagteam_fx_project(p, sx, sy)) continue;
+        const float p[3] = {r.h.pos[0], r.h.pos[1] + (r.h.victim ? top_of(r.h.victim) : 2.05f) + 0.05f, r.h.pos[2]}; float sx, sy; if (!tagteam_fx_project(p, sx, sy)) continue;
         if (sx < 10.f || sx > 470.f || sy < 8.f || sy > 262.f) continue;
         TagHudHit h = r.h; const float w = text_w("-" + std::to_string(h.dmg), true, 8.f);
         dmg_number(h, age, sx - w / 2.f, sy - static_cast<float>(age) * 14.f, false, 8.f, 0.f);
@@ -383,9 +387,16 @@ void tagteam_hud_clear() { g_hits.clear(); g_notices.clear(); g_banner.clear(); 
 void tagteam_hud_set_banner(const std::string& t) { g_banner = t; }
 void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style, bool hide_panels) { g_overhead = bars; g_overhead_style = style; g_hide_panels = hide_panels; }
 void tagteam_hud_set_ram(const uint8_t* rdram) { g_hud_ram = rdram; }
+void tagteam_hud_set_intro(bool r) { g_intro_running = r; }
+void tagteam_hud_set_top_fn(float (*fn)(uint32_t)) { g_top_fn = fn; }
 void tagteam_hud_lockind(const TagHudLockInd& li) {
     const double t = now_s();
     for (uint32_t a : li.fresh) { g_lock_new[a] = t; g_lock_me_new = t; }
+    if (!li.fresh.empty() && !std::getenv("PSPRECOMP_TAGTEAM_LOCKFX_OFF") && g_hud_ram) {   // a new lock-on: a short pulse, stronger / longer for the 2nd and later enemy, brighter on the side the enemy is on
+        g_vig_t0 = t; g_vig_str = li.by.size() >= 2 ? 1.f : 0.65f; g_vig_dur = (li.by.size() >= 2 ? 0.65 : 0.45) * (std::getenv("PSPRECOMP_TAGTEAM_LOCKFX_SLOW") ? std::atof(std::getenv("PSPRECOMP_TAGTEAM_LOCKFX_SLOW")) : 1.0); g_vig_side = 0;   // (_SLOW=N: test aid, N times longer)
+        float p[3]; std::memcpy(p, g_hud_ram + ((li.fresh[0] + 0x80u) & 0x07FFFFFFu), 12); p[1] += 1.0f; float sx, sy;
+        if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2])) { if (!tagteam_fx_project(p, sx, sy)) g_vig_side = 2; else if (sx < 100.f) g_vig_side = -1; else if (sx > 380.f) g_vig_side = 1; }   // 2 = behind the camera: the bottom edge
+    }
     g_lockind = li;
     if (li.by.empty() || !li.me) g_lock_new.clear();
 }
@@ -397,7 +408,7 @@ void overhead_bar(const TagHudOverhead& o) {
     if (!g_hud_ram || !o.actor) return;
     float pos[3]; std::memcpy(pos, g_hud_ram + ((o.actor + 0x80u) & 0x07FFFFFFu), 12);
     if (!std::isfinite(pos[0]) || !std::isfinite(pos[1]) || !std::isfinite(pos[2]) || std::fabs(pos[0]) > 1000.f || std::fabs(pos[2]) > 1000.f) return;   // (a fighter parked away from the stage)
-    const float head[3] = {pos[0], pos[1] + 2.05f, pos[2]};
+    const float head[3] = {pos[0], pos[1] + top_of(o.actor), pos[2]};
     float x, y; if (!tagteam_fx_project(head, x, y)) return;
     if (g_overhead_style == 3) return;   // the game's own panels, half size (tagteam.cpp npanel)
     if (g_overhead_style == 2) {   // the mini status panel: 64 x 19 above the head, the target's at 150 / 256 of full strength, the others at 70 / 256 (plugin v0.61)
@@ -435,6 +446,27 @@ void overhead_bar(const TagHudOverhead& o) {
 
 
 namespace {
+bool vig_active(double tnow) { return tnow - g_vig_t0 < g_vig_dur; }
+void vig_draw(double tnow) {
+    const float k = static_cast<float>((tnow - g_vig_t0) / g_vig_dur);
+    if (k < 0.f || k >= 1.f) return;
+    { static int n = 0; if (std::getenv("PSPRECOMP_TAGTEAM_LOG") && n++ % 60 == 0) std::fprintf(stderr, "[LOCKFX] pulse k=%.3f str=%.2f side=%d\n", k, g_vig_str, g_vig_side); }
+    const float a0 = 0.55f * g_vig_str * std::pow(1.f - k, 1.6f) * std::min(1.f, static_cast<float>(tnow - g_vig_t0) / 0.05f + 0.3f);   // quick rise, slow fade
+    const float wv = 58.f;
+    auto strip = [&](float x0, float y0, float x1, float y1, int dir, float boost) {   // dir: 0 left edge, 1 right, 2 top, 3 bottom
+        g_layer.band(x0, y0, x1, y1, [&](float x, float y) {
+            float d = dir == 0 ? (x - x0) : dir == 1 ? (x1 - x) : dir == 2 ? (y - y0) : (y1 - y);
+            d = 1.f - d / (dir < 2 ? wv : wv * 0.6f); if (d <= 0.f) return LayerColor{0, 0, 0, 0};
+            return LayerColor{255, 70.f + 50.f * d, 30.f, a0 * boost * d * d};
+        });
+    };
+    const float bl = g_vig_side == -1 ? 1.f : (g_vig_side == 0 ? 0.7f : 0.45f), br = g_vig_side == 1 ? 1.f : (g_vig_side == 0 ? 0.7f : 0.45f);
+    strip(0, 0, wv, 272, 0, bl); strip(480 - wv, 0, 480, 272, 1, br);
+    strip(0, 0, 480, wv * 0.6f, 2, 0.5f); strip(0, 272 - wv * 0.6f, 480, 272, 3, g_vig_side == 2 ? 1.f : 0.5f);
+}
+}  // namespace
+
+namespace {
 // ---- lock-on indicator: who has the player as their target ----
 bool world_pos(uint32_t actor, float p[3]) {
     if (!g_hud_ram || !actor) return false;
@@ -470,7 +502,7 @@ void lockind_draw(double tnow) {
     // -- on each enemy that is locked on: an eye over its head (above the overhead bar when there is one); off to the side of the screen: at the edge
     for (uint32_t a : li.by) {
         float pos[3]; if (!world_pos(a, pos)) continue;
-        const float head[3] = {pos[0], pos[1] + 2.05f, pos[2]};
+        const float head[3] = {pos[0], pos[1] + top_of(a), pos[2]};
         float x, y; if (!tagteam_fx_project(head, x, y)) continue;
         static const float up[4] = {7.f, 19.f, 30.f, 23.f};   // above: nothing / the HP bar + BRV / the mini panel / the PPSSPP panel
         const float dy = up[std::clamp(li.oh_style, 0, 3)];
@@ -485,22 +517,10 @@ void lockind_draw(double tnow) {
         }
         eye_icon(ex, ey, (edge ? 12.f : 14.f) * pop, edge ? 0.8f : 0.95f, pulse, fl);
     }
-    // -- on the player: a pulsing red-orange chevron over its head, a ring on the floor, "xN" with more than one
+    // -- on the player: a pulsing red-orange chevron over its head, "xN" with more than one (no floor ring: removed 25 Nov, user)
     float me[3]; if (!world_pos(li.me, me)) return;
-    const float head[3] = {me[0], me[1] + 2.35f, me[2]}, feet[3] = {me[0], me[1] + 0.03f, me[2]};
-    float hx, hy, fx, fy; const bool ok_head = tagteam_fx_project(head, hx, hy), ok_feet = tagteam_fx_project(feet, fx, fy);
-    const double since = tnow - g_lock_me_new; const float fl = since < 0.5 ? 1.f - static_cast<float>(since) / 0.5f : 0.f;
-    if (ok_feet) {
-        float hf, hfy; const float above[3] = {me[0], me[1] + 1.7f, me[2]};
-        const float unit = tagteam_fx_project(above, hf, hfy) ? std::max(4.f, std::fabs(fy - hfy) / 1.7f) : 20.f;   // design units per metre at the player's distance
-        const int n = 32; const float rad = 0.95f + 0.07f * pulse + (fl > 0.f ? 0.8f * (1.f - fl) : 0.f);
-        for (int i = 0; i < n; i++) {
-            const float ang = 6.2831853f * float(i) / float(n);
-            const float p[3] = {me[0] + std::cos(ang) * rad, me[1] + 0.04f, me[2] + std::sin(ang) * rad}; float x, y;
-            if (tagteam_fx_project(p, x, y)) g_layer.glow(x, y, std::max(1.4f, 0.075f * unit), LayerColor{255, 90, 50, (0.30f + 0.22f * pulse + 0.35f * fl)});
-        }
-        if (fl > 0.f) g_layer.glow(fx, fy - 0.3f * unit, 1.3f * unit * (1.2f - 0.4f * fl), LayerColor{255, 140, 90, 0.5f * fl});
-    }
+    const float head[3] = {me[0], me[1] + top_of(li.me) + 0.3f, me[2]};
+    float hx, hy; const bool ok_head = tagteam_fx_project(head, hx, hy);
     if (ok_head && hx > -20.f && hx < 500.f && hy > -20.f && hy < 292.f) {
         const float bob = 1.5f * static_cast<float>(std::sin(tnow * 5.0)), cx = hx, tipy = hy + bob, wd = 10.f, ht = 8.f, th = 4.8f;   // a V (pointing down at the player): its centre is the lowest
         const float a = 0.95f;
@@ -525,7 +545,7 @@ void lockind_draw(double tnow) {
 void tagteam_hud_draw(const std::vector<TagHudFighter>& fighters, const std::vector<TagHudReserve>& reserves) {
     g_fighters = fighters; g_reserves = reserves;
 }
-void tagteam_hud_hide() { g_hits.clear(); g_fighters.clear(); g_reserves.clear(); g_overhead.clear(); g_banner.clear(); g_notices.clear(); g_lockind = TagHudLockInd(); g_lock_new.clear(); }
+void tagteam_hud_hide() { g_hits.clear(); g_fighters.clear(); g_reserves.clear(); g_overhead.clear(); g_banner.clear(); g_notices.clear(); g_lockind = TagHudLockInd(); g_lock_new.clear(); g_vig_t0 = -10.0; }
 
 bool tagteam_fx_draw(dissidia::MenuLayer& layer);   // tagteam_fx.cpp
 
@@ -543,14 +563,14 @@ void tagteam_layer_frame(bool in_battle) {
     const double tnow = now_s();
     g_notices.erase(std::remove_if(g_notices.begin(), g_notices.end(), [&](const Notice& n) { return n.until <= tnow; }), g_notices.end());
     g_hits.erase(std::remove_if(g_hits.begin(), g_hits.end(), [&](const HitRec& r) { return tnow - r.t0 >= kFeedLife + 0.1; }), g_hits.end());
-    const bool any = !g_fighters.empty() || !g_hits.empty() || !g_reserves.empty() || !g_overhead.empty() || !g_lockind.by.empty() || !g_banner.empty() || !g_notices.empty();
+    const bool any = !g_fighters.empty() || !g_hits.empty() || !g_reserves.empty() || !g_overhead.empty() || !g_lockind.by.empty() || vig_active(tnow) || !g_banner.empty() || !g_notices.empty();
     L.lap("prep"); g_layer.begin(std::max(2, psp_sddialog::output_scale())); L.lap("begin");
     if (any) {
         for (const TagHudOverhead& o : g_overhead) if (!o.target) overhead_bar(o);   // (under the panels; the target's bar last, on top of the others)
         for (const TagHudOverhead& o : g_overhead) if (o.target) overhead_bar(o);
         int row[2] = {0, 0};
         for (const TagHudFighter& f : g_fighters) {
-            if (g_hide_panels) break;   // Settings > Debug > Hide Tag Team UI
+            if (g_hide_panels || g_intro_running) break;   // (not in the banters / intro) Settings > Debug > Hide Tag Team UI
             const int s = f.side != 0;
             const bool g = f.ex >= 0.f || f.assist >= 0.f;   // with the gauges a panel is 31 high (rows 34 apart) and its EX tube sits outside it
             // Smaller and a little see-through (user, 22 Nov: "the side HUD is too big and distracting"): the stack is zoomed to kSideZoom about the
@@ -560,7 +580,7 @@ void tagteam_layer_frame(bool in_battle) {
             panel(f, s == 0 ? (g ? 9.f : 4.f) : 480.f - (g ? 9.f : 4.f) - 112.f, 142.f - (g ? 34.f : 27.f) * row[s]++, tnow);
             g_layer.set_zoom(1.f, 0.f, 0.f); g_layer.opacity = 1.f;
         }
-        lockind_draw(tnow); L.lap("lockind");
+        vig_draw(tnow); lockind_draw(tnow); L.lap("lockind");
         L.lap("panels"); for (const TagHudReserve& r : g_reserves) reserve(r); L.lap("reserves");
         if (hpdmg_mode() > 0 && !g_hits.empty()) {   // fighters on the retail big panels (bottom corners, number beside the BRV): ours sits next to the retail pulse
             for (int s = 0; s < 2; s++) {
