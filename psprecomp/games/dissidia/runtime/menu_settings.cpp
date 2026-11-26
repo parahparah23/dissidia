@@ -460,7 +460,7 @@ void sub_tick_hook(uint8_t* rdram, recomp_context* ctx) {
         // PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY=1: old.
         static auto last_tick = std::chrono::steady_clock::now();
         const auto now_t = std::chrono::steady_clock::now();
-        const bool gap = std::chrono::duration<double>(now_t - last_tick).count() > 0.25 && !std::getenv("PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY");
+        const bool gap = std::chrono::duration<double>(now_t - last_tick).count() > (std::getenv("PSPRECOMP_TAGTEAM_SLOWMENU") ? 0.25 : 0.12) && !std::getenv("PSPRECOMP_TAGTEAM_ROWBACK_GROUPONLY");
         last_tick = now_t;
         const bool reopen_ms = gap && g_ms_flow && tg && static_cast<int>(tg->group) == g_ms_group && !g_ms_go && !dissidia_tagteam_modesel_active() && !std::getenv("PSPRECOMP_TAGTEAM_MENUBACK_OLD");
         if (reopen_ms) g_ms_reopen = true;
