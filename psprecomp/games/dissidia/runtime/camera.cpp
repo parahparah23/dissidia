@@ -58,13 +58,14 @@ extern uint32_t g_dissidia_cine_actor, g_dissidia_cine_seq;   // roster.cpp (hit
 extern int g_dissidia_cine_ticks;
 float dissidia_battle_age();
 float dissidia_tagteam_age();   // tagteam.cpp: its battle clock (moves with the simulation)
+float dissidia_tagteam_intro_delay();   // tagteam.cpp: ticks the retail intro was held for the partners' banters
 uint32_t dissidia_player_actor();   // framerate.cpp: the human-controlled fighter
 
 float g_dissidia_last_eye[3] = {}, g_dissidia_last_tgt[3] = {}; uint32_t g_dissidia_last_cam = 0;   // the last SetEye (any camera object), for logs
-float g_entr_fov = 0.f;   // the fov the current entrance shot wants (0 = the game's)
+float g_entr_fov = 0.f; bool g_fov_scaled = false;   // the game's own fov before the first banter shot wrote its own: put back when the shots are over   // the fov the current entrance shot wants (0 = the game's)
 bool g_dissidia_entr_tight = false;   // the shot is a start-of-battle banter's: as tight as the retail intro close-up (eye ~1.8-2.4 m in front, chest height)
 bool g_dissidia_entr_more = false;    // another banter follows this one at once: no ease out to the game's camera between them
-uint32_t g_dissidia_entr_actor = 0; float g_dissidia_entr_pose_at = 0.f, g_dissidia_entr_until = 0.f;
+uint32_t g_dissidia_entr_actor = 0; float g_dissidia_entr_pose_at = 0.f, g_dissidia_entr_until = 0.f, g_dissidia_entr_t0 = 0.f;
 uint32_t g_dissidia_vic_actor = 0;   // the winner of a finished tag battle (tagteam.cpp): vic_frame
 namespace {
 
@@ -235,7 +236,7 @@ bool entr_frame(const float* eye, const float* tgt, float* E, float* F, float* w
     float d[3] = {ld[0], 0.f, ld[1]};
     const float L = std::sqrt(d[0] * d[0] + d[2] * d[2]); if (L < 1e-3f) return false;
     d[0] /= L; d[2] /= L;
-    const float since = age - (g_dissidia_entr_pose_at > 0.f ? g_dissidia_entr_pose_at : (g_dissidia_entr_until - 150.f));
+    const float since = age - (g_dissidia_entr_pose_at > 0.f ? g_dissidia_entr_pose_at : (g_dissidia_entr_tight && g_dissidia_entr_t0 > 0.f) ? g_dissidia_entr_t0 : (g_dissidia_entr_until - 150.f));   // (a banter whose line made it longer than 2.5 s: its shots run from its start)
     // banter: measured on the retail intro close-ups of the slot fighters (PSPRECOMP_INTROCAM_LOG): eye 2.1 - 2.4 m away horizontally, 1.75 - 2.0 m above his feet, looking at
     // 1.6 - 1.8 m, with a NARROW field of view (camera object + 0xC0: 21 - 26 degrees, the game's own is 50): head and chest fill the picture. The banter shot takes the same
     // (eye 2.2 -> 1.9 m, +1.75 m, look-at +1.55 m, fov 26); the call-in pose keeps its waist-up 2.8 -> 2.3 m at the normal fov.
@@ -248,23 +249,27 @@ bool entr_frame(const float* eye, const float* tgt, float* E, float* F, float* w
     g_entr_fov = tight ? 26.f : 0.f;
     static const bool cam_old = std::getenv("PSPRECOMP_BANTER_CAMOLD") != nullptr;
     if (tight && !cam_old) {
-        // 25 Nov (user: "the camera is not the retail one: zoom in, angle change"). Retail's intro gives a fighter two shots in a row (PSPRECOMP_INTROCAM_LOG=2 on the
-        // opening intro, ages 168-330 of the enemy slot fighter): first a LOW wide shot from his front-right (eye 0.3 m up, ~2.4 m away, fov 22 -> 36, looking up at him), then a
-        // front close-up (eye 1.8 m away, 1.0 - 1.5 m up, look-at his face, fov 23) that keeps pushing in. The banter now does the same: a hard cut between the two at 1.0 s.
-        const float tk = since / 60.f, rx = d[2], rz = -d[0];   // (right of the facing)
-        const float f0 = P[1];
-        if (tk < 1.0f) {
-            const float k1 = smooth01(tk / 1.0f);
-            const float dd = 2.1f - 0.3f * k1, rr = 1.6f - 0.3f * k1;
-            E[0] = P[0] + d[0] * dd + rx * rr; E[1] = f0 + 0.35f + 0.15f * k1; E[2] = P[2] + d[2] * dd + rz * rr;
-            F[0] = P[0]; F[1] = f0 + 1.0f + 0.1f * k1; F[2] = P[2];
-            g_entr_fov = 36.f - 4.f * k1;
-        } else {
-            const float k2 = smooth01((tk - 1.0f) / 1.5f), dd = 1.9f - 0.3f * k2, rr = -0.5f;
-            E[0] = P[0] + d[0] * dd + rx * rr; E[1] = f0 + 1.55f + 0.3f * k2; E[2] = P[2] + d[2] * dd + rz * rr;
-            F[0] = P[0] + d[0] * 0.1f; F[1] = f0 + 1.5f + 0.2f * k2; F[2] = P[2] + d[2] * 0.1f;
-            g_entr_fov = 24.f - 2.f * k2;
-        }
+        // 25 Nov (user play-test 3): every banter shot is retail's own intro shot of a fighter, measured on the retail 1v1 intro (PSPRECOMP_INTROCAM_LOG=2, [INTROPATH]; the enemy slot
+        // fighter's two shots, ages 168 - 326 of `~/dissidia/tt/s2/ttbanter3/p0`, the same numbers in `q0`): E1, a low wide shot from his right (eye 0.28 m up, 1.7 m in front, 1.6 m to
+        // the right, looking at a point 1.1 m in front / 0.9 m right of him, so he stands off-centre; fov 36) for 122 ticks, then E2, a front close-up (eye 1.75 m in front at 1.04 m,
+        // look-at 0.8 m in front at 1.27 m, fov 23.1) for the rest. Numbers are in the fighter's frame (forward = matrix row 2, right = (fz, -fx), up from his feet). Same shot for every
+        // banter, a HARD cut at the start (retail cuts from the human's shot to the enemy's) and at the end. (Retail's per-character shots differ a little in height; the numbers are one character's.)
+        struct K { float t, ef, es, eu, lf, ls, lu, fov; };
+        static const K ks[] = {{0, 1.73f, 1.70f, 0.28f, 1.35f, 0.91f, 0.76f, 36.f}, {2, 1.73f, 1.70f, 0.28f, 1.33f, 0.91f, 0.76f, 36.f}, {14, 1.73f, 1.66f, 0.28f, 1.23f, 0.92f, 0.73f, 36.f},
+                               {26, 1.75f, 1.59f, 0.28f, 1.12f, 0.94f, 0.70f, 36.f}, {38, 1.76f, 1.56f, 0.28f, 1.08f, 0.94f, 0.68f, 36.f}, {50, 1.77f, 1.55f, 0.29f, 1.08f, 0.94f, 0.68f, 36.f},
+                               {62, 1.77f, 1.56f, 0.28f, 1.09f, 0.94f, 0.68f, 36.f}, {121, 1.77f, 1.56f, 0.28f, 1.09f, 0.94f, 0.68f, 36.f},
+                               {122, 1.78f, 0.10f, 1.04f, 0.81f, -0.05f, 1.27f, 23.1f}, {158, 1.71f, 0.12f, 1.04f, 0.75f, -0.05f, 1.29f, 23.1f}};
+        const int nk = static_cast<int>(sizeof ks / sizeof ks[0]);
+        K c = since < 0.f ? ks[0] : ks[nk - 1];
+        for (int i = 0; i + 1 < nk; i++) if (since >= ks[i].t && since < ks[i + 1].t) { const float u = (since - ks[i].t) / (ks[i + 1].t - ks[i].t);
+            c = {since, ks[i].ef + (ks[i + 1].ef - ks[i].ef) * u, ks[i].es + (ks[i + 1].es - ks[i].es) * u, ks[i].eu + (ks[i + 1].eu - ks[i].eu) * u, ks[i].lf + (ks[i + 1].lf - ks[i].lf) * u,
+                 ks[i].ls + (ks[i + 1].ls - ks[i].ls) * u, ks[i].lu + (ks[i + 1].lu - ks[i].lu) * u, ks[i].fov + (ks[i + 1].fov - ks[i].fov) * u}; break; }
+        const float rx = d[2], rz = -d[0];
+        E[0] = P[0] + d[0] * c.ef + rx * c.es; E[1] = P[1] + c.eu; E[2] = P[2] + d[2] * c.ef + rz * c.es;
+        F[0] = P[0] + d[0] * c.lf + rx * c.ls; F[1] = P[1] + c.lu; F[2] = P[2] + d[2] * c.lf + rz * c.ls;
+        g_entr_fov = std::getenv("PSPRECOMP_BANTER_FOVTEST") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_BANTER_FOVTEST"))) : c.fov; *w = 1.f;
+        if (std::getenv("PSPRECOMP_ENTRCAM_LOG")) { static int nl = 0; if (nl++ % 10 == 0) std::fprintf(stderr, "[ENTRCAM] banter shot age %.0f since %.0f eye %.2f %.2f %.2f look-at %.2f %.2f %.2f fov %.1f fighter %.2f %.2f %.2f yaw9C %.3f yaw320 %.3f row2 %.3f %.3f fwd90 %.3f %.3f\n", age, since, E[0], E[1], E[2], F[0], F[1], F[2], c.fov, P[0], P[1], P[2], rdf(g_dissidia_entr_actor + 0x9Cu), rdf(g_dissidia_entr_actor + 0x320u), rdf(g_dissidia_entr_actor + 0x350u), rdf(g_dissidia_entr_actor + 0x358u), rdf(g_dissidia_entr_actor + 0x90u), rdf(g_dissidia_entr_actor + 0x98u)); }
+        return true;
     }
     if (tight) {
         // the second banter follows the first at once: pan from the last close-up to this one, not through the game's wide camera
@@ -439,7 +444,7 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
             }
         }
         if (g_lock_logs > 0 && !known) { static int n = 0; if (n++ % 60 == 0) std::fprintf(stderr, "[CAMLOCK] unknown: player %08X\n", pl); }
-        if (!g_ever_locked && dissidia_battle_age() < g_arm_ticks) { locked = true; known = false; }   // intro: the game's camera runs
+        if (!g_ever_locked && dissidia_battle_age() - dissidia_tagteam_intro_delay() < g_arm_ticks) { locked = true; known = false; }   // (25 Nov: the arming counts the time the partners' banters held the intro: the free hold took over the retail "vs" shot, fov and all)   // intro: the game's camera runs
         if (g_locked && !locked && g_game_valid) {
             g_relock_w = 0.f;   // just lost the lock: freeze the camera where the game had it
             std::memcpy(g_held_e, g_game_e, sizeof g_held_e); std::memcpy(g_held_t, g_game_t, sizeof g_held_t); g_held_valid = true; g_held_p_set = false;
@@ -578,7 +583,7 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
             held_now = true;
         }
     }
-    if (g_in_update && cam == g_mgr && g_eye_calls == 0 && (!held_now || (g_dissidia_entr_actor && !std::getenv("PSPRECOMP_BANTER_HOLDCAM_OLD")))) {   // (25 Nov: the held free camera takes over 10 s into a battle; a long start - 3 v 3 banters run to 16 s - lost the banter close-ups to it)
+    if (g_in_update && cam == g_mgr && g_eye_calls == 0 && !held_now) {   // (25 Nov: the held free camera takes over 10 s into a battle; a long start - 3 v 3 banters run to 16 s - lost the banter close-ups to it)
         float ev[3] = {rdf(eye), rdf(eye + 4), rdf(eye + 8)}, tv[3] = {rdf(eye + 0x10), rdf(eye + 0x14), rdf(eye + 0x18)};
         if (static const bool il = std::getenv("PSPRECOMP_INTROCAM_LOG") != nullptr; il) {   // debug: the game's own eye / look-at against the nearest fighter (the retail intro close-up's framing)
             static int n = 0; float np[3];
@@ -587,7 +592,7 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
                 if (std::getenv("PSPRECOMP_INTROCAM_LOG")[0] == '2') {   // every update: the eye / look-at in the fighter's own frame (forward = matrix row 2, +0x350 / +0x358), for the retail intro's shot path
                     const uint32_t na = dissidia_nearest_actor(); const float fx = rdf(na + 0x350u), fz = rdf(na + 0x358u), fl = std::sqrt(fx * fx + fz * fz) + 1e-6f, ux = fx / fl, uz = fz / fl;
                     const float ex = ev[0] - np[0], ez = ev[2] - np[2], tx = tv[0] - np[0], tz = tv[2] - np[2];
-                    std::fprintf(stderr, "[INTROPATH] age=%.1f actor=%08X eye fwd %.2f side %.2f up %.2f | look fwd %.2f side %.2f up %.2f | fov %.1f\n", dissidia_tagteam_age(), na, ex * ux + ez * uz, ex * uz - ez * ux, ev[1] - np[1], tx * ux + tz * uz, tx * uz - tz * ux, tv[1] - np[1], rdf(g_mgr + 0xC0u));
+                    std::fprintf(stderr, "[INTROPATH] age=%.1f actor=%08X eye fwd %.2f side %.2f up %.2f | look fwd %.2f side %.2f up %.2f | fov %.1f ra %08X a0 %08X ent %08X | yaw9C %.3f yaw320 %.3f row2 %.3f %.3f fwd90 %.3f %.3f\n", dissidia_tagteam_age(), na, ex * ux + ez * uz, ex * uz - ez * ux, ev[1] - np[1], tx * ux + tz * uz, tx * uz - tz * ux, tv[1] - np[1], rdf(g_mgr + 0xC0u), static_cast<uint32_t>(ctx->r[31]), cam, g_dissidia_entr_actor, rdf(na + 0x9Cu), rdf(na + 0x320u), rdf(na + 0x350u), rdf(na + 0x358u), rdf(na + 0x90u), rdf(na + 0x98u));
                     n++;
                 } else
                 if (n++ % 3 == 0) std::fprintf(stderr, "[INTROCAM] fov %.3f n=%d age=%.0f entr=%08X eye-fighter horiz %.2f dy %.2f look-at: dy %.2f dist %.2f eye %.1f %.1f %.1f\n", rdf(g_mgr + 0xC0u), n, dissidia_tagteam_age(), g_dissidia_entr_actor, dh, ev[1] - np[1], tv[1] - np[1], dt, ev[0], ev[1], ev[2]);
@@ -598,9 +603,16 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
                 wrf(eye + 4 * i, ev[i] + (E[i] - ev[i]) * w);
                 wrf(eye + 0x10 + 4 * i, tv[i] + (F[i] - tv[i]) * w);
             }
-            if (g_entr_fov > 0.f && g_dissidia_entr_actor && !std::getenv("PSPRECOMP_BANTER_NOFOV")) { const float fv = rdf(g_mgr + 0xC0u); wrf(g_mgr + 0xC0u, fv + (g_entr_fov - fv) * w); }   // the banter's narrow fov
+            if (g_entr_fov > 0.f && g_dissidia_entr_actor && !std::getenv("PSPRECOMP_BANTER_NOFOV")) {
+                // (25 Nov: writing the fov into the camera object, as the first banter shots did, changed nothing on screen - the game builds its projection before SetEye; checked with fov 12 / 60.)
+                // The retail shot's fov is reached with a view-only focal scale on every projection the game uploads (psp_ge_viewport.cpp ge_set_fov_scale).
+                const float fv = rdf(g_mgr + 0xC0u), r = fv > 3.2f ? 3.14159265f / 180.f : 1.f;
+                const float want = fv + (g_entr_fov - fv) * w;
+                if (fv > 1e-3f && want > 1e-3f) { ge_set_fov_scale(std::tan(fv * r * 0.5f) / std::tan(want * r * 0.5f)); g_fov_scaled = true; }
+                if (std::getenv("PSPRECOMP_ENTRCAM_LOG")) { static int nf = 0; if (nf++ % 10 == 0) std::fprintf(stderr, "[ENTRCAM] fov: game %.2f, banter wants %.2f (w %.2f)\n", fv, g_entr_fov, w); }
+            }
             g_eye_calls++;
-        }
+        } else if (g_fov_scaled) { ge_set_fov_scale(1.f); g_fov_scaled = false; }
     }
     float pivot[3];
     if (g_in_update && cam == g_mgr && g_eye_calls == 0 && g_yaw == 0.f && g_pitch == 0.f) g_piv_ok = g_rad_ok = false;   // back on the game's camera: start fresh next time

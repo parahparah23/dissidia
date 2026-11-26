@@ -113,7 +113,8 @@ float g_tt_age = 0.f;
 // battle of a session: a group battle's second fight kept the first one's decided flag (no KO handling, the machines split at the first KO).
 uint32_t g_battle_gen = 0;
 float tt_battle_age() { return g_tt_age; }
-float dissidia_tagteam_age() { return g_tt_age; }   // camera.cpp (the call-in close-up uses the same clock)
+float dissidia_tagteam_age() { return g_tt_age; }
+float dissidia_tagteam_intro_delay();   // (below) battle ticks the retail intro was held by the partners' banters   // camera.cpp (the call-in close-up uses the same clock)
 #define dissidia_battle_age tt_battle_age
 bool dissidia_cpu_ai_off();
 void psp_fx_lights_limit(int n);   // psp_ge_draw.cpp: effect lights at most n (8 = no limit)
@@ -131,7 +132,7 @@ void psp_mem_watch_set(uint32_t addr);   // runtime debug memory watch (psp_disp
 void ge_draw_last_eye(float eye[3], float fwd[3]);
 extern float g_dissidia_last_eye[3], g_dissidia_last_tgt[3]; extern uint32_t g_dissidia_last_cam;
 extern uint32_t g_dissidia_vic_actor;   // camera.cpp: the winner of a finished tag battle (the victory view is checked)
-extern bool g_dissidia_entr_tight, g_dissidia_entr_more; extern uint32_t g_dissidia_entr_actor; extern float g_dissidia_entr_pose_at, g_dissidia_entr_until;   // camera.cpp: the call-in close-up
+extern bool g_dissidia_entr_tight, g_dissidia_entr_more; extern uint32_t g_dissidia_entr_actor; extern float g_dissidia_entr_t0, g_dissidia_entr_pose_at, g_dissidia_entr_until;   // camera.cpp: the call-in close-up
 void psp_mem_watch_set(uint32_t addr);   // runtime/src/psp_dispatch.cpp
 void dissidia_ttnet_slot_rebuilt(int slot, int charId);   // tagteam_net.cpp: a slot fighter was rebuilt as another character
 bool psp_atrac_is_streamed(int id);   // psp_hle_atrac.cpp: a streamed ATRAC track (the battle music)
@@ -414,6 +415,10 @@ int eff_mask() { const int f = ffa_now(); return f ? g_ffa_mask_of(f) : eff_mask
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
 bool g_pre_hold = false;   // 25 Nov: the retail flow (and with it the intro: shots, "vs <enemy>", fade) is held at its start while the partners are planned, made and play their banters
+float g_hold_t0 = 0.f, g_hold_total = 0.f;   // battle ticks the retail intro was held (the camera's free-hold arming counts from the battle start minus this)
+}  // namespace
+float dissidia_tagteam_intro_delay() { return g_hold_total + (g_pre_hold ? dissidia_battle_age() - g_hold_t0 : 0.f); }
+namespace {
 bool g_pre_used = false;   // this battle's start partners came in before the retail intro: they stand held until it is over
 bool pre_mode() {          // the retail flow has not started (bs+72 == 0) and the partners may still come in first; PSPRECOMP_TAGTEAM_BANTERLATE=1: old (after the whole intro)
     static const bool off = std::getenv("PSPRECOMP_TAGTEAM_BANTERLATE") != nullptr;
@@ -1373,7 +1378,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     pool_dump("setup done");
     g_battle_gen++;   // a new battle (the setup object bs is usually at the same address as the last battle's)
     sp_mode_refresh();   // single player: the battle lobby's mode (or a Debug / env override) into the switches this battle reads
-    xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_pre_hold = false; g_pre_used = false; dissidia_hold_flow(false); g_real_partner[0] = g_real_partner[1] = 0; g_partner_chars[0].clear(); g_partner_chars[1].clear();
+    xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_pre_hold = false; g_pre_used = false; g_hold_total = 0.f; dissidia_hold_flow(false); g_real_partner[0] = g_real_partner[1] = 0; g_partner_chars[0].clear(); g_partner_chars[1].clear();
     reset_battle_state();   // (a forfeited / left battle may not have run the teardown: nothing of it may reach this one)
     g_snap_valid = false; g_roster_ok = true; g_shared_valid = false;
     if (!tag_on()) return;
@@ -4545,7 +4550,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         if (cur >= 1000) {
             intro_seen = true;
             if (!first_intro) first_intro = cur;
-            else if (cur != first_intro && !bl && g_late_wait) { g_late_ready = true; g_pre_hold = true; g_pre_used = true; dissidia_pause_match(0, 30.f); pre_hold_tasks(true); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs intro script %d -> %d: the retail flow is held, the partners come in before the vs display\n", dissidia_battle_age() / 60.f, first_intro, cur); }
+            else if (cur != first_intro && !bl && g_late_wait) { g_late_ready = true; g_pre_hold = true; g_pre_used = true; g_hold_t0 = dissidia_battle_age(); dissidia_pause_match(0, 30.f); pre_hold_tasks(true); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs intro script %d -> %d: the retail flow is held, the partners come in before the vs display\n", dissidia_battle_age() / 60.f, first_intro, cur); }
         }
         else if (intro_seen && (cur == 1 || cur == 2)) g_late_ready = true;
         if (!g_late_wait) g_late_ready = true;
@@ -5933,7 +5938,7 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
     if (!warp && !banter) { g_banner_text = g_entr_name; g_banner_until = now + pose_s * 60.f; }
     if (total > 0.f) dissidia_pause_match(A, total);
     g_entrant = A; g_entrant_until = now + total * 60.f;
-    if (!std::getenv("PSPRECOMP_TAGTEAM_NOENTRCAM")) { g_dissidia_entr_actor = A; g_dissidia_entr_pose_at = g_entr_pose_at; g_dissidia_entr_until = g_entrant_until; g_dissidia_entr_tight = banter; g_dissidia_entr_more = banter && !g_banter_q.empty(); }
+    if (!std::getenv("PSPRECOMP_TAGTEAM_NOENTRCAM")) { g_dissidia_entr_actor = A; g_dissidia_entr_t0 = banter ? now : 0.f; g_dissidia_entr_pose_at = g_entr_pose_at; g_dissidia_entr_until = g_entrant_until; g_dissidia_entr_tight = banter; g_dissidia_entr_more = banter && !g_banter_q.empty(); }
     g_entrant_banter = banter;
     if (banter && !warp) banter_line_followup();
     if (!banter) tagteam_fx_entrance(A, now, g_entr_pose_at, g_entrant_until);
@@ -6819,7 +6824,7 @@ void ko_oneround() {
     if (g_pre_hold && g_bs && rd(g_bs + 72) != 0) {   // the partners came in inside the retail intro (the flow step is frozen with the hold: released from here): over when everything is started and the banters are done
         bool unstarted = false; for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) unstarted = true;
         if ((g_late_q.empty() && g_late_load.empty() && !unstarted && g_banter_q.empty() && !g_entrant && g_rebuild.empty()) || age > 2400.f) {
-            g_pre_hold = false; dissidia_pause_match(0, 0.f); pre_hold_tasks(false);
+            g_pre_hold = false; g_hold_total += age - g_hold_t0; dissidia_pause_match(0, 0.f); pre_hold_tasks(false);
             if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs banters over: the retail intro goes on (vs display after them)\n", age / 60.f);
         }
     }
