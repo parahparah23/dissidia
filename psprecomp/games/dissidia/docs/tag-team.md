@@ -15,7 +15,7 @@
 
 - **[FIXED 25 Nov on the host, see "Batch seventeen"; verify on the RP6] Partner banter silent: Jecht (2nd partner extra) had no line at battle start** (RP6, single player, 25 Nov 15:33, log `~/dissidia/tt/desk_logs/rp6_jecht_banter_1125_1533.log`): lines 10147-10155 Laguna plays (`[SNDPOOL] intro_load` before slot1=09B4D3E4, after 00000000); lines 10453-10460 Jecht: intro_load before slot1=00000000, after still 00000000 (the load filled nothing), then `banter of 09D64D80 (JECHT): pose + intro line + close-up`. The 2nd partner's intro line load comes back empty, likely the first banter freed the slot / pool (compare Batch eight).
 
-- **EX Burst effects sometimes missing + wrong camera for a while, worse for extras** (RP6, 25 Nov, single player; log `~/dissidia/tt/desk_logs/rp6_exb_emperor_1125_1455.log` lines ~15706-16217): enemy EXTRA Emperor (extraE 09D58190, char 4) burst at t=172.68 ([XREV] EX Burst chance); at 173.21 its lock block 09D5AD60 had +0xFC = slotH (no burst camera), was cleared and put into camera slot 4; burst ends 186.94. Effects missing (e.g. Terra's thrown blades). Suspects: the extra burster's effect pack / effect holders, the camera-slot lend for extra bursters. Being worked on.
+- **EX Burst effects sometimes missing + wrong camera for a while, worse for extras** (RP6, 25 Nov, single player; log `~/dissidia/tt/desk_logs/rp6_exb_emperor_1125_1455.log` lines ~15706-16217): enemy EXTRA Emperor (extraE 09D58190, char 4) burst at t=172.68 ([XREV] EX Burst chance); at 173.21 its lock block 09D5AD60 had +0xFC = slotH (no burst camera), was cleared and put into camera slot 4; burst ends 186.94. Effects missing (e.g. Terra's thrown blades). Suspects: the extra burster's effect pack / effect holders, the camera-slot lend for extra bursters. **Black burst background of an extra FIXED 25 Nov (host; verify on the RP6)**: the loading screen loaded only the burst sub-stages (org99 / org98 / org97) of the two slot fighters, see "Batch twelve" round 3; `PSPRECOMP_TAGTEAM_EXBSTAGE_OLD=1` = old. Other "missing effects" not reproduced on the host.
 
 - **[FIXED 25 Nov, verify on the RP6] Menu back flow** (RP6 25 Nov ~14:49, log `~/dissidia/tt/desk_logs/rp6_menuback_1125_1449.log`): back did not return to the previous tag menu (Battle Lobby / Mode Select). Fixed, see "Batch fifteen".
 
@@ -5568,3 +5568,61 @@ Reporter's build: issue opened 23 Nov 19:21 UTC, latest release then v0.1.25 = t
 - **Test aids.** `PSPRECOMP_TAGTEAM_AGESHOTS=<dir>:<from s>:<to s>:<step s>` (existing) with `BT_NOPROBE=1` (new, tools/battle_test.py: the harness' HUD probing collides with the runtime's own captures in the intro); `PSPRECOMP_TAGTEAM_FLOWPROBE=1` (party lists at the first flow calls).
 - **Verified (host).** 2v2 (`party_battle_walk.txt`, `SP_PARTNER=1 TESTPART=13;30`, `~/dissidia/tt/s2/ttbanter/mid4`, sheet `mid4_a.png`; before: `old3_a.png`): Jecht / Lightning intro to 5.75 s, Vaan banter 6.0 - 8.4, Cloud banter 8.5 - 10.5, then the retail 1110 close-up, "vs Lightning" at 12.0, fade 13.0, HUD / fight. 3v3 (`v3a`, `TAGTEAM_3V3=1 TESTPART=24,13;15,22`): four banters (Squall, Gabranth, Kain, Cloud) then the vs shot. Squall as human (`sq1`, `quick_battle_walk`): two banters, ok. Two copies online (`mp_bn.py mpbn3`, team2, KO of slot 0 at 20 s): `[NETSYNC] frames compared 1778, mismatched 0` on both (the first version, `mpbn1`, desynced at frame 649 = the KO; BANTERLATE baseline `mpbn2` in sync). `tagteam_test.py --baseline` PASS (`reg2`).
 - **Not verified:** device / audio (line timing), 3v3 online, FFA, characters whose intro has other script ids, the opening banter with Assist On in online Communications.
+
+### Batch twelve (25 Nov): EX Burst of an extra - effects / camera (tree ttexbx, branch tt-exbextra; NOT FIXED, diagnostics only; host-only)
+Report: RP6 `desk_logs/rp6_exb_emperor_1125_1455.log` (enemy extra Emperor, `[XREV]` chance 172.68 s, burst 173.21 -> 186.94 s): burst effects missing / camera wrong for a while, worse for extras.
+- **What was checked on the host** (headless, `AGESHOTS_WIN` every 0.5 s, `EXBAT` forced bursts and natural bursts with `GAUGESET=extra..:12:10000`, Terra / Emperor as extra, as human slot, as enemy slot, 30 and 120 fps):
+  Terra (extraP / extraE / slot) and Emperor (extra / slot) bursts all play: camera on the burster (the camera-slot lend of "EX Burst camera wrong" works, burst ends 9.3 / 13.7 s like the device's 13.7 s), the burst effects of the opening / quicktime / finish phases are drawn.
+  The device's lend lines (`+0xFC` cleared, block into camera slot 4) are the same lines the host prints for a working burst.
+- **Only visible difference found**: Emperor's burst background (brown swirling scene with black shards, "Absolute Dominion" stage of the burst) is drawn when Emperor is a SLOT fighter (human or CPU,
+  on any stage) and is black when he bursts as an extra (first burst of the battle for him; also natural, `n1`). Terra shows no difference. Not a pool / pack / file problem: the file objects (56 model, 198 D_), the effect pack
+  and its bound instance (`holder +52`, handle +32 / instance +40) of an extra Emperor are the same as the slot's; no `FUN_088A9DE8` / `FUN_088AA5B8` effect spawn happens during an Emperor burst in either case
+  (`EXBFXLOG=2`), so the background is not an effect-table effect. Ruled out by experiment (all still black): linking the D_ record (`FUN_08843F4C`), keeping the extra's own camera words (+0x180..+0x2C0, incl. its own +0x2A0 = 198)
+  instead of the slot fighter's, borrowing the slot fighter's camera slot 0 / 1 instead of 4..7, setting the human flag (byte actor +0x5B0 bit 4, set by `FUN_08B2EF44` at battle start for the human's slot fighter only; it is the
+  predicate `FUN_08B2EF74` the class step `FUN_08A3624C` tests before creating the scene objects `ctl +0x228` / `+0x24C` via `FUN_08A3DBD0`; with the flag the objects are created but the screen stays black).
+  The only data that differ at the burst start: `entry +0xC` = `*(actor +912) +208` (a per-fighter static node: slotH 08B899D8, slotC 08B89A04, extras 08B8A55C / 08B8A588; written by `FUN_08A40684`).
+  Next step: find what draws the brown background (not an effect spawn; likely tied to the slot fighters' per-slot set-up of the loading screen, `FUN_08890BB8(bs+1876+40*i, i, char)` / that node) - e.g. a draw-call diff
+  of a slot vs extra Emperor burst frame, or a memory-write watch on the burst scene objects.
+- **Not the cause (checked)**: `[OVL] resolve 0x08A35E60 / 0x08A3CA48 -> MISSING` during a burst (hundreds of lines): empty virtual methods (`jr ra; nop`) of the burst classes that function discovery missed; they occur for slot bursts too.
+- **Natural vs forced**: `EXBAT` bypasses the chance; natural extra bursts on the host (chance -> `0x13` -> burst) behave the same as forced ones.
+- **Not reproduced / unverified**: anything specific to the device (Vulkan renderer, 1080p, long battles with rebuilds); effects of the quicktime phase that differ per input.
+- **Debug aids added (diagnostics only, no behaviour change)**: `PSPRECOMP_TAGTEAM_EXBFXLOG=1|2` (`[EXBFX]` / `[EXBFXL]`: every effect spawn with id, node owner, ra, result handle; 2 = also outside bursts),
+  `EXBENTRIES=1` (`[EXBENT]` the burst controller's 20 per-character entries, `[EXBLB]` lock-block camera words of burster and slot fighters, `[EXBCTX]` per-fighter context nodes), `EXBSTRUCT=1` (`[EXBSTRUCT]` controller scene words 1 s into a burst),
+  `EXBBGLOG=1` (`[EXBBG]` the class step's two conditions), `FILEIDS=1` (`[FILEIDS]` file objects with pack handle / instance at a forced burst), `LOADFILELOG=1` (`[LFG]` every file group load with its caller).
+  Runner `~/dissidia/tt/s2/ttexbx/run.sh`, montage script `mont.py`, shots `~/dissidia/tt/s2/ttexbx/shots`.
+
+- **Round 2 (25 Nov, same tree; still NOT fixed)**: GE per-draw trace (`PSPRECOMP_TAGTEAM_EXBDT=<s>:<prims>` arms the `[DT]` trace from the game; histogram by vertex type per display list) shows what the "brown background" is:
+  the **stage / sky geometry** (vertex type `00011A`, world scale 540, ~819 prims per frame) is drawn during a slot Emperor burst and **not at all during an extra Emperor burst** (0 prims; it is drawn again outside bursts, 2802 before the burst).
+  Per extra character (ENEMY2_CHAR, forced burst at 15 s, prims counted over 3000 prims from 16.5 s): Lightning clone 1603, Bartz 1638, Kain 1638, Terra 1462 = drawn; **Emperor 0, Jecht 0** = not drawn. So it is not "every extra"; Emperor and Jecht bursts lose the stage.
+  Same-character slot present (Emperor extra with Emperor as the enemy slot) -> drawn. Effect scripts (`FUN_0887D868`, `[EXBPART]`) are created and return handles in both cases (the particle script index 3 of the package is only created when the human flag
+  predicate `FUN_08B2EF74` is true; with the flag it is created but nothing more is drawn). `FUN_08B2EF44` (called once at battle start for the human's slot fighter only) just sets actor +0x5B0 bit 4 and the lock block's shown byte (`FUN_08B3B310`: +0x125).
+  Lock-block camera words: a slot block has a camera-player list built at set-up (+0x27C counts 0 -> 5 / 6 players, +0x274 the list, +0x2A0 = the char's D_ file id); an extra's own block has +0x27C = -1 (no list). Keeping the extra's own words instead of the copy, linking the D_ record, borrowing slot 0 / 1,
+  the human flag, and the second load stage of the loading screen (info row flag 0x10; not needed for these chars) did not bring the stage back (all tried, removed again).
+  Function-entry counts (`PSPRECOMP_PC_TRACE=1` + `PSPRECOMP_TAGTEAM_EXBFC=<s1>:<s2>:<path>` writes `<path>.1/.2`) were too noisy because the compared runs had different characters.
+  Next step: compare the draw call itself (which function submits the 819 `00011A` prims: its gating on the camera / lock-block of the shown slot) between a slot and an extra Emperor / Jecht burst with identical characters on the field (e.g. Emperor as enemy slot AND extra), using EXBFC on the same character set.
+
+- **Round 3 (25 Nov, same tree; FIXED - the black burst background of an extra)**. Cause: the burst background is not the stage and not an effect, it is one of three
+  **burst sub-stages** of the stage manager (`S = *0x089D6AC8`, slots `S + 320 + 304 * k`, scene object at slot `+116`): `org99.gmo` (k 0, most characters),
+  `org98.gmo` (k 1, Emperor's / Jecht's swirl), `org97.gmo` (k 2, Feral Chaos' pink space), all three in `general_archive/field/field.bin`. The burst start
+  `FUN_08A3EE44` picks k from the burster's burst record (actor `+1444` = `FUN_088B70C8(char)`; byte 3 != 0 -> 1, byte 0 == 0x20 -> Feral's rule, else 0) and calls
+  `FUN_08892F08(S, k)`; while `S + 1232 != -1` the stage draw `FUN_08892584` draws ONLY that sub-stage (`FUN_08895388` -> `FUN_0886ACCC`) and not the stage.
+  The loading screen `FUN_08B177FC` (field.bin open only there) loads only the sub-stages the TWO slot fighters' records ask for (its flags at sp+32..34, the names
+  at sp+36..44, `FUN_088934E0(data, size, k)` per flag). An extra whose type no slot fighter has bursts in front of an empty sub-stage: nothing is drawn (black).
+  So it depends on the characters: Emperor / Jecht extras next to type-0 slot fighters were black, an Emperor slot on the field loaded org98 (drawn), and the
+  reverse (two Emperor / Jecht slot fighters, a type-0 extra) or a Feral Chaos extra was black too.
+  Found by holding the field fixed (Squall + clone vs Emperor slot + Terra extra / Terra slot + Emperor extra, forced burst at 15 s) and diffing `EXBFC`
+  function counts (only the slot run calls `FUN_0886A24C` etc.), then `EXBFN` call logs of the scene draw `FUN_0886ACCC` (a second scene object drawn from
+  `FUN_08895388` only in the slot run) and of `FUN_08892F08` (k = 1 in both runs).
+- **Fix** (`subst_hook` on `FUN_088934E0`, tagteam.cpp): when the loading screen loads its first sub-stage, the archive is still open (caller's s4 = sp+16), so the
+  sub-stages retail will not load (flag 0) and that are still empty are loaded too, with retail's own calls (k 2 with its `FUN_0889991C(0)` / `FUN_0889350C` /
+  `FUN_0889991C(-1)` set-up). Tag battles only (`tag_on()`); costs at most two more small files (org99 / org98 82 KB, org97 163 KB). `[EXBSTAGE]` logs each load.
+  **`PSPRECOMP_TAGTEAM_EXBSTAGE_OLD=1`: old behaviour.** Not game-simulation state (drawing only); both copies of an online battle load the same.
+- **Tested** (host, headless, `~/dissidia/tt/s2/ttexbx/r3_*`, montages `m3_*.png`; `[DT]` prims of vertex type 00011A over 3000 prims from 16.5 s, burst at 15 s):
+  Emperor extra (Squall + clone vs Terra slot + Emperor extra) **1329** (OLD flag: **0**, black, `m3_B6o.png` vs `m3_B6.png` brown swirl); Jecht extra 1638 (`m3_J6.png`);
+  Terra extra next to Jecht (human) + Emperor (enemy) slot fighters (org99 loaded by the fix) 1638 (`m3_C6.png`); Feral Chaos extra (org97, k 2 at 17.2 s) 1638
+  (`m3_D6.png`, pink); Emperor slot burst unchanged 1320 (before 1267, `m3_A6.png`). No load failures in the logs.
+  Two copies online (`mp/m1`, `mp_test.py --menu-mode team2 --fill`, `FILLCHAR=4,20`, `EXBAT=x0:20,x1:45`: Emperor and Jecht extras burst): both copies load the same
+  sub-stages, NETSYNC 2379 / 2385 frames compared, 0 mismatched. Regression `tagteam_test.py --baseline` PASS (`reg3`).
+- **Debug aids added**: `PSPRECOMP_TAGTEAM_EXBFN=<hex>[,<hex>..]` (up to 4 EBOOT functions: a0, *a0, a0 +144/+148/+296, a1, a2, ra; overlay functions are
+  not hookable at install time), `EXBSCN=1` (`[EXBSCN]` the summon scene set-up `FUN_08A02300` / factory `FUN_08A02E88`: per-side summon objects, not the burst),
+  `[EXBAT]` prints the burster's burst record.
