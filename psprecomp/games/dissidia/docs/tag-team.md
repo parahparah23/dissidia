@@ -52,7 +52,7 @@
   - ~~FFA: after the battle the player lands in the Group Battle menu, which makes no sense.~~ Changed 23 Nov: the players screen comes back (see "Batch six").
   - ~~Battle lobby: a way to set the strength of all CPUs at once.~~ Done 23 Nov [PR #129]: the ALL CPUs row (see "Batch two").
   - ~~Tag team: the original CPU enemy can attack during the other players' battle-start banter.~~ Fixed 23 Nov [PR #129] (see "Batch two").
-  - Tag team: the other players' banter should start before the "vs <enemy>" display; the camera is not the retail one (zoom in, angle change).
+  - ~~Tag team: the other players' banter should start before the "vs <enemy>" display; the camera is not the retail one (zoom in, angle change).~~ 25 Nov (host + two-copy lock-step; not seen on a device): see "Batch twenty".
   - ~~Tag in: the called-in player's assist voice is very quiet when you are far from the spawn point (play it non-positional / from the listener).~~ Fixed 23 Nov [PR #129] in
     single player (see "Batch two"); online it stays positional.
   - ~~Tag team: returning to the main menu selects Group Battle instead of Tag Team Battle.~~ Fixed 23 Nov [PR #129] (see "Menu row and failed-call notice").
@@ -1391,7 +1391,7 @@ the FUN_0890D664 / FUN_0890DF58 hooks are gone), hooks in tagteam.cpp, two small
   grows during waits and stays), so it differs per machine (r4: 1 / 2 / 1-2), as in retail two-player battles.
 - A waiting player adds no wait: in r6 B (lagging 150 ms) drove nothing and A kept lead 1 (1-frame latency), against lead 3 for everyone when
   the same lagging B drove the partner (r7). B's own battle runs that much later (it plays every frame when they arrive).
-- Regression: `tagteam_test.py --baseline` PASS (`~/dissidia/tt/lock_reg1`); plain two-copy Group Battle (`mp_test.py`, no tag) 40 s, 0 stalls,
+- Regression: `tagteam_test.py --baseline` PASS (`~/dissidia/tt/lock_reg2`); plain two-copy Group Battle (`mp_test.py`, no tag) 40 s, 0 stalls,
   NETSYNC 0 mismatched, the dispatcher passed through.
 - Two runs were discarded: the battle ran at 0.6 fps on all three copies from its first frame with `[GE] DrawSync timeout` (the GPU was shared
   with other sessions; the same stage, a castle hall, both times).
@@ -1775,7 +1775,7 @@ it round by round; three things only came out right for the round the booking se
   (0x08B1DE34) gives the pause to the local human's slot fighter (bs+84) whenever a tag fighter owns it in a single-player battle
   (`[TAGTEAM] pause: owner ... ->` in the log; `NOPAUSEFIX=1` off); with `PSPRECOMP_TAGTEAM_LOG=1` every pause logs its owner, the actor
   list and the controllers. Whether this is the device's cause is unknown: needs a device log with the owner line.
-- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttcam_reg1`). Debug: `PSPRECOMP_TAGTEAM_GROUPDIFF=1` logs the changed
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttcam_reg2`). Debug: `PSPRECOMP_TAGTEAM_GROUPDIFF=1` logs the changed
   bytes of the group battle block (base .. +0x3000) every 30 frames.
 
 ## Forfeit ends the match; every battle starts clean (18 Nov, ttfb)
@@ -1945,7 +1945,7 @@ character on EACH machine (`record_for` fallback, "his own save record"): the tw
   `PSPRECOMP_TAGTEAM_NOCOMMSCPU=1` = old behaviour. `[MATCHUP] comms side N char C: ... hash H` logs it (hash of the 0x1060 record bytes).
 - **Evidence.** A (Lightning, Vaan, CPU Yuna) vs B (Laguna, CPU Yuna): both machines log the same lines: side 0 Yuna `record level 100, type 1, brain params 0 6,
   hash 9A1D659D`, side 1 Yuna `5 7, hash A00B3128` (the time seed differs per run and per machine, the records do not); 448 of 448 `[SYNC]` samples equal between A and B.
-  Single-player `tagteam_test.py --baseline` PASS (`~/dissidia/tt/fb4_reg1`).
+  Single-player `tagteam_test.py --baseline` PASS (`~/dissidia/tt/fb4_reg2`).
 - **Open.** Both saves in the rig are copies (the old path would have matched too): the old divergence was reasoned, not reproduced with different saves. Level
   is the lead row's, not each human opponent's. (Strength / level / type per CPU row: built, see the next section.)
   Random type / loadout come from the fixed seed, i.e. they are the same every battle for a given character and side.
@@ -1967,7 +1967,7 @@ character on EACH machine (`record_for` fallback, "his own save record"): the tw
   Covers call-in, slot call-in, rebuild, partner start, stand-in. No usable point: the old ground-sample logic. `NOSPAWNPTS=1` off. Run `fa_p2` (KO list, 5 call-ins):
   all five came in at table points on the fighting level, e.g. (24,23,2), (21,23,18), (21,23,-2). Limit: the floor check only knows places fighters have stood, so
   early in a battle few points qualify (2-5 of 64); the "floor" is not a game query. No game floor/height function was used or found.
-- Regression `tagteam_test.py --baseline` (`fa4_reg1`) PASS.
+- Regression `tagteam_test.py --baseline` (`fa4_reg2`) PASS.
 - (18 Nov ~19:00, user) Vaan and Bartz (enemy members that came in mid-battle) fire their ranged BRV moves in the wrong direction (added to the assist / targeting agent, tree ttfa).
 - (18 Nov ~19:00, user) EX Burst: if the enemy dies on the hit that starts the burst, he disappears and the burst's damage goes to the other enemy. Rule: a fighter caught in an EX Burst must not be despawned / parked / swapped until the burst is over, even at 0 HP; the burst keeps hitting him. (queued)
 - (18 Nov ~19:00, user) Camera still wrong after the player's first fighter dies, and worse when a chase starts then (queued: the Opus task for everything after the player's slot rebuild; RP6 log with [CHASEDBG] needed).
@@ -2093,7 +2093,7 @@ Model pool per load with unloading: 7.9 / 9.7 / 10.1 / 12.0 / 12.0 / 12.2 / 12.0
 - **Results** (final build, w5a-e): 5 of 5 clean - 8 loads, 5 unloads, 0 pack / model FAILED, no hang, no GE crash, 40-44 GE fps. w5a (assist Onion
   Knight) and w5b (assist Kefka) are the formerly failing case: both characters unloaded at 31 / 32 s, Firion's pack fit. Effect pool after the
   8th load: 1.99-2.11 MB free, largest hole 1.23 MB (a pack is 1.06-1.17 MB): one more pack fits, two do not without a release in between.
-  Regression `tagteam_test.py --baseline` on the final build: RESULT: PASS (`~/dissidia/tt/m11_reg1`).
+  Regression `tagteam_test.py --baseline` on the final build: RESULT: PASS (`~/dissidia/tt/m11_reg2`).
 - Open: the effect pool margin is thin (largest hole ~1.2 MB after the 8th load); the 3 s / 1 s release delays still decide whether a fast
   call-in finds room. Sound and the assist's behaviour after its character's mid-battle copy is unloaded are not checked by ear / by eye (no crash).
 
@@ -2466,7 +2466,7 @@ Device log `rp6logs/1118_2030.log`: the enemy's 5th member Ultimecia (char 16) t
   the movers: `safe_spot` callers are `start_extra` / `reuse_parked` / `call_in` (newcomers), `rebuild_begin` (default for a newcomer in a slot, overridden
   for the mate) and the mate takeover (no longer). The KO wait, `rebuild_frame` (uses the job's x/y/z) and `chase_restore` do not move a living fighter.
   `tools/mate_stays_check.py <run log>` checks the `[MATE]` lines of a run with CPU KOs (mate position before = new body position): PASS on `~/dissidia/tt/ac4`
-  (5 takeovers, 0 moved); the only `[TELEPORT]` of a mate is the parking of its old body at 5000,5000. `tagteam_test.py --baseline` PASS (`~/dissidia/tt/inv_reg1`).
+  (5 takeovers, 0 moved); the only `[TELEPORT]` of a mate is the parking of its old body at 5000,5000. `tagteam_test.py --baseline` PASS (`~/dissidia/tt/inv_reg2`).
 
 ## Single player: CPU rows (19 Nov, tree ttlock; host-only, headless, nothing seen on a device)
 Battle Mode > Tag Team Battle (Quick Battle Party > Tournament): the player can now make members of his own party CPU partners, as Square does on the
@@ -2521,7 +2521,7 @@ Communications setup screen. Without CPU rows nothing changes (1 v 2, his member
   - In battle (seen): `spc_b5/battle_gl_045.png` Squall (the player's 2nd own member, in the slot) with Terra's CPU-partner panel.
   - Persistence (`spc_c3`, driven pad: pause > Forfeit > YES, results, Return to Battle Setup): the screen came back with both plates (seen:
     `spc_c3/step_06_cross.png`), the second battle again had Terra as partner with strength 7 / level 3 (`record level 3`).
-  - Regression `tagteam_test.py --baseline` (`~/dissidia/tt/spc_reg1`): RESULT: PASS.
+  - Regression `tagteam_test.py --baseline` (`~/dissidia/tt/spc_reg2`): RESULT: PASS.
 - **Open / limits.** Not on a device. The CPU plate sits where the screen's hand cursor points on the selected row (as in Communications). TYPE shows a number here
   (tree ttfb adds the type names to the same dialog; its round-dialog hook is on the same `FUN_08AAB514`: the two hooks have to be merged into one at the merge).
   The 1v2 "no CPU rows" case is unchanged code. With non-NAT `KOLIST` (HP 0) the retail finish ended the round under the tag logic (`spc_b4`, a test artefact).
@@ -2620,7 +2620,7 @@ User (desktop): after pause > Retry "tifa's voice sounds really weird and terra'
   with `FUN_08842650`/`0884246C` while Terra still fought. A free of a bank another member uses, or a limit on sound bank slots (the silent ones are the 4th and 5th assist banks), are the
   candidates; nothing audible can be checked headless. Whether SE banks are also silent is unknown (voice banks only were inspected).
 - Evidence: runs `~/dissidia/tt/rt1..rt8`; regression: see below.
-- Regression `tagteam_test.py --baseline` (display :91, out `~/dissidia/tt/retry_reg1`): RESULT: PASS.
+- Regression `tagteam_test.py --baseline` (display :91, out `~/dissidia/tt/retry_reg2`): RESULT: PASS.
 
 
 ## White screen after a won single-player tag battle (18 Nov, tree ttlock; NOT reproduced, no fix)
@@ -2725,7 +2725,7 @@ Desktop 19 Nov (`rp6logs/desk_1119_vaan3.log`): "Bartz and Vaan still have no au
   | ffa1, ffa3 | old behaviour (ffa3: the new build with every switch off) | 2 x `[SNDHEAP] ... FAILED` (Yuna, Bartz) | 4367 / 2627 KB free | 224 KB |
   | ffa2 | placement + bridge + sound release | none | 5615 / 3141 KB free | 449 KB (Yuna, then the release gives 1235 KB before Bartz) |
   | ffa4 | + re-link / reload (final) | none | 5615 / 3141 KB free | 449 KB (Yuna); 8 loads, 0 pack / sound failures, no hang |
-  Regression `tagteam_test.py --baseline`: RESULT: PASS on the ffa2 build (`~/dissidia/tt/ffa_reg1`) and on the final build (`~/dissidia/tt/ffa_reg2`).
+  Regression `tagteam_test.py --baseline`: RESULT: PASS on the ffa2 build (`~/dissidia/tt/ffa_reg2`) and on the final build (`~/dissidia/tt/ffa_reg2`).
 - **Not verified / open**: nothing heard (headless). The desktop log's Bartz and Vaan DID get their sound blocks (sound heap 1332 -> 603 KB at Bartz's load,
   1198 -> 553 KB at Vaan's), so their silence there is not explained by a failed allocation; the stale link (cause 4) needs an unload + reload of the same
   character, which the desktop log does not show for them. Per-character play counts (SetVoice addresses inside a character's own blocks, ffa2) were zero for
@@ -2818,7 +2818,7 @@ The RP6 build had no `PSPRECOMP_SNDREG_LOG`, so whether Jecht's own two banks go
   | `f2` | HOG=3, Assists OFF + forced calls (final) | same six, all 2 registered | the round 8 assists' `_a_zako` banks only | Squall 45, CoD 29, Laguna 135, Yuna 16 |
   | `f3` | mirror, HOG=3 (`party_battle_walk.txt`, RESERVE `24,11,15;20,26,30`, KOLIST `enemy2:12,cpu:40,human:60,enemy2:75,cpu:90`) | enemy Jecht 32.0 s while the human's Jecht fights: same record (use count 3, indices 8 9); Tifa 61.6, Kain 65.7 (slot), Vaan 93.2 (reloaded) | p_sev100_a (an assist) only | p_ten200 (both Jechts) 329, Kain 103, Tifa 42, Vaan (both stints) 70 |
   Also without the hog (`b1` Assists ON, `b2` Assists OFF, `m2` mirror): every call-in 2 registered, 0 failures of a fighter's bank.
-  Regression `tagteam_test.py --baseline`: RESULT: PASS (`~/dissidia/tt/snd/reg1`).
+  Regression `tagteam_test.py --baseline`: RESULT: PASS (`~/dissidia/tt/snd/reg2`).
 - **Not verified**: nothing heard (headless; "plays" proves the mixer was given sample data from that bank, not that it is audible). The RP6's exact registry
   state at Jecht's call-in (no `SNDREG` log there): a device run with `PSPRECOMP_SNDREG_LOG=1` shows the table at every load and any `-> #-1`. The assist that
   loses its slots to a fighter is silent until the watch gives them back.
@@ -3049,7 +3049,7 @@ User wish: no Round-Robin; Square toggles assists; with assists off an assist ca
   What did NOT work: the virtual pad (`pad_set_state FUN_08AB387C(pad, bit, 1)`; BRV attack = bit 10, Circle = bit 13, held 6 frames): the AI rewrites the pad, no script started (`ATKMODE=pad` keeps it for tests); START_ACTION 100 / 101 / 10008 / 700 from 5-29 m
   never connected (they do not home). Env: `_ASSISTATK=0` only moves (round 1 behaviour), `_ATKID=<id>`, `_ATKGAP=<m>` and `_STILLFOE=<s>` are test aids.
 - **Evidence** (`~/dissidia/tt/ttl_b1`, side 0 forced call at 14 s, enemies still 6 s): partner appears at 240, at 15.03 s put 1.5 m from the foe, 10000 starts, `[ASSISTATK] hit-victim <foe>` at 15.27 s and the foe's BRV 1099 -> 1063; later its AI goes on
-  (400, 10008 .. hits again). Gauge `ttl_a1`: 9517 -> 4517. Regression `tagteam_test.py --baseline` PASS (`~/dissidia/tt/ttl_reg1`).
+  (400, 10008 .. hits again). Gauge `ttl_a1`: 9517 -> 4517. Regression `tagteam_test.py --baseline` PASS (`~/dissidia/tt/ttl_reg2`).
 - **Unverified**: the appear light is not clearly visible in the headless shots (`ttl_s1/montage.png`); the game's own assist appear effect / sound was not reached; a hit from an enemy-side call (b2: the foe was not stilled, the partner was hit during the appear and `launch_attack` found no floor under the foe);
   air foes; Lightning's 10000 at distance (ran into script 102 at once from 3.7 m); real pad calls; kind 2 cost. NOT DONE: the setup-screen "Assists: ON/OFF" label over the format text and the player name / CPU level per row (the walks do not stop on that screen; no screenshots).
 ## Extras' EX and assist gauges; gauge bars on the small panels (19 Nov, tree ttcam; host-only, headless screenshots, nothing seen on a device)
@@ -3083,7 +3083,7 @@ User wish: no Round-Robin; Square toggles assists; with assists off an assist ca
   orbs 2/hit: extraP 0 -> 1560, extraE 0 -> 2112 incl. a core +1056 at 90 s; x2: `extraE EX core points applied: EX 0 -> 2607`); CPU extras enter EX Mode on
   their own when full and the retail tick drains it (x7 with GAUGESET: Terra (partner) EX Mode 20 -> 42 s, 10000 -> 0; Vaan (enemy) full 24 -> 53 s, EX Mode
   53 -> 76 s, 10000 -> 0; x6: Vaan EX Mode at 40.7 s). Screenshots `~/dissidia/tt/exg/xgauge_montage.png` (18 / 30 / 40 / 60 s), `x7_shots/`. Regression
-  `tagteam_test.py --baseline` PASS (`~/dissidia/tt/exg/reg1`).
+  `tagteam_test.py --baseline` PASS (`~/dissidia/tt/exg/reg2`).
 - **Not done / not verified:** a natural EX Burst by an extra (none happened in the runs); retail orbs for extras (approximation above); assist gauges that fill
   (needs an assist actor for members); x5 once showed the enemy extra's EX set to 10000 back at 0 a second later (not reproduced in x6 / x7, cause unknown);
   multiplayer lock-step not run; nothing on the desktop / a device.
@@ -3198,7 +3198,7 @@ User freeze (desktop, `rp6logs/desk_1119_freeze.log` + `.bin`): game thread 100 
 - **Results (host, headless GL, `sp_cpu_walk.txt`, RESERVE `24,11,15,22;26,9,30,16` = the user's match, 10 forced KOs with `KOLIST_NAT`, 140 s, 8 rebuilds):**
   before (`hc_r1`, causes 2/3 present): the FIELD::MEMORY break at f6062 and 3 double frees of lock blocks; after (`hc_f1`): no break, no bad free, 4
   `camera slot ... hidden` rebuilds. `hc_m2` (same match, 440 s of battle, 8 rebuilds, 5 portraits from the package, HEAPCHECK on): no break, no bad free.
-  Regression `tagteam_test.py --baseline` (`~/dissidia/tt/exg/hc_reg1`): PASS.
+  Regression `tagteam_test.py --baseline` (`~/dissidia/tt/exg/hc_reg2`): PASS.
 - **Second desktop freeze (`rp6logs/desk_1119_freeze2.log`, binary without the fix: no `[HEAPFIX]` string in it): the same mechanism, not a double free.**
   Battle 1 torn down at 130 s; battle 2: Tifa's portrait at the top (09A19D00, top free), then Bartz's portrait came back as `buffer 099C6178` = the data of the
   live block 099C6138 (the scan path; line 17798), the .gim copied over it; the chain now held 099C6138 linked to itself. The hang came at the next
@@ -3498,7 +3498,7 @@ _HPM_SWEEP=0 _HPM_WRONGFOE=1 _HPM_VBRV0=1 _HPM_FRIENDLY=1 _HPM_NODOWN=1`): the s
 - **Host numbers (same sweep, new):** 32 `[FRIENDLYBLOCK]`, no `[HPBRV]`, no `[XBRKST]`, enemy HP 9684 untouched, attacker extraP BRV stays 3000 (`~/dissidia/tt/friendly_new_26.png`: Lightning 9684,
   human 9249). BRV matrix (`_HPMATRIX=10000`, all four same-side pairs): attackers keep 3000, no steal. Harness: `_HPM_NODOWN=1` (the matrix's g_down stand-still made the KO ledger end the
   battle in the menu-walk tag battle) and `[HPM2]` HP is now the effective HP (status +0xC minus +8).
-- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/fx/reg1`). Logs `~/dissidia/tt/fx/{s2 (old HP), s3 (new HP), c0/c1 (BRV new/old), q_old/q_new (shots)}`.
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/fx/reg2`). Logs `~/dissidia/tt/fx/{s2 (old HP), s3 (new HP), c0/c1 (BRV new/old), q_old/q_new (shots)}`.
 - Unverified: on device; a hit that is in the middle of a multi-hit attack (retail per-attack hit memory may re-test every frame: the log shows repeated [FRIENDLYBLOCK] lines, harmless on the host);
   an attack that has an effect only on connect (e.g. a Holy cast that would heal / buff the mate) now does nothing to the mate.
 
@@ -3536,7 +3536,7 @@ at 370.4 s (nobody left on the stage), and L never switched the lock again: 0 `l
     puts the old block back (`+252 08D927A0 -> 00000000`), the call-in locks the slot enemy (a4: was foe extraE), and the cycle works from the first
     press after the entrance, across later chained chases (a3) and with an EX core out (a4: `retail went to the EX core, steered to the other enemy`).
     The chase is not needed for the bug: the rebuild alone sets the override.
-- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lksc/reg1`): RESULT: PASS.
+- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lksc/reg2`): RESULT: PASS.
 - **Not verified:** on a device; a mate takeover / pad swap rebuild (same code path, not driven); retail's own behaviour for the first lock of a fresh
   fighter is inferred from the battle start (+252 0, mode 1 on the opponent), not from a retail mid-battle entrance (the core step of the cycle); a multiplayer human extra (the `apply_drive` clear is
   untested); the user's other lock buttons (only L driven; the toggle gate is the same function).
@@ -3698,7 +3698,7 @@ on both machines is read, so it is lock-step safe (the release runs at the same 
   retail finish step runs the local fighter's win / lose script on each machine (known, see the KOLIST remark below; nothing is played after it). `keep2` (t2, free play, 2 KOs + final): 141 equal lines, same end.
 - SP (`~/dissidia/tt/exg/fa/sp1`, `party_battle_walk.txt`, `seq10.env`, 3 releases at 11.6 / 22.6 s, call-in assists made again at 17.0 / 29.0 s): every release clean, no hang, no repair needed (the assists were on the list).
   `[MODELS] ... FAILED` allocations (60840 B) are in that log too: not from this change (list words only), not investigated here (another session works on memory).
-- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttfa_mp/reg1`).
+- Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ttfa_mp/reg2`).
 **KOLIST (finding 2):** the divergence of `a5` is the test aid, not a per-machine KO detection. `PSPRECOMP_TAGTEAM_KOLIST` puts HP 0 on the fighter; without `PSPRECOMP_TAGTEAM_KOLIST_NAT` a slot fighter
 then goes through the retail KO chain and the finish step runs the LOCAL fighter's win / lose script per machine, so the two machines KO'd "their own" fighter. Use `KOLIST_NAT=1` with the side-based names
 (`slot0 slot1 extra0 extra1`) in lock-step runs (comment added at the code; `human` / `cpu` / `partner` / `enemy2` are per-machine names too).
@@ -3774,7 +3774,7 @@ battle teardown `actor 08DDEC20 freed`, `08DCF790 freed`, `08DF4260 freed` (Terr
   | `g2` | Assist ON, `XASSISTLOG`: the partner's assist in its attack script 10010 at 17.43 s, forfeit at 18.0 s | 2 | OK |
   | `g3` | fix 1 OFF (`XASSIST_UNDOPAIR=1`, the orphaning back): only the guard (2) | 2 | OK: `destroyed fighter .. is not on the fighter list (2 nodes walked ..): linked at the tail` once per teardown, no hang |
   Every "after" run: all four extra / assist actors destroyed and freed at each teardown, results -> Return to Battle Setup -> the next battle started (`final.png`). Regression
-  `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ff/reg1`). The device log's `aim fix .. foe 0 .. STALE` lines just before the teardown (retail clears the targets while the battle is being
+  `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/ff/reg2`). The device log's `aim fix .. foe 0 .. STALE` lines just before the teardown (retail clears the targets while the battle is being
   killed) are harmless and not changed.
 - **This also explains** the open point of "the release at a KO no longer hangs" above: the assist that was missing from the fighter list there was most likely cut off the same way (two assists
   made in one frame, or a rebuild's constructor appending to the restored tail).
@@ -3895,7 +3895,7 @@ her fall and did not move either, and the camera "moved to him".
   real pad (`m1`, `menu_drive`: START, Down / Up moved the cursor, Cross on "Return to Game" resumed, a second START + Circle resumed as well; the AI-driven
   fighter kept fighting after both, Yuna took the slot at 45 s and fought on to 99 s). No stuck state seen; no code change for the pause. (A START tap by the
   test script itself never closes the pause: the script clock is game time and stops with it; use `menu_drive.py` for pause tests.)
-- Regression `tagteam_test.py --baseline` (`~/dissidia/ttx/reg1`): RESULT: PASS.
+- Regression `tagteam_test.py --baseline` (`~/dissidia/ttx/reg2`): RESULT: PASS.
 - **Not verified.** Nothing on a device (RP6 / 120 Hz). One run (`r3`) stopped simulating at 71.3 s (screenshots kept being taken, no `[HANGDUMP]` since it was not armed): not
   reproduced in `r5` / `r6` / `m1` (same KOs, HANGDUMP armed), cause unknown; the other runs never froze. Camera "snap" to the new body at a takeover was not
   added. The exact RP6 sequence (Squall as a CPU row called in onto the down body) was reproduced with Yuna in that role, not Squall.
@@ -4114,7 +4114,7 @@ with the lock cycled onto the enemy partner (Lightning, extraE) the camera did n
   one 1-s sample at -26 / -34 while she dashed), the slot enemy within -11..+18 deg after cycling back (18-23 s, 30-35 s), cycling back and forth 6 times.
   EX Burst after a lock on extraE (r5, `EXBAT=s0:14`): the burst camera as before (14-25 s), afterwards the lock is still on extraE and the camera
   frames her (-6..+6 deg, 26-40 s). Screens: `before_top_after_bottom.png` (top r4 before, bottom r3 after), `exburst_after.png`, `r3_montage.png`.
-- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lkcam/reg1`): RESULT: PASS.
+- Regression `tagteam_test.py --baseline` (`~/dissidia/tt/lkcam/reg2`): RESULT: PASS.
 - **Not verified:** on a device; multiplayer (two machines / a human extra's own lock); a forfeit followed by a new battle (the user ruled the forfeit
   out; the hook keeps no state across battles apart from a log map); a pre-XAS build run for comparison.
 ## Small panel / big panel follow the fighter drawn in them (20 Nov, tree tthud; host-only, headless)
@@ -4135,7 +4135,7 @@ right panel showed Yuna (retail BREAK, correct) and the small panel showed the s
   `lock3.txt` = L at +4.7 / +5.5 s more): `A_old` (OLD flag) vs `G2`: extraE broken at 24 s while on the big panel - old: small panel (Lightning) shows the BREAK flash, new: only the big panel; `D4` (guards off) vs `D3`:
   slotC broken at 26 s with extraE on the big panel - old: BREAK steady word on Terra's number, new: Terra's number untouched, small panel Lightning flashes BREAK and shows BRV falling; `C2`: extraE broken, lock back to the slot
   at 25.1 s (word off on the big panel, small panel flashes Terra), forth again 25.9 s (word on); `final_montage.png`. Unlocked break (`B_new`) and slot break on its own panel (`E_new`) behave as before.
-  Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/th/reg1`).
+  Regression `tagteam_test.py --baseline`: PASS (`~/dissidia/tt/th/reg2`).
 - **Not verified**: the RP6 itself; the human's own side (the same code, but its big panel never follows a lock); the multiplayer view-only panels (`comms_handover`); the swap exactly at the frame of a retail
   break burst (the swap shots show the fading word for a frame); swaps in the first 0.1 s of a break; a real hit break (XHSTATE writes the handler state, the host runs did not get a natural extra break in the window).
 
@@ -4441,7 +4441,7 @@ only the icon types were stale (the old fighter's).
 - **Evidence** (`tagteam_acc_test.py`, `PSPRECOMP_TAGTEAM_ACCUILOG=1`: `[ACCUI]` rebuild lines + periodic `lit mask (+1508 scale) tbl:` per panel fighter; runs `~/dissidia/tt/ttu2`, `ttu3`): slot Jecht table
   `0 1 2 218 64 65 77 79 62 204` icon types `-1 -1 -1 -1 7 7 8 9 10 -1`; call-in char 15 `204 218 0` all -1; char 6 `1 8 0 2 204 78 79 218 64 77` types `-1 x5 8 9 -1 7 8`, own ability block (distinct pointer),
   mask 0x40 (+1508 120) for Jecht, mask 0x60 / 0x240 (+1508 144) for char 6 (bits 5, 6 = its own 78 / 79, not Jecht's slots 5 / 6); enemy: slotC row `-1 x6 2 2 7 9`, on lock swap to extraE (ids `3 1 78 78 97 47 79 83 83 63`) the row
-  becomes `-1 -1 8 8 8 3 9 6 6 10` at the swap and back when the lock ends (6 swaps in the run). Window shots `~/dissidia/tt/ttu3s` (`AGESHOTS_WIN`) show the top rows changing (montage `~/dissidia/tt/ttu3_top.png`). Regression `tagteam_test.py --baseline` PASS (`ttu_reg1`).
+  becomes `-1 -1 8 8 8 3 9 6 6 10` at the swap and back when the lock ends (6 swaps in the run). Window shots `~/dissidia/tt/ttu3s` (`AGESHOTS_WIN`) show the top rows changing (montage `~/dissidia/tt/ttu3_top.png`). Regression `tagteam_test.py --baseline` PASS (`ttu_reg2`).
 - **Not verified**: nothing on a device; no forced-condition negative test (the original fighter's boost not applying to the call-in is shown by distinct blocks / masks / scales and the code reading only its own block, not by forcing a condition);
   that each boost's numeric effect on damage is per fighter beyond the block scale (+1508) was not measured; multiplayer not run; the fade restarts from 0 after a rebuild (icons fade in again).
 ## Overhead HUD: three styles (21 Nov; Settings > Debug)
@@ -5360,7 +5360,7 @@ TODO "the big retail orb not refreshing after a swap". **The orb is right; the b
   loaded 8 frames later (`g_intro_pend_*`, log "the new line follows in 8 frames"; `PSPRECOMP_TAGTEAM_INTRODEFER_OLD=1` old; `PSPRECOMP_TAGTEAM_INTROFREE_OLD=1` for the added stop in `intro_free`).
   Host runs `bn_old` / `bn2` / `bn3`: ATRAC set-up missing for the 2nd (and 3rd) line; `bn4` (fixed): all four lines have `[ATRAC] id=1 ...` before "intro line playing". Not heard (no audio
   capture): the check is the stream being made. The HLE also logs a failed `sceAtracSetDataAndGetID` now.
-- **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_tt3v3 --baseline` PASS (`~/dissidia/tt/s2/tt3v3/reg1`).
+- **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_tt3v3 --baseline` PASS (`~/dissidia/tt/s2/tt3v3/reg2`).
 
 ### Batch eighteen (25 Nov): slot take re-check (tree ttslot, branch tt-slottake)
 - The 23 Nov "slot take online FAILS" (`ttest/mp2`: slot 0 KO'd at 20 s, mate CPU Emperor, Vaan comes in as an extra at 41.6 s, no `slot take` line)
@@ -5416,4 +5416,14 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   waits until 2.1 battle seconds after the call line request (`g_callline_t`, `g_intro_play_at`, log `intro line waits for the call line`, battle ticks only: same on every machine);
   (2) a second entrance within 4 s could take the registry slot of the first call line's `_a` bank (`sndreg_make_room` tier 2): banks of a call line requested < 4 s ago are taken last (tier 3).
   `PSPRECOMP_TAGTEAM_CALLHOLD_OLD=1`: both old. **Not verified by ear / on a device.**
-- **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_ttassist --baseline` PASS (`~/dissidia/tt/s2/ttassist/reg1`).
+- **Regression**: `PSPRECOMP_CLOUD=0 python3 tools/tagteam_test.py --work ~/dissidia/work_ttassist --baseline` PASS (`~/dissidia/tt/s2/ttassist/reg2`).
+
+
+### Batch twenty (25 Nov): partner banters before the "vs <enemy>" display, retail-like banter camera (tree ttbanter, branch tt-bantercam)
+- **Retail's start** (age in 1/60 s ticks of the battle clock, `~/dissidia/tt/s2/ttbanter/old3`): the human slot fighter's pose 1100 (0 - 2.5 s), the enemy's close-up with its line (2.5 - 5.75 s), the human's second pose 1110 (the "vs <enemy>" shot, text 1.6 s later at 7.0 s), the white fade at 8.0 s, fight / HUD at 8.3 s. The partners used to banter after all of it.
+- **What does NOT hold the retail intro** (all tried, vs text / fade still came at 7.0 / 8.0 s): the match pause (fighters' dt 0), a global slow-motion channel, the fighters' frame counters, the global frame step (`FRAME_STEP`), swallowing the flow step `FUN_088887A4`. Holding the flow before it starts (`bs+72 == 0`, `PSPRECOMP_TAGTEAM_BANTERPRE=1`, research) shows a white screen (the scene is drawn only once the flow has started). The intro is a set of update tasks of the battle scene task list.
+- **Fix.** When the human slot fighter's intro script changes (1100 -> 1110, `intro script .. -> ..` log) the partners are spawned / loaded / started (the party record is readable already) and the scene task list is run like a drawn-only frame (`task_run_hook`, filter (4, 4)) plus the object manager family (0x08841xxx: the fighters' updates, stopped by the match pause except the banter's fighter) and the camera tasks (08B3C41C / 08B3C43C), with `FRAME_STEP` 0 during the pass (the banter's fighter gets the step back in `actor_dt_hook`). So the retail intro stands still (its camera shot, the vs text, the fade), the banters play (one after the other, 2.5 s each), then `banters over` releases the tasks and the retail intro goes on: its 1110 close-up, "vs Lightning", fade, fight. Extras that came in early stay held (AI gate) until both slot fighters' intro scripts are over (`pre_intro_over`: uses BOTH slot fighters, never the local human's slot, which differs per machine - the first version desynced at the first KO). `PSPRECOMP_TAGTEAM_BANTERLATE=1`: old (after the whole intro); `PSPRECOMP_TAGTEAM_BANTERHOLD=0`: partners early but no task hold. No hold = the old fall back too when the human's intro has no second script (partners then come after the intro as before).
+- **Camera.** Retail gives a fighter two shots (`PSPRECOMP_INTROCAM_LOG=2` now logs `[INTROPATH]` every update in the fighter's frame): a LOW wide shot (eye 0.3 m up, ~2.4 m away, fov 22 -> 36), then a front close-up (eye ~1.8 m, look-at the face, fov 23) that keeps pushing in. The banter now does that: 1.0 s low wide shot from the front-right (fov 36 -> 32, pulls up slightly), hard cut, 1.5 s close-up from the front with a small side offset (fov 24 -> 22, eye 1.9 -> 1.6 m, rises 1.55 -> 1.85 m). `PSPRECOMP_BANTER_CAMOLD=1`: the old single static shot. Not verified: that the fov write is exactly applied (the close-up frames waist-up to chest, retail's Lightning close-up is similar).
+- **Test aids.** `PSPRECOMP_TAGTEAM_AGESHOTS=<dir>:<from s>:<to s>:<step s>` (existing) with `BT_NOPROBE=1` (new, tools/battle_test.py: the harness' HUD probing collides with the runtime's own captures in the intro); `PSPRECOMP_TAGTEAM_FLOWPROBE=1` (party lists at the first flow calls).
+- **Verified (host).** 2v2 (`party_battle_walk.txt`, `SP_PARTNER=1 TESTPART=13;30`, `~/dissidia/tt/s2/ttbanter/mid4`, sheet `mid4_a.png`; before: `old3_a.png`): Jecht / Lightning intro to 5.75 s, Vaan banter 6.0 - 8.4, Cloud banter 8.5 - 10.5, then the retail 1110 close-up, "vs Lightning" at 12.0, fade 13.0, HUD / fight. 3v3 (`v3a`, `TAGTEAM_3V3=1 TESTPART=24,13;15,22`): four banters (Squall, Gabranth, Kain, Cloud) then the vs shot. Squall as human (`sq1`, `quick_battle_walk`): two banters, ok. Two copies online (`mp_bn.py mpbn3`, team2, KO of slot 0 at 20 s): `[NETSYNC] frames compared 1778, mismatched 0` on both (the first version, `mpbn1`, desynced at frame 649 = the KO; BANTERLATE baseline `mpbn2` in sync). `tagteam_test.py --baseline` PASS (`reg2`).
+- **Not verified:** device / audio (line timing), 3v3 online, FFA, characters whose intro has other script ids, the opening banter with Assist On in online Communications.
