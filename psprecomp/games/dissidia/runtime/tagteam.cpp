@@ -4463,9 +4463,19 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 if (tt - t0 >= e2.second) { fired = step; if (e2.first > 0) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; const uint32_t rv = call(START_ACTION, F[hpm_also] + 304u, static_cast<uint32_t>(e2.first), 0); g_ctx->r[29] = static_cast<int32_t>(sp0);
                     std::fprintf(stderr, "[HPMALSO] t=%.2f window %d: %s action %d at +%.2fs -> %u, script now %d\n", tt, step, R[hpm_also], e2.first, tt - t0, rv, static_cast<int16_t>(rd(F[hpm_also] + 0x180u) & 0xFFFFu)); } } }
         }
+        // PSPRECOMP_TAGTEAM_HPM_B="<att2>:<vic2>:<action>:<s>" (indices as HPM_ALSO): a SECOND, independent attack in the same window (user, 25 Nov, issue #136 video 2: Tifa's BRV move on the human
+        // while Cloud's HP move hits the partner). att2 stands 8 m from the pair, vic2 in front of it, att2's foe = vic2; att2 starts <action> <s> seconds after the window start.
+        static int hpmb_a = -1, hpmb_v = -1, hpmb_act = 0; static float hpmb_s = 0.f; static bool hpmb_parsed = false; static int hpmb_fired = -1;
+        if (!hpmb_parsed) { hpmb_parsed = true; if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_HPM_B")) { float sx = 0.f; if (std::sscanf(w, "%d:%d:%d:%f", &hpmb_a, &hpmb_v, &hpmb_act, &sx) == 4) hpmb_s = sx; else hpmb_a = -1; } }
+        if (att && hpmb_a >= 0 && hpmb_fired != step && tt - t0 >= hpmb_s && ok(F[hpmb_a], 0x12D0)) {
+            hpmb_fired = step;
+            const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+            g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; const uint32_t rv2 = call(START_ACTION, F[hpmb_a] + 304u, static_cast<uint32_t>(hpmb_act), 0); g_ctx->r[29] = static_cast<int32_t>(sp0);
+            std::fprintf(stderr, "[HPMB] t=%.2f window %d: %s starts action %d on %s at +%.2fs -> %u, script now %d\n", tt, step, R[hpmb_a], hpmb_act, R[hpmb_v], tt - t0, rv2, static_cast<int16_t>(rd(F[hpmb_a] + 0x180u) & 0xFFFFu));
+        }
         if (att && !std::getenv("PSPRECOMP_TAGTEAM_HPM_TOGETHER")) {   // the two fighters not in the pair stand 30+ m away, so a stray hit cannot land on them
             const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); const uint32_t vec = sp0 - 0xC0u;
-            for (int q = 0; q < 4; q++) { if (F[q] == att || F[q] == vic || (hpm_also >= 0 && q == hpm_also)) continue; wrf(vec, rdf(att + 0x80u) + 30.0f + 8.0f * q); wrf(vec + 4, rdf(att + 0x84u)); wrf(vec + 8, rdf(att + 0x88u) + 30.0f); wrf(vec + 12, 1.0f); call(PLACE, F[q], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }
+            for (int q = 0; q < 4; q++) { if (F[q] == att || F[q] == vic || (hpm_also >= 0 && q == hpm_also) || (hpmb_a >= 0 && (q == hpmb_a || q == hpmb_v))) continue; wrf(vec, rdf(att + 0x80u) + 30.0f + 8.0f * q); wrf(vec + 4, rdf(att + 0x84u)); wrf(vec + 8, rdf(att + 0x88u) + 30.0f); wrf(vec + 12, 1.0f); call(PLACE, F[q], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }
             g_ctx->r[29] = static_cast<int32_t>(sp0);
         }
         if (att && att != F[0] && tt - t0 < (std::getenv("PSPRECOMP_TAGTEAM_HPM_SWEEP") ? 1.6f : 4.0f)) {   // AI attacker: keep the victim in front of it
@@ -4508,6 +4518,12 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
                 if (hpm_also >= 0 && ok(F[hpm_also], 0x12D0)) { wrf(vec + 8, rdf(a + 0x88u) + hpm_dz); call(PLACE, F[hpm_also], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f; }
                 tagteam_hpm_marker(a, v, step);
+                if (hpmb_a >= 0 && ok(F[hpmb_a], 0x12D0) && ok(F[hpmb_v], 0x12D0) && F[hpmb_a] != a && F[hpmb_a] != v && F[hpmb_v] != a && F[hpmb_v] != v) {   // the second attack's pair, 8 m beside the first
+                    wrf(vec, rdf(a + 0x80u)); wrf(vec + 4, rdf(a + 0x84u)); wrf(vec + 8, rdf(a + 0x88u) + (std::getenv("PSPRECOMP_TAGTEAM_HPM_BDZ") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_HPM_BDZ"))) : 8.0f)); call(PLACE, F[hpmb_a], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+                    wrf(vec, rdf(a + 0x80u) + 1.6f); call(PLACE, F[hpmb_v], vec, 1); g_ctx->f[12] = 0.0f; g_ctx->f[13] = 0.0f;
+                    call(SET_FOE, F[hpmb_a], F[hpmb_v]); call(LOCK_SET, rd(F[hpmb_a] + 0x5ACu), F[hpmb_v]);
+                    const uint32_t st2 = rd(F[hpmb_a] + 0x52Cu); wr(st2 + 0x14u, (3000u << 16) | 3000u);
+                }
                 if (std::getenv("PSPRECOMP_TAGTEAM_HPM_GDB") && false) {   // stall so that a debugger can be attached and a hardware watchpoint set on the victim's BRV word
                     const uint32_t wa = rd(v + 0x52Cu) + 0x14u;
                     std::fprintf(stderr, "[GDBWAIT] victim BRV guest %08X host %p\n", wa, static_cast<void*>(g_ram + (wa & 0x07FFFFFFu))); std::fflush(stderr);
@@ -4816,6 +4832,8 @@ void dtor_hook(uint8_t* rdram, recomp_context* ctx) {
 // debug (PSPRECOMP_TAGTEAM_HPSTEPLOG=1): the HP damage step FUN_08AEFF40(?, msg) - msg+0 = the actor whose status it changes, msg+4 -> handler
 uint32_t hit_victim_of(uint32_t att);
 void hit_last(uint32_t att, uint32_t& vic, int& age);
+int hit_secondaries(uint32_t att, uint32_t* out, int maxn);   // the other fighters the same attack registered on in the same frame (consumed)
+uint32_t g_hp_last_victim = 0;   // the fighter the last HP step (hpstep_core) booked
 // ---- KO ledger (the group battle's tally and the job powers of every round, see tally_from_ledger) ----
 // A tag battle is one match for what retail books as several Tournament rounds. Per battle: who fell (team 0 = the human's, character)
 // and who scored it (the last HP attacker of the fallen, within 10 s; else the slot fighter facing the fallen's side), and each member's
@@ -4963,8 +4981,8 @@ uint32_t g_midfin_gen = ~0u;   // battle generation whose retail finish phase (b
 // Retail's finish machine (FUN_08B0618C, FUN_08B06370) clears the sound-request enable byte 0x089D6C98 (FUN_088A24D4 returns 0 without it: no sound effect or voice can start any more); nothing sets it again
 // until the next phase. A mid-battle KO saves it at the finish start and writes it back when the finish is over (user, RP6 25 Nov: the second KO, a slot fighter, silenced every effect; PSPRECOMP_TAGTEAM_NOSNDENABLE=1 = old).
 uint32_t g_sndenable_gen = ~0u; uint32_t g_sndenable_val = 0;
-void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
-    g_ram = rdram; g_ctx = ctx;
+static void hpstep_core(uint8_t* rdram, recomp_context* ctx, uint32_t forced) {
+    g_ram = rdram; g_ctx = ctx; g_hp_last_victim = 0;
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_BS72WATCH")) { static uint32_t wg = 0xFFFFFFFFu; if (wg != g_battle_gen) { wg = g_battle_gen; psp_mem_watch_set(g_bs + 72u); std::fprintf(stderr, "[BS72] watching bs+72 at %08X\n", g_bs + 72u); } }   // debug: who writes the battle phase
     // The HP damage step FUN_08AEFF40(?, msg): msg+0 = the victim (always the attacker's slot opponent), *(msg+4) = the attacker. An HP attack that hit an extra was booked on the slot fighter (the HUD and the rules saw the main enemy lose HP; enough
     // of it ended the round). The module's fighter is the fighter the attacker really hit (hit registration) for the duration of the step.
@@ -4978,12 +4996,20 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     // keeps its BRV). PSPRECOMP_TAGTEAM_NOXSTEPHP=1: the old booking.
     static const bool xstep_hp = !std::getenv("PSPRECOMP_TAGTEAM_NOXSTEPHP");
     const bool xstep = g_nextra && g_xstep_att && xstep_hp && !std::getenv("PSPRECOMP_TAGTEAM_NOHPREDIRECT");
-    if (xstep && !(ok(g_xstep_vic, 0x12D0) && g_xstep_vic != g_xstep_att && hp_eff(g_xstep_vic) > 0)) {
+    if (xstep && !forced && !(ok(g_xstep_vic, 0x12D0) && g_xstep_vic != g_xstep_att && hp_eff(g_xstep_vic) > 0)) {
         if (g_log) { static int c = 0; if (c++ < 100) { const uint32_t xs = rd(g_xstep_att + 0x52Cu); std::fprintf(stderr, "[HPWHIFF] t=%.2fs %s %08X (char %d): HP damage step with %s (step victim %08X, message victim %s %08X): skipped, attacker BRV %d kept\n", dissidia_battle_age() / 60.0f, role_of(g_xstep_att), g_xstep_att, actor_char(g_xstep_att), g_xstep_vic ? "a victim that has no HP left" : "no registered hit", g_xstep_vic, ok(slotv, 0x12D0) ? role_of(slotv) : "?", slotv, ok(xs, 0x40) ? static_cast<int>(rdh(xs + 0x14u)) : -1); } }
         return;
     }
     uint32_t real = xstep ? g_xstep_vic : (g_nextra && ok(att, 0x12D0) && !std::getenv("PSPRECOMP_TAGTEAM_NOHPREDIRECT")) ? hit_victim_of(att) : 0u;
+    // 25 Nov (user, issue #136 video 2: Cloud's HP hit on Tidus was booked on Jecht, Cloud's foe, while Tifa hit Jecht with a BRV move): a step whose attacker has no hit registered in the last 2 frames
+    // used to fall back to the module's default victim = the attacker's foe. The attacker's last registered hit (up to 8 frames old: the hit message can reach the step after a few frames) is the
+    // fighter it really hit. [HPLATE] logs it. PSPRECOMP_TAGTEAM_NOHPLATE=1: old.
+    if (!xstep && !real && !forced && g_nextra && ok(att, 0x12D0) && !std::getenv("PSPRECOMP_TAGTEAM_NOHPREDIRECT") && !std::getenv("PSPRECOMP_TAGTEAM_NOHPLATE")) {
+        uint32_t lv = 0; int lage = -1; hit_last(att, lv, lage);
+        if (lv && lage >= 0 && lage <= 8 && lv != att) { real = lv; if (g_log) { static int c = 0; if (c++ < 60) std::fprintf(stderr, "[HPLATE] t=%.2fs %s %08X: no hit in the last 2 frames, its last registered hit (%d frames ago) on %s %08X books the HP damage (module victim %s %08X)\n", dissidia_battle_age() / 60.0f, role_of(att), att, lage, ok(lv, 0x12D0) ? role_of(lv) : "?", lv, ok(slotv, 0x12D0) ? role_of(slotv) : "?", slotv); } }
+    }
     if (!(ok(real, 0x12D0) && ok(slotv, 0x12D0) && real != slotv && (xstep || side_of(real) == side_of(slotv) || side_of(real) == side_of(att)) && hp_eff(real) > 0)) real = 0;
+    if (forced) real = forced;   // PSPRECOMP_TAGTEAM_HPAIMONLY off: the same attack's second (third) victim, see hpstep_hook
     if (g_log && g_nextra && std::getenv("PSPRECOMP_TAGTEAM_HPSTEPLOG")) { uint32_t lv = 0; int lage = -1; hit_last(att, lv, lage); std::fprintf(stderr, "[HPSTEP] att %s %08X module fighter %s %08X, last registered hit on %08X %d frames ago\n", ok(att, 0x12D0) ? role_of(att) : "?", att, ok(slotv, 0x12D0) ? role_of(slotv) : "?", slotv, lv, lage); }
     if (real) wr(m, real);
     const uint32_t a = ok(m, 8) ? rd(m) : 0u, h = ok(m, 8) ? rd(m + 4u) : 0u, st = ok(a, 0x12D0) ? rd(a + 0x52Cu) : 0u;
@@ -5053,8 +5079,41 @@ void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     }
     if (real) { wr(m, slotv); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs HP damage by %s %08X goes to the fighter it hit: %s %08X (not %s %08X), damage taken %d -> %d\n", dissidia_battle_age() / 60.0f, role_of(ratt), ratt, role_of(real), real, role_of(slotv), slotv, pd0, ok(st, 0x40) ? static_cast<int>(rd(st + 0x8u)) : -1); }
     hp_hit_indicator(a, ratt, dmg_hp0, hold && g_ko_mark.count(a) != 0);
+    g_hp_last_victim = a;
     static int n = 0;
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_HPSTEPLOG") && n++ < 400) std::fprintf(stderr, "[HPSTEP] t=%.2fs r4 %08X msg %08X actor %s %08X (handler %08X h+16 %s %08X) r6 %08X r7 %08X r8 %08X: hp %d -> %d pend %d -> %d\n", dissidia_battle_age() / 60.0f, static_cast<uint32_t>(ctx->r[4]), m, ok(a, 0x12D0) ? role_of(a) : "?", a, h, ok(h, 0x40) && ok(rd(h), 0x12D0) ? role_of(rd(h)) : "-", ok(h, 0x40) ? rd(h) : 0u, static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[7]), static_cast<uint32_t>(ctx->r[8]), hp0, ok(st, 0x40) ? static_cast<int>(rd(st + 0xCu)) : -1, pd0, ok(st, 0x40) ? static_cast<int>(rd(st + 0x8u)) : -1);
+}
+// One HP attack that registered on two (or more) fighters in the same frame (retail's area / sweeping HP moves; 25 Nov user decision, issue #136 video 2): EACH fighter hit takes the HP damage.
+// The retail HP step takes one victim and the attacker's BRV at the hit as the damage, then zeroes the attacker's BRV. The step runs once for the victim kept by hitreg_hook (the attacker's
+// foe when it is among them, else the last registered) and once more for every other fighter registered by the same attack, each time with the attacker's BRV as it was at the hit (every
+// victim takes the full value as damage); the attacker's BRV is spent once (0 afterwards, as with one victim). Each step books its own damage number, KO handling and ledger entry.
+// PSPRECOMP_TAGTEAM_HPAIMONLY=1: the old rule (one victim per HP step, a bystander of the same move loses no HP).
+void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
+    static const bool aimonly = std::getenv("PSPRECOMP_TAGTEAM_HPAIMONLY") != nullptr;
+    if (aimonly || !g_nextra) { hpstep_core(rdram, ctx, 0); return; }
+    g_ram = rdram; g_ctx = ctx;
+    const recomp_context sv = *ctx;
+    const uint32_t m = static_cast<uint32_t>(ctx->r[5]);
+    const uint32_t mh = ok(m, 8) ? rd(m + 4u) : 0u, att = ok(mh, 8) ? rd(mh) : 0u;
+    const uint32_t ratt = g_xstep_att ? g_xstep_att : att;
+    const uint32_t ast = ok(ratt, 0x12D0) ? rd(ratt + 0x52Cu) : 0u; const int abrv0 = ok(ast, 0x40) ? static_cast<int>(rdh(ast + 0x14u)) : -1;
+    const uint32_t xvic = g_xstep_vic;
+    hpstep_core(rdram, ctx, 0);
+    const uint32_t prim = g_hp_last_victim;
+    uint32_t sec[4]; const int ns = ok(ratt, 0x12D0) ? hit_secondaries(ratt, sec, 4) : 0;
+    if (!ns) return;
+    const recomp_context after = *ctx;
+    for (int q = 0; q < ns; q++) {
+        const uint32_t v = sec[q];
+        if (!prim || v == prim || v == ratt || !ok(v, 0x12D0) || hp_eff(v) <= 0 || !foes(v, ratt)) continue;
+        *ctx = sv;
+        if (abrv0 >= 0) wrh(ast + 0x14u, static_cast<uint16_t>(abrv0));
+        if (g_log) { static int c = 0; if (c++ < 100) std::fprintf(stderr, "[HPBOTH] t=%.2fs %s %08X (char %d) HP attack also hit %s %08X (char %d): second HP step with the attacker's BRV %d (first victim %s %08X)\n", dissidia_battle_age() / 60.0f, role_of(ratt), ratt, actor_char(ratt), role_of(v), v, actor_char(v), abrv0, ok(prim, 0x12D0) ? role_of(prim) : "?", prim); }
+        g_xstep_vic = v;
+        hpstep_core(rdram, ctx, v);
+    }
+    g_xstep_vic = xvic;
+    *ctx = after;
 }
 std::vector<uint32_t> all_fighters_any() { std::vector<uint32_t> v; if (g_bs) for (int k = 0; k < 2; k++) { const uint32_t a = srd(g_bs + 56u + 4u * k); if (ok(a, 0x12D0)) v.push_back(a); } for (int i = 0; i < g_nextra; i++) if (ok(g_extra[i].actor, 0x12D0)) v.push_back(g_extra[i].actor); return v; }
 void stock_hook(uint8_t* rdram, recomp_context* ctx) {
@@ -8991,6 +9050,19 @@ void hudch2_hook(uint8_t* rdram, recomp_context* ctx) { if (std::getenv("PSPRECO
 // registration (hit info +24 = the attacker): remember the extra that hit a victim, and show it as the victim's foe while the module step runs.
 struct HitRec { uint32_t vic, att; int frame; };
 HitRec g_hits[8]; int g_nhits = 0;
+HitRec g_hits2[8]; int g_nhits2 = 0;   // the other victims of the same attack in the same frame (PSPRECOMP_TAGTEAM_HPAIMONLY=1 ignores them)
+void hit_add2(uint32_t att, uint32_t vic) {
+    if (!vic || vic == att) return;
+    for (int i = 0; i < g_nhits2; i++) if (g_hits2[i].att == att && g_hits2[i].vic == vic && g_hits2[i].frame == g_hframe) return;
+    int k = -1; for (int i = 0; i < g_nhits2; i++) if (g_hframe - g_hits2[i].frame > 2) { k = i; break; }
+    if (k < 0) { if (g_nhits2 < 8) k = g_nhits2++; else k = 0; }
+    g_hits2[k] = {vic, att, g_hframe};
+}
+int hit_secondaries(uint32_t att, uint32_t* out, int maxn) {
+    int n = 0;
+    for (int i = 0; i < g_nhits2 && n < maxn; i++) if (g_hits2[i].att == att && g_hframe - g_hits2[i].frame <= 2) { out[n++] = g_hits2[i].vic; g_hits2[i].frame = -1000; }
+    return n;
+}
 // Hit messages (FUN_08AF02C0(module+0x140, type, module, info)) for the fighter that was hit go to the module of the attacker's slot opponent, so a
 // hit on an extra put the break / BRV state into the slot fighter's handler (the extra was never "broken" and every hit broke it again). A message for
 // a slot module while a registered hit of the other side on an extra of that side is being booked goes to the extra's module copy instead.
@@ -9312,6 +9384,7 @@ void hitreg_hook(uint8_t* rdram, recomp_context* ctx) {
             // is the attacker's foe when it is among them (registration order is the actor list's, so the last one was always the extra). 20 Nov hpnohit.
             const bool keep_foe = i < g_nhits && g_hits[i].frame == g_hframe && g_hits[i].vic != vic && g_hits[i].vic == rd(att + 0x300u) && !std::getenv("PSPRECOMP_TAGTEAM_NOHITFOEPREF");
             if (keep_foe && g_log) { static int c = 0; if (c++ < 60) std::fprintf(stderr, "[HITFOE] t=%.2fs %s %08X also hit %s %08X this frame: the hit on its foe %s %08X is kept for the damage step\n", dissidia_battle_age() / 60.0f, role_of(att), att, role_of(vic), vic, role_of(g_hits[i].vic), g_hits[i].vic); }
+            if (i < g_nhits && g_hits[i].frame == g_hframe && g_hits[i].vic != vic) hit_add2(att, keep_foe ? vic : g_hits[i].vic);   // (the other victim of this attack: the HP step books it too)
             if (i == g_nhits && g_nhits < 8) g_nhits++;
             if (i < 8 && !keep_foe) g_hits[i] = {vic, att, g_hframe};
             if (!keep_foe) audit_record(att, vic);
