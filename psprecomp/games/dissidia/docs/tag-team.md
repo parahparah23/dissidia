@@ -5790,3 +5790,12 @@ User on the merged lock-on indicator: the overhead bar and eye were on Golbez's 
 - **Floor ring removed** (and its new-lock flash on the floor): the dots under the player's feet. The chevron + "xN" and the eyes stay.
 - **Screen pulse.** A new lock-on (30-tick debounce) draws red-orange edge gradients (sides 58 px, top / bottom 35 px) for 0.45 s (0.65 s and stronger when 2+ enemies have the player), brighter on the side the enemy is on (left / right by its screen x, bottom when behind the camera). View only, off with the Lock-On Indicator option, `PSPRECOMP_TAGTEAM_LOCKFX_OFF=1`, `_LOCKFX_SLOW=N` = N times longer (test aid), `[LOCKFX]` log lines.
 - **Tests** (`~/dissidia/tt/s2/ttlockind`, FORCE targets): `a1` (Golbez + Lightning vs Jecht, `a1_golbez.png`: bar + eye above Golbez's head), `a2` (3v3 Onion / Shantotto vs Golbez / Exdeath: banters show nothing overhead, `a2_s1.png`; fight `a2_s3.png`), `c1` (Chaos, Exdeath), `c2` (Onion Knight, Shantotto), pulse `p1_s.png` (_SLOW=1000: full-strength edge tint). Not verified: audio, devices, whether top is right in unusual idle poses (flying idle).
+
+## PC setup: mouse clicks did nothing (26 Nov, tree ttsetui, branch tt-setupui)
+Cause: psprecomp/setup/setup_main.cpp only handled touch (SDL_FINGER*) events; desktop SDL delivers mouse events, which the wizard never read, so clicks only
+"worked" by luck (a window manager / touch-emulating device) - keyboard / pad were the real inputs. Fix: SDL_MOUSEMOTION / BUTTONDOWN / WHEEL handled
+(`App::mouse_event`): hover moves the highlighted row and shows the hand cursor (SDL_SYSTEM_CURSOR_HAND; arrow over disabled / info lines), ONE left click acts at
+once (on press, same hit-test as touch: row, +/- arrows, Back / Close button), right click = back, wheel moves the selection, SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH
+so the focusing click also acts. The on-screen keyboard (Report text, typed path) is clickable too (new `KeyboardDialog::pointer`). Note SDL already maps mouse
+event coordinates into the renderer's logical 960x544 space (any window size / HiDPI scale), so they are used as is. Tested under Xvfb + openbox with xdotool
+at 960x544 and 640x360. Keyboard / pad paths unchanged.

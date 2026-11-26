@@ -1242,23 +1242,105 @@ struct App {
                 return;
             }
             if (screen == Screen::TypePath || screen == Screen::ReportText) return;
-            // hit-test against what the settings renderer drew (its geometry is in the same 480x272 design units)
-            const psp_sddialog::SetGeom& G = view.geom();
-            if (G.back.w > 0 && G.back.has(dx, dy) && screen != Screen::Welcome) { cancel(); return; }
-            int top = 0;
-            if (is_browser()) {   // page() lists only the visible window of the browser's entries
-                int total = (int)br.list.size();
-                top = std::max(0, std::min(sel - MENU_ROWS / 2, total - MENU_ROWS));
-            }
-            for (const auto& r : G.rows) {
-                if (!r.r.has(dx, dy)) continue;
-                sel = top + r.idx;
-                dirty = true;
-                if (r.dec.w > 0 && r.dec.has(dx, dy)) adjust(-1);
-                else if (r.inc.w > 0 && r.inc.has(dx, dy)) adjust(+1);
-                else confirm();
+            tap(dx, dy);
+        }
+    }
+
+    // ---- mouse (desktop): hover picks the row under the pointer (and shows a hand), ONE left click acts at once (on press), right click goes back ----
+    // Hit-test against what the settings renderer drew (its geometry is in the same 480x272 design units).
+    // Returns 0 = nothing, 1 = the Back / Close button, 2 = a row (row_idx = its index in the page / browser list).
+    int hit(float dx, float dy, const psp_sddialog::SetGeom::Row** row, int* row_idx) {
+        const psp_sddialog::SetGeom& G = view.geom();
+        if (G.back.w > 0 && G.back.has(dx, dy)) return 1;
+        int top = 0;
+        if (is_browser()) {   // page() lists only the visible window of the browser's entries
+            int total = (int)br.list.size();
+            top = std::max(0, std::min(sel - MENU_ROWS / 2, total - MENU_ROWS));
+        }
+        for (const auto& r : G.rows) {
+            if (!r.r.has(dx, dy)) continue;
+            *row = &r; *row_idx = top + r.idx;
+            return 2;
+        }
+        return 0;
+    }
+
+    void tap(float dx, float dy) {
+        const psp_sddialog::SetGeom::Row* r = nullptr;
+        int idx = 0;
+        int h = hit(dx, dy, &r, &idx);
+        if (h == 1) { cancel(); return; }
+        if (h != 2) return;
+        sel = idx;
+        dirty = true;
+        if (r->dec.w > 0 && r->dec.has(dx, dy)) adjust(-1);
+        else if (r->inc.w > 0 && r->inc.has(dx, dy)) adjust(+1);
+        else confirm();
+    }
+
+    SDL_Cursor* cur_hand = nullptr;
+    SDL_Cursor* cur_arrow = nullptr;
+    bool cur_is_hand = false;
+    void set_hand(bool on) {
+        if (on == cur_is_hand) return;
+        cur_is_hand = on;
+        if (!cur_hand) { cur_hand = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND); cur_arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW); }
+        if (SDL_Cursor* c = on ? cur_hand : cur_arrow) SDL_SetCursor(c);
+    }
+
+    bool mouse_to_design(int mx, int my, float& dx, float& dy) {
+        // SDL already maps mouse events into the renderer's logical (960x544) space (SDL_RenderSetLogicalSize): any window size / HiDPI
+        // scale / letterbox arrives as canvas pixels. (Mapping again with SDL_RenderWindowToLogical would be off at every size but 960x544.)
+        dx = (float)mx / (float)SCALE;
+        dy = (float)my / (float)SCALE;
+        return true;
+    }
+
+    void mouse_event(const SDL_Event& ev) {
+        if (ev.type == SDL_MOUSEMOTION ? ev.motion.which == SDL_TOUCH_MOUSEID : ev.type == SDL_MOUSEWHEEL ? ev.wheel.which == SDL_TOUCH_MOUSEID : ev.button.which == SDL_TOUCH_MOUSEID) return;   // touch has its own path
+        if (ev.type == SDL_MOUSEWHEEL) {
+            if (screen == Screen::TypePath || screen == Screen::ReportText) return;
+            int n = row_count();
+            int step = ev.wheel.y > 0 ? -1 : ev.wheel.y < 0 ? 1 : 0;
+            if (n && step) { sel = std::max(0, std::min(n - 1, sel + step)); dirty = true; }
+            return;
+        }
+        if (screen == Screen::TypePath || screen == Screen::ReportText) {   // the on-screen keyboard: click its keys (or type on the host keyboard)
+            if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_RIGHT) {
+                psp_sddialog::osk_set_active(false);
+                if (screen == Screen::ReportText) go(Screen::Report, 0); else go(Screen::BrowseDir);
                 return;
             }
+            if (ev.type == SDL_MOUSEWHEEL) return;
+            float kx, ky;
+            const bool mv = ev.type == SDL_MOUSEMOTION;
+            mouse_to_design(mv ? ev.motion.x : ev.button.x, mv ? ev.motion.y : ev.button.y, kx, ky);
+            const bool click = ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT;
+            if (!mv && !click) return;
+            const bool over = osk.pointer(kx, ky, click);
+            if (mv) set_hand(over);
+            dirty = true;
+            return;
+        }
+        float dx, dy;
+        const int mx = ev.type == SDL_MOUSEMOTION ? ev.motion.x : ev.button.x, my = ev.type == SDL_MOUSEMOTION ? ev.motion.y : ev.button.y;
+        mouse_to_design(mx, my, dx, dy);
+        const psp_sddialog::SetGeom::Row* r = nullptr;
+        int idx = 0;
+        int h = hit(dx, dy, &r, &idx);
+        if (ev.type == SDL_MOUSEMOTION) {
+            bool hand = h == 1;
+            if (h == 2) {
+                Page pg = page();
+                int pi = is_browser() ? r->idx : idx;   // page() rows are the visible window for the browser
+                bool dead = pi >= 0 && pi < (int)pg.rows.size() && pg.rows[pi].disabled;
+                hand = !dead && !(screen == Screen::Build && idx < 3);   // the progress / info lines are not buttons
+                if (idx != sel && !dead) { sel = idx; dirty = true; }
+            }
+            set_hand(hand);
+        } else if (ev.type == SDL_MOUSEBUTTONDOWN) {
+            if (ev.button.button == SDL_BUTTON_LEFT) tap(dx, dy);
+            else if (ev.button.button == SDL_BUTTON_RIGHT && screen != Screen::Welcome) cancel();
         }
     }
 
@@ -1698,6 +1780,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");   // the click that focuses the window also acts
     app.win = SDL_CreateWindow("Dissidia Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 480 * SCALE, 272 * SCALE,
                                SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!app.win) { std::fprintf(stderr, "cannot create a window: %s\n", SDL_GetError()); return 1; }
@@ -1740,6 +1823,11 @@ int main(int argc, char** argv) {
             case SDL_FINGERMOTION:
             case SDL_FINGERUP:
                 app.touch_event(ev);
+                break;
+            case SDL_MOUSEMOTION:
+            case SDL_MOUSEBUTTONDOWN:
+            case SDL_MOUSEWHEEL:
+                app.mouse_event(ev);
                 break;
             case SDL_TEXTINPUT:
                 if (app.screen == Screen::TypePath || app.screen == Screen::ReportText)
