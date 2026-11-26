@@ -22,6 +22,8 @@
 #include "install.h"
 #include "payload.h"
 #include "proc.h"
+#include "psp_report.h"
+#include "report_key.h"
 
 namespace fs = std::filesystem;
 
@@ -373,6 +375,55 @@ JNI(jstring, parseUpdate)(JNIEnv* e, jclass, jstring line) {
 JNI(void, inheritFd)(JNIEnv*, jclass, jint fd) {
     int fl = fcntl(fd, F_GETFD);
     if (fl >= 0) fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
+}
+
+// ---- Report an issue (runtime/src/psp_report.cpp, the game's code: scrubbing, zip, system facts; the Java side does the HTTPS POST) ----
+// flat string arrays: files = rel, path, rel, path ...; facts = key, value, key, value ...
+static void report_product(JNIEnv* e, jstring version, jstring space_dir, jobjectArray files, jobjectArray facts) {
+    auto strs = [&](jobjectArray a) {
+        std::vector<std::string> v;
+        for (jsize i = 0, n = a ? e->GetArrayLength(a) : 0; i < n; i++) {
+            jstring s = (jstring)e->GetObjectArrayElement(a, i);
+            v.push_back(str(e, s));
+            e->DeleteLocalRef(s);
+        }
+        return v;
+    };
+    psp_report::Product p;
+    p.name = "installer";
+    p.version = str(e, version);
+    p.space_dir = str(e, space_dir);
+    const auto f = strs(files), k = strs(facts);
+    for (size_t i = 0; i + 1 < f.size(); i += 2) p.files.push_back({f[i], f[i + 1], 8u << 20});
+    for (size_t i = 0; i + 1 < k.size(); i += 2) p.facts.push_back({k[i], k[i + 1]});
+    psp_report::set_product(p);
+}
+
+// The files a report holds: "name|bytes" lines (the page shows them before anything is sent).
+JNI(jobjectArray, reportPreview)(JNIEnv* e, jclass, jstring version, jstring space_dir, jobjectArray files, jobjectArray facts) {
+    report_product(e, version, space_dir, files, facts);
+    std::vector<std::string> out;
+    for (const auto& f : psp_report::preview(false)) out.push_back(f.name + "|" + std::to_string(f.size));
+    return to_array(e, out);
+}
+
+// Builds the zip (scrubbed logs + report.json with the system facts) into `out`. "" = ok, else the error.
+JNI(jstring, reportBuild)(JNIEnv* e, jclass, jstring version, jstring space_dir, jobjectArray files, jobjectArray facts, jstring title, jstring desc, jstring out) {
+    report_product(e, version, space_dir, files, facts);
+    psp_report::Params p;
+    p.title = str(e, title);
+    p.description = str(e, desc);
+    p.include_dump = false;
+    std::string err;
+    if (!psp_report::build_zip_file(p, str(e, out), &err)) return jstr(e, err.empty() ? "could not build the report" : err);
+    return jstr(e, "");
+}
+
+// X-Report-Sig for a zip file: HMAC-SHA256(report_key.h's key, "<time>\n<sha256 of the file>"). The key lives only in report_key.h.
+JNI(jstring, reportSign)(JNIEnv* e, jclass, jstring time, jstring zip) {
+    std::ifstream f(str(e, zip), std::ios::binary);
+    std::string b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return jstr(e, psp_report::hmac_sha256_hex(PSPRECOMP_REPORT_KEY, str(e, time) + "\n" + psp_report::sha256_hex(reinterpret_cast<const uint8_t*>(b.data()), b.size())));
 }
 
 JNI(jlong, freeSpace)(JNIEnv* e, jclass, jstring path) { return (jlong)setup::free_space(str(e, path)); }

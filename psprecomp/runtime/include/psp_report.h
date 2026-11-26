@@ -8,6 +8,8 @@
 // Never collected: cloud.ini, anything under cloud/, credentials (lines that look like tokens / passwords are blanked). The player's home
 // folder and user name are replaced by "~" in every text file.
 //
+// Build flags of the setup programs: PSP_REPORT_STANDALONE (no game: version / files come from set_product), PSP_REPORT_NO_HTTP (no upload code:
+// the Android app posts from Java).
 // PSPRECOMP_REPORT_URL=<base> sends to another service (tests: http://127.0.0.1:18791). PSPRECOMP_REPORT_OLD=1 hides the button.
 #pragma once
 
@@ -23,6 +25,18 @@ using Pairs = std::vector<std::pair<std::string, std::string>>;
 
 /// The PSP's memory (main thread, once at start): what "include memory dump" compresses.
 void set_ram(const uint8_t* rdram, size_t size);
+/// The setup programs (PC wizard, Android setup app) use the same code for their "Report an issue": they name the product, its version, the files to
+/// send (instead of the game's run.log / settings.ini ...) and a folder whose free space is reported. No game facts (GPU, game id, mods) then.
+struct ProductFile { std::string rel, path; size_t tail; };   // name inside the zip, file, bytes kept from its end
+struct Product {
+    std::string name;      // "installer"
+    std::string version;
+    std::vector<ProductFile> files;
+    std::string space_dir; // free space of this folder is reported
+    std::string save_dir;  // a report that could not be sent is saved here (default: ./reports)
+    Pairs facts;           // anything else (installer kind, android version ...)
+};
+void set_product(const Product& p);
 /// The graphics strings the event loop already prints at start (render thread): version, renderer, vendor.
 void note_gpu(const char* version, const char* renderer, const char* vendor);
 /// A game module's own facts for the report, one "key=value" per line (for example in_battle=1). Called on the main thread when a report starts.
@@ -34,6 +48,9 @@ struct Params {
     bool include_dump = true;
     Pairs extra;     // system facts only the settings menu knows (window, renderer, mods, changed debug switches ...)
 };
+
+/// Builds the report zip into `path` now (the calling thread; no upload). For the Android app, whose Java side does the HTTPS POST.
+bool build_zip_file(const Params& p, const std::string& path, std::string* error);
 
 struct FileInfo { std::string name; size_t size; };
 /// The files a report would hold right now (names inside the zip, raw size). The memory dump is listed as "ram.bin.z" with the used size.

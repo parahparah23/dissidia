@@ -9,7 +9,7 @@
   - Settings: an unlocked frame rate option.
   - Death / kill camera: audio can still disappear (not on the 1st KO, on the 2nd player's death); log `~/dissidia/tt/desk_logs/rp6_killcam_audio_1125_1842.log` (other session's kill-camera item).
   - FFA: still goes through Party Select (should open the Free-for-all menu directly); still not the retail character select; uses the default outfit instead of the saved one; "Hide tag team UI" gets turned on (must never be auto-enabled in any mode); HUD: the 2 not-locked-on fighters stacked on the right; allow removing the 4th player (3-way FFA). (FFA job tt-ffares.)
-  - Installers (PC + Android setup app): a Report an issue feature like the game's (report service, issue #143 was the first real report from the game).
+  - ~~Installers (PC + Android setup app): a Report an issue feature like the game's~~ DONE 25 Nov (branch tt-setupreport, see "Batch: installers' Report an issue"; live test against the real service still to do by the coordinator).
 
 - ~~Debug menu: Report an issue button~~ DONE (25 Nov, branch report-issue, see the "Report an issue" section below; live test against the real service still to do by the coordinator).
 
@@ -5433,6 +5433,30 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   429, network) show the server's text; the zip is then saved in `<game folder>/reports/report-<time>.zip` and the path is shown. `PSPRECOMP_REPORT_NO_OPEN=1` skips the browser (tests).
 - Tests: `runtime/tests/run_report.sh` (SHA / HMAC vectors, scrub, a real build + signed upload to report_service.py on port 18791 with `make_issue` faked, checks the stored zip,
   403 for a wrong key / old time). Menu run with the game: see the coordinator notes in the commit message / report.
+### Batch (25 Nov): Report an issue in both installers (tree ttsetrep, branch tt-setupreport)
+
+- **What**: "Report an issue" in the PC setup (Linux + Windows, `setup/setup_main.cpp`) and the Android setup app (Java UI + engine). Always on the start page (and on the Logs page / the problem page);
+  offered first on the failure page ("Not finished" / "Stopped") and, after a run that never ended, at the next start (PC: page "Last run stopped"; Android: a dialog). Page: What went wrong (text: on-screen
+  keyboard / host keyboard on PC, an EditText on Android), What is sent (the files list, system info, never ISO / cloud.ini / saves, home paths + user name -> `~`, token-looking lines blanked),
+  Send. On success the issue opens in the browser (PC `SDL_OpenURL`, Android `ACTION_VIEW`) and the page says "Issue #N opened"; on failure the zip is saved (PC `<pref dir>/reports/`, Android
+  `files/reports/`, with Share / Save as file) and the page shows where. The failing step + reason (`failure`, `last_step`, `last_line` / `last_lines`) go into report.json and the description.
+- **Shared code**: `runtime/src/psp_report.cpp` is the one implementation (scrub, zip, SHA / HMAC, system facts, upload). New: `psp_report::set_product(Product)` (name "installer", version, files to send,
+  free-space folder, save dir, extra facts: OS, device, Android version, CPU, RAM, free space, installer version), `build_zip_file`. Build flags `PSP_REPORT_STANDALONE` (no game) and `PSP_REPORT_NO_HTTP`.
+  The key is only in `src/report_key.h`. PC setup links psp_report + psp_http (+ mbedTLS when the bundle has it, + the embedded CA bundle) + zlib (`setup/CMakeLists.txt`). The Android engine compiles psp_report.cpp
+  without upload (system libz) and exposes `Engine.reportPreview / reportBuild / reportSign` (the HMAC is computed natively from report_key.h); `ReportClient.java` does the HTTPS POST (HttpURLConnection).
+  The service marks these reports (`system.product == installer` -> "Sent from the installer's Report an issue button").
+- **Crash / kill detection (Android)**: `BuildRunner` flushes setup.log per line (a kill leaves the log) and keeps `files/build.running` while a plan runs; found at the next start with no runner = the app was killed
+  or crashed -> the dialog offers the report (the facts include Android's `last_exit_reasons`: low memory kill, native crash ...). PC: `install.running` in the pref dir. The setup app's own Java crash report
+  dialog now also offers "Report an issue". `res/xml/network_security_config.xml` allows cleartext http only to 10.0.2.2 / 127.0.0.1 / localhost (tests); everything else is HTTPS.
+- **Tests (never the real service)**: `tools/report_service/local_service.py STORE [PORT]` (real service code, temp config, `make_issue` faked, port 18792 here). PC: `psprecomp_setup --report "text" --dir D
+  [--report-step S]` (no window) -> issue 9001, zip holds setup.log scrubbed (`~`, `token= <removed>`), no cloud.ini; real window under Xvfb driven with xdotool: Welcome -> Report -> type -> Send -> "Issue #9002 opened" (browser
+  skipped with `PSPRECOMP_REPORT_NO_OPEN=1`), and with the service down: "Not sent" + the saved zip path. Android (AVD dissidia_16k on the desktop, ssh -R 18792, `files/report_url.txt` = `http://10.0.2.2:18792`):
+  Report page, typed text, Send -> "Issue #9003 opened" (zip: update.log + report.json with device / Android 15 / RAM / free space / last_exit_reasons), first try over cleartext was refused by Android (now allowed for 10.0.2.2),
+  service unreachable -> "Not sent" + saved zip + share / save; `build.running` marker + restart -> "The last build did not finish" dialog. Emulator killed and verified gone. Logs / shots: `~/dissidia/tt/s2/setupreport/`.
+  `runtime/tests/run_report.sh` (the game's report test) still passes.
+- **Not verified**: HTTPS from the PC setup (no mbedTLS on this host: the bundle build has it; the code path is the game's), Windows build, the real GitHub service, the Failed page flow with a real failing install
+  (screenshots only), an arm64 phone. `PSPRECOMP_REPORT_URL` overrides the service on PC; on Android `files/report_url.txt`.
+
 ### Batch nineteen (25 Nov): Assist Off partner returns where it left; call line vs banter audio (tree ttassist, branch tt-assistfix)
 - **Partner return (Assist Off call).** The partner that plays the call leaves (PLACE to 5000,5000 while its assist X acts) and used to be put at X's last spot ("round 8 hand-over", `[AO8] hand-over`),
   never where it left from. Now `ao8_finish` returns it to the spot it left from: x / y / z, facing (+0x9C, +0x320, model yaw), stand state (script 1) or air state (102) when it left
