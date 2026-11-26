@@ -2,6 +2,7 @@
 
 ## TODO (kept up to date; newest first)
 
+- ~~Out-of-bounds fighters (user, 26 Nov: "if a player is outside the map and they should not be, teleport them back")~~ DONE 26 Nov (branch tt-oobfix, see "Batch: out-of-bounds teleport").
 - **User play-test 25 Nov evening (RP6):**
   - ~~Battle Lobby: hovering "Enter Battle" shows no stage preview (should show the lobby's stage).~~ Fixed 25 Nov ("Batch twenty-nine").
   - ~~Opening Communications mode opened the battle menu.~~ Fixed 25 Nov, reproduced on the host ("Batch twenty-nine").
@@ -103,6 +104,17 @@ runtime hooks. "Confirmed" = read in the code; "inferred" = a guess to check in 
 
 Goal: Budokai Tenkaichi style tag battles. Two fighters per side on the stage at once, the rest of the party roster
 comes in when a fighter is KO'd, the existing lock-on cycling switches between the enemy fighters.
+
+## Batch: out-of-bounds teleport (26 Nov, branch tt-oobfix)
+
+The game has no stage-bounds query (walls are collision geometry), so "the map" is what the battle learned: the ground samples of `ground_track()`.
+`oob_tick()` (tagteam.cpp, called every battle tick from `ko_oneround`) checks every fighter of `all_fighters()` (slot fighters + started extras, any side / mode incl. FFA / PvE):
+NaN position, y more than 25 m below the lowest usable sample, or more than 45 m from any usable sample. After 0.5 s (30 ticks) of that the fighter is put on the
+nearest usable sample (fallback: nearest to a team mate, then the side's start spot), `start_script(1)` (drops speed, stand state), `[OOB] ...` logged.
+Not touched: parked (|x| or |z| >= 1000: Assist Off partners, fallen extras, waiting call-ins), KO'd / falling / defeated / AI-gated, `g_park`, the Assist Off pair, a fighter in the running EX Burst / chase pair; nothing runs during EX Burst / finish / entrance / intro, before 20 samples are known, or once the battle is decided.
+Battle state only (deterministic online). Opt-out `PSPRECOMP_TAGTEAM_OOB_OFF=1`. Test aid `PSPRECOMP_TAGTEAM_OOB_TEST="<sec>:<y|x|nan|park>[:<fighter index>]"` forces it once.
+Test (1v1 + clones, headless): `x` (+300 m) -> `[OOB] ... outside the known map at (298,0,11): back to the nearest floor (13,0,8)` 0.5 s later; `park` (5000,5000) untouched; `y` / `nan`: the game re-derives
+the height from the floor each frame, so those self-heal before the check matters (the check stays as a net for stages where it does not). No false positives in 40 s fights.
 
 ## What the battle looks like today (confirmed)
 
