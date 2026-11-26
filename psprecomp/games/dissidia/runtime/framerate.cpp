@@ -858,11 +858,16 @@ constexpr uint32_t GRID_MASK = 0x2000u | 0x8000u;
 uint32_t dissidia_walk_filter(uint32_t buttons);   // direct_battle.cpp
 uint32_t dissidia_tagteam_pad(uint32_t raw);        // tagteam.cpp: the tag swap button
 uint32_t dissidia_tagteam_menu_pad(uint32_t raw);   // tagteam_menu.cpp: the CPU settings dialog takes the pad while it is open
+uint32_t dissidia_training_pad(uint32_t raw);   // training.cpp: Training mode's options panel takes the pad while it is open
+bool dissidia_training_ai_skip(uint32_t brain);
+void dissidia_training_frame_end(uint8_t* rdram, recomp_context* ctx, const uint32_t f[4], int idle, float age);
+void dissidia_training_overlay(bool paused_hint); bool dissidia_training_paused();
 namespace {
 uint32_t jecht_grid_filter(uint32_t raw) {
     raw = dissidia_walk_filter(raw);   // direct_battle.cpp: test-only pad record / replay of the menu walk (a no-op unless asked for)
     raw = dissidia_tagteam_pad(raw);   // tagteam.cpp: takes the swap button out of the input in a tag battle
     raw = dissidia_tagteam_menu_pad(raw);
+    raw = dissidia_training_pad(raw);
     if (l30_active()) {   // 30 Hz logic: the pad changes only on gameplay frames (the PSP reads it once per 30 Hz frame);
         static uint32_t shown = 0, latched = 0;            // a press that came and went between two of them is shown once (latched)
         latched |= raw & ~shown;
@@ -1230,6 +1235,11 @@ void frame_end_hook(uint8_t* rdram, recomp_context* ctx) {
     input_debug_frame();
     testdrive_frame(rdram, ctx);
     if (battle_running()) g_battle_age += g_logic_step; else g_battle_age = 0.f;
+    {   // Training mode (training.cpp; inert unless Battle Mode > Training was chosen): the fighters, the frames since one stepped (the pause menu) and the fight's age
+        int idle = 1 << 20; uint32_t tf[4] = {}; for (int i = 0; i < 4; i++) if (g_fighters[i] && g_tick - g_fighter_seen[i] < 3600) { tf[i] = g_fighters[i]; idle = std::min<int>(idle, static_cast<int>(g_tick - g_fighter_seen[i])); }
+        dissidia_training_frame_end(rdram, ctx, tf, idle, g_battle_age > 0.f ? g_battle_age : (overlay_id() == 1 ? 1.f : 0.f));
+        dissidia_training_overlay(dissidia_training_paused());
+    }
     {   // tall windows: the picture is centred from the moment the fight runs until the battle overlay goes (summons, the pause menu and
         // the results keep it; the loading / opponent pages before the fight are at the top like the menus), see ge_draw_note_scene_view
         static bool in_battle = false;
@@ -2606,7 +2616,7 @@ float dissidia_own_clock_scale() { return g_ticks * 0.5f; }
 FuncPtr g_orig_cpu_tick = nullptr;
 void cpu_tick_noai_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t brain = static_cast<uint32_t>(ctx->r[4]);
-    const bool off = (g_env_no_ai && g_gt_started) || (g_dbg_no_ai && g_ai_armed);
+    const bool off = (g_env_no_ai && g_gt_started) || (g_dbg_no_ai && g_ai_armed) || (g_ai_armed && dissidia_training_ai_skip(brain));
     if (off && ok(brain) && static_cast<int32_t>(r32(brain + 0x54u)) == 0) return;   // only once the fight runs: the intro waits for the brains
     g_orig_cpu_tick(rdram, ctx);
 }

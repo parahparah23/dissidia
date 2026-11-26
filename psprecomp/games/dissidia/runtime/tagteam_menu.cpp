@@ -1401,6 +1401,17 @@ int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool onl
     if (r) { g_dlg_open = false; g_dlg_mode = 0; }
     return r;
 }
+// A list screen in the menu style (the Battle Lobby's look) for other modes: Training's options panel (training.cpp). rows = label / value; publishes the game layer.
+void dissidia_menu_style_list(const std::string& title, const std::string& sub, const std::vector<std::pair<std::string, std::string>>& rows, int sel, const std::string& help, const std::string& footer) {
+    g_layer.begin(std::max(2, psp_sddialog::output_scale()));
+    gs_background(); gs_title(title, sub);
+    const float x0 = 38.f, x1 = 442.f, y0 = 40.f, h = 16.f;
+    for (size_t i = 0; i < rows.size(); i++) gs_row(x0, x1, y0 + h * float(i), h - 1.f, static_cast<int>(i) == sel, rows[i].first, rows[i].second, !rows[i].second.empty(), 6.6f);
+    gs_footer(footer, help);
+    g_layer.publish();
+}
+void dissidia_menu_style_clear() { g_layer.begin(std::max(2, psp_sddialog::output_scale())); g_layer.publish(); }
+void dissidia_menu_play_se(uint8_t* rdram, recomp_context* ctx, int id) { play_se(rdram, ctx, id); }
 void dissidia_tagteam_modesel_draw_frozen(bool online) { ge_draw_set_game_layer_ttl(kHoldTtlMs); modesel_draw(online); }   // after a choice: the Mode Select stays on screen, cursor on the chosen row, until the next menu opens (the layer expires 150 ms after the last draw)
 void dissidia_tagteam_modesel_confirm(bool sp) {
     g_inject_late.store(9, std::memory_order_relaxed);
