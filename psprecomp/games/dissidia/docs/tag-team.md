@@ -2,6 +2,15 @@
 
 ## TODO (kept up to date; newest first)
 
+- **User play-test 25 Nov evening (RP6):**
+  - Battle Lobby: hovering "Enter Battle" shows no stage preview (should show the lobby's stage).
+  - Opening Communications mode opened the battle menu (tag menu flow; likely the Mode Select re-open of Batch fifteen firing on the Communications list).
+  - Tag battle rules (e.g. a skill-off rule) only apply to the 2 original fighters, not to partners / call-ins; check judgment the same way.
+  - Settings: an unlocked frame rate option.
+  - Death / kill camera: audio can still disappear (not on the 1st KO, on the 2nd player's death); log `~/dissidia/tt/desk_logs/rp6_killcam_audio_1125_1842.log` (other session's kill-camera item).
+  - FFA: still goes through Party Select (should open the Free-for-all menu directly); still not the retail character select; uses the default outfit instead of the saved one; "Hide tag team UI" gets turned on (must never be auto-enabled in any mode); HUD: the 2 not-locked-on fighters stacked on the right; allow removing the 4th player (3-way FFA). (FFA job tt-ffares.)
+  - Installers (PC + Android setup app): a Report an issue feature like the game's (report service, issue #143 was the first real report from the game).
+
 - ~~Debug menu: Report an issue button~~ DONE (25 Nov, branch report-issue, see the "Report an issue" section below; live test against the real service still to do by the coordinator).
 
 - **[FIXED 25 Nov on the host, see "Batch seventeen"; verify on the RP6] Partner banter silent: Jecht (2nd partner extra) had no line at battle start** (RP6, single player, 25 Nov 15:33, log `~/dissidia/tt/desk_logs/rp6_jecht_banter_1125_1533.log`): lines 10147-10155 Laguna plays (`[SNDPOOL] intro_load` before slot1=09B4D3E4, after 00000000); lines 10453-10460 Jecht: intro_load before slot1=00000000, after still 00000000 (the load filled nothing), then `banter of 09D64D80 (JECHT): pose + intro line + close-up`. The 2nd partner's intro line load comes back empty, likely the first banter freed the slot / pool (compare Batch eight).
