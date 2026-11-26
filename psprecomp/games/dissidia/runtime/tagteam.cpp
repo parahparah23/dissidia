@@ -6741,6 +6741,54 @@ void tagduel_swap_tick() {
         if (tagduel_swap(sd, "SELECT", nullptr)) last[sd] = age;
     }
 }
+// ---- out of the map: teleport back (user, 26 Nov: "if a player is outside the map and they should not be, teleport them back into the map") ----
+// Per frame, every fighter on the stage (slot fighters + started extras, any side / mode) is checked against what the battle has learned of the map (the ground samples
+// of ground_track(): fighters' own standing spots): NaN position, far below the lowest known floor (> 25 m), or > 45 m from any usable sample. After 0.5 s (30 battle ticks) of
+// that it is put on the nearest known floor, stand / air state (the script start drops the fall speed), "[OOB]" logged. Not touched: parked (|x| or |z| >= 1000: Assist Off
+// partners, fallen extras, call-in waiters), KO'd / falling / defeated, not started, during an EX Burst / finish / entrance / intro / chase, the Assist Off pair.
+// Battle state only (deterministic online). PSPRECOMP_TAGTEAM_OOB_OFF=1: off. PSPRECOMP_TAGTEAM_OOB_TEST="<sec>:<y|x|nan|park>[:<extra index>]" test aid (forces it once).
+void start_script(uint32_t P, uint32_t id); void place_at(uint32_t P, float x, float y, float z, const char* why);
+bool oob_ao8_involved(uint32_t a); bool chase_pair_holds(uint32_t a); bool exb_busy(); bool entrance_busy(); bool intro_done(); bool exb_in(uint32_t a);
+void oob_tick(float age) {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_OOB_OFF") != nullptr; if (off || !g_bs || !tag_live()) return;
+    static std::map<uint32_t, float> since; static uint32_t gen = ~0u; static bool tested = false;
+    if (gen != g_battle_gen) { gen = g_battle_gen; since.clear(); tested = false; }
+    uint32_t f[6]; const int n = all_fighters(f);
+    if (const char* t = std::getenv("PSPRECOMP_TAGTEAM_OOB_TEST"); t && !tested) {
+        float sec = 0.f; char mode[8] = {0}; int ix = 0; const int c = std::sscanf(t, "%f:%7[a-z]:%d", &sec, mode, &ix);
+        if (c >= 2 && age >= sec * 60.f && n > 0) { tested = true; const uint32_t a = f[std::min(std::max(ix, 0), n - 1)];
+            if (!std::strcmp(mode, "y")) wrf(a + 0x84u, rdf(a + 0x84u) - 200.f);
+            else if (!std::strcmp(mode, "x")) wrf(a + 0x80u, rdf(a + 0x80u) + 300.f);
+            else if (!std::strcmp(mode, "nan")) wr(a + 0x84u, 0x7FC00000u);
+            else if (!std::strcmp(mode, "park")) { wrf(a + 0x80u, 5000.f); wrf(a + 0x88u, 5000.f); }
+            std::fprintf(stderr, "[OOB] t=%.2fs TEST: %08X forced %s -> (%.1f,%.1f,%.1f)\n", age / 60.f, a, mode, rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)); }
+    }
+    if (g_decided || exb_busy() || entrance_busy() || !intro_done() || g_gsamp.size() < 20) { since.clear(); return; }
+    float miny = 1e30f; for (const auto& kv : g_gsamp) if (sample_ok(kv.first, kv.second, true)) miny = std::min(miny, kv.second.y);
+    if (miny > 1e29f) { since.clear(); return; }
+    for (int i = 0; i < n; i++) {
+        const uint32_t a = f[i];
+        const float x = rdf(a + 0x80u), y = rdf(a + 0x84u), z = rdf(a + 0x88u); const bool fin = std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+        const int sc = static_cast<int16_t>(rd(a + 0x180u) & 0xFFFFu);
+        bool skip = !ok(a, 0x12D0) || !alive(a) || is_down(a) || ko_script(a) || (sc >= 1200 && sc < 1300) || exb_in(a) || chase_pair_holds(a) || oob_ao8_involved(a) || (rd(a + 0x380u) & 2u);
+        for (const auto& pk : g_park) if (pk.first == a) skip = true;
+        if (fin && (std::fabs(x) >= 1000.f || std::fabs(z) >= 1000.f)) skip = true;   // parked
+        bool out = false; const char* why = "";
+        if (!skip) { if (!fin) { out = true; why = "NaN position"; }
+            else if (y < miny - 25.f) { out = true; why = "below the floor"; }
+            else { GPos q{}; const float d = nearest_sample(x, z, &q); if (d > 45.f) { out = true; why = "outside the known map"; } } }
+        if (!out) { since.erase(a); continue; }
+        auto it = since.find(a); if (it == since.end()) { since[a] = age; continue; }
+        if (age - it->second < 30.f) continue;
+        since.erase(a);
+        GPos q{};
+        float d = fin ? nearest_sample(x, z, &q) : -1.f;
+        if (d < 0.f) { const uint32_t o = f[(i + 1) % n]; const float ox = rdf(o + 0x80u), oz = rdf(o + 0x88u); d = (n > 1 && o != a && std::isfinite(ox) && std::isfinite(oz) && std::fabs(ox) < 1000.f && std::fabs(oz) < 1000.f) ? nearest_sample(ox, oz, &q) : -1.f; }
+        if (d < 0.f) { if (g_side_start_set[side_of(a) & 1u]) q = g_side_start[side_of(a) & 1u]; else continue; }
+        std::fprintf(stderr, "[OOB] t=%.2fs %s %08X (c%d, script %d) %s at (%.1f,%.1f,%.1f): back to the nearest floor (%.1f,%.1f,%.1f)\n", age / 60.f, role_of(a), a, actor_char(a), sc, why, x, y, z, q.x, q.y, q.z);
+        place_at(a, q.x, q.y, q.z, "oob"); start_script(a, 1);
+    }
+}
 void ko_oneround() {
     ledger_step();   // the KO ledger (tally, jobs) sees every fall before it is handled
     if (g_oneround && g_tagin && g_bs && g_nextra == 0 && !g_decided && !std::getenv("PSPRECOMP_TAGTEAM_NOEARLYFORFEIT") && !std::getenv("PSPRECOMP_TAGTEAM_NOFORFEITEND") && !psp_adhoc_in_session()) {
@@ -6813,6 +6861,7 @@ void ko_oneround() {
             std::fprintf(stderr, "\n"); } }
     if (g_decided) return;
     const float age = dissidia_battle_age();
+    oob_tick(age);
     if (const char* e = std::getenv("PSPRECOMP_TTLOCK_AISLOT"); e && comms_handover()) {   // debug: "<slot>:<sec>": that slot goes to the AI at that tag-clock time (deterministic), so the next handover of it is AI -> pad
         static uint32_t done = 0xFFFFFFFFu; unsigned sl = 0; float at = 0.f;
         if (done != g_battle_gen && std::sscanf(e, "%u:%f", &sl, &at) == 2 && age >= at * 60.f) { done = g_battle_gen; const uint32_t S = srd(g_bs + 56u + 4u * (sl & 1u)); if (ok(S, 0x12D0) && alive(S)) { std::fprintf(stderr, "[TTLOCK] t=%.1fs AISLOT: slot %u (%08X) handed to the AI\n", age / 60.0f, sl & 1u, S); slot_handover(S, -1); } }
@@ -10614,6 +10663,7 @@ uint32_t ao_partner_of(uint32_t M) {
 // banner, gauge, attack with its homing, leave) and the retail hit module books the hits on the caller's side; the partner's body steps out (parked) meanwhile and comes back after.
 // Needs X ready (spawned 4 s into the battle); else round 7's attack. PSPRECOMP_TTCAM_ASSISTMOVE=0: round 7. PSPRECOMP_TTCAM_NOPARK=1: the partner's body stays where it is.
 struct Ao8 { uint32_t M = 0, P = 0, X = 0, prev = 0, gen = 0; float t0 = 0; bool seen = false, parked = false, pair = false; float px = 0, py = 0, pz = 0, pyaw = 0, idle = -1.f, atk = -1.f; } g_ao8[2];
+bool oob_ao8_involved(uint32_t a) { for (int k = 0; k < 2; k++) if (g_ao8[k].M && (g_ao8[k].P == a || g_ao8[k].X == a)) return true; return false; }
 bool g_ao8_hitfinish = false;   // ao8_finish from a hit on the assist: the partner keeps its hit reaction
 std::map<uint32_t, float> g_ao8_xwatch;
 struct Ao8XFix { uint32_t X = 0, P = 0, snap[4] = {}; float t = 0; }; std::vector<Ao8XFix> g_ao8_xfix;   // assist actors hit at a switch: their own reaction is undone when it starts   // dismissed assist actors (debug log of their state for 2 s, PSPRECOMP_TTCAM_AO8LOG)
