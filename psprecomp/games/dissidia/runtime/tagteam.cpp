@@ -118,6 +118,7 @@ float dissidia_tagteam_age() { return g_tt_age; }   // camera.cpp (the call-in c
 bool dissidia_cpu_ai_off();
 void psp_fx_lights_limit(int n);   // psp_ge_draw.cpp: effect lights at most n (8 = no limit)
 void dissidia_hold_flow(bool on);   // framerate.cpp
+int psp_atrac_last_end_sample(); uint32_t psp_atrac_set_count();   // runtime/src/hle/psp_hle_atrac.cpp
 void dissidia_pause_match(uint32_t keep, float seconds);   // framerate.cpp: every fighter but `keep` stands still for that long
 bool dissidia_match_paused();    // framerate.cpp: the debug menu's Enemy AI option / the test harness switched the CPU brains off
 uint32_t dissidia_camera_manager();   // camera.cpp
@@ -5137,6 +5138,7 @@ std::string g_entr_name;
 // The entrant's intro line, the one the battle start plays (FUN_08B0E40C loads both sides' with FUN_08B0D7F4(obj16, actor, 2, 0x09AFDFB0, 0, -1),
 // a script event plays them with FUN_08B0D938(obj), FUN_08B0D8D8(obj) frees): loaded at the warp-in, played at the pose, freed after the entrance.
 uint32_t g_intro_obj = 0; float g_intro_free_at = 0.f;
+uint32_t g_sub_obj = 0; float g_sub_until = 0.f, g_sub_last = 0.f, g_line_end = 0.f;
 void intro_free() {
     if (!g_intro_obj || !(rd(g_intro_obj) || rd(g_intro_obj + 4u))) return;
     // The next partner's entrance can come while the previous line still plays (3 v 3: the second partner's banter was silent, RP6 25 Nov / host b2): the line is stopped
@@ -5182,6 +5184,7 @@ uint32_t g_intro_pend_A = 0; float g_intro_pend_at = 0.f; bool g_intro_pend_play
 void intro_load(uint32_t A) {
     if (std::getenv("PSPRECOMP_TAGTEAM_NOINTROVOICE")) return;
     g_intro_play_at = 0.f;   // (a new line: the earlier one is stopped below; the wait of the earlier one is over)
+    g_line_end = 0.f;
     static const bool defer_old = std::getenv("PSPRECOMP_TAGTEAM_INTRODEFER_OLD") != nullptr;
     if (!defer_old && g_intro_obj && (rd(g_intro_obj) || rd(g_intro_obj + 4u)) && g_intro_pend_A != A) {
         if (rd(g_intro_obj + 4u)) call(0x08B0D9B0u, g_intro_obj, 0);
@@ -5219,6 +5222,39 @@ void intro_load(uint32_t A) {
 // every machine; the stream's heap use moves with it, so it must not follow a clock). PSPRECOMP_TAGTEAM_CALLHOLD_OLD=1: old (the line plays at the pose).
 float g_callline_t = -1e9f, g_intro_play_at = 0.f;
 constexpr float kCallLineHold = 2.1f * 60.f;
+// 25 Nov (user play-test): the partners' banter lines had NO SUBTITLES and the last banter ended before its line did. Retail's intro event (FUN_08B11334, "play line k") plays the line
+// with FUN_08B0D938(obj) and then shows its caption: the line's name record holds the text id (halfword at name + 16); FUN_08B1209C(sub, textId) makes the caption (sub = the banter
+// ctx + 160), FUN_08B122CC(sub, duration in ticks) arms it, and the intro's per-frame step runs FUN_08B12248(sub) (state machine; 08B1234C draws / counts down). The retail step does
+// not run for a partner's line (and is held with the intro), so it is started here and stepped from the tick; FUN_088F47E0(0x16) is the game's caption option (>0: no captions).
+// The line's length comes from its data (the ATRAC track's end sample / 44100, the same on every machine): a banter lasts until the line is over (+ a margin), never less than
+// kBanterPause. PSPRECOMP_TAGTEAM_BANTER_NOSUB=1: no caption; PSPRECOMP_TAGTEAM_BANTER_LINEWAIT=0: fixed 2.5 s banters (old).
+constexpr float kBanterMargin = 0.8f * 60.f;   // (the stream starts a little after the play call)
+void sub_stop() { if (g_sub_obj && ok(g_sub_obj, 0x30)) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u); call(0x08B122E4u, g_sub_obj); g_ctx->r[29] = static_cast<int32_t>(sp0); } g_sub_until = 0.f; }
+void sub_start(float ticks) {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_BANTER_NOSUB") != nullptr;
+    if (off || !g_intro_obj || !ok(g_banter_ctx, 0x90 + 0x30)) return;
+    const uint32_t np = rd(g_intro_obj + 12u); const uint32_t tid = ok(np, 0x20) ? rdh(np + 16u) : 0u; if (!tid) return;
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x40u);
+    const bool hidden = call(0x088F47E0u, 0x16u) != 0u;
+    if (!hidden) { sub_stop(); g_sub_obj = g_banter_ctx + 160u; g_ctx->f[12] = 0.7f; call(0x08B1209Cu, g_sub_obj, tid); g_ctx->f[12] = ticks; call(0x08B122CCu, g_sub_obj); g_sub_until = dissidia_battle_age() + ticks; g_sub_last = dissidia_battle_age(); }
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] banter caption: text %u for %.0f ticks (%s)\n", tid, ticks, hidden ? "captions off" : "shown");
+}
+void sub_step() {   // every tick: the caption's per-frame step with the battle ticks since the last one (0 on a drawn-only frame)
+    if (g_sub_until <= 0.f) return;
+    const float age = dissidia_battle_age();
+    if (age >= g_sub_until + 20.f || !ok(g_sub_obj, 0x30)) { sub_stop(); return; }
+    const float dt = age - g_sub_last; if (dt <= 0.f) return; g_sub_last = age;
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x80u);
+    g_ctx->f[12] = dt; call(0x08B12248u, g_sub_obj);
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+}
+void banter_line_followup() {   // the banter's line has just been started for the entrant (g_entrant): the banter lasts until it is over, and its caption
+    if (!g_entrant || !g_entrant_banter) return;
+    const float now = dissidia_battle_age();
+    if (g_line_end > now && g_line_end + kBanterMargin > g_entrant_until) { g_entrant_until = g_line_end + kBanterMargin; g_dissidia_entr_until = g_entrant_until; dissidia_pause_match(g_entrant, (g_entrant_until - now) / 60.f); }
+    sub_start(g_line_end > now ? g_line_end - now + kBanterMargin : 150.f);
+}
 void intro_play_now();
 void intro_play() {
     static const bool old = std::getenv("PSPRECOMP_TAGTEAM_CALLHOLD_OLD") != nullptr;
@@ -5233,7 +5269,16 @@ void intro_play() {
 void intro_play_now() {
     if (!g_intro_obj || !rd(g_intro_obj + 4u)) return;
     if (g_log) std::fprintf(stderr, "[TAGTEAM] intro line obj before play: [%08X %08X %08X %08X] (+16..: %08X %08X)\n", rd(g_intro_obj), rd(g_intro_obj + 4u), rd(g_intro_obj + 8u), rd(g_intro_obj + 12u), rd(rd(g_intro_obj) + 0u), rd(rd(g_intro_obj + 4u) + 0u));
+    const uint32_t atrac0 = psp_atrac_set_count();
     call(0x08B0D938u, g_intro_obj);
+    {   // the line's own length (data only) and its caption
+        static const bool lw = !(std::getenv("PSPRECOMP_TAGTEAM_BANTER_LINEWAIT") && std::getenv("PSPRECOMP_TAGTEAM_BANTER_LINEWAIT")[0] == '0');
+        const float now = dissidia_battle_age(); float len = 0.f;
+        if (psp_atrac_set_count() != atrac0) len = std::min(8.f * 60.f, static_cast<float>(psp_atrac_last_end_sample()) / 44100.f * 60.f);
+        g_line_end = len > 0.f ? now + len : 0.f;
+        if (g_log) std::fprintf(stderr, "[TAGTEAM] intro line length %.2f s (%s)\n", len / 60.f, lw ? "banters wait for it" : "ignored");
+        if (!lw) g_line_end = 0.f;
+    }
     if (g_log) pool_dump("after play call");
     g_intro_free_at = dissidia_battle_age() + 8.f * 60.f + (std::getenv("PSPRECOMP_TAGTEAM_INTRO_HOLD") ? 100000.f : 0.f);   // (_HOLD: test aid, the line is never freed in the battle)
     if (g_log) std::fprintf(stderr, "[TAGTEAM] intro line playing\n");
@@ -5804,7 +5849,8 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
     if (!warp) { face_foe(A); intro_play(); }
     wr(A + 0x380u, rd(A + 0x380u) | 2u);   // its AI waits until the entrance is over (it cut the warp-in short)
     g_ctx->r[29] = static_cast<int32_t>(sp0);
-    const float now = dissidia_battle_age(), total = (warp ? appear_s : 0.f) + (banter ? banter_s : pose_s);
+    const float now = dissidia_battle_age(); float total = (warp ? appear_s : 0.f) + (banter ? banter_s : pose_s);
+    if (banter && !warp && g_line_end > now && (g_line_end + kBanterMargin - now) / 60.f > total) total = (g_line_end + kBanterMargin - now) / 60.f;   // the banter lasts until its line is over
     if (g_log) std::fprintf(stderr, "[TAGTEAM] entrance of %08X: %s, script now %d\n", A, warp ? "warp-in then pose" : "pose", static_cast<int16_t>(rd(A + 0x180u) & 0xFFFFu));
     g_entr_name = banter ? std::string() : name + " JOINS THE BATTLE";
     g_entr_pose_at = warp ? now + appear_s * 60.f : 0.f;
@@ -5813,6 +5859,7 @@ void entrance_effect(uint32_t A, const std::string& name, bool banter) {
     g_entrant = A; g_entrant_until = now + total * 60.f;
     if (!std::getenv("PSPRECOMP_TAGTEAM_NOENTRCAM")) { g_dissidia_entr_actor = A; g_dissidia_entr_pose_at = g_entr_pose_at; g_dissidia_entr_until = g_entrant_until; g_dissidia_entr_tight = banter; g_dissidia_entr_more = banter && !g_banter_q.empty(); }
     g_entrant_banter = banter;
+    if (banter && !warp) banter_line_followup();
     if (!banter) tagteam_fx_entrance(A, now, g_entr_pose_at, g_entrant_until);
     if (banter && g_log) std::fprintf(stderr, "[TAGTEAM] banter of %08X (%s): pose + intro line + close-up for %.1fs\n", A, name.c_str(), banter_s);
 }
@@ -5879,7 +5926,7 @@ void entrance_step(float age) {   // the warp-in is over: the battle-start pose 
     if (g_log && g_entrant && std::getenv("PSPRECOMP_TAGTEAM_FACELOG")) { static int n = 0; if (n++ % 6 == 0) { const uint32_t A = g_entrant, foe = rd(A + 0x300u); std::fprintf(stderr, "[FACE] t=%.2fs yaw9C %.3f yaw320 %.3f row2 %.3f %.3f row0 %.3f %.3f to-foe %.3f\n", age / 60.0f, rdf(A + 0x9Cu), rdf(A + 0x320u), rdf(A + 0x350u), rdf(A + 0x358u), rdf(A + 0x330u), rdf(A + 0x338u), ok(foe, 0x12D0) ? std::atan2(rdf(foe + 0x80u) - rdf(A + 0x80u), rdf(foe + 0x88u) - rdf(A + 0x88u)) : 9.f); } }
     if (std::getenv("PSPRECOMP_ENTRCAM_HOLDTURN") && g_entrant && age < g_entrant_until && !is_down(g_entrant)) model_face_yaw(g_entrant);   // debug: hold the facing every tick of the entrance
     if (g_intro_pend_A && age >= g_intro_pend_at) { const uint32_t A = g_intro_pend_A; g_intro_pend_A = 0; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
-        if (ok(A, 0x12D0) && !is_down(A)) { intro_load(A); if (g_intro_pend_play) intro_play(); }
+        if (ok(A, 0x12D0) && !is_down(A)) { intro_load(A); if (g_intro_pend_play) { intro_play(); banter_line_followup(); } }
         g_ctx->r[29] = static_cast<int32_t>(sp0); }
     if (g_intro_play_at > 0.f && age >= g_intro_play_at) { g_intro_play_at = 0.f; const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); intro_play_now(); g_ctx->r[29] = static_cast<int32_t>(sp0); }
     if (g_intro_free_at > 0.f && age >= g_intro_free_at) { const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u); intro_free(); g_ctx->r[29] = static_cast<int32_t>(sp0); }
@@ -6667,6 +6714,7 @@ void ko_oneround() {
             if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs banters over: the retail intro goes on (vs display after them)\n", age / 60.f);
         }
     }
+    sub_step();
     entrance_step(age);
     if (g_entrant && age < g_entrant_until && !is_down(g_entrant)) wr(g_entrant + 0x380u, rd(g_entrant + 0x380u) | 2u);   // AI gated for the whole entrance (the pose action cleared the bit: the AI cut it short)
     { static uint32_t late_for = 0; static float late_at = 0; if (g_entrant) { late_for = g_entrant; late_at = g_entrant_until + 60.f; }

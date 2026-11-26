@@ -197,8 +197,8 @@ bool entr_frame(const float* eye, const float* tgt, float* E, float* F, float* w
     (void)tgt;
     if (!g_dissidia_entr_actor) return false;
     const float age = dissidia_tagteam_age();   // the tag clock, the one the entrance times are in
-    if (age >= g_dissidia_entr_until) { g_dissidia_entr_actor = 0; return false; }
-    float P[3]; if (!rdvec(g_dissidia_entr_actor + ACT_POS, P)) return false;
+    if (age >= g_dissidia_entr_until) { if (std::getenv("PSPRECOMP_ENTRCAM_LOG")) std::fprintf(stderr, "[ENTRCAM] shot over: actor %08X age %.0f until %.0f\n", g_dissidia_entr_actor, age, g_dissidia_entr_until); g_dissidia_entr_actor = 0; return false; }
+    float P[3]; if (!rdvec(g_dissidia_entr_actor + ACT_POS, P)) { if (std::getenv("PSPRECOMP_ENTRCAM_LOG")) std::fprintf(stderr, "[ENTRCAM] no position of %08X\n", g_dissidia_entr_actor); return false; }
     const float C[3] = {P[0], P[1] + 1.1f, P[2]};
     const float out = (g_dissidia_entr_tight && g_dissidia_entr_more) ? 1.f : smooth01((g_dissidia_entr_until - age) / 18.f);   // 0.3 s ease out (ages are 60ths); not between two banters
     if (g_dissidia_entr_pose_at > 0.f && age < g_dissidia_entr_pose_at) {   // warp-in: the game's eye, looking at him
@@ -551,7 +551,7 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
             held_now = true;
         }
     }
-    if (g_in_update && cam == g_mgr && g_eye_calls == 0 && !held_now) {
+    if (g_in_update && cam == g_mgr && g_eye_calls == 0 && (!held_now || (g_dissidia_entr_actor && !std::getenv("PSPRECOMP_BANTER_HOLDCAM_OLD")))) {   // (25 Nov: the held free camera takes over 10 s into a battle; a long start - 3 v 3 banters run to 16 s - lost the banter close-ups to it)
         float ev[3] = {rdf(eye), rdf(eye + 4), rdf(eye + 8)}, tv[3] = {rdf(eye + 0x10), rdf(eye + 0x14), rdf(eye + 0x18)};
         if (static const bool il = std::getenv("PSPRECOMP_INTROCAM_LOG") != nullptr; il) {   // debug: the game's own eye / look-at against the nearest fighter (the retail intro close-up's framing)
             static int n = 0; float np[3];
