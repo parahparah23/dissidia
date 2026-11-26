@@ -262,3 +262,33 @@ the cache off and on again, a failing compiler). `test_objcache.py` passes on Li
 - The game code as its own shared library, so that an update would not link either.
 - zig's global cache on a PC (`~/.cache/zig`, `%LOCALAPPDATA%\zig`) also keeps a copy of each object it compiles; it holds zig's
   own runtime libraries too, so it is not emptied. With the object cache it grows only when game code is really compiled.
+
+## The phone's build profile (Fast / Full) and resuming
+
+The setup app on Android compiles the game on the phone (`tools/android_build.py` `device_build`). The user picks, before the build, **Fast** (default) or
+**Full** (stored in `files/build_profile.txt`, copied to `<work>/build_profile.txt` for the build; `Rebuild game (Full/Fast)` on the home page switches later).
+PC builds and the SDK's APK build are unchanged (-O2 everywhere).
+
+- **Full**: every file -O2 (as before).
+- **Fast**: -O2 only for the generated batch files that contain a function listed in `tools/hot_funcs.txt`; every other batch is compiled with
+  `-Os -fno-inline` (`COLD_OPT`; `PSPRECOMP_COLD_OPT` overrides, `PSPRECOMP_BUILD_PROFILE=full|fast` forces a profile). The flags are part of the object cache key
+  (PR #140), so switching profile compiles only the files whose flags differ. `build: Fast: -O2 for N batch files ...` is in the log.
+- `hot_funcs.txt` ("group addr", group = out / battle / menu / extra / supacc / xmods) is the set of functions that make up 97 % of the executed code
+  (entry count x function length in generated lines) in a tag battle + the menus. It is matched by function entry address, not by batch number, so a renumbering
+  or a changed batch layout does not matter; a function that is not in the list is simply cold. Regenerate: run a tag battle with
+  `PSPRECOMP_PC_TRACE=1 PSPRECOMP_TAGTEAM=1 PSPRECOMP_TAGTEAM_EXBFC=2:75:<path>` (writes `<path>.1`, `<path>.2` entry counts) and
+  `python3 tools/hot_funcs.py <work> <path>.1 <path>.2 tools/hot_funcs.txt`.
+- Measured (host, zig 0.15.2 for aarch64-linux-android, the same flags, 468 files, 6 jobs, host under load so CPU seconds are noisy): -O1 costs the same as -O2 on this
+  code (huge straight-line functions: the time is the inliner and the back end), -O0 is slower (41 MB objects), `-Os -fno-inline` is the cheapest.
+  All -O2: 1185 to 1353 CPU s (wall 199 to 236 s); Fast: 825 CPU s (wall 139 s), 189 of 451 batch files -O2.
+
+### Resuming a build that was cut off
+Every finished object is put in place with `os.replace` of a complete `.part` file, so an object is whole or absent; `.part` leftovers of a killed compile are
+deleted when the next build starts. psp_build keeps its translation stamp. The app records each finished plan step in `<work>/steps_done.txt` and the plan's
+options in `files/build.running`; after a kill / crash / quit the app offers **Resume the build** (skips the finished steps, the compile step compiles only the
+missing objects, then links and packs) or **Start over**. The desktop wizard shares the object cache and psp_build's stamps, so re-running its build also compiles only the
+missing files; it has no per-step record or dialog (not needed: the steps are idempotent).
+
+Game speed of Fast vs Full (PC x86 build of the same sources compiled the same way: batches in `hot_funcs.txt` -O2, the others `-Os -fno-inline`; the Android emulator rig was
+in use by another session): a 70 s tag battle run unthrottled took 56 / 55 s (Full) and 53 / 59 s (Fast) wall, no measurable difference. SDK APK build (cmake, all files):
+Full 2 m 59 s wall / 28 m 11 s CPU, Fast 2 m 16 s / 19 m 45 s. Not measured on a real phone.

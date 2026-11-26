@@ -1,5 +1,6 @@
 package org.psprecomp.setup;
 
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -46,7 +47,19 @@ final class BuildRunner {
     volatile JSONObject lastProgress;
     private Writer out;
 
-    BuildRunner(String kind, JSONArray plan, File log) {
+    private final Context app;
+    private final String opts;
+    private final boolean resume;
+    private final File doneFile;
+    private final java.util.HashSet<String> done = new java.util.HashSet<>();
+
+    /** resume = continue an interrupted run: the steps that finished are skipped (steps_done.txt next to the log); a step that was cut off runs again, and
+     *  the build step itself continues where it stopped (psp_build keeps its translation stamp and every finished object, see android_build.py). */
+    BuildRunner(Context ctx, String kind, JSONArray plan, File log, String opts, boolean resume) {
+        this.app = ctx.getApplicationContext();
+        this.opts = opts == null ? "" : opts;
+        this.resume = resume;
+        this.doneFile = new File(log.getParentFile(), "steps_done.txt");
         this.kind = kind;
         this.plan = plan;
         this.log = log;
@@ -126,6 +139,21 @@ final class BuildRunner {
 
     private void run() {
         try {
+            run2();
+        } finally {   // whatever ended the build (done, failed, cancelled, an exception): the wake lock and the service go
+            BuildService.stop(app);
+            if (running) {
+                running = false;
+                if (error.isEmpty()) error = "The setup stopped unexpectedly.";
+                final Listener l = listener;
+                if (l != null) ui.post(() -> { if (listener == l) l.finished(false, error, note); });
+            }
+            if (listener == null) BuildService.finished(app, ok, ok ? "Open the setup app and install the game." : error);
+        }
+    }
+
+    private void run2() {
+        try {
             log.getParentFile().mkdirs();
             out = new OutputStreamWriter(new FileOutputStream(log, true), "UTF-8");
         } catch (Exception e) {
@@ -136,7 +164,7 @@ final class BuildRunner {
             if (m != null) {
                 m.getParentFile().mkdirs();
                 try (FileOutputStream mo = new FileOutputStream(m)) {
-                    mo.write((kind + "\n").getBytes("UTF-8"));
+                    mo.write((kind + "\n" + opts).getBytes("UTF-8"));   // what "Resume the build" needs after a kill
                 }
             }
         } catch (Exception e) {
@@ -145,9 +173,25 @@ final class BuildRunner {
         String stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
         say("===== psprecomp_setup run (" + kind + ", " + stamp + ") =====");
         String fail = null;
+        if (resume) {
+            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(doneFile), "UTF-8"))) {
+                String l;
+                while ((l = br.readLine()) != null) done.add(l);
+            } catch (Exception e) {
+                // nothing recorded: everything runs
+            }
+            say("Resuming: " + done.size() + " step(s) were finished earlier.");
+        } else {
+            doneFile.delete();
+        }
         try {
             for (int i = 0; i < plan.length() && fail == null; i++) {
                 JSONObject step = plan.getJSONObject(i);
+                final String stepKey = i + "|" + step.optString("label");
+                if (done.contains(stepKey)) {
+                    say("===== step " + (i + 1) + "/" + plan.length() + ": " + step.optString("label") + " (done earlier, skipped) =====");
+                    continue;
+                }
                 say("===== step " + (i + 1) + "/" + plan.length() + ": " + step.optString("label") + " =====");
                 String err = Engine.startStep(i);
                 emitProgress(true);
@@ -186,6 +230,13 @@ final class BuildRunner {
                         fail = perr.isEmpty() ? "A step failed (exit code " + code + "). The log shows what happened." : perr + ".";
                     }
                 }
+                if (fail == null) {
+                    try (FileOutputStream df = new FileOutputStream(doneFile, true)) {
+                        df.write((stepKey + "\n").getBytes("UTF-8"));
+                    } catch (Exception e) {
+                        // not recorded: the step runs again on a resume
+                    }
+                }
             }
         } catch (Exception e) {
             fail = "The setup stopped: " + e;
@@ -201,6 +252,7 @@ final class BuildRunner {
         File m = marker;
         if (m != null) m.delete();
         ok = fail == null;
+        if (ok) doneFile.delete();
         error = fail == null ? "" : fail;
         running = false;
         final Listener l = listener;

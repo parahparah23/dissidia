@@ -120,7 +120,6 @@ public class SetupActivity extends Activity {
     private boolean wasStopped;
     private static final long INSTALL_HINT_MS = 30000;   // no answer from Android after this: the waiting page explains what to do
     private String pendingInstallApk;
-    private PowerManager.WakeLock wakeLock;
     private JSONObject upd;
     private volatile int checkSeq = 0;
     private Downloader updDl;
@@ -160,7 +159,10 @@ public class SetupActivity extends Activity {
 
         BuildRunner.marker = new File(getFilesDir(), "build.running");
         if (BuildRunner.current == null && BuildRunner.marker.isFile()) {   // a plan was running when the app last ended and it never finished: killed or crashed
-            interruptedKind = readText(BuildRunner.marker, 64).trim();
+            String mk = readText(BuildRunner.marker, 1 << 16);
+            int nl = mk.indexOf('\n');
+            interruptedKind = (nl < 0 ? mk : mk.substring(0, nl)).trim();
+            interruptedOpts = nl < 0 ? "" : mk.substring(nl + 1);
             if (interruptedKind.isEmpty()) interruptedKind = "install";
             BuildRunner.marker.delete();
         }
@@ -640,6 +642,35 @@ public class SetupActivity extends Activity {
         return w != null && !w.isEmpty() && new File(w, "android/dissidia.apk").isFile();
     }
 
+    /** "fast" (default on a phone) or "full": how the game is compiled here (games/dissidia/tools/android_build.py reads work/build_profile.txt). */
+    private String buildProfile() {
+        return "full".equals(readText(new File(getFilesDir(), "build_profile.txt"), 16).trim()) ? "full" : "fast";   // own file: the engine's install.ini only keeps keys it knows
+    }
+
+    private static final String[] PROFILE_LABELS = {"Fast", "Full"};
+    private static final String PROFILE_HELP_FAST = "Fast: a shorter install; the parts of the game that run a lot are optimised fully, the rest for size. The game can be a little slower.";
+    private static final String PROFILE_HELP_FULL = "Full: the longest install (about half as long again) and the fastest game. You can switch later with Rebuild.";
+
+    private void setProfile(String p) {
+        try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(getFilesDir(), "build_profile.txt"))) {
+            o.write((p + "\n").getBytes("UTF-8"));
+        } catch (Exception e) {
+            // the choice is then not kept
+        }
+    }
+
+    /** The build's choice goes to the work folder: the build script reads it (the object cache keys include the flags, so switching rebuilds only what differs). */
+    private void writeProfile(String dir) {
+        try {
+            new File(dir).mkdirs();
+            try (java.io.FileOutputStream o = new java.io.FileOutputStream(new File(dir, "build_profile.txt"))) {
+                o.write((buildProfile() + "\n").getBytes("UTF-8"));
+            }
+        } catch (Exception e) {
+            // the build then uses its default (fast)
+        }
+    }
+
     private boolean needRebuild() {
         if (!installed()) return false;
         String fp = Engine.payloadFingerprint(), built = st.get("built_fp");
@@ -678,6 +709,11 @@ public class SetupActivity extends Activity {
             if (!upd) ins.style(Card.STYLE_PRIMARY);
             ins.onClick(v -> installGame(new File(stWorkdir(), "android/dissidia.apk").getPath(), false));
             saveApkCard(p);
+            final boolean isFull = "full".equals(buildProfile());
+            p.card(new Card(this, Card.ACTION, Icons.REFRESH, isFull ? "Rebuild game (Fast)" : "Rebuild game (Full)", isFull
+                    ? "Builds again with the shorter install; the game can be a little slower. Now: Full. No disc needed."
+                    : "Builds again with full optimisation: the longest install, the fastest game. Now: Fast. No disc needed. Only part of the game is compiled again."))
+                    .onClick(v -> { setProfile(isFull ? "fast" : "full"); workdir = stWorkdir(); startPlan("rebuild", "", Options.from(st), null); });
             p.card(new Card(this, Card.ACTION, Icons.SLIDERS, "Change extras", "HD textures, texture pack, Japanese voices or Bartz's Dissidia 1 moves, without building again.")).onClick(v -> beginExtras());
             p.card(new Card(this, Card.ACTION, Icons.DISC, "Build it again", "Pick your game file and build from scratch. Your saves are kept.")).onClick(v -> beginPick(PICK_ISO, this::backHome));
             p.card(new Card(this, Card.ACTION, Icons.DOWNLOAD, "Check for updates", "Looks for a newer version of this app on github.com. Nothing about you or your game is sent.")).onClick(v -> beginCheck(true));
@@ -984,6 +1020,11 @@ public class SetupActivity extends Activity {
             Card up = p.card(new Card(this, Card.TOGGLE, Icons.REFRESH, "Check for updates", "Look for a newer version of this app when it starts, and once a day in the background (a notification only).").toggle(opt.checkUpdates()));
             up.onChange(k -> opt.set("check_updates", k.isOn() ? "1" : "0"));
         }
+        if (!extrasMode) {
+            final int sel0 = "full".equals(buildProfile()) ? 1 : 0;
+            Card bp = p.card(new Card(this, Card.CHOICE, Icons.BUILD, "Build", (sel0 == 0 ? PROFILE_HELP_FAST : PROFILE_HELP_FULL)).choices(PROFILE_LABELS, sel0));
+            bp.onChange(c -> { setProfile(c.choice() == 1 ? "full" : "fast"); c.summary(c.choice() == 1 ? PROFILE_HELP_FULL : PROFILE_HELP_FAST); });
+        }
         long free = Engine.freeSpace(workdir);
         String space = free >= 0 ? "Free space: " + BuildRunner.size(free) + (free < (6L << 30) && !extrasMode ? " (about 6 GB are needed!)" : "") + "." : "";
         Card start = p.card(new Card(this, Card.ACTION, extrasMode ? Icons.CHECK : Icons.BUILD, extrasMode ? "Apply changes" : "Start building",
@@ -1040,7 +1081,9 @@ public class SetupActivity extends Activity {
             dialog("Extras", "Nothing needed to be added: the extras you chose are already in place.", Icons.CHECK, new Btn("OK", Icons.CHECK, Card.STYLE_PRIMARY, this::backHome));
             return;
         }
-        BuildRunner r = new BuildRunner(kind, plan, new File(workdir, "setup.log"));
+        if (kind.equals("install") || kind.equals("rebuild")) writeProfile(workdir);
+        BuildRunner r = new BuildRunner(this, kind, plan, new File(workdir, "setup.log"), runOpts, resumeNext);
+        resumeNext = false;
         r.start();
         keepAwake(true);
         BuildService.start(this);
@@ -1297,6 +1340,8 @@ public class SetupActivity extends Activity {
     }
 
     private String failMsg = "", failTail = "", failStage = "";
+    private String interruptedOpts = "";
+    private boolean resumeNext;   // the next startPlan continues an interrupted run
     private String interruptedKind = "";   // set at start when the last install did not end (offered once)
 
     private void showFailed() {
@@ -1337,12 +1382,11 @@ public class SetupActivity extends Activity {
 
     private void keepAwake(boolean on) {
         if (on) {
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            if (wakeLock == null) wakeLock = ((PowerManager) getSystemService(Context.POWER_SERVICE)).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "psprecomp:build");
-            if (!wakeLock.isHeld()) wakeLock.acquire(3 * 60 * 60 * 1000L);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);   // the screen stays on while this page is shown
+            BuildService.hold(this);   // the CPU stays on when it is not (the process-wide lock, given back when the build ends)
         } else {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            BuildService.release();
         }
     }
 
@@ -1956,6 +2000,15 @@ public class SetupActivity extends Activity {
         if (overlay.getChildCount() > 0) return;
         if (f == null && !killed.isEmpty()) {   // no crash report, but a run never ended: Android killed the app (memory?) or the device restarted
             interruptedKind = "";
+            final String kOpts = interruptedOpts;
+            final boolean canResume = (killed.equals("install") || killed.equals("rebuild") || killed.equals("demo")) && new File(killed.equals("install") || killed.equals("demo") ? workdir : stWorkdir(), "steps_done.txt").isFile();
+            if (canResume) {
+                dialog("The last build did not finish", "The app was closed while it built the game. Resume continues where it stopped: the steps and the compiled files that are done are kept, only the rest is built. Start over builds everything again (your game file is asked for again).", Icons.REFRESH,
+                        new Btn("Resume the build", Icons.REFRESH, Card.STYLE_PRIMARY, () -> { resumeNext = true; workdir = killed.equals("install") || killed.equals("demo") ? workdir : stWorkdir(); startPlan(killed, "", Options.parse(kOpts), null); }),
+                        new Btn("Start over", Icons.BUILD, Card.STYLE_NORMAL, () -> { new File(killed.equals("install") || killed.equals("demo") ? workdir : stWorkdir(), "steps_done.txt").delete(); backHome(); }),
+                        new Btn("Report an issue", Icons.BUG, Card.STYLE_NORMAL, () -> beginReport(this::backHome, "The last " + killed + " did not finish: the app was closed while it worked.", "", "")));
+                return;
+            }
             dialog("The last " + (killed.equals("install") ? "build" : killed) + " did not finish", "The app was closed while it worked (Android may have stopped it, or it crashed). The build log is kept. Sending it to the developer helps to fix this; you see what is sent first.", Icons.BUG,
                     new Btn("Report an issue", Icons.BUG, Card.STYLE_PRIMARY, () -> beginReport(this::backHome, "The last " + killed + " did not finish: the app was closed while it worked.", "", "")),
                     new Btn("Not now", Icons.CLOSE, Card.STYLE_NORMAL, null));

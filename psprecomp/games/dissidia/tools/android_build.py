@@ -13,6 +13,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import stat
@@ -165,6 +166,59 @@ def pack_apk(adir, work, libmain, run, say, env):
 
 # --------------------------------------------------------------------------------------------------------------- on the phone
 
+# The cold batches' flags (measured, see games/dissidia/docs/native-build.md "Fast build"): -O1 compiles as slowly as -O2 on this code (huge straight-line
+# functions: the time is in the inliner and the back end), -O0 is slower still (41 MB objects); -Os with no inlining is the cheapest and the smallest.
+COLD_OPT = "-Os -fno-inline"
+HOT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hot_funcs.txt")
+
+
+def build_profile(work):
+    """("fast" | "full", the cold files' -O level) for the phone's own build. PSPRECOMP_BUILD_PROFILE, else <work>/build_profile.txt
+    (written by the setup app), else fast. PSPRECOMP_COLD_OPT (-O1 / -O0) is for measuring."""
+    p = os.environ.get("PSPRECOMP_BUILD_PROFILE", "").strip().lower()
+    if not p:
+        try:
+            p = open(os.path.join(work, "build_profile.txt")).read().strip().lower()
+        except OSError:
+            p = ""
+    if p != "full":
+        p = "fast"
+    cold = os.environ.get("PSPRECOMP_COLD_OPT", COLD_OPT)
+    return p, (cold if cold in ("-O0", "-O1", "-Os", COLD_OPT) else COLD_OPT)
+
+
+def hot_functions():
+    """tools/hot_funcs.txt: {group: set of entry addresses} of the functions that run a lot; group = out (the EBOOT) or an overlay name.
+    No file = nothing known: every batch is hot (the same as Full)."""
+    d = {}
+    try:
+        for l in open(HOT_FILE):
+            t = l.split()
+            if len(t) == 2 and not l.startswith("#"):
+                d.setdefault(t[0], set()).add(int(t[1], 16))
+    except OSError:
+        return None
+    return d or None
+
+
+def src_is_batch(src):
+    return os.path.basename(src).startswith("batch_")
+
+
+_FUNC_RE = re.compile(rb"^RECOMP_FUNC void \w+\(.*\{ /\* 0x([0-9A-Fa-f]{8}) \*/", re.M)
+
+
+def batch_is_hot(src, work, hot):
+    """Does this generated batch file hold a function of the hot list? (by the entry addresses in the file: batch numbers can change)"""
+    if hot is None:
+        return True
+    parts = os.path.normpath(src).split(os.sep)
+    group = parts[-3] if len(parts) > 3 and parts[-3] != "output" and parts[-2] == "generated" and parts[-4] == "overlays" else "out"
+    want = hot.get(group, ())
+    with open(src, "rb") as f:
+        return any(int(m.group(1), 16) in want for m in _FUNC_RE.finditer(f.read()))
+
+
 def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
     """Compile + link the generated game ON the phone with the zig that ships in the setup app (zig is clang + lld in one static binary).
 
@@ -197,6 +251,15 @@ def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
     # zig's cache is only needed while a compile runs: emptied before the build (a stopped one leaves it) and after it.
     if not os.environ.get("PSPRECOMP_KEEP_ZIG_CACHE"):
         shutil.rmtree(env["ZIG_GLOBAL_CACHE_DIR"], ignore_errors=True)
+    # a build that was killed leaves the half-written object it was compiling (<name>.part): discarded here. A finished object is only ever put in place by
+    # os.replace of a complete .part (below), so everything else in objdir is whole and is reused: a resumed build compiles only the missing files.
+    for dp, _, fns in os.walk(objdir):
+        for fn in fns:
+            if fn.endswith(".part"):
+                try:
+                    os.remove(os.path.join(dp, fn))
+                except OSError:
+                    pass
     deps = os.path.join(adir, "deps", "deps")
     out = os.path.join(work, "output")
     ovl = os.path.join(work, "overlays")
@@ -223,6 +286,25 @@ def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
              "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % api, "-fdata-sections", "-ffunction-sections", "-funwind-tables",
              "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-std=gnu++17", "-fPIC", "-O2", "-fno-lto", "-fno-strict-aliasing", "-Wno-everything",
              "-ffp-contract=off"]   # lock-step online play: no fused multiply-add (clang for ARM fuses a * b + c by default), same rounding as the PC build
+    # Build profile: "full" = -O2 everywhere; "fast" (the phone's default, chosen in the setup app) = -O2 only for the batch files that hold
+    # code that runs a lot (tools/hot_funcs.txt: measured during a battle and the menus), the cold batches with -O1: a shorter install
+    # for a slightly slower game. The flags are part of the object's key, so switching the profile compiles only the files that differ.
+    profile, cold_opt = build_profile(work)
+    hot_set = hot_functions() if profile == "fast" else None
+    opt_of = {}   # source -> "-O2" / cold_opt
+    hot_n = [0, 0]
+
+    def flags_for(src):
+        if src not in opt_of:
+            hot = hot_set is None or not src_is_batch(src) or batch_is_hot(src, work, hot_set)
+            opt_of[src] = "-O2" if hot else cold_opt
+            if src_is_batch(src):
+                hot_n[0 if hot else 1] += 1
+        out = []
+        for t in flags:
+            out += cold_opt.split() if (t == "-O2" and opt_of[src] != "-O2") else [t]
+        return out
+
     # Objects are kept by what they were compiled from (objcache.py: the source's bytes, the generated headers it includes, the compiler
     # and the flags without folder paths), so an update compiles only the files whose code changed. Before, the object names carried a
     # hash of the flags and of zig's path, which are inside the release folder: every update compiled all files again.
@@ -237,14 +319,14 @@ def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
         zig_ver = ""
     cid = "zig %s size %d; ndk %s; api %s" % (zig_ver or "?", os.path.getsize(zig), v.get("ndk", {}).get("version", "?"), api)
     use_cache = not os.environ.get("PSPRECOMP_NO_OBJCACHE")
-    old_stamp = hashlib.sha256((" ".join(flags) + zig).encode()).hexdigest()[:12]
+    old_stamp = {}
     info = {}   # source -> (object file, the parts of its key or None when it is not cached)
 
     def obj_of(src):
         if src not in info:
-            parts = objcache.key_parts(work, src, flags, cid) if use_cache else None
+            parts = objcache.key_parts(work, src, flags_for(src), cid) if use_cache else None
             info[src] = (objcache.entry(objdir, objcache.key_of(parts)) if parts else
-                         os.path.join(objdir, hashlib.sha1(src.encode()).hexdigest()[:10] + "_" + os.path.basename(src) + "." + old_stamp + ".o"), parts)
+                         os.path.join(objdir, hashlib.sha1(src.encode()).hexdigest()[:10] + "_" + os.path.basename(src) + "." + hashlib.sha256((" ".join(flags_for(src)) + zig).encode()).hexdigest()[:12] + ".o"), parts)
         return info[src][0]
 
     def up_to_date(src):
@@ -252,6 +334,8 @@ def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
         return os.path.isfile(o) and (info[src][1] is not None or os.path.getmtime(o) >= os.path.getmtime(src))
 
     todo = [(s, inc) for s, inc in srcs if not up_to_date(s)]
+    say("Build: %s (%s)" % ("Fast: -O2 for %d batch files that run a lot, '%s' for the other %d" % (hot_n[0], cold_opt, hot_n[1]) if profile == "fast" else "Full: -O2 for every file",
+                            "chosen in the setup app"))
     reasons = {}   # why the cached files of this build are compiled (the part of the key that changed)
     for s, _ in todo:
         if info[s][1]:
@@ -302,7 +386,7 @@ def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
             st["starts"].append(t0)
         out, rc, peak = "", 1, 0
         try:
-            pr = subprocess.Popen([zig, "c++"] + flags + inc + ["-c", src, "-o", part], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            pr = subprocess.Popen([zig, "c++"] + flags_for(src) + inc + ["-c", src, "-o", part], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             out = pr.stdout.read().decode("utf-8", "replace")
             try:
                 _, status, ru = os.wait4(pr.pid, 0)
