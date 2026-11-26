@@ -5673,6 +5673,15 @@ Report: RP6 `desk_logs/rp6_exb_emperor_1125_1455.log` (enemy extra Emperor, `[XR
   `[EXBAT]` prints the burster's burst record.
 
 
+### Batch thirty (25 Nov): no forced cursor, faster tag menus, Party Select never shown (tree ttffares3, branch tt-ffares3)
+- **Nudge removed.** The Down + Up injected after the lobby closed (`g_nudge`, Batch twenty-three) is gone for good (no env flag): the setup screen's stage preview is not refreshed any more (it follows the cursor row; not checked whether it now shows the old stage after a lobby stage change).
+- **Delays found and cut** (host, 30 fps, `~/dissidia/tt/s2/ttffares3/flow.py` + `tm.py`, log timestamps): the FFA scripted pass (Party Select > CPU Select > setup, `g_script_t`) waited 220 polls (7 s at 30 fps) for Party Select, which is up after ~0.5 s, and spaced its presses 120 polls (4 s) apart:
+  **lobby Cross > setup screen + Enter Battle: 24.4 s before, 6.7 s now** (first press after 40 polls, spacing x0.3; `PSPRECOMP_TAGTEAM_SCRIPT_WAIT`, `_SCRIPT_SCALE`; `PSPRECOMP_TAGTEAM_SLOWMENU=1` = all old values). Hop to CPU Select from the players screen: ~3.2 s (measured with screenshots every 0.25 s). Also cut: the re-arm check after backing out (500 > 120 ms), the Mode Select's frozen layer over the next screen
+  (450 > 150 ms), the sub-list re-opening gap (0.25 > 0.12 s). Retail's own transitions measured with the same tool: main menu > Battle Mode list 0.03 s, list > Party Select 0.2 s, Party Select <> CPU Select 0.45 s.
+- **Party Select never on screen**: while the script runs (from the Mode Select's confirm) the players screen's background with "Opening the character select..." / "Starting the battle..." is drawn over retail's screens each poll (`PSPRECOMP_TAGTEAM_FFA_NOCOVER=1`: off); seen in a 0.25 s screenshot series: players > Mode Select frame (frozen layer) > cover > CPU Select, no Party Select.
+- **NOT done: the real Player Select (1-on-1, LOOK / SET, "Play as this character?") per pick.** Every field still opens the CPU Select grid (Batch twenty-nine). Reaching Player Select without pad presses needs retail's open step (the Battle Mode list's row 0 target = Quick Battle 1-on-1 opens it from the Mode Select by writing the row index, the same way the tag modes do) AND its confirm / pick storage to come back
+  to the players screen without Circle presses: not located (a RAM diff across the YES confirm showed only noise; the pick lives in the 1-on-1 route's own state, the battle record is only filled at Enter Battle). CPU fighters' and tag-ins' looks: not done.
+
 ### Batch twenty-nine (25 Nov): user play-test follow-ups: Enter Battle preview, Communications opened the battle menu, rules for every tag fighter (tree ttlobui, branch tt-lobbyui2)
 - **Enter Battle preview.** `FUN_08AA9350` (menu overlay) picks the stage preview texture: the stage of the cursor row's round block for rows 0-4, the "?" picture (base + 35) for row 5 (Enter Battle).
   In tag mode it now runs with the row shown as 4 for that call (every block holds the lobby's stage) and the row is put back (`g_orig_preview`, tagteam_menu.cpp; `PSPRECOMP_TAGTEAM_ENTERPREVIEW_OFF=1`: old).

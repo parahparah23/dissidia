@@ -121,10 +121,13 @@ std::atomic<int> g_inject_cross{0};
 // Circle on the setup screen's list (no dialog) now reopens the lobby (g_lob_flow), Circle in that lobby goes back to Party Select (one injected Circle for retail's screen),
 // and menu_settings.cpp reopens the Mode Select when the Battle Mode / Communications list comes back. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old.
 bool g_lob_flow = false;   // the lobby is a step of the menu chain (opened by the flow or by Circle on the setup screen): Circle goes back a screen, Cross goes on
-std::atomic<int> g_nudge{0};   // 25 Nov: the setup screen's stage preview only follows the cursor row: after the lobby closed, one Down + Up reloads it (PSPRECOMP_TAGTEAM_NONUDGE=1: old)
+// (25 Nov, user: no cursor is ever moved for the player: the Down + Up "nudge" that reloaded the setup screen's stage preview after the lobby is gone)
+std::atomic<int> g_nudge_unused{0};   // 25 Nov: the setup screen's stage preview only follows the cursor row: after the lobby closed, one Down + Up reloads it (PSPRECOMP_TAGTEAM_NONUDGE=1: old)
 std::atomic<int> g_inject_circle{0};   // a Circle for retail's setup screen after the lobby closed (6 .. 1: down while 5 .. 3)
 std::atomic<int64_t> g_circle_stamp{0};   // steady-clock ms of the last setup screen tick that took Circle (the pad filter hides Circle from the screen for 100 ms after)
 int64_t steady_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+// 25 Nov (user: the tag menus are slow): the idle checks were 500 ms (re-arm after backing out) / 450 ms (the Mode Select's frozen layer over the next screen); PSPRECOMP_TAGTEAM_SLOWMENU=1: old values
+const int kRearmMs = std::getenv("PSPRECOMP_TAGTEAM_SLOWMENU") ? 500 : 120, kHoldTtlMs = std::getenv("PSPRECOMP_TAGTEAM_SLOWMENU") ? 450 : 150;
 bool menuback_old() { static const bool o = std::getenv("PSPRECOMP_TAGTEAM_MENUBACK_OLD") != nullptr; return o; }
 std::atomic<int> g_script_t{-1};   // the Free-for-all's scripted pass through retail's Party Select and CPU Select (single player): polls since the confirm, -1 = off
 std::atomic<int> g_inject_late{0};   // a confirm for the start menu after the mode select closed: pressed once the dialog hold is over (6 .. 1: Cross is down while 5 .. 3)   // "Add CPU" (L on the free row) presses Cross for the screen: it opens Player Select for the new row
@@ -528,7 +531,7 @@ int g_ffa_slot = 0, g_ffa_field = 0;   // the cursor: slot 0..3, field 0 TYPE, 1
 bool g_rearm = false;   // 25 Nov (user: back out past the lobby, then forward again skipped it): set when the flow was backed out of; once the setup screen has been gone for 0.5 s the lobby (FFA: the players screen) is pending again. PSPRECOMP_TAGTEAM_MENUBACK_OLD=1: old
 bool g_ffa_then_lobby = false, g_lobby_pending = false, g_ffa_flow = false, g_ffa_autostart = false;
 bool g_ms_pre = false, g_ms_hop = false, g_ms_done = false;   // 25 Nov (user: Free-for-all goes DIRECTLY to the players menu): the players screen and the lobby are hosted by the Mode Select (retail's Party Select / CPU Select are passed by a script afterwards; g_ms_hop: the player asked for the game's selector instead)
-std::atomic<int> g_script_lim{1000};   // the scripted pass stops after the event that starts at or before this poll
+std::atomic<int> g_script_lim{1000}; std::atomic<int> g_ps_frames{0};   // frames Party Select's ready test ran since the script started   // the scripted pass stops after the event that starts at or before this poll
 std::atomic<int> g_hop_more{0}; std::atomic<int64_t> g_hop_at{0};
 int g_hop_slot = -1, g_hop_field = 1;   // the cursor to restore when the players screen comes back from a retail selector
 uint8_t g_seen_p1[2] = {0xFF, 0xFF}, g_seen_pick[3] = {0xFF, 0xFF, 0xFF};   // the retail values (party's first two, CPU Select's picks) already taken over (0xFF = none yet)
@@ -768,7 +771,6 @@ void lobby_dialog(uint8_t* rdram, recomp_context* ctx, uint32_t pressed, float a
         if ((pressed & BTN_CROSS) && vis[g_lob_row] == 8) { g_dlg_mode = 3; g_ffa_then_lobby = true; g_ffa_slot = 1; g_ffa_field = 1; play_se(rdram, ctx, 1); return; }   // PLAYERS: the Free-for-all setup
         std::fprintf(stderr, "[TTLOBBY] lobby closed by a press %04X (sp %d)\n", pressed, (int)sp);
         g_dlg_open = false; g_dlg_mode = 0; g_lob_flow = false; play_se(rdram, ctx, 1);
-        if (sp && !g_ffa_flow && !std::getenv("PSPRECOMP_TAGTEAM_NONUDGE")) g_nudge.store(24, std::memory_order_relaxed);
         if (g_ffa_flow && sp) { g_ffa_flow = false; g_ffa_autostart = true; g_cover_until = std::chrono::steady_clock::now() + std::chrono::seconds(8); }   // Free-for-all: the battle starts from here
         return;
     }
@@ -1007,6 +1009,7 @@ void draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen) {
 // one party the other is the host's CPU party: it may be empty (the test is run again with a stand-in entry in that list, then the list is put back).
 void ready_hook(uint8_t* rdram, recomp_context* ctx) {
     if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(READY_TEST)) f(rdram, ctx); return; }
+    if (g_script_t.load(std::memory_order_relaxed) == 0) g_ps_frames.fetch_add(1, std::memory_order_relaxed);
     const uint32_t base = static_cast<uint32_t>(ctx->r[4]);
     g_orig_ready(rdram, ctx);
     if (ctx->r[2] != 0 || !dissidia_tagteam_group_on()) return;
@@ -1239,7 +1242,7 @@ void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
         }
     }
     {   static auto last_sp = std::chrono::steady_clock::now(); const auto nw = std::chrono::steady_clock::now();
-        if (g_rearm && nw - last_sp > std::chrono::milliseconds(500) && !menuback_old()) { g_rearm = false; g_lobby_pending = true; std::fprintf(stderr, "[TTLOBBY] the setup screen is back after backing out: the lobby again\n"); }
+        if (g_rearm && nw - last_sp > std::chrono::milliseconds(kRearmMs) && !menuback_old()) { g_rearm = false; g_lobby_pending = true; std::fprintf(stderr, "[TTLOBBY] the setup screen is back after backing out: the lobby again\n"); }
         last_sp = nw; }
     if (!g_dlg_open && g_lobby_pending && list && !std::getenv("PSPRECOMP_TAGTEAM_SPLOBBY_OFF")) {   // the flow: Tag Team Battle > mode select > Party Select > (the Free-for-all player setup >) the lobby > this screen
         g_lobby_pending = false; opened_now = true; g_lob_sp = true; g_dlg_bp = false; g_dlg_sp = false; g_dlg_open = true; g_lob_row = 0;
@@ -1340,12 +1343,30 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
     if (g_sp_sq_block.load(std::memory_order_relaxed) && g_pad_polls.fetch_add(1, std::memory_order_relaxed) - g_sq_stamp.load(std::memory_order_relaxed) < 40u) raw &= ~BTN_SQUARE;
     else g_pad_polls.fetch_add(1, std::memory_order_relaxed);
     if (const int eb = g_enter_block.load(std::memory_order_relaxed); eb && g_pad_polls.load(std::memory_order_relaxed) - g_enter_stamp.load(std::memory_order_relaxed) < 40u) { raw &= ~0x8u; if (eb == 2) raw &= ~BTN_CROSS; }   // the CPU party has no opponent yet: Start (and Cross on Enter Battle) do nothing
-    if (int st = g_script_t.load(std::memory_order_relaxed); st >= 0) {   // the scripted pass (offsets from the walk that works headless: Party A, the CPU's 1st slot, a character, down to OK, OK)
-        static const std::pair<int, uint32_t> ev[] = {{220, BTN_CROSS}, {340, BTN_CROSS}, {460, BTN_CROSS}, {580, BTN_DOWN}, {600, BTN_DOWN}, {620, BTN_DOWN}, {640, BTN_DOWN}, {660, BTN_DOWN}, {720, BTN_CROSS}};
+    if (int st = g_script_t.load(std::memory_order_relaxed); st >= 0) {   // the scripted pass (Party A, the CPU's 1st slot, a character, down to OK, OK)
+        // 25 Nov (user: slow menus): it started at poll 220 (7 s at 30 fps; the game's Party Select is up after ~0.5 s) and spaced its steps 4 s apart (retail's transitions take 0.45 s): now 40 polls, and the later steps follow
+        // at kScriptScale of the old spacing (1 = old; PSPRECOMP_TAGTEAM_SCRIPT_SCALE). The first event alone is a hop to CPU Select (g_script_lim < 1000).
+        static const float sc = std::getenv("PSPRECOMP_TAGTEAM_SCRIPT_SCALE") ? static_cast<float>(std::atof(std::getenv("PSPRECOMP_TAGTEAM_SCRIPT_SCALE"))) : 0.3f;
+        static const bool old_t = std::getenv("PSPRECOMP_TAGTEAM_SLOWMENU") != nullptr;
         const int lim = g_script_lim.load(std::memory_order_relaxed);
-        uint32_t m = 0; for (const auto& e : ev) if (e.first <= lim && st >= e.first && st < e.first + 4) m |= e.second;
-        g_script_t.store(st > std::min(800, lim + 40) ? -1 : st + 1, std::memory_order_relaxed);
-        raw = (raw & ~(BTN_CROSS | BTN_DOWN | BTN_UP | BTN_CIRCLE)) | m;
+        {
+            const int base0 = old_t ? 220 : (std::getenv("PSPRECOMP_TAGTEAM_SCRIPT_WAIT") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_SCRIPT_WAIT")) : 40), sp = old_t ? 1 : 0;
+            struct Ev { int t; uint32_t b; };
+            const Ev ev[] = {{0, BTN_CROSS}, {int(120 * (old_t ? 1.f : sc)), BTN_CROSS}, {int(240 * (old_t ? 1.f : sc)), BTN_CROSS}, {int(360 * (old_t ? 1.f : sc)), BTN_DOWN}, {int(380 * (old_t ? 1.f : sc)), BTN_DOWN}, {int(400 * (old_t ? 1.f : sc)), BTN_DOWN}, {int(420 * (old_t ? 1.f : sc)), BTN_DOWN}, {int(440 * (old_t ? 1.f : sc)), BTN_DOWN}, {int(500 * (old_t ? 1.f : sc)), BTN_CROSS}};
+            (void)sp;
+            static int zero = -1; if (st == 0 || zero < 0) { /* st counts polls since Party Select was up */ }
+            uint32_t m = 0; for (size_t i = 0; i < sizeof ev / sizeof ev[0]; i++) { if (lim < 1000 && i > 0) break; const int t0 = ev[i].t + base0; if (st >= t0 && st < t0 + 4) m |= ev[i].b; }
+            const int endt = (lim < 1000 ? 4 + 20 : ev[8].t + 40) + base0;
+            if (!old_t && !std::getenv("PSPRECOMP_TAGTEAM_FFA_NOCOVER")) {   // 25 Nov (user: Party Select must never show in the Free-for-all): the screens the script passes are covered by the players screen's background
+                ge_draw_set_game_layer_ttl(160); g_layer.begin(std::max(2, psp_sddialog::output_scale()));
+                gs_background(); gs_title("FREE-FOR-ALL", "Everyone fights for himself");
+                const char* t = lim < 1000 ? "Opening the character select..." : "Starting the battle...";
+                const float w = g_layer.text(t, true, 9.f, 0, 0, LayerColor{0, 0, 0, 0}, true); g_layer.text(t, true, 9.f, (kScrW - w) / 2.f, 140.f, LayerColor{40, 42, 80, 1.f});
+                g_layer.publish();
+            }
+            g_script_t.store(st > endt ? -1 : st + 1, std::memory_order_relaxed);
+            raw = (raw & ~(BTN_CROSS | BTN_DOWN | BTN_UP | BTN_CIRCLE)) | m;
+        }
     }
     if (const int cf = g_col_fix.load(std::memory_order_relaxed); cf && g_pad_polls.load(std::memory_order_relaxed) - g_enter_stamp.load(std::memory_order_relaxed) < 40u) {
         if (cf == 1) raw &= ~(BTN_RIGHT | BTN_LEFTK);
@@ -1355,7 +1376,6 @@ uint32_t dissidia_tagteam_menu_pad(uint32_t raw) {
     static std::atomic<int> hold{0};   // a button that closed a dialog stays down for a few polls: the screen under it must not see it
     if (g_dlg_open.load(std::memory_order_relaxed)) { hold.store(12, std::memory_order_relaxed); return 0u; }
     if (const int h = hold.load(std::memory_order_relaxed); h > 0) { hold.store(h - 1, std::memory_order_relaxed); return 0u; }
-    if (int nu = g_nudge.load(std::memory_order_relaxed); nu > 0) { g_nudge.store(nu - 1, std::memory_order_relaxed); raw = (raw & ~(BTN_DOWN | BTN_UP)) | ((nu >= 18 && nu <= 20) ? BTN_DOWN : (nu >= 8 && nu <= 10) ? BTN_UP : 0u); }
     if (g_inject_circle.load(std::memory_order_relaxed) == 0 && g_hop_more.load(std::memory_order_relaxed) > 0 && steady_ms() >= g_hop_at.load(std::memory_order_relaxed)) { g_hop_more.fetch_sub(1, std::memory_order_relaxed); g_inject_circle.store(6, std::memory_order_relaxed); }   // (the second Circle of a hop to Party Select)
     if (int ic = g_inject_circle.load(std::memory_order_relaxed); ic > 0) { g_inject_circle.store(ic - 1, std::memory_order_relaxed); raw = (ic >= 3 && ic <= 5) ? (raw | BTN_CIRCLE) : (raw & ~BTN_CIRCLE); }
     if (int il = g_inject_late.load(std::memory_order_relaxed); il > 0) { g_inject_late.store(il - 1, std::memory_order_relaxed); raw = (il >= 3 && il <= 5) ? (raw | BTN_CROSS) : (raw & ~BTN_CROSS); }
@@ -1381,12 +1401,13 @@ int dissidia_tagteam_modesel_frame(uint8_t* rdram, recomp_context* ctx, bool onl
     if (r) { g_dlg_open = false; g_dlg_mode = 0; }
     return r;
 }
-void dissidia_tagteam_modesel_draw_frozen(bool online) { ge_draw_set_game_layer_ttl(450); modesel_draw(online); }   // after a choice: the Mode Select stays on screen, cursor on the chosen row, until the next menu opens (the layer expires 150 ms after the last draw)
+void dissidia_tagteam_modesel_draw_frozen(bool online) { ge_draw_set_game_layer_ttl(kHoldTtlMs); modesel_draw(online); }   // after a choice: the Mode Select stays on screen, cursor on the chosen row, until the next menu opens (the layer expires 150 ms after the last draw)
 void dissidia_tagteam_modesel_confirm(bool sp) {
     g_inject_late.store(9, std::memory_order_relaxed);
     if (sp && g_ms_ffa && !std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY") && !std::getenv("PSPRECOMP_TAGTEAM_FFA_PREOLD")) {
         if (g_ms_hop) { g_lobby_pending = true; g_script_lim.store(220, std::memory_order_relaxed); }   // the player's own trip to the game's selector (P2..P4: Party Select is passed for him)
         else g_script_lim.store(1000, std::memory_order_relaxed);
+        g_ps_frames.store(0, std::memory_order_relaxed);
         if (g_script_lim.load() >= 0) g_script_t.store(0, std::memory_order_relaxed);
     }
 }   // the start menu sees a Cross press after the hold
