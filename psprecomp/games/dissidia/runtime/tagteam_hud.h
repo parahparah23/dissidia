@@ -44,6 +44,11 @@ struct TagHudOverhead {
 // 2 = a mini status panel (name, Bravery, HP bar and number), 3 = the PPSSPP plugin's HUD (v0.52-v0.61): half-size panels with the face over the
 // enemies, the ally and the other enemy on the assist-gauge row at the bottom; 0 = off. With 1, 2 or 3 the side panels are not drawn.
 void tagteam_hud_overhead(const std::vector<TagHudOverhead>& bars, int style = 1, bool hide_panels = false);
+// Lock-on indicator (presentation only): the enemies that currently have the local player's fighter as their target. `me` = the player's actor,
+// `by` = the locked-on enemies' actors (empty: nobody), `fresh` = those among them that locked on just now (flash + optional cue).
+// Called every HUD tick; an empty `by` (or me == 0) removes the markers. oh_style = the overhead bar style (0..3), to place the eye above the bar.
+struct TagHudLockInd { uint32_t me = 0; std::vector<uint32_t> by, fresh; int oh_style = 0; };
+void tagteam_hud_lockind(const TagHudLockInd& li);
 // Guest memory, for the bars' positions (tagteam.cpp, every frame before tagteam_layer_frame).
 void tagteam_hud_set_ram(const uint8_t* rdram);
 

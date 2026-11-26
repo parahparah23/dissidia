@@ -2479,6 +2479,46 @@ void overhead_update() {
     }
     tagteam_hud_overhead(bars, g_overhead, g_hide_ui);
 }
+// Lock-on indicator (user, 25 Nov: "some kind of indicator or effect for when someone locks on to you"): view only (reads the enemies' targets, +0x2FC;
+// changes nothing). Settings > Debug > Tag Team > Lock-On Indicator (saved in settings.ini as tagteam_lockind, default on),
+// PSPRECOMP_TAGTEAM_LOCKIND_OFF=1 = off. PSPRECOMP_TAGTEAM_LOCKIND_SND=1: a soft cue (the menu cursor sound) when an enemy newly locks on.
+// Test aid: PSPRECOMP_TAGTEAM_LOCKIND_FORCE=<mask> shows enemy k (fighter order) as locked on when bit k is set (-1 = none forced, the real targets).
+bool g_lockind_on = !std::getenv("PSPRECOMP_TAGTEAM_LOCKIND_OFF");   // (the saved choice is read when the Debug row is added, at install)
+void lockind_cue() {   // the menu's cursor sound, once (view / audio only: the sound request does not touch the battle state)
+    if (!g_ctx) return;
+    const uint32_t sp0 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp0 - 0x100u);
+    call(0x088D4BF4u, 1u);
+    g_ctx->r[29] = static_cast<int32_t>(sp0);
+}
+std::map<uint32_t, uint32_t> g_lockind_seen;   // enemy actor -> the HUD tick it last had us as its target
+void lockind_update(bool overhead_on) {
+    TagHudLockInd li;
+    static int force = [] { const char* e = std::getenv("PSPRECOMP_TAGTEAM_LOCKIND_FORCE"); return e ? std::atoi(e) : -1; }();
+    static const bool snd = std::getenv("PSPRECOMP_TAGTEAM_LOCKIND_SND") != nullptr;
+    if (g_lockind_on && g_bs && !exb_running()) {
+        const uint32_t me = hud_panel_fighter(rd(g_bs + 84u) & 1u);
+        if (ok(me, 0x12D0) && alive(me) && !is_down(me)) {
+            uint32_t f[8] = {}; const int n = all_fighters(f); int k = 0;
+            for (int i = 0; i < n; i++) {
+                const uint32_t a = f[i];
+                if (!ok(a, 0x12D0) || a == me || !alive(a) || is_down(a) || !foes(a, me)) continue;
+                uint32_t t = rd(a + 0x2FCu); if (const uint32_t b = ao8_body_of(t)) t = b;
+                const bool on = force >= 0 ? ((force >> k) & 1) != 0 : t == me;
+                k++;
+                if (!on) continue;
+                li.by.push_back(a);
+                auto it = g_lockind_seen.find(a);
+                if (it == g_lockind_seen.end() || g_frame_ctr - it->second > 30) { li.fresh.push_back(a); if (g_log) std::fprintf(stderr, "[LOCKIND] %08X locked on to %08X\n", a, me); }
+                g_lockind_seen[a] = g_frame_ctr;
+            }
+            li.me = me;
+        }
+    }
+    li.oh_style = overhead_on ? g_overhead : 0;
+    if (g_log) { static size_t last = ~size_t(0); if (li.by.size() != last) { last = li.by.size(); std::fprintf(stderr, "[LOCKIND] %zu enemies have the player's fighter as target\n", last); } }
+    if (snd && !li.fresh.empty()) lockind_cue();
+    tagteam_hud_lockind(li);
+}
 void hud_update() {
     // The reserve lists are battle state (reserve_left / next_member_char decide KOs and call-ins), so they are kept up to date with the HUD off too:
     // in a lock-step battle one player may have the overlay off.
@@ -2487,7 +2527,7 @@ void hud_update() {
     update_party_reserve();
     if (!g_hud_on) return;
     g_hud_last = g_frame_ctr; g_hud_fe = g_fe_ctr; g_hud_up = true;
-    overhead_update();
+    overhead_update(); lockind_update(g_overhead != 0 && g_bs != 0);
     std::vector<TagHudFighter> fs;
     for (int i = 0; i < g_nextra; i++) {
         Extra& e = g_extra[i];
@@ -11366,7 +11406,7 @@ void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx) {
         if (ok(mg, 0x40)) { char b[200]; int n = 0; for (int ch = 0; ch < 10; ch++) { const float v = rdf(mg + 4u + 4u * ch); n += std::snprintf(b + n, sizeof b - n, " %.2f", static_cast<double>(v)); } const std::string cur = b;
             if (cur != last) { last = cur; std::fprintf(stderr, "[SLOWCH] t=%.2fs bs72 %u channels:%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, b); } }
     }
-    if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); }
+    if (g_hud_up && g_fe_ctr - g_hud_fe > 4) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); tagteam_hud_lockind({}); }
 }
 
 void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
@@ -11422,7 +11462,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
         static float last = -1.f; static unsigned same = 0, multi = 0, runs = 0; const float st = dissidia_logic_tick_len(); runs++;
         if (g_tt_age == last) same++; else if (last >= 0.f && g_tt_age - last > st * 1.5f) multi++;
         last = g_tt_age; if (runs % 600 == 0) std::fprintf(stderr, "[STEPCHK] t=%.2fs runs %u without a step %u over several steps %u\n", g_tt_age / 60.0f, runs, same, multi); }
-    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); }   // no battle tick for a while: take the panels and strips off the screen
+    if (g_hud_up && g_frame_ctr - g_hud_last > 150) { g_hud_up = false; tagteam_hud_set_banner(""); tagteam_hud_draw({}, {}); tagteam_hud_overhead({}, 0, false); tagteam_hud_lockind({}); }   // no battle tick for a while: take the panels and strips off the screen
     if (g_bs && comms_handover() && g_roster_ok && rd(g_bs + 72) != 0 && g_cpu_stage_gen != g_battle_gen) {   // a party of CPUs: the retail slot fighter of a side whose stage entry is a CPU row is played by the AI from the first frame (the same decision on every machine: the roster)
         g_cpu_stage_gen = g_battle_gen; g_ram = rdram; g_ctx = ctx;
         for (int sd = 0; sd < 2; sd++) {
@@ -12443,6 +12483,9 @@ void dissidia_tagteam_install(uint8_t* rdram) {
                                    +[]() { return g_overhead == 3; }, +[](bool on) { g_overhead = on ? 3 : 0; }, false, false, "Tag Team"});
     psp_settings_add_debug_toggle({"Overhead: Assist Bar", "Tag team: the assist bar change (for the overhead HUDs)\nOn: the ally and the other enemy get small panels at the bottom of the screen under the HP bars, the assist gauges move beside the Bravery numbers and the summon orbs above the portrait badges (the PPSSPP plugin's layout). Off: the game's own bottom bar. Works with or without an overhead style. This session only.",
                                    +[]() { return g_oh_assist; }, +[](bool on) { g_oh_assist = on; }, false, false, "Tag Team"});
+    if (psp_settings_saved_value("tagteam_lockind") == "0") g_lockind_on = false;
+    psp_settings_add_debug_toggle({"Lock-On Indicator", "Tag team: show who is locked on to you\nOn (default): while an enemy has your fighter as its target, a red-orange chevron and floor ring pulse at your fighter (\"x2\" with more than one enemy), and an eye shows over the head of each enemy that is after you; a short flash when one newly locks on. Only on your screen, nothing in the battle changes. Saved. PSPRECOMP_TAGTEAM_LOCKIND_OFF=1 turns it off.",
+                                   +[]() { return g_lockind_on; }, +[](bool on) { g_lockind_on = on; psp_settings_save_value("tagteam_lockind", on ? "1" : "0"); }, false, true, "Tag Team"});
     psp_settings_add_debug_toggle({"Hide Tag Team UI", "Tag team: hide the side panels\nOn: our small status panels at the screen edges are not drawn (the overhead styles show the same). Off: they are drawn next to any overhead style. This session only.",
                                    +[]() { return g_hide_ui; }, +[](bool on) { g_hide_ui = on; }, false, false, "Tag Team"});
     if (!std::getenv("PSPRECOMP_SOUNDHEAP_RETAIL")) psp_dispatch_register(0x088A0C10u, soundheap_hook);
