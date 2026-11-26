@@ -7576,12 +7576,51 @@ void chase_pair_start(uint32_t att, uint32_t opp) {
     if (g_log) std::fprintf(stderr, "[CHASEPAIR] t=%.2fs %s %08X (foe %08X target %08X lock %08X) <-> %s %08X (foe %08X target %08X lock %08X)\n", dissidia_battle_age() / 60.0f, role_of(att), att, g_cpair[0].f300, g_cpair[0].f2FC, g_cpair[0].lockT, role_of(opp), opp, g_cpair[1].f300, g_cpair[1].f2FC, g_cpair[1].lockT);
     chase_pair_set(att, opp); chase_pair_set(opp, att);
 }
+// Issue #136 video 3: a NaN in a fighter's transform words (+0..+0xBF) or in its lock block (+0x40..+0x7F) is copied by the game into the camera
+// (3D view empty, listener = NaN -> full-scale static). Every frame: finite words are remembered, a NaN / inf word is put back to the last finite value
+// (0 when none). PSPRECOMP_TAGTEAM_NONANFIX=1 = old behaviour. Log `[NANFIX]`.
+void nan_repair_step() {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NONANFIX") != nullptr;
+    if (off || !g_bs) return;
+    struct Snap { uint32_t w[48]; bool ok = false; };
+    static std::map<uint32_t, Snap> snaps; static int nfix = 0; static float last_age = 0.f;
+    const float age = dissidia_battle_age(); if (age < last_age - 120.f) { snaps.clear(); nfix = 0; } last_age = age;
+    auto bad = [](uint32_t v) { return (v & 0x7F800000u) == 0x7F800000u; };
+    auto fix = [&](uint32_t base, uint32_t nw, const char* nm) {
+        Snap& sn = snaps[base]; bool dirty = false;
+        for (uint32_t i = 0; i < nw; i++) { const uint32_t v = rd(base + 4u * i); if (bad(v)) { dirty = true; const uint32_t g = sn.ok ? sn.w[i] : 0u; wr(base + 4u * i, bad(g) ? 0u : g); } }
+        if (dirty) { if (nfix++ < 20) std::fprintf(stderr, "[NANFIX] t=%.2fs %s %08X: NaN words put back\n", age / 60.f, nm, base); }
+        for (uint32_t i = 0; i < nw; i++) sn.w[i] = rd(base + 4u * i);
+        sn.ok = true;
+    };
+    uint32_t f[8]; const int nf = all_fighters(f);
+    for (int i = 0; i < nf; i++) {
+        if (!ok(f[i], 0x12D0)) continue;
+        fix(f[i], 48, role_of(f[i]));
+        const uint32_t lb = rd(f[i] + 0x5ACu); if (ok(lb, 0x600)) fix(lb + 0x40u, 16, "lock block");
+    }
+}
+
 // [CHASEDBG] (PSPRECOMP_TAGTEAM_LOG=1): the chase as the camera and the lock blocks see it, at its start and every 15 frames while it runs
 // (device report: after the player's slot rebuild the chase camera zoomed on the wrong enemy / into the floor).
 void chase_debug_step() {
     if (!g_log || !g_bs) return;
     static uint32_t was = 0; static int n = 0;
     const uint32_t ctl = rd(0x08AB6738u), st = ok(ctl, 0x40) ? rd(ctl) : 0u;
+    if (std::getenv("PSPRECOMP_TAGTEAM_NANWATCH")) {   // debug: the first frame any fighter / lock block / camera manager transform word is NaN: who, and arm a watch on it
+        static bool done = false, armed = false; const uint32_t mgr = dissidia_camera_manager();
+        if (const char* ar = std::getenv("PSPRECOMP_TAGTEAM_NANARM")) if (!armed && g_bs && dissidia_battle_age() >= std::atof(ar) * 60.f) {   // watch the player's lock block +0x40 from that second on
+            armed = true; const uint32_t H = srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u)), L = ok(H, 0x12D0) ? rd(H + 0x5ACu) : 0u;
+            if (ok(L, 0x600)) { psp_mem_watch_set(L + 0x40u); std::fprintf(stderr, "[NANFIRST] watching lock block %08X +40 from t=%.2fs\n", L, dissidia_battle_age() / 60.f); } }
+        if (!done && mgr) {
+            uint32_t f[8]; const int nf = all_fighters(f); int hits = 0; uint32_t first = 0;
+            auto isn = [&](uint32_t a) { const uint32_t v = rd(a); return (v & 0x7F800000u) == 0x7F800000u; };
+            auto chk = [&](const char* nm, uint32_t base, uint32_t from, uint32_t to) { for (uint32_t o = from; o < to; o += 4) if (isn(base + o)) { std::fprintf(stderr, "[NANFIRST] t=%.2fs %s %08X +%X = %08X\n", dissidia_battle_age() / 60.f, nm, base, o, rd(base + o)); if (!first) first = base + o; if (++hits > 12) return; } };
+            chk("mgr", mgr, 0x40, 0x5C);
+            for (int i = 0; i < nf && hits < 12; i++) { chk(role_of(f[i]), f[i], 0x80, 0x90); const uint32_t lb = rd(f[i] + 0x5ACu); if (ok(lb, 0x600)) chk("lock", lb, 0x40, 0x80); }
+            if (hits) { done = true; if (first && !std::getenv("PSPRECOMP_TAGTEAM_NANARM")) psp_mem_watch_set(first); }
+        }
+    }
     if (std::getenv("PSPRECOMP_TAGTEAM_CAMDBG")) {   // debug: the normal camera once a second (eye, look-at, nearest fighter, the player's lock block)
         static float nx = 0; const float a = dissidia_battle_age(); if (a < nx - 120.f) nx = 0;
         if (a >= nx) { nx = a + 60.f; const uint32_t H = srd(g_bs + 56u + 4u * (rd(g_bs + 84u) & 1u)), L = ok(H, 0x12D0) ? rd(H + 0x5ACu) : 0u, mgr = dissidia_camera_manager();
@@ -7599,7 +7638,12 @@ void chase_debug_step() {
             for (int i = 0; i < nf; i++) { const float fx = rdf(f[i] + 0x80u) - rdf(mgr + 0x40u), fz = rdf(f[i] + 0x88u) - rdf(mgr + 0x48u);
                 const float ang = std::atan2(vx * fz - vz * fx, vx * fx + vz * fz) * 57.29578f;
                 std::fprintf(stderr, " %s%s %+.0fdeg %.1fm (%.1f,%.1f,%.1f)", role_of(f[i]), f[i] == (ok(L, 0x200) ? call(LOCK_GET, L) : 0u) ? "*" : "", -ang, std::sqrt(fx * fx + fz * fz), rdf(f[i] + 0x80u), rdf(f[i] + 0x84u), rdf(f[i] + 0x88u)); }
-            std::fprintf(stderr, "\n"); }
+            std::fprintf(stderr, "\n");
+            if (std::isnan(rdf(mgr + 0x40u)) || std::isnan(rdf(mgr + 0x50u))) {   // [CAMNAN]: which words are NaN (floats with exponent 0xFF and a mantissa) in the manager, the fighters and their lock blocks
+                auto scan = [&](const char* nm, uint32_t base, uint32_t len) { int n = 0; for (uint32_t o = 0; o < len && n < 24; o += 4) { const uint32_t v = rd(base + o); if ((v & 0x7F800000u) == 0x7F800000u && (v & 0x7FFFFFu)) { std::fprintf(stderr, "[CAMNAN] %s %08X +%X = %08X\n", nm, base, o, v); n++; } } };
+                scan("mgr", mgr, 0x1000);
+                for (int i = 0; i < nf; i++) { scan(role_of(f[i]), f[i], 0x12D0); const uint32_t lb = rd(f[i] + 0x5ACu); if (ok(lb, 0x600)) scan("lock", lb, 0x600); }
+            } }
     }
     if (!st) { if (was) std::fprintf(stderr, "[CHASEDBG] t=%.2fs chase over\n", dissidia_battle_age() / 60.0f); was = 0; return; }
     const bool first = !was; was = st;
@@ -10014,8 +10058,33 @@ void callfx_release(const char* why) {
     const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, sm, 6u); g_ctx->r[29] = static_cast<int32_t>(sp1);
     std::fprintf(stderr, "[ASSISTOFF] t=%.2fs call effects: slow motion channel 6 released (%s)\n", dissidia_battle_age() / 60.0f, why);
 }
+// Issue #136 video 1: a call that overlaps an EX Burst's start (v0.1.25, ~1 in 3 forced calls 1 s before a burst) left slow-motion channel 6 at 0.4 (and,
+// with the retail call, channel 3 at 0) for the rest of the battle: the call's own release was lost to the burst. Safety net: channels 3..9 that stay
+// below normal speed for 5 s while no call, burst, finish phase or chase is running are given back (retail's FUN_08A620B0). Log `[SLOWWATCH]`.
+// PSPRECOMP_TAGTEAM_NOSLOWWATCH=1 = old behaviour.
+void slow_watchdog() {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOSLOWWATCH") != nullptr;
+    static float since[10]; static uint32_t gen = 0;
+    if (off || !g_bs) return;
+    const uint32_t sm = rd(0x08A62280u); const float age = dissidia_battle_age();
+    if (const char* ts = std::getenv("PSPRECOMP_TAGTEAM_TESTSTICK")) { static bool did = false; if (!did && ok(sm, 0x40) && age >= std::atof(ts) * 60.f) {   // test aid: a slow-motion channel 6 nobody gives back
+        did = true; g_ctx->f[12] = 0.4f; call(0x08A62020u, sm, 6u, 0x44u); std::fprintf(stderr, "[SLOWWATCH] t=%.2fs test: channel 6 set to 0.4 and left\n", age / 60.f); } }
+    if (!ok(sm, 0x40) || gen != g_battle_gen) { for (float& x : since) x = -1.f; gen = g_battle_gen; if (!ok(sm, 0x40)) return; }
+    const bool quiet = g_callfx_rel < 0.f && !exb_busy() && !finish_busy() && !g_chase_ctl_now && rd(g_bs + 72u) != 4u;
+    for (uint32_t ch = 3; ch < 10; ch++) {
+        const float v = rdf(sm + 4u + 4u * ch);
+        if (!quiet || !(v < 1.9f)) { since[ch] = -1.f; continue; }
+        if (since[ch] < 0.f || age < since[ch]) { since[ch] = age; continue; }
+        if (age - since[ch] < 300.f) continue;
+        const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, sm, ch); g_ctx->r[29] = static_cast<int32_t>(sp1);
+        std::fprintf(stderr, "[SLOWWATCH] t=%.2fs slow-motion channel %u stuck at %.2f for 5 s with nothing running: released\n", age / 60.f, ch, v);
+        since[ch] = -1.f;
+    }
+}
+
 void callfx_step() {
     TtStep tt_step_("callfx_step");
+    slow_watchdog();
     if (g_callfx_rel < 0.f) return;
     if (g_callfx_gen != g_battle_gen) { g_callfx_rel = -1.f; g_callfx_hum = 0; return; }
     if (g_callfx_hum && g_callfx_hum_rel == g_callfx_rel && !std::getenv("PSPRECOMP_TTCAM_AO9HUMANSLOW_NOHIT")) {
@@ -11775,6 +11844,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
     }
     if (g_bs) { g_ram = rdram; g_ctx = ctx; chase_interrupt_step(rdram, ctx); }
     chase_pair_step();
+    nan_repair_step();
     chase_debug_step();
     if (g_bs && (g_chase_ctl_now || !g_chase_cam.empty())) chase_camera();
     if (g_log && g_chase_ctl_now && std::getenv("PSPRECOMP_TAGTEAM_LBDUMP")) {   // debug: the opponent's lock block (0x600 bytes) 4 frames into each chase
