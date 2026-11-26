@@ -82,6 +82,9 @@ void dissidia_tagteam_frame_end(uint8_t* rdram, recomp_context* ctx);
 void dissidia_heapcheck_frame(const uint8_t* rdram);   // hooks_models.cpp (PSPRECOMP_HEAPCHECK=1: every game heap's chain checked)
 bool dissidia_tagteam_pad_blocked(uint32_t actor);   // tagteam.cpp: fighters held out of an EX Burst (any player, also a human's pad)   // tagteam.cpp: takes the tag team overlay off the screen when the fight stops refreshing it
 
+float dissidia_tt_chase_actor_scale(uint32_t actor, float ticks);   // tagteam.cpp
+float dissidia_tt_chase_cam_scale(float ticks);
+void dissidia_tt_chase_step_log(uint32_t actor, float before, float after);
 namespace {
 
 constexpr uint32_t OVL_BASE = 0x089DD4C0u;
@@ -1908,6 +1911,7 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     if (g_hold_flow && actor == g_pause_keep && ctx->f[0] == 0.f && g_hold_dt > 0.f && match_paused_impl()) ctx->f[0] = g_hold_dt;   // the held intro: the banter's fighter plays at the step the task pass was given
     if (g_test_freeze_cpu && g_gt_started && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != test_player()) { ctx->f[0] = 0.f; return; }
     if (g_ticks != 2.0f && ok(actor) && own) ctx->f[0] *= g_ticks * 0.5f;   // own clock: a fixed 2.0 per frame
+    if (!own && ok(actor) && ctx->f[0] != 0.f) { const float b4 = ctx->f[0]; ctx->f[0] *= dissidia_tt_chase_actor_scale(actor, g_ticks); dissidia_tt_chase_step_log(actor, b4, ctx->f[0]); }   // tag team "chase slow: chasers only": actors outside a running chase do not take its slow motion
     if (g_action_start_step && g_ticks < 2.0f && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0) {
         for (int i = 0; i < 4; i++) {
             if (g_fighters[i] != actor) continue;
@@ -1939,6 +1943,7 @@ void cam_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t cam = static_cast<uint32_t>(ctx->r[4]);
     g_orig_cam_dt(rdram, ctx);
     if (g_ticks != 2.0f && ok(cam) && r32(cam + 0x100u) == 2u) ctx->f[0] *= g_ticks * 0.5f;
+    if (ok(cam)) ctx->f[0] *= dissidia_tt_chase_cam_scale(g_ticks);   // the view of a fighter outside a running chase (chasers-only slow motion)
 }
 
 
