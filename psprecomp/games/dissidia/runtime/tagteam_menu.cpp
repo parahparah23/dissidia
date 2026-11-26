@@ -672,7 +672,11 @@ void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
         for (int k = 1, f = g_ffa_field; k <= 3; k++) { f += d; if (f < 1 || f > 3) break; if ((m >> f) & 1) { g_ffa_field = f; play_se(rdram, ctx, 1); break; } }
     }
     clamp_field();
-    if ((pressed & BTN_SQUARE) && g_ffa_slot < 4 && g_ffa_field == 1) {   // Square on a MAIN: the quick grid (Random / Off, no trip to the game's selector)
+    if ((pressed & BTN_L) && g_ffa_slot < 4 && (g_ffa_field == 1 || g_ffa_field == 2)) {   // L: P3 / P4 on <-> Off (MAIN), a tag-in Random <-> None
+        if (g_ffa_field == 1 && g_ffa_slot >= 2) { uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(g_ffa_slot - 1, sl); sl[0] = sl[0] ? 0 : 1; if (!sl[0]) sl[1] = 0; dissidia_tagteam_ffa_set(g_ffa_slot - 1, sl); play_se(rdram, ctx, 1); }
+        else if (g_ffa_field == 2) { if (g_ffa_slot == 0) { uint8_t p1[2]; dissidia_tagteam_ffa_p1_get(p1); p1[1] = p1[1] == 255 ? 0 : 255; dissidia_tagteam_ffa_p1_set(p1); } else { uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(g_ffa_slot - 1, sl); sl[2] = sl[2] == 255 ? 0 : 255; dissidia_tagteam_ffa_set(g_ffa_slot - 1, sl); } play_se(rdram, ctx, 1); }
+    }
+    if ((pressed & BTN_SQUARE) && std::getenv("PSPRECOMP_TAGTEAM_FFA_GRIDPICK") && g_ffa_slot < 4 && g_ffa_field == 1) {   // Square on a MAIN: the quick grid (Random / Off, no trip to the game's selector)
         uint8_t sl[4] = {1, 0, 0, 5}; uint8_t p1[2] = {0, 0}; if (g_ffa_slot == 0) dissidia_tagteam_ffa_p1_get(p1); else dissidia_tagteam_ffa_get(g_ffa_slot - 1, sl);
         uint8_t ros[40]; const int rn = dissidia_tagteam_roster(ros); const uint8_t cur = g_ffa_slot == 0 ? p1[0] : (!sl[0] ? 254 : sl[1]);
         g_pk_opts.clear(); g_pk_opts.push_back(0); if (g_ffa_slot >= 2) g_pk_opts.push_back(254); for (int k = 0; k < rn; k++) g_pk_opts.push_back(ros[k]);
@@ -693,17 +697,17 @@ void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
             g_dlg_mode = 4; play_se(rdram, ctx, 1);
         };
         static const bool grid_main = std::getenv("PSPRECOMP_TAGTEAM_FFA_GRIDMAIN") != nullptr;
-        if (g_ffa_flow && !grid_main && g_ffa_field <= (g_ffa_slot == 0 ? 2 : 1)) {   // the game's own selector (see g_hop_more)
+        if (g_ffa_flow && !grid_main && g_ffa_field <= 2) {   // the game's own character grid (CPU Select) for every fighter field; its 1st pick comes back
             g_hop_slot = g_ffa_slot; g_hop_field = g_ffa_field;
+            if (g_sp_screen_last >= 0x08800000u && g_sp_screen_last < 0x0A000000u) for (uint32_t k = 0; k < 40u; k++) g_ram[(g_sp_screen_last + 0x8B4u + k) & 0x07FFFFFFu] = 0;   // CPU Select starts empty: its 1st pick is the answer
             if (g_ms_pre) {   // still in the Mode Select: let retail's screens come now (Party Select first; P2..P4: one scripted Cross on it, then CPU Select is the player's)
                 g_ms_pre = false; g_ms_hop = true; g_dlg_open = false; g_dlg_mode = 0; g_ffa_then_lobby = false; g_ffa_flow = false; play_se(rdram, ctx, 2);
-                std::fprintf(stderr, "[FFA] players screen (Mode Select): P%d %s -> the game's %s\n", g_ffa_slot + 1, g_ffa_field == 1 ? "main" : "tag-in", g_ffa_slot == 0 ? "Party Select" : "CPU Select");
+                std::fprintf(stderr, "[FFA] players screen (Mode Select): P%d %s -> the game's %s\n", g_ffa_slot + 1, g_ffa_field == 1 ? "main" : "tag-in", "character select");
                 return;
             }
             g_dlg_open = false; g_dlg_mode = 0; g_ffa_then_lobby = false; g_ffa_flow = false; g_rearm = true; play_se(rdram, ctx, 2);
             g_inject_circle.store(6, std::memory_order_relaxed);
-            if (g_ffa_slot == 0) { g_hop_more.store(1, std::memory_order_relaxed); g_hop_at.store(steady_ms() + 1800, std::memory_order_relaxed); }
-            std::fprintf(stderr, "[FFA] players screen: P%d %s -> the game's %s\n", g_ffa_slot + 1, g_ffa_field == 1 ? "main" : "tag-in", g_ffa_slot == 0 ? "Party Select" : "CPU Select");
+            std::fprintf(stderr, "[FFA] players screen: P%d %s -> the game's %s\n", g_ffa_slot + 1, g_ffa_field == 1 ? "main" : "tag-in", "character select");
             return;
         }
         if (g_ffa_slot == 0) open_list(p1[g_ffa_field - 1]);
@@ -735,7 +739,7 @@ void ffa_screen(uint8_t* rdram, recomp_context* ctx, uint32_t pressed) {
         }
     }
     gs_row(150.f, 330.f, 220.f, 24.f, g_ffa_slot == 4, "DONE", "", false, 8.6f);
-    gs_footer(g_ffa_flow ? "Up/Down: player   Left/Right: field   Cross: change (fighters: the game's selector)   Square: quick grid   Circle: back" : "Up/Down: player   Left/Right: field   Cross: change   Done: Cross / Circle");
+    gs_footer(g_ffa_flow ? "Up/Down: player   Left/Right: field   Cross: pick in the game's character select   L: Off / None   Circle: back" : "Up/Down: player   Left/Right: field   Cross: change   Done: Cross / Circle");
 }
 
 void card_head(float cx0, float cx1) {   // the pale pill behind a card's heading (retail's "Party A" plate)
@@ -1156,23 +1160,32 @@ void sp_hide_bands() {   // the round dialog (every matchup, the lobby sets them
 // P1 = the party's first two members, P2 / P3 / P4 = CPU Select's 1st / 2nd / 3rd pick (the screen object keeps the picks at +0x8B4, 8 bytes apart, charId or 0 = empty;
 // found by diffing two screen dumps with different picks); P2 stays on (random when empty), an empty P3 / P4 is Off. Strength / tag-in settings are kept.
 void ffa_prefill(uint32_t screen, const uint8_t* rows, int n, int only) {
-    // only what retail's screens changed is taken over; `only` = the slot (0 = P1) whose selector the player opened (-1: every slot that changed). An empty CPU Select slot never switches a slot off (Off is the quick grid's)
+    if (only >= 0) {   // the player opened the character grid (CPU Select) for one field: its first pick is the answer (the picks were cleared before)
+        int pick = 0; for (int i = 0; i < 5 && !pick; i++) { const int c = g_ram[(screen + 0x8B4u + 8u * uint32_t(i)) & 0x07FFFFFFu]; if (c >= 1 && c <= 33) pick = c; }
+        std::fprintf(stderr, "[FFA] character select for P%d %s: pick %d\n", only + 1, g_hop_field == 1 ? "main" : "tag-in", pick);
+        if (pick) {
+            if (only == 0) { uint8_t p1[2] = {0, 255}; dissidia_tagteam_ffa_p1_get(p1); const int f = g_hop_field - 1; p1[f] = static_cast<uint8_t>(pick); if (f == 0 && p1[1] == pick) p1[1] = 255; if (f == 1 && p1[0] == pick) p1[0] = 0; dissidia_tagteam_ffa_p1_set(p1); }
+            else { uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(only - 1, sl); if (g_hop_field == 1) { sl[0] = 1; sl[1] = static_cast<uint8_t>(pick); if (sl[2] == pick) sl[2] = 0; } else sl[2] = static_cast<uint8_t>(pick); dissidia_tagteam_ffa_set(only - 1, sl); }
+        }
+        for (uint32_t k = 0; k < 40u; k++) g_ram[(screen + 0x8B4u + k) & 0x07FFFFFFu] = 0;
+        return;
+    }
+    // legacy (the setup screen came back some other way): only what retail's screens changed is taken over
     uint8_t p1[2] = {0, 255}; dissidia_tagteam_ffa_p1_get(p1);
-    if (n >= 1 && rows[0] && (only < 0 || only == 0)) {
+    if (n >= 1 && rows[0]) {
         const uint8_t r0 = rows[0], r1 = (n >= 2 && rows[1] && rows[1] != rows[0]) ? rows[1] : 255;
-        if (only == 0 || r0 != g_seen_p1[0] || r1 != g_seen_p1[1]) { p1[0] = r0; p1[1] = r1; dissidia_tagteam_ffa_p1_set(p1); }
+        if (r0 != g_seen_p1[0] || r1 != g_seen_p1[1]) { p1[0] = r0; p1[1] = r1; dissidia_tagteam_ffa_p1_set(p1); }
         g_seen_p1[0] = r0; g_seen_p1[1] = r1;
     }
     for (int i = 0; i < 3; i++) {
         const int c = g_ram[(screen + 0x8B4u + 8u * uint32_t(i)) & 0x07FFFFFFu];
         const uint8_t pick = (c >= 1 && c <= 33) ? static_cast<uint8_t>(c) : 0;
-        if (!pick || (only >= 0 && only != i + 1) || (only < 0 && pick == g_seen_pick[i])) { if (only < 0 || only == i + 1) g_seen_pick[i] = pick; continue; }
+        if (!pick || pick == g_seen_pick[i]) { g_seen_pick[i] = pick; continue; }
         g_seen_pick[i] = pick;
         uint8_t sl[4] = {1, 0, 0, 5}; dissidia_tagteam_ffa_get(i, sl);
         sl[0] = 1; sl[1] = pick; if (sl[2] == pick) sl[2] = 0;
         dissidia_tagteam_ffa_set(i, sl);
     }
-    std::fprintf(stderr, "[FFA] players filled from Party Select / CPU Select (slot %d): P1 %d + %d, CPU picks %d %d %d\n", only, p1[0], p1[1], g_ram[(screen + 0x8B4u) & 0x07FFFFFFu], g_ram[(screen + 0x8BCu) & 0x07FFFFFFu], g_ram[(screen + 0x8C4u) & 0x07FFFFFFu]);
 }
 void sp_draw(uint8_t* rdram, recomp_context* ctx, uint32_t screen, bool hide) {
     dissidia_tagteam_result_done();
@@ -1372,7 +1385,7 @@ void dissidia_tagteam_modesel_draw_frozen(bool online) { ge_draw_set_game_layer_
 void dissidia_tagteam_modesel_confirm(bool sp) {
     g_inject_late.store(9, std::memory_order_relaxed);
     if (sp && g_ms_ffa && !std::getenv("PSPRECOMP_TAGTEAM_FFA_KEEPPARTY") && !std::getenv("PSPRECOMP_TAGTEAM_FFA_PREOLD")) {
-        if (g_ms_hop) { g_lobby_pending = true; if (g_hop_slot > 0) g_script_lim.store(220, std::memory_order_relaxed); else g_script_lim.store(-1, std::memory_order_relaxed); }   // the player's own trip to the game's selector (P2..P4: Party Select is passed for him)
+        if (g_ms_hop) { g_lobby_pending = true; g_script_lim.store(220, std::memory_order_relaxed); }   // the player's own trip to the game's selector (P2..P4: Party Select is passed for him)
         else g_script_lim.store(1000, std::memory_order_relaxed);
         if (g_script_lim.load() >= 0) g_script_t.store(0, std::memory_order_relaxed);
     }
