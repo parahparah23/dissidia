@@ -4053,6 +4053,7 @@ void exb_debug_start() {
         if (through_rule) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(c); g_ctx->r[5] = static_cast<int32_t>(a); g_ctx->r[6] = static_cast<int32_t>(foe); exbstart_hook(g_ram, g_ctx); *g_ctx = sv; }   // (as retail's caller reaches the hook)
         else { g_exb_debug_call = true; call(EXB_START, c, a, foe); g_exb_debug_call = false; }
         std::fprintf(stderr, "[EXBAT] t=%.2fs burst %s %08X (foe asked %08X): running=%u, in it %08X / %08X\n", dissidia_battle_age() / 60.0f, sp.who, a, foe, rd(c + 0x278u), rd(c + 0x26Cu), rd(c + 0x270u));
+        { const uint32_t ad = rd(a + 1444u); if (ok(ad, 8)) std::fprintf(stderr, "[EXBAT]   burster record +1444 %08X: %08X %08X\n", ad, rd(ad), rd(ad + 4u)); }
         break;
     }
 }
@@ -11871,6 +11872,65 @@ void lfg_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
 // Debug (PSPRECOMP_TAGTEAM_EXBBGLOG=1): the burst class step FUN_08A3624C(entry) creates the scene object (FUN_08A3DBD0) only while the burster's motion is
 // younger than 120 frames (motion frame from FUN_0882FC20(actor + 304, -1) minus actor +424) and a virtual of the burster's class (actor +1348, slot +320) says yes.
 FuncPtr g_orig_bgstep = nullptr;
+// EX Burst background stages (Batch twelve round 3). The burst start FUN_08A3EE44 points the stage manager (*0x089D6AC8) at one of its three
+// burst sub-stages, FUN_08892F08(stage, idx): idx 1 for a burster whose burst record (FUN_088B70C8(char), the actor's +1444) has byte 3 set
+// (Emperor, Jecht: "org98.gmo"), 0 for the others ("org99.gmo"), 2 for the 0x20 record (Feral Chaos, "org97.gmo"); while it runs the stage
+// draw FUN_08892584 draws ONLY that sub-stage (stage +320 + 304 * idx, scene at +116) instead of the stage. The loading screen
+// (FUN_08B177FC) loads only the sub-stages the TWO slot fighters' records ask for (from general_archive/field/field.bin, open only there),
+// so an extra whose type no slot fighter has bursts in front of an empty sub-stage: nothing is drawn (black). Fix: when the loading screen
+// loads its first sub-stage (FUN_088934E0(data, size, k), the archive still open in the caller's s4 = sp+16, the three names at the caller's
+// sp+36.., its "will load" flags at sp+32..), the sub-stages it will not load are loaded too (k = 2 with retail's extra set-up around it).
+// Tag battles only; PSPRECOMP_TAGTEAM_EXBSTAGE_OLD=1: old behaviour (only the slot fighters' sub-stages).
+FuncPtr g_orig_subst = nullptr;
+void subst_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; g_ctx = ctx;
+    const uint32_t sp = static_cast<uint32_t>(ctx->r[29]), arc = static_cast<uint32_t>(ctx->r[20]), ra = static_cast<uint32_t>(ctx->r[31]);
+    const int k = static_cast<int>(ctx->r[6]);
+    g_orig_subst(rdram, ctx);
+    static bool busy = false;
+    static const bool old = std::getenv("PSPRECOMP_TAGTEAM_EXBSTAGE_OLD") != nullptr;
+    if (busy || old || !tag_on() || ra < 0x08B177FCu || ra > 0x08B18300u) return;   // (only the loading screen's own call, FUN_08B177FC)
+    const uint32_t S = rd(0x089D6AC8u); if (!ok(S, 0x740)) return;
+    busy = true;
+    for (int kk = 0; kk < 3; kk++) {
+        if (kk == k || (g_ram[(sp + 32u + static_cast<uint32_t>(kk)) & 0x07FFFFFFu]) != 0) continue;   // retail loads it itself (now or later in its loop)
+        const uint32_t slot = S + 320u + 304u * static_cast<uint32_t>(kk);
+        if (rd(slot + 116u) != 0) continue;
+        const uint32_t name = rd(sp + 36u + 4u * static_cast<uint32_t>(kk)); if (!ok(name, 8) || !ok(arc, 8)) continue;
+        const uint32_t e = call(0x08869AB4u, arc, name);
+        char nm[24] = {}; for (int i = 0; i < 23 && g_ram[(name + i) & 0x07FFFFFFu]; i++) nm[i] = static_cast<char>(g_ram[(name + i) & 0x07FFFFFFu]);
+        if (!ok(e, 12)) { std::fprintf(stderr, "[EXBSTAGE] burst sub-stage %d (%s): not in the archive\n", kk, nm); continue; }
+        if (kk == 2) call(0x0889991Cu, 0);
+        call(0x088934E0u, rd(e + 4u), rd(e + 8u), static_cast<uint32_t>(kk));
+        if (kk == 2) { call(0x0889350Cu, rd(e + 4u), rd(e + 8u)); call(0x0889991Cu, 0xFFFFFFFFu); }
+        std::fprintf(stderr, "[EXBSTAGE] burst sub-stage %d (%s, %u B) loaded for the extras (the slot fighters' records asked for %d%d%d), scene %08X\n", kk, nm, rd(e + 8u),
+            g_ram[(sp + 32u) & 0x07FFFFFFu], g_ram[(sp + 33u) & 0x07FFFFFFu], g_ram[(sp + 34u) & 0x07FFFFFFu], rd(slot + 116u));
+    }
+    busy = false;
+}
+
+// debug (PSPRECOMP_TAGTEAM_EXBSCN=1): the per-character burst scene set-up FUN_08A02300(mgr, desc) and its factory FUN_08A02E88(mgr, scene index, ptr)
+FuncPtr g_orig_scnset = nullptr, g_orig_scnfac = nullptr;
+void scnset_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; const uint32_t m = static_cast<uint32_t>(ctx->r[4]), d = static_cast<uint32_t>(ctx->r[5]), ra = static_cast<uint32_t>(ctx->r[31]);
+    std::fprintf(stderr, "[EXBSCN] t=%.2fs setup mgr %08X desc %08X ra %08X:", dissidia_battle_age() / 60.0f, m, d, ra);
+    if (ok(d, 0x20)) for (uint32_t o = 0; o < 0x20u; o += 4) std::fprintf(stderr, " %08X", rd(d + o));
+    std::fprintf(stderr, "\n");
+    g_orig_scnset(rdram, ctx);
+    std::fprintf(stderr, "[EXBSCN]   -> %d, mgr +8 %08X +12 %08X +16 %08X +20 %08X\n", static_cast<int32_t>(ctx->r[2]), rd(m + 8u), rd(m + 12u), rd(m + 16u), rd(m + 20u));
+}
+// debug (PSPRECOMP_TAGTEAM_EXBFN=<hex addr>[,<hex addr>...], up to 4): log a0, *a0, a1, ra of calls to these functions (40 first, then every 60th)
+FuncPtr g_orig_exbfn[4] = {}; uint32_t g_exbfn_addr[4] = {};
+template <int K> void exbfn_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; static int n = 0; const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]);
+    if (n++ < 10 || (n % 15) == 0) std::fprintf(stderr, "[EXBFN] t=%.2fs %08X(a0 %08X [*a0 %08X +144 %08X +148 %08X +296 %08X] a1 %08X a2 %08X) ra %08X #%d\n", dissidia_battle_age() / 60.0f, g_exbfn_addr[K], a0, ok(a0, 4) ? rd(a0) : 0u, ok(a0, 300) ? rd(a0 + 144u) : 0u, ok(a0, 300) ? rd(a0 + 148u) : 0u, ok(a0, 300) ? rd(a0 + 296u) : 0u, static_cast<uint32_t>(ctx->r[5]), static_cast<uint32_t>(ctx->r[6]), static_cast<uint32_t>(ctx->r[31]), n);
+    g_orig_exbfn[K](rdram, ctx);
+}
+void scnfac_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
+    g_ram = rdram; const uint32_t a0 = static_cast<uint32_t>(ctx->r[4]), a1 = static_cast<uint32_t>(ctx->r[5]), a2 = static_cast<uint32_t>(ctx->r[6]);
+    g_orig_scnfac(rdram, ctx);
+    std::fprintf(stderr, "[EXBSCN] factory(%08X, %d, %08X) -> %08X (vtable %08X)\n", a0, static_cast<int32_t>(a1), a2, static_cast<uint32_t>(ctx->r[2]), ok(static_cast<uint32_t>(ctx->r[2]), 4) ? rd(static_cast<uint32_t>(ctx->r[2])) : 0u);
+}
 void bgstep_dbg_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t entry = static_cast<uint32_t>(ctx->r[4]); const uint32_t a = ok(entry, 0x10) ? rd(entry) : 0u;
     if (ok(a, 0x12D0)) {
@@ -11968,6 +12028,10 @@ void dissidia_tagteam_install(uint8_t* rdram) {
     if (!g_orig_chase) { g_orig_chase = fn(0x08AB6348u); if (g_orig_chase) psp_dispatch_register(0x08AB6348u, chase_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_EXBFXLOG") && !g_orig_partc) { g_orig_partc = fn(0x0887D868u); if (g_orig_partc) psp_dispatch_register(0x0887D868u, partc_dbg_hook); }
     if (std::getenv("PSPRECOMP_TAGTEAM_EXBBGLOG") && !g_orig_bgstep) { g_orig_bgstep = fn(0x08A3624Cu); if (g_orig_bgstep) psp_dispatch_register(0x08A3624Cu, bgstep_dbg_hook); }
+    if (const char* w = std::getenv("PSPRECOMP_TAGTEAM_EXBFN"); w && !g_exbfn_addr[0]) { static const FuncPtr hk[4] = {exbfn_dbg_hook<0>, exbfn_dbg_hook<1>, exbfn_dbg_hook<2>, exbfn_dbg_hook<3>}; int k = 0;
+        for (const char* q = w; *q && k < 4;) { char* e = nullptr; const uint32_t a = static_cast<uint32_t>(std::strtoul(q, &e, 16)); if (e == q) break; if ((g_orig_exbfn[k] = fn(a))) { g_exbfn_addr[k] = a; psp_dispatch_register(a, hk[k]); k++; } q = (*e == ',') ? e + 1 : e; } }
+    if (!g_orig_subst) { g_orig_subst = fn(0x088934E0u); if (g_orig_subst) psp_dispatch_register(0x088934E0u, subst_hook); }
+    if (std::getenv("PSPRECOMP_TAGTEAM_EXBSCN") && !g_orig_scnset) { g_orig_scnset = fn(0x08A02300u); if (g_orig_scnset) psp_dispatch_register(0x08A02300u, scnset_dbg_hook); g_orig_scnfac = fn(0x08A02E88u); if (g_orig_scnfac) psp_dispatch_register(0x08A02E88u, scnfac_dbg_hook); }
     if (!g_orig_exbstart) { g_orig_exbstart = fn(EXB_START); if (g_orig_exbstart) psp_dispatch_register(EXB_START, exbstart_hook); }
     if (!g_orig_portrait) { g_orig_portrait = fn(0x08B21588u); if (g_orig_portrait) psp_dispatch_register(0x08B21588u, portrait_hook); }
     if (!g_orig_hitreact2) { g_orig_hitreact2 = fn(0x08AE3320u); if (g_orig_hitreact2) psp_dispatch_register(0x08AE3320u, hitreact2_hook); }
