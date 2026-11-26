@@ -83,6 +83,7 @@ constexpr int32_t REMAIN_NONLOOP_ON_MEMORY = -2;
 
 constexpr int MAX_ATRAC_IDS = 8;
 
+static int g_lastSetEnd = 0; static uint32_t g_setCount = 0;
 static bool (*g_loopPolicy)(int endSample, int loopStart) = nullptr;
 
 struct AtracCtx {
@@ -655,6 +656,7 @@ uint32_t set_and_get_id(uint8_t* rdram, uint32_t buf, uint32_t rs, uint32_t bs) 
     if (id < 0) { std::fprintf(stderr, "[ATRAC] SetDataAndGetID: no free atrac id (buf 0x%08X)\n", buf); return ERR_NO_ATRACID; }
     e = ctx_set_data(g_ctx[id], t, buf, rs, std::max(bs, rs), 2, rdram);
     if (e) { free_ctx(id); return e; }
+    g_lastSetEnd = t.endSample; g_setCount++;
     std::fprintf(stderr,
         "[ATRAC] id=%d %s ch=%d align=%u state=%d fileSize=%u endSample=%d firstOff=%d loop=%d..%d buf=0x%08X\n",
         id, t.codec == CODEC_AT3PLUS ? "AT3+" : "AT3", t.channels, t.blockAlign,
@@ -965,6 +967,9 @@ void hle_Reinit(uint8_t*, recomp_context* ctx) { ret(ctx, 0); }
 void hle_StartEntry(uint8_t*, recomp_context* ctx) { ret(ctx, 0); }
 
 }  // namespace
+
+int psp_atrac_last_end_sample() { return g_lastSetEnd; }   // end sample of the track the last sceAtracSetDataAndGetID made (a game module measures a voice line's length with it)
+uint32_t psp_atrac_set_count() { return g_setCount; }
 
 bool psp_atrac_is_streamed(int id) { return atrac_is_streamed(id); }
 

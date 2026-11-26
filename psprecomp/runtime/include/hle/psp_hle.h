@@ -237,6 +237,9 @@ void psp_hle_register_atrac();
 /// A game module's policy for streamed ATRAC tracks that have loop info but whose loop count the game never set (they would play once): called from the
 /// decoder with (end sample, loop start sample); true = loop it forever. Must not block. nullptr: none.
 void psp_atrac_set_loop_policy(bool (*fn)(int endSample, int loopStart));
+/// End sample (length at 44.1 kHz) of the track the last sceAtracSetDataAndGetID created, and how many were created (data-derived: the same on every machine).
+int psp_atrac_last_end_sample();
+uint32_t psp_atrac_set_count();
 
 // sceMpeg movie playback (PSMF/MPEG-PS, H.264 + ATRAC3+) via libavcodec
 void psp_hle_register_mpeg();
