@@ -212,6 +212,10 @@ bool g_menu_mode = false;   // Battle Mode > Tag Team Battle was chosen (menu_se
 bool g_log = false;
 uint8_t* g_ram = nullptr;
 uint32_t rd(uint32_t a);   // below
+void kodiff_dump(const char* tag);
+void finsnap_restore();
+uint8_t g_pair_on = 0, g_pair_on2 = 0; bool g_pair_have = false;
+float g_kodiff_late = -1.f, g_kodiff_kolate = -1.f, g_kobrv0_until = -1.f; uint32_t g_kobrv0_h = 0; float g_kobrv0_dump = -1.f;
 constexpr uint8_t kTagNetVersion = 9;   // 9: + the host's battle lobby (bytes 40-47, docs "Battle lobby"); 8: + 3 v 3 (roster flags bit 3); 7: the host's rules carry free-for-all (roster flags bit 2; a version-6 build would ignore it and split); 6: + the host's CPU party (bytes 24-39, docs "Proper PvE"); 5: + the CPU rows' STRENGTH / LEVEL / TYPE (bytes 16-23); 4: the battle runs on the N-player lock-step of tagteam_net.cpp (a version-3/4 build keeps the plain 1v1)
 constexpr int kTagNetLen = 48;
 bool g_group_mode = false;
@@ -4355,6 +4359,9 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         const float age_now = dissidia_battle_age(); const bool restarted = age_now < last_age; last_age = age_now;
         if (bs_seen != g_battle_gen || restarted) { bs_seen = g_battle_gen; next = 0; list.clear(); std::string e = std::getenv("PSPRECOMP_TAGTEAM_KOLIST"); size_t p0 = 0;
             while (p0 < e.size()) { size_t c = e.find(',', p0); if (c == std::string::npos) c = e.size(); const std::string t = e.substr(p0, c - p0); const size_t k = t.find(':'); if (k != std::string::npos) list.push_back({t.substr(0, k), static_cast<float>(std::atof(t.c_str() + k + 1))}); p0 = c + 1; } }
+        if (g_kodiff_kolate > 0.f && age_now >= g_kodiff_kolate) { g_kodiff_kolate = -1.f; kodiff_dump("kolate"); }
+        if (g_kobrv0_until > 0.f && age_now < g_kobrv0_until) { static float lastp = -1e9f; if (age_now - lastp >= 30.f) { lastp = age_now; const uint32_t hk = g_kobrv0_h; if (ok(hk, 0x310) && age_now >= g_kobrv0_dump && g_kobrv0_dump > 0.f) { g_kobrv0_dump = -1.f; std::fprintf(stderr, "[KOBRV0W] t=%.1fs words:", age_now / 60.f); for (uint32_t o = 0; o < 0x300u; o += 4) std::fprintf(stderr, " %X=%X", o, rd(hk + o)); std::fprintf(stderr, "\n"); }
+        const uint32_t h = g_kobrv0_h; if (ok(h, 0x310)) std::fprintf(stderr, "[KOBRV0] t=%.1fs handler %08X state %u timer %.3f b665 %u dt(089D5EAC) %.4f phase %u slow ch0 %.3f pair %08X list +24 %08X +28 %08X b+88 %u\n", age_now / 60.f, h, rd(h + 8u), static_cast<double>(rdf(h + 568u)), g_ram[(h + 665u) & 0x07FFFFFFu], static_cast<double>(rdf(0x089D5EACu)), g_bs ? rd(g_bs + 72u) : 99u, ok(rd(0x08A62280u), 0x40) ? static_cast<double>(rdf(rd(0x08A62280u) + 4u)) : -1.0, rd(0x089D69F8u), rd(rd(0x089D69F8u) + 24u), rd(rd(0x089D69F8u) + 28u), g_ram[(rd(0x089D69F8u) + 88u) & 0x07FFFFFFu]); } }
         if (next < list.size() && dissidia_battle_age() / 60.0f >= list[next].second) {
             const std::string& who = list[next].first; next++;
             const uint32_t hs = rd(g_bs + 84u), H = srd(g_bs + 56u + 4u * hs), C = srd(g_bs + 56u + 4u * (1u - hs)); uint32_t a = 0;
@@ -4370,6 +4377,13 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
                 if (nat && is_slot_fighter(a)) { bool mate = false; for (int i = 0; i < g_nextra; i++) if (g_extra[i].started && g_extra[i].actor != a && side_of(g_extra[i].actor) == side_of(a) && alive(g_extra[i].actor)) mate = true; mark = ffa_now() ? ffa_keep(a) : (mate || reserve_left(team_of(side_of(a))) > 0); }
                 if (mark) { const uint32_t hp = rd(st + 0xCu), keep = hp > 1 ? hp - 1 : 0; wr(st + 0x8u, keep); wr(st + 0x20u, keep); wr(st + 0x0u, (rd(st + 0x0u) & 0xFFFFu) | (keep << 16)); g_ko_mark.insert(a); }
                 else wr(st + 0xCu, rd(st + 0x8u));
+                kodiff_dump("ko"); g_kodiff_kolate = dissidia_battle_age() + 660.f;
+                if (std::getenv("PSPRECOMP_TAGTEAM_KOBRV0")) {   // debug: the human has just spent its BRV on an HP attack: BRV 0 and its damage handler in state 1 (what retail does for the attacker), like the RP6 report
+                    extern std::map<uint32_t, uint32_t> g_slot_hdl; const uint32_t st2 = rd(H + 0x52Cu); const auto it = g_slot_hdl.find(H);
+                    if (ok(st2, 0x40)) wr(st2 + 0x14u, rd(st2 + 0x14u) & 0xFFFF0000u);
+                    if (it != g_slot_hdl.end() && ok(it->second, 0x310)) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08AE1270u, it->second, 1u); g_ctx->r[29] = static_cast<int32_t>(sp1); }
+                    if (it != g_slot_hdl.end()) { g_kobrv0_h = it->second; g_kobrv0_until = dissidia_battle_age() + 900.f; g_kobrv0_dump = dissidia_battle_age() + (std::getenv("PSPRECOMP_TAGTEAM_KOBRV0W") ? 600.f : 30.f); }
+                    std::fprintf(stderr, "[KOBRV0] human %08X BRV 0, handler %08X state -> %u\n", H, it != g_slot_hdl.end() ? it->second : 0u, it != g_slot_hdl.end() ? rd(it->second + 8u) : 99u); }
                 std::fprintf(stderr, "[KOLIST] t=%.1fs %s -> %s %08X %s\n", dissidia_battle_age() / 60.0f, who.c_str(), role_of(a), a, mark ? "lethal damage + KO mark" : "HP 0");
             }
             else std::fprintf(stderr, "[KOLIST] t=%.1fs %s: no such fighter\n", dissidia_battle_age() / 60.0f, who.c_str());
@@ -6888,6 +6902,12 @@ void ko_oneround() {
         if (g_log) std::fprintf(stderr, "[FFA] t=%.1fs one fighter is left standing: %08X's KO goes to retail, team %d loses\n", age / 60.0f, S, team_of(side_of(S)));
         group_decided(team_of(side_of(S))); return;
     }
+    if (const char* lw = std::getenv("PSPRECOMP_TAGTEAM_LOCKWATCH")) {   // debug (needs PSPRECOMP_MEM_WATCH=0 / FUNC_TRACE): memory watch on the human's lock block word (+0x124 = 1, handler +0x18 = 2, handler +0x28 = 3), armed 20 s into the battle
+        static uint32_t gen = ~0u; if (gen != g_battle_gen && age >= 1200.f && g_bs) { const uint32_t hum = srd(g_bs + 56u + 4u * rd(g_bs + 84u)), Lb = ok(hum, 0x12D0) ? rd(hum + 0x5ACu) : 0u, h = ok(Lb, 0x200) ? rd(Lb + 304u) : 0u;
+            if (ok(h, 0x40)) { gen = g_battle_gen; const uint32_t w = lw[0] == '1' ? Lb + 0x124u : lw[0] == '2' ? h + 0x18u : h + 0x28u; psp_mem_watch_set(w); std::fprintf(stderr, "[LOCKWATCH] watching %08X (lock block %08X handler %08X)\n", w, Lb, h); } } }
+    if (g_bs && rd(g_bs + 72u) == 3u) { const uint32_t pm = rd(0x089D69F8u); if (ok(pm, 0x100)) { g_pair_on = g_ram[(pm + 88u) & 0x07FFFFFFu]; g_pair_on2 = g_ram[(pm + 89u) & 0x07FFFFFFu]; g_pair_have = true; } }   // the fighter-pair update's switch (see finsnap_restore)
+    if (g_kodiff_kolate > 0.f && age >= g_kodiff_kolate) { g_kodiff_kolate = -1.f; kodiff_dump("kolate"); }
+    if (g_kodiff_late > 0.f && age >= g_kodiff_late) { g_kodiff_late = -1.f; kodiff_dump("late"); }
     // With the KO hold gone (default) retail's finish presentation (phase 4, the KO fall + camera ~1.5 s) runs for a lethal hit on a slot fighter whose side goes on.
     // When the KO flow has handled it (nobody of the slots is in a KO state any more, no call-in / rebuild pending, the match not decided) the phase goes back to 3 and the
     // finish latch bit (+0x380 0x20000000) is cleared, so the next fall is not taken for the finish of the match. PSPRECOMP_TAGTEAM_NOPHASEBACK=1: left at 4.
@@ -6897,7 +6917,7 @@ void ko_oneround() {
         if (!ko_any) { if (fin_since == 0.f) fin_since = age; if (age - fin_since >= 5.f) {
             { const uint32_t mg = rd(0x08A62280u); if (ok(mg, 0x40) && rdf(mg + 4u) < 1.99f) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, mg, 0u); g_ctx->r[29] = static_cast<int32_t>(sp1); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs finish slow motion (channel 0) released by hand\n", age / 60.0f); } }
             if (g_sndenable_gen == g_battle_gen && !std::getenv("PSPRECOMP_TAGTEAM_NOSNDENABLE")) { const uint32_t cur = rd(0x089D6C98u); if ((cur & 0xFFu) != g_sndenable_val) { wr(0x089D6C98u, (cur & ~0xFFu) | g_sndenable_val); if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs sound requests enabled again (byte 089D6C98 %02X -> %02X)\n", age / 60.0f, cur & 0xFFu, g_sndenable_val); } } g_sndenable_gen = ~0u;
-            cam_restore("finish over"); g_midfin_gen = ~0u; wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
+            g_kodiff_late = age + 300.f; kodiff_dump("post"); cam_restore("finish over"); g_midfin_gen = ~0u; finsnap_restore(); wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
             // The finish also puts the WINNER's slot fighter into its victory state (+0x380 bit 2 and world flags +908 bit 2: win script, no pad, not moved by the world step): with the match going on that fighter stayed frozen for good
             // (kill camera "stuck forever", the extras / other players still moved). Back to normal for every slot fighter that is standing. PSPRECOMP_TAGTEAM_NOWINCLEAR=1 = old.
             if (!std::getenv("PSPRECOMP_TAGTEAM_NOWINCLEAR")) for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0) && !ko_state(a2) && hp_eff(a2) > 0 && ((rd(a2 + 0x380u) & 2u) || (rd(a2 + 908u) & 2u))) { const uint32_t f0 = rd(a2 + 0x380u), w0 = rd(a2 + 908u); wr(a2 + 0x380u, f0 & ~2u); wr(a2 + 908u, w0 & ~2u); if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs slot fighter %08X: victory state cleared (+0x380 %08X -> %08X, world flags +908 %08X -> %08X)\n", age / 60.0f, a2, f0, rd(a2 + 0x380u), w0, rd(a2 + 908u)); } }
@@ -7134,13 +7154,43 @@ bool mid_ko_now(uint32_t* who_out = nullptr) {
     if (who_out) *who_out = who;
     return mid;
 }
+// debug: PSPRECOMP_TAGTEAM_KODIFF=<dir>: RAM image (0x08800000..0x0A000000) at the finish start and at "KO flow done" (diffed offline for what the finish changes)
+void kodiff_dump(const char* tag) {
+    const char* d = std::getenv("PSPRECOMP_TAGTEAM_KODIFF"); if (!d || !*d || !g_ram) return;
+    std::string p = std::string(d) + "/" + tag + ".bin"; FILE* f = std::fopen(p.c_str(), "wb"); if (!f) return;
+    std::fwrite(g_ram + 0x00800000u, 1, 0x01800000u, f); std::fclose(f); if (g_log) std::fprintf(stderr, "[KODIFF] %s dumped\n", tag);
+}
+// The finish machine's start (FUN_08B09D88) marks both slot fighters as "decided": FUN_08B34E98(fighter, 3) sets fighter +0x380 bit 0x20000000 and the byte +0x126B (fighter + 4712 + 3) = 1, the world flags
+// (+908 |= 2: the winner's victory state) and it clears the byte +0x126 of each fighter's lock block (fighter +0x5AC): lock-on disabled. For a mid-battle KO the match goes on, so these are put back to what they were
+// at the finish start when the KO flow is done (RP6 25 Nov: after the first kill no BRV gain, no lock-on reticle, no chase prompt). PSPRECOMP_TAGTEAM_NOFINRESTORE=1 = old.
+struct FinSnap { bool have = false; uint32_t actor[2] = {0, 0}, lock[2] = {0, 0}; uint8_t dec[2] = {0, 0}, lk126[2] = {0, 0}; } g_finsnap;
+void finsnap_take() {
+    g_finsnap.have = false;
+    for (uint32_t k = 0; k < 2; k++) { const uint32_t a = srd(g_bs + 56u + 4u * k); g_finsnap.actor[k] = 0; if (!ok(a, 0x12D0)) continue;
+        const uint32_t L = rd(a + 0x5ACu); g_finsnap.actor[k] = a; g_finsnap.lock[k] = ok(L, 0x200) ? L : 0u; g_finsnap.dec[k] = g_ram[(a + 0x126Bu) & 0x07FFFFFFu]; g_finsnap.lk126[k] = g_finsnap.lock[k] ? g_ram[(L + 0x126u) & 0x07FFFFFFu] : 0;
+        g_finsnap.have = true; }
+}
+void finsnap_restore() {
+    if (!g_finsnap.have || std::getenv("PSPRECOMP_TAGTEAM_NOFINRESTORE")) { g_finsnap.have = false; return; }
+    // The finish update (FUN_0888C048 -> FUN_08886934(pair object *0x089D69F8)) zeroes the pair object's bytes +88 / +89: FUN_08886C88 (per frame: both slot fighters' damage handlers = BRV refill / break states,
+    // lock-on parts) then does nothing for the rest of the match (RP6 25 Nov: after the kill the BRV never came back, no reticle / chase prompt). Put back to what the last phase-3 frame had.
+    if (g_pair_have) { const uint32_t pm = rd(0x089D69F8u); if (ok(pm, 0x100)) { const uint8_t o8 = g_ram[(pm + 88u) & 0x07FFFFFFu], o9 = g_ram[(pm + 89u) & 0x07FFFFFFu]; g_ram[(pm + 88u) & 0x07FFFFFFu] = g_pair_on; g_ram[(pm + 89u) & 0x07FFFFFFu] = g_pair_on2; const uint32_t w0 = rd(pm + 180u); if (!std::getenv("PSPRECOMP_TAGTEAM_KEEPWINNER")) wr(pm + 180u, 0u); if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs pair update switch put back (+88 %u -> %u, +89 %u -> %u), decided winner +180 %08X -> 0\n", dissidia_battle_age() / 60.0f, o8, g_pair_on, o9, g_pair_on2, w0); } }
+    for (uint32_t k = 0; k < 2; k++) { const uint32_t a = g_finsnap.actor[k]; if (!a || a != srd(g_bs + 56u + 4u * k) || !ok(a, 0x12D0)) continue;
+        const uint8_t d0 = g_ram[(a + 0x126Bu) & 0x07FFFFFFu]; g_ram[(a + 0x126Bu) & 0x07FFFFFFu] = g_finsnap.dec[k];
+        const uint32_t L = rd(a + 0x5ACu); uint8_t l0 = 0, l1 = 0; const bool same = L && L == g_finsnap.lock[k] && ok(L, 0x200);
+        if (same) { l0 = g_ram[(L + 0x126u) & 0x07FFFFFFu]; g_ram[(L + 0x126u) & 0x07FFFFFFu] = g_finsnap.lk126[k]; l1 = g_finsnap.lk126[k]; }
+        if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs slot fighter %08X: finish marks put back (decided byte +0x126B %u -> %u; lock block %08X +0x126 %u -> %u%s)\n", dissidia_battle_age() / 60.0f, a, d0, g_finsnap.dec[k], L, l0, l1, same ? "" : ", lock block replaced: left"); }
+    g_finsnap.have = false;
+}
 void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
+    kodiff_dump("pre");
     uint32_t who = 0; const bool mid = mid_ko_now(&who);
     g_midfin_gen = mid ? g_battle_gen : ~0u;
     if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish start (bs+72 %u): %s%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, mid ? "mid-battle KO of " : "match-ending / forfeit: full retail finish", mid ? role_of(who) : "");
     if (mid) cam_snap("finish start"); else g_camsnap.have = false;
     if (mid) { g_sndenable_gen = g_battle_gen; g_sndenable_val = rd(0x089D6C98u) & 0xFFu; } else g_sndenable_gen = ~0u;
+    if (mid) finsnap_take(); else g_finsnap.have = false;
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_KOSHOT")) { const float a = dissidia_battle_age() / 60.0f; tagteam_breakshot_event(a, g_battle_gen, "kofin", 0, "a", nullptr); tagteam_breakshot_event(a + 2.f, g_battle_gen, "kofin", 0, "b", nullptr); }   // debug: shots at the finish start +0 / 0.5 / 1.5 and +2 / 2.5 / 3.5 s
     g_orig_finstart(rdram, ctx);
 }

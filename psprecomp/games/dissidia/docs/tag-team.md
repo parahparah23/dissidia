@@ -4771,6 +4771,11 @@ User after play: the retail finish for a mid-battle KO changed the music (defeat
   stereo sting. All skipped for a mid-battle KO (`PSPRECOMP_TAGTEAM_NOSNDKEEP=1` = old). "THE FINAL BLOW!" (and the white speed lines) = `FUN_08B17014(machine + 96)`, started by state 2's update
   `FUN_08B06370` (ra `08B063E8`) when its timer reaches 20: skipped (`PSPRECOMP_TAGTEAM_NOBANNERSKIP=1` = old). Debug: `PSPRECOMP_AUDIOCHK=1` (per-second peak of the audio sink),
   `PSPRECOMP_TAGTEAM_KOSHOT=1` (screenshots at the finish start +0 / 0.5 / 1.5 s and +2 / 2.5 / 3.5 s), `FNLOG` / `FNSKIP` take up to 128 addresses.
+- **Mid-battle KO, finish marks (26 Nov, tree ttkc4; RP6 report: after the first kill no BRV gain, no lock-on reticle, no chase prompt):** the finish update (`FUN_0888C048` -> `FUN_08886934`) zeroes the pair object's bytes `+88` / `+89`
+  (`*0x089D69F8`; `FUN_08886C88` per frame = both slot fighters' damage handlers (BRV refill 2 -> 0, break), lock parts) and the pair's winner word `+180` stays set (`FUN_0888696C` = "decided"); `FUN_08B09D88` also sets fighter `+0x126B` = 1
+  (`FUN_08B34E98(f, 3)`, with `+0x380` bit 29) and clears the byte `+0x126` of each fighter's lock block (`*(f+0x5AC)`; `FUN_08B3F7F4` / `FUN_08B40290` skip the lock work with 0). At "KO flow done" all are put back
+  (`finsnap_restore`; `[KOCAM] ... pair update switch put back`, `finish marks put back`; `PSPRECOMP_TAGTEAM_NOFINRESTORE=1` = old, `KEEPWINNER=1` keeps +180). Test: `PSPRECOMP_TAGTEAM_KOLIST=cpu:40 KOBRV0=1` (human BRV 0 + handler state 1 like after an HP attack):
+  before the fix the handler stayed in state 2 for good (BRV 0); now `2 -> 0` at 46.6 s with BRV back (same as the extra-KO control). Debug: `KODIFF=<dir>` (RAM images at finish start / done / +5 s), `LOCKWATCH`.
 - Not done / unverified: the fade to black seen near the end of the retail slot presentation (state 3) is still there; the camera of an extra KO online (view only, the slow motion is battle state); EX Burst KO; subtitles of our own KO line.
 
 ## Kill camera, round 2: no fade, every route into the finish (22 Nov, tree ttx; host-only)
