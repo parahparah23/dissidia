@@ -16,6 +16,7 @@
 //   psprecomp_setup --headless ... --extra KEY=VALUE  turn on an extra / give its disc (repeatable; e.g. d1_moves=1 d1_iso=FILE)
 //   psprecomp_setup --import-saves SAVEDATA --dir DIR  copy Dissidia 012 saves into an install (an install step; no window)
 //   psprecomp_setup --root DIR               use DIR as the release folder instead of this program's folder
+//   psprecomp_setup --report "TEXT" [--dir DIR] [--report-step "WHAT FAILED"]   send a "Report an issue" without a window (tests; PSPRECOMP_REPORT_URL picks the service)
 //   psprecomp_setup --screenshots OUTDIR     write PPM images of the pages (documentation / look checks) and exit
 #define SDL_MAIN_HANDLED   // keep the plain main() on Windows (see SDL_SetMainReady below)
 #include <SDL.h>
@@ -33,6 +34,7 @@
 
 #include "../runtime/src/hle/psp_savedata_dialog.h"
 #include "../runtime/src/hle/psp_savemgr.h"
+#include "../runtime/include/psp_report.h"
 #include "install.h"
 #include "extras.h"
 #include "../runtime/include/psp_app_icon_installer.h"   // the wizard has its own icon, not the game's
@@ -198,7 +200,7 @@ struct Browser {
 };
 
 // -------------------------------------------------------------------------------------------------------------- app
-enum class Screen { Welcome, PickInfo, PickIso, PickUndub, Waiting, InstallDir, BrowseDir, TypePath, Options, Build, Done, Failed, Checking, UpdateAvail, Message };
+enum class Screen { Welcome, PickInfo, PickIso, PickUndub, Waiting, InstallDir, BrowseDir, TypePath, Options, Build, Done, Failed, Checking, UpdateAvail, Message, Report, ReportText, Interrupted };
 // What a file/folder pick is for.
 enum class Pick { Iso, Disc, Dir };   // Disc: the second disc image of an extra (pick_extra; setup/extras.cpp)
 
@@ -285,6 +287,16 @@ struct App {
         go(Screen::Options, i);
     }
 
+    // "Report an issue" (psp_report.cpp, the game's code): the description is typed with the on-screen keyboard (host keyboard or pad)
+    std::string rep_text;                 // what the player typed
+    Screen rep_back = Screen::Welcome;    // where Back goes
+    bool rep_sent = false;                // a report went out (the status row shows its result)
+    bool rep_working = false;
+    std::string rep_value;                // the Status row's short value: "Issue #N opened" / "Not sent"
+    std::string rep_failed_step;          // the step that failed (Failed page), put into the report
+    std::string rep_status;               // last status line
+    std::string marker_path;              // exists while an install runs: found at the next start = the last run did not end
+
     // build
     setup::Proc proc;
     std::vector<setup::Step> plan;
@@ -339,7 +351,7 @@ struct App {
             p.title = "DISSIDIA 012 SETUP";
             if (!layout_problem.empty()) {
                 p.tab = "Problem";
-                p.rows = {row("Quit", layout_problem)};
+                p.rows = {row("Quit", layout_problem), row("Report an issue", "Send a report about this problem to the developer.")};
             }
             else if (installed()) {
                 p.tab = "Installed";
@@ -349,12 +361,14 @@ struct App {
                           row("Check for updates", "Look for a newer release of the game files (not available yet)."),
                           row("Rebuild the game", "Compile the game again from your extracted files. Use this if the game does not start."),
                           row("Install again", "Pick a game file and install from scratch (your saves are kept)."),
+                          row("Report an issue", "Tell the developer what went wrong. You see exactly what is sent before it goes."),
                           row("Quit")};
             } else {
                 p.tab = "Welcome";
                 p.rows = {row("Install the game",
                               "Builds the game on this computer from your own copy of Dissidia 012 (EU or US, ISO or CSO). "
                               "Nothing from the game is downloaded or shipped with this program. It takes a while."),
+                          row("Report an issue", "Tell the developer what went wrong. You see exactly what is sent before it goes."),
                           row("Quit")};
             }
             break;
@@ -505,10 +519,31 @@ struct App {
                 p.rows.push_back(row("Install on an Android device", "The Android version is built: " + cur_workdir() + "/android/dissidia.apk. This installs it on a device connected with USB or wireless debugging (adb in your PATH) and copies the game files to it. Or install the APK by hand and copy the folders (see docs/android.md)."));
             p.rows.push_back(row("Quit", (shortcut_note.empty() ? std::string() : shortcut_note + ". ") + "The game can also be started with this program any time."));
             break;
+        case Screen::Interrupted:
+            p.title = "LAST RUN STOPPED";
+            p.tab = "Report";
+            p.rows = {row("Report an issue", "The last install did not finish: the program was closed or crashed while it ran. Send the install log to the developer so it can be fixed."),
+                      row("Continue")};
+            break;
+        case Screen::Report: {
+            p.title = "REPORT AN ISSUE";
+            p.tab = "Send";
+            const std::string d = rep_text.empty() ? std::string("(not written yet)") : shorten_left(rep_text, 34);
+            p.rows = {row("What went wrong", "Describe the problem in a few words (what you did, what you expected, what happened). Select to type it with the keyboard.", d),
+                      row("Files that will be sent", report_files_help()),
+                      row("Send the report", "Sends the report to the developer's issue tracker on GitHub, then opens the new issue in your browser. Nothing is sent before you choose this."),
+                      row("Status", rep_status.empty() ? std::string("Nothing is sent until you choose Send the report.") : rep_status, rep_working ? "Sending..." : rep_sent ? rep_value : ""),
+                      row("Back")};
+            if (!rep_working && !rep_sent) p.rows[3].value = "";
+            break;
+        }
+        case Screen::ReportText:
+            break;
         case Screen::Failed:
             p.title = "NOT FINISHED";
             p.tab = "Stopped";
-            p.rows = {row("Try again", fail_msg + " Trying again continues where it stopped.")};
+            p.rows = {row("Try again", fail_msg + " Trying again continues where it stopped."),
+                      row("Report an issue", "Send the log and what failed to the developer. You see what is sent first.")};
             if (can_open_log()) {
                 p.rows.push_back(row("Open setup.log", "The log of this install: every step's output and why it stopped. " + log_path));
                 p.rows.push_back(row("Show setup.log in its folder", "Opens the install folder with setup.log selected, e.g. to send the file. " + log_path));
@@ -518,6 +553,104 @@ struct App {
             break;
         }
         return p;
+    }
+
+    // ---- Report an issue ----
+    static std::string release_version(const std::string& root) {
+        std::ifstream f(fs::path(root) / "release.json");
+        std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        size_t at = s.find("\"version\"");
+        if (at == std::string::npos) return "dev";
+        at = s.find('"', s.find(':', at) + 1);
+        const size_t e = at == std::string::npos ? at : s.find('"', at + 1);
+        return e == std::string::npos ? "dev" : s.substr(at + 1, e - at - 1);
+    }
+    // Names the files of this install for the report (the same list the preview shows).
+    void report_configure() {
+        psp_report::Product pr;
+        pr.name = "installer";
+        pr.version = release_version(layout.root);
+        const std::string wd = cur_workdir();
+        const std::string logp = !log_path.empty() ? log_path : (fs::path(wd) / "setup.log").string();
+        pr.files.push_back({"setup.log", logp, 8u << 20});
+        if (!wd.empty()) {
+            for (const char* n : {"last_run.log", "run.log"}) pr.files.push_back({n, (fs::path(wd) / n).string(), 8u << 20});
+            std::error_code ec;
+            for (auto it = fs::directory_iterator(wd, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                const std::string n = it->path().filename().string(), l = lower(n);
+                if (l.rfind("crash", 0) == 0 || l.rfind("hs_err", 0) == 0) pr.files.push_back({n, it->path().string(), 1u << 20});
+            }
+        }
+        pr.save_dir = (fs::path(marker_path).parent_path() / "reports").string();
+        pr.space_dir = wd.empty() ? setup::home_dir() : wd;
+        std::error_code ec;
+        if (!fs::exists(pr.space_dir, ec)) pr.space_dir = setup::home_dir();
+        pr.facts.push_back({"installer_screen", std::to_string((int)screen)});
+#ifdef _WIN32
+        pr.facts.push_back({"installer_platform", "windows"});
+#else
+        pr.facts.push_back({"installer_platform", "linux"});
+#endif
+        pr.facts.push_back({"extras", opt.get("hd_textures").empty() ? "" : "hd_textures=" + opt.get("hd_textures")});
+        psp_report::set_product(pr);
+    }
+    std::string report_files_help() {
+        report_configure();
+        std::string s = "Sent: your description, the installer's version, OS, CPU, memory and free space, which step failed, and ";
+        for (const auto& f : psp_report::preview(false)) {
+            if (f.name == "report.json") continue;
+            s += f.name + ", ";
+        }
+        s += "(your user name and home folder are replaced by ~). Never sent: your disc image, cloud.ini, saves.";
+        return s;
+    }
+    void begin_report(Screen back) {
+        rep_back = back;
+        rep_sent = rep_working = false;
+        rep_status.clear();
+        go(Screen::Report, 0);
+    }
+    void send_report() {
+        if (rep_working) return;
+        if (rep_text.empty() && rep_failed_step.empty()) { rep_status = "Write a few words about what went wrong first (What went wrong)."; dirty = true; return; }
+        report_configure();
+        psp_report::Params p;
+        p.description = rep_text;
+        if (!rep_failed_step.empty()) p.description += (rep_text.empty() ? "" : "\n\n") + std::string("Failed: ") + rep_failed_step;
+        p.title = "Installer: " + (rep_text.empty() ? rep_failed_step : rep_text.substr(0, 70));
+        p.include_dump = false;
+        if (!rep_failed_step.empty()) p.extra.push_back({"failure", rep_failed_step});
+        if (!prog.stage.empty()) p.extra.push_back({"last_step", prog.stage});
+        if (!prog.last_line.empty()) p.extra.push_back({"last_line", prog.last_line});
+        if (!psp_report::start(p)) { rep_status = "A report is already being sent."; dirty = true; return; }
+        rep_working = true;
+        rep_sent = false;
+        rep_status = "Collecting the report...";
+        dirty = true;
+    }
+    void pump_report() {
+        if (!rep_working) return;
+        const psp_report::Status st = psp_report::status();
+        if (st.text != rep_status && st.state == psp_report::Status::Working) { rep_status = st.text; dirty = true; }
+        if (!psp_report::take_finished()) return;
+        rep_working = false;
+        rep_sent = true;
+        rep_status = st.text;
+        rep_value = st.state == psp_report::Status::Done ? st.text : "Not sent";
+        sel = 3;   // the Status row, whose help says what happened (and where the zip was saved when it did not go)
+        if (st.state == psp_report::Status::Done) {
+            std::fprintf(stderr, "[REPORT] %s %s\n", st.text.c_str(), st.issue_url.c_str());
+            const char* no = std::getenv("PSPRECOMP_REPORT_NO_OPEN");
+            if (!(no && no[0] == '1')) SDL_OpenURL(st.issue_url.c_str());
+            rep_status = st.text + ". Your browser opens it: " + st.issue_url;
+        }
+        log_line("report: " + rep_status);
+        dirty = true;
+    }
+    void marker(bool on) {
+        if (marker_path.empty()) return;
+        if (on) { if (FILE* f = std::fopen(marker_path.c_str(), "wb")) { std::fputs("install running\n", f); std::fclose(f); } }
+        else { std::error_code ec; fs::remove(marker_path, ec); }
     }
 
     bool can_open_log() const {   // a desktop with a setup.log to show (Android: the app's storage, not reachable from here)
@@ -542,6 +675,8 @@ struct App {
         else if (update) plan = setup::plan_update(layout, state.workdir, o, upd);
         else plan = rebuild ? setup::plan_rebuild(layout, state.workdir, o) : setup::plan_install(layout, iso, workdir, o);
         log_open((rebuild || update || extras) ? state.workdir : workdir);
+        rep_failed_step.clear();
+        marker(true);
         prog = setup::Progress();
         prog.stage = plan[0].label;
         prog.explain = plan[0].explain;
@@ -578,7 +713,9 @@ struct App {
     void fail(const std::string& msg) {
         log_line("FAILED: " + msg);
         building = false;
+        marker(false);
         fail_msg = msg;
+        rep_failed_step = (prog.stage.empty() ? std::string() : prog.stage + ": ") + msg;
         go(Screen::Failed);
     }
 
@@ -618,6 +755,7 @@ struct App {
                 start_step();
             } else {
                 building = false;
+                marker(false);
                 if (!rebuild_only) {
                     state.workdir = workdir;
                     state.iso = iso;
@@ -877,7 +1015,7 @@ struct App {
     void confirm() {
         switch (screen) {
         case Screen::Welcome:
-            if (!layout_problem.empty()) { quit = true; break; }
+            if (!layout_problem.empty()) { if (sel == 1) begin_report(Screen::Welcome); else quit = true; break; }
             if (installed()) {
                 switch (sel) {
                 case 0: play(); break;
@@ -886,12 +1024,14 @@ struct App {
                 case 3: begin_check(true); break;
                 case 4: opt = state.options; start_plan(true); break;
                 case 5: begin_pick(Pick::Iso, Screen::Welcome); break;
+                case 6: begin_report(Screen::Welcome); break;
                 default: quit = true;
                 }
             } else if (sel == 0) {
                 if (workdir.empty()) workdir = setup::default_install_dir();
                 begin_pick(Pick::Iso, Screen::Welcome);
-            } else quit = true;
+            } else if (sel == 1) begin_report(Screen::Welcome);
+            else quit = true;
             break;
         case Screen::PickInfo:
             if (sel == 2) begin_pick(pick, before_pick, true);
@@ -965,22 +1105,35 @@ struct App {
             else quit = true;
             break;
         case Screen::Failed: {
-            const int extra = can_open_log() ? 2 : 0;   // rows 1 and 2: open setup.log / show it in its folder
+            const int extra = can_open_log() ? 2 : 0;   // rows 2 and 3: open setup.log / show it in its folder (row 1: Report an issue)
             if (sel == 0) { if (!plan.empty()) start_plan(rebuild_only && !updating && !android_inst, updating, android_inst); else go(Screen::Welcome); }
-            else if (sel <= extra) {
+            else if (sel == 1) begin_report(Screen::Failed);
+            else if (sel <= extra + 1) {
                 if (logf) std::fflush(logf);
                 std::string err;
-                if (!setup::open_on_desktop(log_path, sel == 2, &err)) {
+                if (!setup::open_on_desktop(log_path, sel == 3, &err)) {
                     msg_title = "SETUP LOG";
                     msg_text = "Could not open it (" + err + "). The file is " + log_path;
                     msg_back = Screen::Failed;
                     go(Screen::Message);
                 }
             }
-            else if (sel == extra + 1) go(Screen::Welcome);
+            else if (sel == extra + 2) go(Screen::Welcome);
             else quit = true;
             break;
         }
+        case Screen::Interrupted:
+            if (sel == 0) begin_report(Screen::Welcome); else go(Screen::Welcome);
+            break;
+        case Screen::Report:
+            if (sel == 0) {
+                osk.begin(u"What went wrong", std::u16string(rep_text.begin(), rep_text.end()), 300, true);
+                psp_sddialog::osk_set_active(true);
+                go(Screen::ReportText);
+            } else if (sel == 2) send_report();
+            else if (sel == 4) { if (!rep_working) go(rep_back); }
+            break;
+        case Screen::ReportText:
         case Screen::TypePath:
             break;
         }
@@ -1024,6 +1177,12 @@ struct App {
         case Screen::UpdateAvail:
             if (launch_mode) play(); else go(Screen::Welcome);
             break;
+        case Screen::Report:
+            if (!rep_working) go(rep_back);
+            break;
+        case Screen::Interrupted:
+            go(Screen::Welcome);
+            break;
         default:
             break;
         }
@@ -1063,7 +1222,7 @@ struct App {
             drag_accum += dy - touch_y;
             touch_x = dx; touch_y = dy;
             if (std::abs(dy - touch_y0) > 10 || std::abs(dx - touch_x0) > 10) touch_moved = true;
-            if (screen != Screen::TypePath && screen != Screen::Build) {
+            if (screen != Screen::TypePath && screen != Screen::ReportText && screen != Screen::Build) {
                 const float step = 22;   // design units of drag per row
                 int n = row_count();
                 while (drag_accum > step) { sel = n ? std::max(0, sel - 1) : 0; drag_accum -= step; dirty = true; }   // finger down = list moves down = earlier rows
@@ -1075,14 +1234,14 @@ struct App {
                 int64_t dt = std::max<int64_t>(1, now_ms() - touch_t0);
                 float v = (dy - touch_y0) / (float)dt;
                 int extra = std::abs(v) < 0.3f ? 0 : (int)std::max(-120.f, std::min(120.f, -v * 90.f));   // only a quick flick
-                if (std::abs(extra) > 2 && screen != Screen::TypePath && screen != Screen::Build) {
+                if (std::abs(extra) > 2 && screen != Screen::TypePath && screen != Screen::ReportText && screen != Screen::Build) {
                     int n = row_count();
                     sel = n ? std::max(0, std::min(n - 1, sel + extra)) : 0;
                     dirty = true;
                 }
                 return;
             }
-            if (screen == Screen::TypePath) return;
+            if (screen == Screen::TypePath || screen == Screen::ReportText) return;
             // hit-test against what the settings renderer drew (its geometry is in the same 480x272 design units)
             const psp_sddialog::SetGeom& G = view.geom();
             if (G.back.w > 0 && G.back.has(dx, dy) && screen != Screen::Welcome) { cancel(); return; }
@@ -1105,6 +1264,16 @@ struct App {
 
     void update_input() {
         in.update(pad);
+        if (screen == Screen::ReportText) {
+            auto r = osk.update(in.pad_held, now_ms());
+            dirty = true;
+            if (r == psp_sddialog::Result::Selected) {
+                psp_sddialog::osk_set_active(false);
+                rep_text = utf8_of(osk.text());
+                go(Screen::Report, 2);   // on to Send
+            }
+            return;
+        }
         if (screen == Screen::TypePath) {
             auto r = osk.update(in.pad_held, now_ms());
             dirty = true;
@@ -1136,6 +1305,16 @@ struct App {
             if (p & BTN_LTRIGGER) { sel = std::max(0, sel - MENU_ROWS); dirty = true; }
             if (p & BTN_RTRIGGER) { sel = std::min(n - 1, sel + MENU_ROWS); dirty = true; }
         }
+    }
+
+    static std::string utf8_of(const std::u16string& t) {
+        std::string u8;
+        for (char16_t c : t) {
+            if (c < 0x80) u8 += (char)c;
+            else if (c < 0x800) { u8 += (char)(0xC0 | (c >> 6)); u8 += (char)(0x80 | (c & 0x3F)); }
+            else { u8 += (char)(0xE0 | (c >> 12)); u8 += (char)(0x80 | ((c >> 6) & 0x3F)); u8 += (char)(0x80 | (c & 0x3F)); }
+        }
+        return u8;
     }
 
     static std::string nice(const std::string& up) {   // "WHERE TO INSTALL" -> "Where to install"
@@ -1183,7 +1362,7 @@ struct App {
 
     void render_page() {
         canvas.clear(0xFF000000);
-        if (screen == Screen::TypePath) {
+        if (screen == Screen::TypePath || screen == Screen::ReportText) {
             osk.render(canvas);
             return;
         }
@@ -1253,6 +1432,28 @@ int run_headless(const setup::Layout& l, const std::string& iso, const std::stri
     }
     std::printf("installed: %s\n", setup::game_binary(dir).c_str());
     return setup::game_installed(dir) ? 0 : 1;
+}
+
+// --report TEXT [--dir DIR]: the Report an issue upload without a window (tests, support). Prints the result; exit 0 when the issue was opened.
+int run_report_cli(const setup::Layout& l, const std::string& dir, const std::string& text, const std::string& step) {
+    psp_report::Product pr;
+    pr.name = "installer";
+    pr.version = App::release_version(l.root);
+    pr.files.push_back({"setup.log", (fs::path(dir.empty() ? "." : dir) / "setup.log").string(), 8u << 20});
+    pr.space_dir = dir.empty() ? "." : dir;
+    pr.save_dir = (fs::path(dir.empty() ? "." : dir) / "reports").string();
+    psp_report::set_product(pr);
+    psp_report::Params p;
+    p.description = text + (step.empty() ? "" : "\n\nFailed: " + step);
+    p.title = "Installer: " + text.substr(0, 70);
+    p.include_dump = false;
+    if (!step.empty()) p.extra.push_back({"failure", step});
+    for (const auto& f : psp_report::preview(false)) std::printf("file: %s (%zu bytes)\n", f.name.c_str(), f.size);
+    if (!psp_report::start(p)) return 1;
+    while (!psp_report::take_finished()) SDL_Delay(50);
+    const psp_report::Status st = psp_report::status();
+    std::printf("%s\n%s\n%s\n", st.state == psp_report::Status::Done ? "DONE" : "FAILED", st.text.c_str(), st.issue_url.c_str());
+    return st.state == psp_report::Status::Done ? 0 : 1;
 }
 
 }  // namespace
@@ -1345,7 +1546,7 @@ int main(int argc, char** argv) {
     attach_parent_console();
     std::string root, iso, dir, play_dir, shots, import_from, saves_from;
     bool headless = false, play = false, launch = false;
-    std::string unpack_to;
+    std::string unpack_to, report_text, report_step;
     std::vector<std::pair<std::string, std::string>> extras;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -1363,6 +1564,8 @@ int main(int argc, char** argv) {
             if (eq == std::string::npos || eq == 0) { std::fprintf(stderr, "--extra needs KEY=VALUE\n"); return 2; }
             extras.push_back({kv.substr(0, eq), kv.substr(eq + 1)});
         }
+        else if (a == "--report") next(report_text);
+        else if (a == "--report-step") next(report_step);
         else if (a == "--launch") launch = true;
         else if (a == "--screenshots") next(shots);
         else if (a == "--play") { play = true; if (i + 1 < argc && argv[i + 1][0] != '-') play_dir = argv[++i]; }
@@ -1399,9 +1602,11 @@ int main(int argc, char** argv) {
 
     char* pref = SDL_GetPrefPath("psprecomp", "setup");
     std::string state_file = std::string(pref ? pref : "./") + "install.ini";
+    const std::string pref2 = pref ? pref : "./";
     if (pref) SDL_free(pref);
     setup::State state = setup::load_state(state_file);
 
+    if (!report_text.empty()) return run_report_cli(layout, dir, report_text, report_step);
     if (headless) {
         if (iso.empty() || dir.empty()) { std::fprintf(stderr, "--headless needs --iso FILE and --dir DIR\n"); return 2; }
         return run_headless(layout, iso, dir, saves_from, extras);
@@ -1430,6 +1635,11 @@ int main(int argc, char** argv) {
     app.iso = state.iso;
     app.opt = state.options;
     app.launch_mode = launch;
+    app.marker_path = pref2 + "install.running";
+    if (shots.empty() && fs::exists(app.marker_path)) {   // the last install never reached its end (killed, crashed, power loss)
+        app.marker(false);
+        if (app.layout_problem.empty()) app.go(Screen::Interrupted);
+    }
 
     if (!shots.empty()) {   // look check without a window
         std::error_code ec;
@@ -1475,6 +1685,14 @@ int main(int argc, char** argv) {
         { std::error_code ec; std::filesystem::remove(app.log_path, ec); }
         app.osk.begin(u"Folder path", u"/home/player", 200, true);
         app.go(Screen::TypePath); shot("8_type_path");
+        app.rep_text = "The compile step stops at 40 percent and the window closes";
+        app.rep_failed_step = "Compiling the game: A step failed (exit code 1)";
+        app.go(Screen::Report, 2); shot("9_report");
+        app.rep_sent = true; app.rep_value = "Issue #144 opened"; app.rep_status = "Issue #144 opened. Your browser opens it: https://github.com/schindlershadow/dissidia/issues/144";
+        app.go(Screen::Report, 3); shot("9b_report_sent");
+        app.osk.begin(u"What went wrong", u"The compile step stops", 300, true);
+        app.go(Screen::ReportText); shot("9c_report_text");
+        app.go(Screen::Interrupted); shot("9d_interrupted");
         std::printf("%d screenshots in %s\n", n, shots.c_str());
         SDL_Quit();
         return 0;
@@ -1506,7 +1724,7 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
             case SDL_QUIT:
-                if (app.building) app.proc.kill();
+                if (app.building) { app.proc.kill(); app.marker(false); }
                 app.quit = true;
                 break;
             case SDL_CONTROLLERDEVICEADDED:
@@ -1524,7 +1742,7 @@ int main(int argc, char** argv) {
                 app.touch_event(ev);
                 break;
             case SDL_TEXTINPUT:
-                if (app.screen == Screen::TypePath)
+                if (app.screen == Screen::TypePath || app.screen == Screen::ReportText)
                     for (const unsigned char* c = (const unsigned char*)ev.text.text; *c; c++)
                         if (*c >= 0x20 && *c < 0x7F) psp_sddialog::osk_push_key(*c);
                 break;
@@ -1534,10 +1752,13 @@ int main(int argc, char** argv) {
                 } else if (ev.key.keysym.sym == SDLK_F11 || (ev.key.keysym.sym == SDLK_RETURN && (ev.key.keysym.mod & KMOD_ALT))) {
                     bool fs_on = SDL_GetWindowFlags(app.win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
                     SDL_SetWindowFullscreen(app.win, fs_on ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-                } else if (app.screen == Screen::TypePath) {
+                } else if (app.screen == Screen::TypePath || app.screen == Screen::ReportText) {
                     if (ev.key.keysym.sym == SDLK_BACKSPACE) psp_sddialog::osk_push_key(8);
                     else if (ev.key.keysym.sym == SDLK_RETURN) psp_sddialog::osk_push_key(13);
-                    else if (ev.key.keysym.sym == SDLK_ESCAPE) { psp_sddialog::osk_set_active(false); app.go(Screen::BrowseDir); }
+                    else if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                        psp_sddialog::osk_set_active(false);
+                        if (app.screen == Screen::ReportText) app.go(Screen::Report, 0); else app.go(Screen::BrowseDir);
+                    }
                 }
                 break;
             case SDL_WINDOWEVENT:
@@ -1546,11 +1767,12 @@ int main(int argc, char** argv) {
             }
         }
         app.poll_native();
+        app.pump_report();
         if (app.checking) app.pump_check();
         if (app.building) app.pump_build();
         app.update_input();
         int64_t t = now_ms();
-        if (app.dirty || (app.building && t - app.last_draw > 250)) {
+        if (app.dirty || ((app.building || app.rep_working) && t - app.last_draw > 250)) {
             app.dirty = false;   // before drawing: the settings view asks for the next frame while it animates
             app.present();
             app.last_draw = t;

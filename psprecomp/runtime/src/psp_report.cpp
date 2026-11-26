@@ -1,7 +1,9 @@
 // "Report an issue": collect, zip, sign, upload (psp_report.h).
 #include "psp_report.h"
 #include "report_key.h"
+#ifndef PSP_REPORT_NO_HTTP
 #include "hle/psp_http.h"
+#endif
 
 #include <zlib.h>
 #if defined(PSPRECOMP_HAVE_VKGL)
@@ -35,7 +37,9 @@
 #define PSPRECOMP_GIT_COMMIT "unknown"
 #endif
 
+#ifndef PSP_REPORT_STANDALONE
 std::string psp_release_version();   // psp_ge_draw.cpp
+#endif
 
 namespace fs = std::filesystem;
 
@@ -55,6 +59,8 @@ const uint8_t* g_ram = nullptr;
 size_t g_ram_size = 0;
 std::string g_gpu_version, g_gpu_renderer, g_gpu_vendor;
 std::string (*g_state_hook)() = nullptr;
+Product g_product;
+bool g_has_product = false;
 
 void set_status(Status::State st, const std::string& text) {
     std::lock_guard<std::mutex> lk(g_mu);
@@ -252,6 +258,11 @@ void note_gpu(const char* version, const char* renderer, const char* vendor) {
     g_gpu_vendor = vendor ? vendor : "";
 }
 void set_state_hook(std::string (*fn)()) { g_state_hook = fn; }
+void set_product(const Product& p) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_product = p;
+    g_has_product = true;
+}
 
 namespace {
 
@@ -273,6 +284,10 @@ std::vector<Src> sources() {
         if (is_forbidden(rel) || is_forbidden(path)) return;
         if (fs::is_regular_file(fs::u8path(path), ec)) v.push_back({rel, path, tail});
     };
+    if (g_has_product) {
+        for (const ProductFile& f : g_product.files) add(f.rel, f.path, f.tail);
+        return v;
+    }
     add("last_run.log", "last_run.log", kLogTail);
     add("run.log", "run.log", kLogTail);
     add("setup.log", "setup.log", kLogTail);
@@ -461,7 +476,49 @@ std::string list_dir_names(const std::string& dir) {
     return s;
 }
 
+std::string ram_total() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX m{};
+    m.dwLength = sizeof m;
+    if (GlobalMemoryStatusEx(&m)) return std::to_string(m.ullTotalPhys >> 20) + " MB";
+#else
+    std::ifstream f("/proc/meminfo");
+    std::string l;
+    while (std::getline(f, l))
+        if (l.rfind("MemTotal:", 0) == 0) return std::to_string(std::atoll(l.c_str() + 9) / 1024) + " MB";
+#endif
+    return "unknown";
+}
+
+Pairs installer_info() {
+    Pairs v;
+    v.push_back({"product", g_product.name});
+    v.push_back({"version", g_product.version});
+    v.push_back({"os", os_name()});
+#if defined(__ANDROID__)
+    v.push_back({"device_model", prop("ro.product.manufacturer") + " " + prop("ro.product.model")});
+    v.push_back({"android_version", prop("ro.build.version.release")});
+    v.push_back({"android_api", prop("ro.build.version.sdk")});
+#else
+    v.push_back({"device_model", "desktop"});
+#endif
+    v.push_back({"cpu", cpu_name()});
+    v.push_back({"ram_total", ram_total()});
+    if (!g_product.space_dir.empty()) {
+        std::error_code ec;
+        const auto sp = fs::space(fs::u8path(g_product.space_dir), ec);
+        v.push_back({"free_space", ec ? std::string("unknown") : std::to_string(sp.available >> 20) + " MB free in " + g_product.space_dir});
+    }
+    for (const auto& kv : g_product.facts) v.push_back(kv);
+    v.push_back({"uptime_s", std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - g_t0).count())});
+    return v;
+}
+
 Pairs system_info() {
+    if (g_has_product) return installer_info();
+#ifdef PSP_REPORT_STANDALONE
+    return Pairs();
+#else
     Pairs v;
     v.push_back({"version", psp_release_version()});
     v.push_back({"git_commit", PSPRECOMP_GIT_COMMIT});
@@ -491,6 +548,7 @@ Pairs system_info() {
     v.push_back({"texture_packs", list_dir_names(std::string(mods && mods[0] ? mods : "mods") + "/texpacks")});
     v.push_back({"uptime_s", std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - g_t0).count())});
     return v;
+#endif
 }
 
 }  // namespace
@@ -548,6 +606,7 @@ bool build_zip(const Params& p, const Pairs& system, const std::vector<uint8_t>&
     return zip_out->size() <= kZipCap;
 }
 
+#ifndef PSP_REPORT_NO_HTTP
 void upload(const std::vector<uint8_t>& zip, const std::string& base, Status* out) {
     const std::string time = std::to_string(static_cast<long long>(std::time(nullptr)));
     const std::string sig = hmac_sha256_hex(PSPRECOMP_REPORT_KEY, time + "\n" + sha256_hex(zip.data(), zip.size()));
@@ -561,8 +620,9 @@ void upload(const std::vector<uint8_t>& zip, const std::string& base, Status* ou
     const std::string body = r.text();
     auto save_local = [&]() {
         std::error_code ec;
-        fs::create_directories("reports", ec);
-        const std::string path = "reports/report-" + time + ".zip";
+        const std::string dir = g_has_product && !g_product.save_dir.empty() ? g_product.save_dir : std::string("reports");
+        fs::create_directories(fs::u8path(dir), ec);
+        const std::string path = dir + "/report-" + time + ".zip";
         std::ofstream f(path, std::ios::binary);
         f.write(reinterpret_cast<const char*>(zip.data()), std::streamsize(zip.size()));
         out->saved_path = f ? fs::absolute(path, ec).u8string() : "";
@@ -586,6 +646,20 @@ void upload(const std::vector<uint8_t>& zip, const std::string& base, Status* ou
     if (out->state == Status::Failed && !out->saved_path.empty()) out->text += ". A copy of the report is saved at " + out->saved_path;
 }
 
+#endif  // PSP_REPORT_NO_HTTP
+
+bool build_zip_file(const Params& p, const std::string& path, std::string* error) {
+    const Pairs sys = system_info();
+    std::vector<uint8_t> zip, none;
+    std::string notes;
+    if (!build_zip(p, sys, none, &zip, &notes)) { if (error) *error = "could not build the report"; return false; }
+    std::ofstream f(fs::u8path(path), std::ios::binary);
+    f.write(reinterpret_cast<const char*>(zip.data()), std::streamsize(zip.size()));
+    if (!f) { if (error) *error = "could not write " + path; return false; }
+    return true;
+}
+
+#ifndef PSP_REPORT_NO_HTTP
 bool start(const Params& p) {
     bool exp = false;
     if (!g_busy.compare_exchange_strong(exp, true)) return false;
@@ -634,6 +708,8 @@ bool start(const Params& p) {
     }).detach();
     return true;
 }
+
+#endif  // PSP_REPORT_NO_HTTP
 
 Status status() {
     std::lock_guard<std::mutex> lk(g_mu);

@@ -127,7 +127,7 @@ def make_issue(r, link):
     lines += ["", "**Logs and data**: [%s](%s) (zip, kept %d days)" % (link.rsplit("/", 1)[-1], link, KEEP_DAYS), "",
               "<details><summary>Files in the zip</summary>", ""]
     lines += ["- `%s` (%d KB)" % (clean(n, 120).replace("`", "'"), s // 1024) for n, s in r["_files"]]
-    lines += ["", "</details>", "", "_Sent from the game's Report an issue button._"]
+    lines += ["", "</details>", "", "_Sent from the %s's Report an issue button._" % ("installer" if info.get("product") == "installer" else "game")]
     data = json.dumps({"title": "[Report] " + title, "body": "\n".join(lines), "labels": CFG["labels"]}).encode()
     req = urllib.request.Request("https://api.github.com/repos/%s/issues" % CFG["repo"], data=data, method="POST", headers={
         "Authorization": "Bearer " + CFG["github_token"], "Accept": "application/vnd.github+json",
