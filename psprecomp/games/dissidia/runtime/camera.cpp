@@ -492,10 +492,37 @@ void dissidia_cam_update(uint8_t* rdram, recomp_context* ctx) {
     if (set_wide) set_aspect(static_cast<float>(ge_draw_widescreen_width()) / 272.0f);
 }
 
+// Issue #136 video 3: after a slot fighter's KO swap the game's camera program sometimes computes eye / look-at = NaN (a lock block's +0x40.. words
+// are NaN) and keeps them for the rest of the battle: the 3D view is empty sky and the positional audio (listener = camera) turns into full-scale
+// static. SetEye gets the NaN vectors, so replace them here: look at the player's fighter from behind the last good eye's side.
+// PSPRECOMP_TAGTEAM_NOCAMNAN=1 = old behaviour.
+static void nan_guard(uint32_t cam, uint32_t eye) {
+    if (!g_in_update || cam != g_mgr) return;
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_NOCAMNAN") != nullptr;
+    if (off) return;
+    float v[6]; bool bad = false;
+    for (int i = 0; i < 3; i++) { v[i] = rdf(eye + 4u * i); v[3 + i] = rdf(eye + 0x10u + 4u * i); }
+    for (float f : v) if (!std::isfinite(f) || std::fabs(f) > 1.0e6f) bad = true;
+    static float good[6] = {0, 0, 0, 0, 0, 0}; static bool have = false; static int n = 0;
+    if (!bad) { for (int i = 0; i < 6; i++) good[i] = v[i]; have = true; return; }
+    float P[3] = {0, 0, 0}; const bool pl = pl_pos(P) && std::isfinite(P[0]) && std::isfinite(P[1]) && std::isfinite(P[2]);
+    float T[3], E[3];
+    if (pl) { T[0] = P[0]; T[1] = P[1] + 1.4f; T[2] = P[2]; } else for (int i = 0; i < 3; i++) T[i] = have ? good[3 + i] : 0.f;
+    float dx = have ? good[0] - T[0] : 0.f, dz = have ? good[2] - T[2] : 6.f;
+    float len = std::sqrt(dx * dx + dz * dz);
+    if (!(len > 0.5f)) { dx = 0.f; dz = 6.f; len = 6.f; }
+    const float r = len < 4.f ? 4.f : (len > 8.f ? 8.f : len);
+    E[0] = T[0] + dx / len * r; E[1] = T[1] + 2.0f; E[2] = T[2] + dz / len * r;
+    for (int i = 0; i < 3; i++) { wrf(eye + 4u * i, E[i]); wrf(eye + 0x10u + 4u * i, T[i]); good[i] = E[i]; good[3 + i] = T[i]; }
+    have = true;
+    if (n++ < 5 || n % 600 == 0) std::fprintf(stderr, "[CAMNAN] SetEye got NaN / garbage (%f %f %f | %f %f %f): eye/look-at replaced (player %d) n=%d\n", v[0], v[1], v[2], v[3], v[4], v[5], (int)pl, n);
+}
+
 // SetEye(cam, vec): rotate vec about the target stored 0x10 after it, once per update.
 void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
     uint32_t cam = static_cast<uint32_t>(ctx->r[4]), eye = static_cast<uint32_t>(ctx->r[5]);
     g_ram = rdram;
+    nan_guard(cam, eye);
     for (int i = 0; i < 3; i++) { g_dissidia_last_eye[i] = rdf(eye + 4u * i); g_dissidia_last_tgt[i] = rdf(eye + 0x10u + 4u * i); } g_dissidia_last_cam = cam;
     float E[3], F[3], w = 0.f;
     bool held_now = false;
