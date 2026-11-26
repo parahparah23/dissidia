@@ -101,6 +101,7 @@ constexpr float kRowY0 = 120.f, kRowPitch = 20.f, kColX0 = 2.f, kColX1 = 164.f;
 // for the round dialog work). screen + 0x7CFC = M (seen = the screen itself): M + 4 the state (2 = the list), M + 1444 the cursor row (0..4 = 1st..5th, 5 = Enter Battle).
 
 uint8_t* g_ram = nullptr;
+FuncPtr g_orig_preview = nullptr;
 FuncPtr g_orig_ready = nullptr, g_orig_enter = nullptr, g_orig_tick = nullptr, g_play_se = nullptr, g_orig_sp_tick = nullptr, g_orig_sp_dlg = nullptr;
 bool g_lob_sp = false;   // the battle lobby (modes 2..4) was opened by the single player screen (else by the Communications setup screen)
 bool g_dlg_sp = false;   // the CPU settings dialog edits a single player CPU row (else a Communications row)
@@ -139,6 +140,7 @@ std::chrono::steady_clock::time_point g_last{};
 float g_appear = 0.f;
 
 uint32_t r32(uint32_t a) { uint32_t v; std::memcpy(&v, g_ram + (a & 0x07FFFFFFu), 4); return v; }
+void w32(uint32_t a, uint32_t v) { std::memcpy(g_ram + (a & 0x07FFFFFFu), &v, 4); }
 
 void play_se(uint8_t* rdram, recomp_context* ctx, int id) {
     if (!g_play_se) return;
@@ -1295,6 +1297,20 @@ void dissidia_tagteam_menu_install(uint8_t* rdram) {
     g_orig_sp_tick = ovl_menu_lookup(SP_TICK); g_orig_sp_dlg = ovl_menu_lookup(SP_DLG);
     if (g_orig_sp_tick) psp_dispatch_register(SP_TICK, sp_tick_hook);
     else std::fprintf(stderr, "[TTSP] Tournament screen hook not installed\n");
+    // 25 Nov (user, RP6: "hovering Enter Battle shows no stage preview"): FUN_08AA9350 picks the preview's texture: the stage of the cursor row's round block for rows 0-4, the "?" picture
+    // (index + 35) for the Enter Battle row (row 5). In tag mode the row is shown as the 5th round row for that call (every block holds the lobby's stage), then put back.
+    // PSPRECOMP_TAGTEAM_ENTERPREVIEW_OFF=1: old.
+    if (!std::getenv("PSPRECOMP_TAGTEAM_ENTERPREVIEW_OFF") && !std::getenv("PSPRECOMP_TAGTEAM_NOSPCPU") && ovl_menu_lookup(0x08AA9350u)) {
+        g_orig_preview = ovl_menu_lookup(0x08AA9350u);
+        psp_dispatch_register(0x08AA9350u, [](uint8_t* rdram, recomp_context* ctx) {
+            if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(0x08AA9350u)) f(rdram, ctx); return; }
+            const uint32_t M = r32(static_cast<uint32_t>(ctx->r[4]) + 31996u);
+            const bool fake = dissidia_tagteam_sp_mode() && M >= 0x08800000u && M < 0x0A000000u && r32(M + 1444u) == 5u;
+            if (fake) w32(M + 1444u, 4u);
+            g_orig_preview(rdram, ctx);
+            if (fake) w32(M + 1444u, 5u);
+        });
+    }
     if (g_orig_sp_dlg && !std::getenv("PSPRECOMP_TAGTEAM_SPDLG_OFF"))
         psp_dispatch_register(SP_DLG, [](uint8_t* rdram, recomp_context* ctx) { if (r32(OVL_BASE) != 2) { if (FuncPtr f = ovl_battle_lookup(SP_DLG)) f(rdram, ctx); return; } sp_dlg_hook(rdram, ctx); });
 }

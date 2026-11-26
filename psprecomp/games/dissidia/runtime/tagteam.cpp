@@ -226,6 +226,7 @@ NetPlayer g_me;              // this player (party / host read every sync, regs 
 uint8_t g_mode_pick = 0;     // the host's fighters-per-side choice (encoded as byte 6; bit 7: set by the battle lobby); 0 = default
 }  // namespace
 void dissidia_tagteam_lobby_encode(uint8_t out[8]);   // the battle lobby (below): the host's settings as beacon bytes 40-47
+bool dissidia_tagteam_lobby_get(uint8_t out[10]);   // (defined below, global)
 namespace {
 std::vector<NetPlayer> g_snap;   // the group as it was when this battle was set up (every spawn decision of the battle uses it)
 bool g_snap_valid = false;
@@ -992,7 +993,7 @@ bool make_comms_cpu_record(uint32_t G, int charId) {
 bool make_sp_cpu_record(uint32_t G, int charId);   // below (single player CPU rows)
 bool make_sp_fill_record(uint32_t G, int charId);   // below (single player CPU fill)
 bool owner_record(uint32_t G, int ch, const uint8_t** out, int* who);   // below (lock-step tag battle: the party owner's save record of a member)
-uint32_t record_for(uint32_t G, int newChar) {
+uint32_t record_for_raw(uint32_t G, int newChar) {
     const int oldChar = g_ram[G & 0x07FFFFFFu];
     group_rows_dump("record_for", newChar);
     g_rec_cpu_made = false;
@@ -1031,6 +1032,29 @@ uint32_t record_for(uint32_t G, int newChar) {
     for (uint32_t o = 0x3C0u; o < 0x600u; o += 2) if (r[o + 1] == oldChar && r[o] < 0x40) { r[o + 1] = static_cast<uint8_t>(newChar); ids++; }
     if (g_log) std::fprintf(stderr, "[TAGTEAM] character record for char %d made from the side record of char %d (%d ability ids moved)\n", newChar, oldChar, ids);
     return g_rec_scratch;
+}
+
+// 25 Nov (user, RP6: "rules don't work like skill off for anyone other than the 2 original players"): retail applies the battle's rules (lobby RULES: Official, Official (Skill),
+// EX / Assist / BRV Centric) to the two side records when it builds them: the record builders (FUN_088F9BB0 / FUN_088FA2AC ...) end with FUN_088FB5D0(0, side0, side1, phase2 side0,
+// phase2 side1), which strips every ability / accessory / EX skill of a side's record that the rule's table (REC_BASE + 9720, made once at the battle setup) does not allow, and caps
+// the level (seen: rules 2 vs 0 differ only by the 0xFFFF ability entries at +0xAA / +0x110A of the two side records, `~/dissidia/tt/s2/lobui/r0.rec` / `r2.rec`). The records the tag code
+// makes for partners, enemy members, call-ins and slot rebuilds (record_for) never went through it. Now they do: the record goes into side 0's slot for one call and comes back.
+// PSPRECOMP_TAGTEAM_RULES_OLD=1: old.
+void rules_filter_record(uint32_t R) {
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_RULES_OLD") != nullptr;
+    uint8_t L[10] = {}; if (off || !g_ram || !dissidia_tagteam_lobby_get(L) || L[5] == 0) return;
+    std::vector<uint8_t> keep(g_ram + (REC_BASE & 0x07FFFFFFu), g_ram + (REC_BASE & 0x07FFFFFFu) + 0x1060u), before(g_ram + (R & 0x07FFFFFFu), g_ram + (R & 0x07FFFFFFu) + 0x1060u);
+    std::memcpy(g_ram + (REC_BASE & 0x07FFFFFFu), before.data(), 0x1060u);
+    call(0x088FB5D0u, 0, 1, 0, 1, 0);
+    std::memcpy(g_ram + (R & 0x07FFFFFFu), g_ram + (REC_BASE & 0x07FFFFFFu), 0x1060u);
+    std::memcpy(g_ram + (REC_BASE & 0x07FFFFFFu), keep.data(), 0x1060u);
+    int n = 0; for (uint32_t i = 0; i < 0x1060u; i++) if (g_ram[(R + i) & 0x07FFFFFFu] != before[i]) n++;
+    if (g_log) std::fprintf(stderr, "[RULES] rule %d applied to a made record (char %d): %d bytes changed\n", L[5], g_ram[R & 0x07FFFFFFu], n);
+}
+uint32_t record_for(uint32_t G, int newChar) {
+    const uint32_t R = record_for_raw(G, newChar);
+    if (R != G && R == g_rec_scratch && R) rules_filter_record(R);
+    return R;
 }
 
 // The fighter constructor makes its lock block with FUN_08B3BC34(camera manager, slot, ...): a lock block already in the camera manager's slot

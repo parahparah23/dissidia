@@ -3,9 +3,9 @@
 ## TODO (kept up to date; newest first)
 
 - **User play-test 25 Nov evening (RP6):**
-  - Battle Lobby: hovering "Enter Battle" shows no stage preview (should show the lobby's stage).
-  - Opening Communications mode opened the battle menu (tag menu flow; likely the Mode Select re-open of Batch fifteen firing on the Communications list).
-  - Tag battle rules (e.g. a skill-off rule) only apply to the 2 original fighters, not to partners / call-ins; check judgment the same way.
+  - ~~Battle Lobby: hovering "Enter Battle" shows no stage preview (should show the lobby's stage).~~ Fixed 25 Nov ("Batch twenty-four").
+  - ~~Opening Communications mode opened the battle menu.~~ Fixed 25 Nov, reproduced on the host ("Batch twenty-four").
+  - ~~Tag battle rules (e.g. a skill-off rule) only apply to the 2 original fighters, not to partners / call-ins~~ Fixed 25 Nov for the records the tag code makes ("Batch twenty-four"); judgment: see there.
   - Settings: an unlocked frame rate option.
   - Death / kill camera: audio can still disappear (not on the 1st KO, on the 2nd player's death); log `~/dissidia/tt/desk_logs/rp6_killcam_audio_1125_1842.log` (other session's kill-camera item).
   - FFA: still goes through Party Select (should open the Free-for-all menu directly); still not the retail character select; uses the default outfit instead of the saved one; "Hide tag team UI" gets turned on (must never be auto-enabled in any mode); HUD: the 2 not-locked-on fighters stacked on the right; allow removing the 4th player (3-way FFA). (FFA job tt-ffares.)
@@ -5521,3 +5521,19 @@ the existing Edit machinery: host keyboard / Android IME through SDL text input,
   Before: `m10.png` (lobby), `m2.png` (Mode Select); after: `a_lobby.png`, `a_lobby3.png`, `a_modesel.png`, `a_ffa_players.png`, `a_ffa_p2.png`. Communications: one copy walked up to the Group Battle room screen (`c1.png` Mode Select, `c4.png`);
   the Communications lobby panel itself (needs the two-copy room) shares the helpers but was not looked at. Retail fonts are the game's own face; the lobby uses the same bold face as before (the retail Options labels are the same face).
 - **Not done:** a device check (RP6 / Deck); the lobby card text (party names) keeps its old plain text style.
+
+
+### Batch twenty-four (25 Nov): user play-test follow-ups: Enter Battle preview, Communications opened the battle menu, rules for every tag fighter (tree ttlobui, branch tt-lobbyui2)
+- **Enter Battle preview.** `FUN_08AA9350` (menu overlay) picks the stage preview texture: the stage of the cursor row's round block for rows 0-4, the "?" picture (base + 35) for row 5 (Enter Battle).
+  In tag mode it now runs with the row shown as 4 for that call (every block holds the lobby's stage) and the row is put back (`g_orig_preview`, tagteam_menu.cpp; `PSPRECOMP_TAGTEAM_ENTERPREVIEW_OFF=1`: old).
+  Checked on screen (`~/dissidia/tt/s2/lobui/p4_e.png` 5th row, `p4_enter.png` Enter Battle: Kefka's Tower on both). Writing the stage into a "6th block" does nothing (those bytes are a pointer; do not write there).
+- **Communications opened the Tag Team Mode Select.** Cause (reproduced: `t_old3.png`, main menu > Battle Mode, cursor on Tag Team Battle, Circle back, Communications Mode: "Battle Mode > Tag Team Battle"
+  Mode Select): `main_tick_hook` calls `tag_row_confirm(state)` at the top level, where the group sub-list's fields (group, row count, cursor index) are still those of the last list. With the cursor last on Tag Team Battle
+  (index == rows) the Cross that opens any other top-level row looked like a confirm on that row. Now the top-level call counts only while a sub-list ticks (`g_last_sub_tick`, within 0.15 s), and
+  the flow flags (`g_ms_flow / reopen / hold / go`, Tag Team mode) are cleared when the top level runs with no sub-list tick for 0.5 s. `PSPRECOMP_TAGTEAM_FLOWRESET_OFF=1`: old.
+  Checked: Battle Mode list > Circle > Communications (`t_b3.png`), after a full single player flow and back out (`t_comm3.png`), the Communications tag flow (Mode Select, room screen, Circle > Mode Select again: `t_c3.png`), the single player back chain (`t_ms.png`).
+- **Rules for every tag fighter.** Retail applies the lobby's RULES to the two side records when it builds them: the record builders end with `FUN_088FB5D0(0, side0, side1, phase2 side0, phase2 side1)`, which clears every ability / accessory the rule's table
+  (`REC_BASE + 9720`, made at the battle setup) does not allow and caps the level. Rules 2 (Official (Skill)) vs 0 differ in the two side records by exactly those 0xFFFF entries (`r0.rec` / `r2.rec`, +0xAA / +0x110A). The records the tag code makes (partners, enemy members, call-ins, slot rebuilds: `record_for`)
+  never went through it. Now `record_for` runs the same function on every made record (it goes into side 0's slot for the call and comes back; `rules_filter_record`, tagteam.cpp; only when the lobby's rule is not None;
+  `PSPRECOMP_TAGTEAM_RULES_OLD=1`: old). Seen on the host with rule 2: `[RULES] rule 2 applied to a made record (char 27): 29 bytes changed` for the enemy's second fighter (Laguna). It uses the host's lobby rule and retail's table, so every machine does the same.
+  **Judgment** (None / Cosmos / Chaos / Double / Random) is not a per-fighter record rule: it is decided by retail's rules step on the battle state (the same for all fighters); not looked at further, no change. Not checked: abilities actually missing in the fighter's moves on screen, rules 3-5 beyond the record filter, two-copy online.
