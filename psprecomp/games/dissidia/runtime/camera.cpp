@@ -53,6 +53,7 @@ extern FuncPtr dissidia_ovl_menu_lookup(uint32_t vaddr);
 extern FuncPtr dissidia_ovl_extra_lookup(uint32_t vaddr);
 extern void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx);   // tagteam.cpp: the tag swap's safe point (the camera step runs once per frame, outside any fighter's update)
 bool dissidia_nearest_fighter(const float eye[3], float pos[3]);   // framerate.cpp
+uint32_t dissidia_nearest_actor();   // framerate.cpp
 extern uint32_t g_dissidia_cine_actor, g_dissidia_cine_seq;   // roster.cpp (hitcam=)
 extern int g_dissidia_cine_ticks;
 float dissidia_battle_age();
@@ -245,6 +246,26 @@ bool entr_frame(const float* eye, const float* tgt, float* E, float* F, float* w
     E[0] = C[0] + d[0] * dist + sx * 0.7f; E[1] = C[1] + (tight ? 0.65f : 0.45f); E[2] = C[2] + d[2] * dist + sz * 0.7f;
     F[0] = C[0]; F[1] = C[1] + (tight ? 0.45f : 0.3f); F[2] = C[2];
     g_entr_fov = tight ? 26.f : 0.f;
+    static const bool cam_old = std::getenv("PSPRECOMP_BANTER_CAMOLD") != nullptr;
+    if (tight && !cam_old) {
+        // 25 Nov (user: "the camera is not the retail one: zoom in, angle change"). Retail's intro gives a fighter two shots in a row (PSPRECOMP_INTROCAM_LOG=2 on the
+        // opening intro, ages 168-330 of the enemy slot fighter): first a LOW wide shot from his front-right (eye 0.3 m up, ~2.4 m away, fov 22 -> 36, looking up at him), then a
+        // front close-up (eye 1.8 m away, 1.0 - 1.5 m up, look-at his face, fov 23) that keeps pushing in. The banter now does the same: a hard cut between the two at 1.0 s.
+        const float tk = since / 60.f, rx = d[2], rz = -d[0];   // (right of the facing)
+        const float f0 = P[1];
+        if (tk < 1.0f) {
+            const float k1 = smooth01(tk / 1.0f);
+            const float dd = 2.1f - 0.3f * k1, rr = 1.6f - 0.3f * k1;
+            E[0] = P[0] + d[0] * dd + rx * rr; E[1] = f0 + 0.35f + 0.15f * k1; E[2] = P[2] + d[2] * dd + rz * rr;
+            F[0] = P[0]; F[1] = f0 + 1.0f + 0.1f * k1; F[2] = P[2];
+            g_entr_fov = 36.f - 4.f * k1;
+        } else {
+            const float k2 = smooth01((tk - 1.0f) / 1.5f), dd = 1.9f - 0.3f * k2, rr = -0.5f;
+            E[0] = P[0] + d[0] * dd + rx * rr; E[1] = f0 + 1.55f + 0.3f * k2; E[2] = P[2] + d[2] * dd + rz * rr;
+            F[0] = P[0] + d[0] * 0.1f; F[1] = f0 + 1.5f + 0.2f * k2; F[2] = P[2] + d[2] * 0.1f;
+            g_entr_fov = 24.f - 2.f * k2;
+        }
+    }
     if (tight) {
         // the second banter follows the first at once: pan from the last close-up to this one, not through the game's wide camera
         const float kin = smooth01(since / (chain ? 18.f : 12.f));
@@ -534,8 +555,14 @@ void dissidia_cam_seteye(uint8_t* rdram, recomp_context* ctx) {
         float ev[3] = {rdf(eye), rdf(eye + 4), rdf(eye + 8)}, tv[3] = {rdf(eye + 0x10), rdf(eye + 0x14), rdf(eye + 0x18)};
         if (static const bool il = std::getenv("PSPRECOMP_INTROCAM_LOG") != nullptr; il) {   // debug: the game's own eye / look-at against the nearest fighter (the retail intro close-up's framing)
             static int n = 0; float np[3];
-            if (n < 1500 && dissidia_nearest_fighter(ev, np)) {
+            if (n < 6000 && dissidia_nearest_fighter(ev, np)) {
                 const float dh = std::sqrt((ev[0] - np[0]) * (ev[0] - np[0]) + (ev[2] - np[2]) * (ev[2] - np[2])), dt = std::sqrt((tv[0] - np[0]) * (tv[0] - np[0]) + (tv[1] - np[1]) * (tv[1] - np[1]) + (tv[2] - np[2]) * (tv[2] - np[2]));
+                if (std::getenv("PSPRECOMP_INTROCAM_LOG")[0] == '2') {   // every update: the eye / look-at in the fighter's own frame (forward = matrix row 2, +0x350 / +0x358), for the retail intro's shot path
+                    const uint32_t na = dissidia_nearest_actor(); const float fx = rdf(na + 0x350u), fz = rdf(na + 0x358u), fl = std::sqrt(fx * fx + fz * fz) + 1e-6f, ux = fx / fl, uz = fz / fl;
+                    const float ex = ev[0] - np[0], ez = ev[2] - np[2], tx = tv[0] - np[0], tz = tv[2] - np[2];
+                    std::fprintf(stderr, "[INTROPATH] age=%.1f actor=%08X eye fwd %.2f side %.2f up %.2f | look fwd %.2f side %.2f up %.2f | fov %.1f\n", dissidia_tagteam_age(), na, ex * ux + ez * uz, ex * uz - ez * ux, ev[1] - np[1], tx * ux + tz * uz, tx * uz - tz * ux, tv[1] - np[1], rdf(g_mgr + 0xC0u));
+                    n++;
+                } else
                 if (n++ % 3 == 0) std::fprintf(stderr, "[INTROCAM] fov %.3f n=%d age=%.0f entr=%08X eye-fighter horiz %.2f dy %.2f look-at: dy %.2f dist %.2f eye %.1f %.1f %.1f\n", rdf(g_mgr + 0xC0u), n, dissidia_tagteam_age(), g_dissidia_entr_actor, dh, ev[1] - np[1], tv[1] - np[1], dt, ev[0], ev[1], ev[2]);
             }
         }

@@ -117,6 +117,7 @@ float dissidia_tagteam_age() { return g_tt_age; }   // camera.cpp (the call-in c
 #define dissidia_battle_age tt_battle_age
 bool dissidia_cpu_ai_off();
 void psp_fx_lights_limit(int n);   // psp_ge_draw.cpp: effect lights at most n (8 = no limit)
+void dissidia_hold_flow(bool on);   // framerate.cpp
 void dissidia_pause_match(uint32_t keep, float seconds);   // framerate.cpp: every fighter but `keep` stands still for that long
 bool dissidia_match_paused();    // framerate.cpp: the debug menu's Enemy AI option / the test harness switched the CPU brains off
 uint32_t dissidia_camera_manager();   // camera.cpp
@@ -410,6 +411,15 @@ int eff_mask() { const int f = ffa_now(); return f ? g_ffa_mask_of(f) : eff_mask
 // FFA 3: the CPU side's extra only; FFA 4: both extras
 int g_stop = 99;   // PSPRECOMP_TAGTEAM_STOP=n: debugging, spawn steps up to n only (1 alloc, 2 ctor, 3 foe, 4 init, 5 brain, 6 start/place)
 bool g_late_wait = false;   // PSPRECOMP_TAGTEAM_LATE=2: the late partner waits until the intro is over
+bool g_pre_hold = false;   // 25 Nov: the retail flow (and with it the intro: shots, "vs <enemy>", fade) is held at its start while the partners are planned, made and play their banters
+bool g_pre_used = false;   // this battle's start partners came in before the retail intro: they stand held until it is over
+bool pre_mode() {          // the retail flow has not started (bs+72 == 0) and the partners may still come in first; PSPRECOMP_TAGTEAM_BANTERLATE=1: old (after the whole intro)
+    static const bool off = std::getenv("PSPRECOMP_TAGTEAM_BANTERLATE") != nullptr;
+    static const bool on = std::getenv("PSPRECOMP_TAGTEAM_BANTERPRE") != nullptr;   // (research: before the flow starts the scene is not drawn yet - a white screen - so this is opt-in)
+    return on && !off && g_late_wait && g_bs && rd(g_bs + 72) == 0 && dissidia_battle_age() < 900.f;
+}
+bool pre_intro_over();
+void pre_hold_tasks(bool on) { static const bool off = std::getenv("PSPRECOMP_TAGTEAM_BANTERHOLD") && std::getenv("PSPRECOMP_TAGTEAM_BANTERHOLD")[0] == '0'; if (!off) dissidia_hold_flow(on); }   // (framerate.cpp task_run_hook)
 bool g_late = false;   // PSPRECOMP_TAGTEAM_LATE=1: the partner is made once the battle has started (not during the intro setup)
 struct Late { uint32_t side = 0, foe = 0, cpu_side = 0, info_slot = 0, slot_actor = 0; bool callin = false; int charId = 0; int driver = -1; int hp = -1; uint32_t brv = 0; bool quiet = false; };   // driver: the player (players_sorted index) who drives it, -1 = the AI
 bool clones_allowed() { static const bool on = std::getenv("PSPRECOMP_TAGTEAM_CLONES") != nullptr; return on; }   // copies of the fighter on the stage as partners (test setups); off: a team without a second member has no partner
@@ -1310,7 +1320,7 @@ void setup_hook(uint8_t* rdram, recomp_context* ctx) {
     pool_dump("setup done");
     g_battle_gen++;   // a new battle (the setup object bs is usually at the same address as the last battle's)
     sp_mode_refresh();   // single player: the battle lobby's mode (or a Debug / env override) into the switches this battle reads
-    xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_real_partner[0] = g_real_partner[1] = 0; g_partner_chars[0].clear(); g_partner_chars[1].clear();
+    xas_reset(false); g_nextra = 0; g_bs = 0; g_tt_age = 0.f; g_label_char.clear(); g_swaps.clear(); g_late_q.clear(); g_late_load.clear(); g_banter_q.clear(); g_late_ready = false; g_pre_hold = false; g_pre_used = false; dissidia_hold_flow(false); g_real_partner[0] = g_real_partner[1] = 0; g_partner_chars[0].clear(); g_partner_chars[1].clear();
     reset_battle_state();   // (a forfeited / left battle may not have run the teardown: nothing of it may reach this one)
     g_snap_valid = false; g_roster_ok = true; g_shared_valid = false;
     if (!tag_on()) return;
@@ -1567,9 +1577,13 @@ void start_extra(Extra& e) {
 
 // The flow step runs every frame until both fighters are ready, then starts them (action 1) and sets bs+72. The extras
 // are held to the same rule and started right after the original has started the others.
+void flow_probe(uint32_t bs);
+bool g_pre_hold_step(uint32_t bs);
 void flow_hook(uint8_t* rdram, recomp_context* ctx) {
     const uint32_t bs = static_cast<uint32_t>(ctx->r[4]);
     g_ram = rdram; g_ctx = ctx;
+    flow_probe(bs);
+    if (bs == g_bs && g_late_wait && (g_pre_hold || (rd(bs + 72) == 0 && pre_mode())) && g_pre_hold_step(bs)) return;   // the partners come in first (the retail intro starts when this step lets the original run)
     bool pending = false;
     for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) pending = true;
     if (!pending || bs != g_bs || rd(bs + 72) != 0) { g_orig_flow(rdram, ctx); return; }
@@ -1783,6 +1797,29 @@ void safe_spot(uint32_t ref, float dx, float dz, float out[3], bool callin) {
 }
 bool g_entrant_banter = false;   // the entrance in progress is a start-of-battle banter
 uint32_t g_entrant = 0; float g_entrant_until = 0;   // the call-in's pose ends with the match pause
+bool pre_intro_over() {    // (partners that came in before the intro stand held until it is over) both slot fighters' intro scripts (>= 1000) have run and they are idle again; or 12 s after the flow started. NOT the local human's slot: that differs per machine (lock-step)
+    static uint32_t gen = ~0u; static bool seen[2] = {false, false}; static float t0 = -1.f; if (gen != g_battle_gen) { gen = g_battle_gen; seen[0] = seen[1] = false; t0 = -1.f; }
+    if (!g_bs || rd(g_bs + 72) == 0) return false;
+    const float age = dissidia_battle_age(); if (t0 < 0.f) t0 = age;
+    bool idle = true;
+    for (uint32_t k = 0; k < 2; k++) { const uint32_t S = srd(g_bs + 56u + 4u * k); const int cur = ok(S, 0x12D0) ? static_cast<int16_t>(rd(S + 0x180u) & 0xFFFFu) : 1; if (cur >= 1000) seen[k] = true; if (!(seen[k] && (cur == 1 || cur == 2))) idle = false; }
+    return idle || age - t0 > 720.f;
+}
+
+// Flow hold: true = this call of the flow step is swallowed. While the queue still has partners to plan / load / spawn the flow waits; once they are spawned and started
+// (the tick starts them: g_pre_hold) it waits for their banters; then the original runs and the retail intro (Jecht / enemy / "vs") begins. Gives up after 15 / 25 s of ticks.
+bool g_pre_hold_step(uint32_t bs) {
+    (void)bs;
+    const float age = dissidia_battle_age();
+    if (!pre_mode() && !g_pre_hold) return false;
+    if (!g_pre_hold) return !g_late_q.empty() || !g_late_load.empty();   // not queued / planned away: nothing to wait for (a battle without partners goes on at once)
+    bool unstarted = false; for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) unstarted = true;
+    if (!g_late_q.empty() || !g_late_load.empty() || unstarted || !g_banter_q.empty() || g_entrant) { if (age < 1500.f) return true; }
+    g_pre_hold = false; dissidia_pause_match(0, 0.f); pre_hold_tasks(false);
+    if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs banters over: the retail intro begins (vs display after them)\n", age / 60.f);
+    return false;
+}
+
 int g_win_team = -1;   // the team that won the finished tag battle (group_decided)
 float g_banner_until = 0; std::string g_banner_text;   // the call-in announcement (battle age ticks)
 std::vector<int> g_reserve_ids[2];   // the charIds behind g_reserve[t].names (same order), for the call-ins
@@ -1861,6 +1898,9 @@ int party_partner_char(int team, uint32_t hum, uint32_t cpu, int k) {
     return 0;
 }
 int g_party_last[2] = {0, 0};   // index of the member on the stage per team (only moves forward while the party list stays the same)
+void flow_probe(uint32_t bs) {
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_FLOWPROBE") && rd(bs + 72) == 0) { static int pn = 0; if (pn++ < 6) { const PartyList a = read_party(0), b = read_party(1); std::fprintf(stderr, "[FLOWPROBE] call %d age %.1f bs+72 0: party0 n=%d [%d %d %d] party1 n=%d [%d %d %d] slot0 %08X slot1 %08X\n", pn, dissidia_battle_age(), a.n, a.n > 0 ? a.ids[0] : -1, a.n > 1 ? a.ids[1] : -1, a.n > 2 ? a.ids[2] : -1, b.n, b.n > 0 ? b.ids[0] : -1, b.n > 1 ? b.ids[1] : -1, b.n > 2 ? b.ids[2] : -1, srd(bs + 56u), srd(bs + 60u)); } }
+}
 void update_party_reserve() {
     if (std::getenv("PSPRECOMP_TAGTEAM_RESERVE") || std::getenv("PSPRECOMP_TAGTEAM_RESERVE_SIDES") || !g_bs) return;   // an env list overrides
     const uint32_t hs = rd(g_bs + 84u);
@@ -4400,9 +4440,19 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     static bool intro_seen = false; static uint32_t intro_gen = ~0u;
     if (intro_gen != g_battle_gen) { intro_gen = g_battle_gen; intro_seen = false; }   // per battle: a forfeit during the intro left it set, the next battle spawned its
     // partners at once, before the frame hook had picked the party members: copies of the fighters on the stage (19 Nov desktop, user)
+    if (!g_late_q.empty() && g_bs && !g_late_ready && pre_mode()) { g_late_ready = true; g_pre_hold = true; g_pre_used = true; if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs the retail flow is held: the partners come in before the intro (vs display)\n", dissidia_battle_age() / 60.f); }
     if (!g_late_q.empty() && g_bs && rd(g_bs + 72) != 0 && !g_late_ready) {   // the intro scripts (ids >= 1000) have run and the human is idle again
         const int cur = static_cast<int16_t>(rd(g_late_q[0].slot_actor + 0x180u) & 0xFFFFu);
-        if (cur >= 1000) intro_seen = true;
+        // 25 Nov (user): the partners' banters belong BEFORE the "vs <enemy>" display. Retail's intro: the human slot fighter's first pose (1100), the enemy's close-up, then the
+        // human's second pose (1110) = the "vs" shot (text 1.6 s later, then the fade). When the human's intro script changes to its second one the partners are made, the retail flow is
+        // held (g_pre_hold_step) and the match paused until their banters are over. PSPRECOMP_TAGTEAM_BANTERLATE=1: old (after the whole intro).
+        static int first_intro = 0; static uint32_t fi_gen = ~0u; if (fi_gen != g_battle_gen) { fi_gen = g_battle_gen; first_intro = 0; }
+        static const bool bl = std::getenv("PSPRECOMP_TAGTEAM_BANTERLATE") != nullptr;
+        if (cur >= 1000) {
+            intro_seen = true;
+            if (!first_intro) first_intro = cur;
+            else if (cur != first_intro && !bl && g_late_wait) { g_late_ready = true; g_pre_hold = true; g_pre_used = true; dissidia_pause_match(0, 30.f); pre_hold_tasks(true); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs intro script %d -> %d: the retail flow is held, the partners come in before the vs display\n", dissidia_battle_age() / 60.f, first_intro, cur); }
+        }
         else if (intro_seen && (cur == 1 || cur == 2)) g_late_ready = true;
         if (!g_late_wait) g_late_ready = true;
     }
@@ -4420,7 +4470,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
         bool only_callin = true; for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started && !g_extra[i].callin) only_callin = false;
         if (!(only_callin && exb_busy()))   // a called-in member's entrance waits for any EX Burst
         for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) { pending = true; if (!call(FIGHTER_READY, g_extra[i].actor)) all_ready = false; }
-        if (pending && all_ready && g_bs && rd(g_bs + 72) != 0) {
+        if (pending && all_ready && g_bs && (rd(g_bs + 72) != 0 || g_pre_hold)) {
             gfx_dump("before the undo");
             for (int i = g_nextra - 1; i >= 0; i--) if (!g_extra[i].started) { apply_undo(g_extra[i]); gfx_dump("after one undo"); }
             for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) { start_extra(g_extra[i]); gfx_dump("after one start"); }
@@ -4479,7 +4529,7 @@ void tick_hook(uint8_t* rdram, recomp_context* ctx) {
     if (Extra* e = extra_of(owner); e && e->started) {
         if (g_tagin && !alive(owner)) return;   // a KO'd extra stays down: its brain does not think
         if (rd(owner + 0x2FCu) == 0 && g_orig_refresh) { const recomp_context sv = *g_ctx; g_ctx->r[4] = static_cast<int32_t>(owner); g_orig_refresh(g_ram, g_ctx); *g_ctx = sv; }
-        { static const int kf = std::getenv("PSPRECOMP_TAGTEAM_KOFIX") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_KOFIX")) : 0; const bool held = !std::getenv("PSPRECOMP_TAGTEAM_NOBANTERHOLD") && (std::find(g_banter_q.begin(), g_banter_q.end(), owner) != g_banter_q.end() || (owner == g_entrant && dissidia_battle_age() < g_entrant_until));   // waiting for its opening banter / in its own banter or entrance pose: the brain does not act (18 Nov, user: the CPU team mate attacked during the opening banter)
+        { static const int kf = std::getenv("PSPRECOMP_TAGTEAM_KOFIX") ? std::atoi(std::getenv("PSPRECOMP_TAGTEAM_KOFIX")) : 0; const bool held = !std::getenv("PSPRECOMP_TAGTEAM_NOBANTERHOLD") && (std::find(g_banter_q.begin(), g_banter_q.end(), owner) != g_banter_q.end() || (owner == g_entrant && dissidia_battle_age() < g_entrant_until) || (g_pre_used && !g_pre_hold && !pre_intro_over() && !e->callin));   // waiting for its opening banter / in its own banter or entrance pose: the brain does not act (18 Nov, user: the CPU team mate attacked during the opening banter)
           wr(owner + 0x380u, ((is_down(owner) && !(kf & 8)) || g_exb_frozen.count(owner) || held) ? (rd(owner + 0x380u) | 2u) : (rd(owner + 0x380u) & ~2u)); }   // (a fighter held out of an EX Burst keeps its gate)   // bit 2 of +0x380 makes the CPU brain skip the actor; the retail two lose it after the intro
     }
     {   // the two slot fighters' CPU brains wait while a partner's start-of-battle banter is queued or running (user 23 Nov: "the original CPU enemy can attack
@@ -6580,11 +6630,18 @@ void ko_oneround() {
         }
         g_slot_callin.erase(g_slot_callin.begin() + static_cast<long>(i));
     }
-    if (!g_banter_q.empty() && (!entrance_busy_noq() || (g_entrant && g_entrant_banter && age >= g_entrant_until && g_late_load.empty() && g_rebuild.empty())) && g_bs && rd(g_bs + 72) != 0) {   // (the next banter starts in the tick the last one ends: no wide shot between them)   // the next start-of-battle partner's banter
+    if (!g_banter_q.empty() && (!entrance_busy_noq() || (g_entrant && g_entrant_banter && age >= g_entrant_until && g_late_load.empty() && g_rebuild.empty())) && g_bs && (rd(g_bs + 72) != 0 || g_pre_hold)) {   // (the next banter starts in the tick the last one ends: no wide shot between them)   // the next start-of-battle partner's banter
         const uint32_t A = g_banter_q.front(); g_banter_q.erase(g_banter_q.begin());
         Extra* e = extra_of(A);
         if (e && e->started && ok(A, 0x12D0) && !is_down(A)) entrance_effect(A, char_label(e->charId, true), true);
         else if (ok(A, 0x12D0)) wr(A + 0x380u, rd(A + 0x380u) & ~2u);
+    }
+    if (g_pre_hold && g_bs && rd(g_bs + 72) != 0) {   // the partners came in inside the retail intro (the flow step is frozen with the hold: released from here): over when everything is started and the banters are done
+        bool unstarted = false; for (int i = 0; i < g_nextra; i++) if (!g_extra[i].started) unstarted = true;
+        if ((g_late_q.empty() && g_late_load.empty() && !unstarted && g_banter_q.empty() && !g_entrant && g_rebuild.empty()) || age > 2400.f) {
+            g_pre_hold = false; dissidia_pause_match(0, 0.f); pre_hold_tasks(false);
+            if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs banters over: the retail intro goes on (vs display after them)\n", age / 60.f);
+        }
     }
     entrance_step(age);
     if (g_entrant && age < g_entrant_until && !is_down(g_entrant)) wr(g_entrant + 0x380u, rd(g_entrant + 0x380u) | 2u);   // AI gated for the whole entrance (the pose action cleared the bit: the AI cut it short)
@@ -11043,7 +11100,7 @@ void dissidia_tagteam_frame(uint8_t* rdram, recomp_context* ctx) {
             if (st >= 0 && l[st].is_cpu) { std::fprintf(stderr, "[TTCPUP] side %d: the fighter on the stage (char %d) is a CPU row: the AI plays slot %d from the start\n", sd, l[st].charId, sd); slot_handover(srd(g_bs + 56u + 4u * static_cast<uint32_t>(sd)), -1); }
         }
     }
-    if (g_bs && !g_late_q.empty() && rd(g_bs + 72) != 0) {   // a group battle: the extras at the start are the party's second members, not clones (the party record is not filled when the setup runs, so this is decided once the battle runs)
+    if (g_bs && !g_late_q.empty() && (rd(g_bs + 72) != 0 || pre_mode())) {   // a group battle: the extras at the start are the party's second members, not clones (the party record is not filled when the setup runs, so this is decided once the battle runs)
         g_ram = rdram; g_ctx = ctx;
         if (g_planned_gen != g_battle_gen && g_roster_ok) {   // (a member plans with the host's roster: it is here before the first lock-step frame)
             g_planned_gen = g_battle_gen;

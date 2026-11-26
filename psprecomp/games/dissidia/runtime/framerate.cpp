@@ -1803,7 +1803,23 @@ void net_task_hook(uint8_t* rdram, recomp_context* ctx) {
     g_orig_net_task(rdram, ctx);
 }
 
+// Tag team (docs "Batch twenty"): the retail intro (camera shots, the "vs <enemy>" text, the fade) is run by update tasks of the battle scene list, not by the fighters, the global step or the
+// flow step, so pausing the fighters did not hold it. While the partners' banters play inside it (tagteam.cpp g_pre_hold) the scene list runs like a drawn-only frame (the (4, 4) filter: only the
+// tasks that are safe to run while paused) plus the object manager family (0x0884 1xxx: the fighters' updates, which the match pause already stops except for the banter's fighter) and the
+// camera manager's tasks (the banter close-up is written inside its update). PSPRECOMP_TAGTEAM_BANTERHOLD=0: no hold.
+bool g_hold_flow = false; float g_hold_dt = 0.f;
 void task_run_hook(uint8_t* rdram, recomp_context* ctx) {
+    if (g_hold_flow && ctx->r[5] == 1 && ctx->r[6] == 1 && (!l30_active() || g_l30_logic_now) && battle_scene_list(static_cast<uint32_t>(ctx->r[4]))) {
+        std::vector<std::pair<uint32_t, uint32_t>> saved;
+        uint32_t t = r32(static_cast<uint32_t>(ctx->r[4]) + 4u);
+        for (int i = 0; i < 200 && ok(t); i++, t = r32(t + 52u)) { const uint32_t f = r32(t); if ((f >= 0x08841000u && f < 0x08842000u) || f == 0x08B3C41Cu || f == 0x08B3C43Cu) { saved.push_back({t, r32(t + 40u)}); w32(t + 40u, r32(t + 40u) | 4u); } }
+        ctx->r[5] = 4; ctx->r[6] = 4;
+        g_hold_dt = rdf(FRAME_STEP); wrf(FRAME_STEP, 0.0f);   // (the camera manager's own shot track advances by the global step: held too; the banter's fighter is given it back in actor_dt_hook)
+        g_orig_task_run(rdram, ctx);
+        wrf(FRAME_STEP, g_hold_dt);
+        for (auto& sv : saved) w32(sv.first + 40u, sv.second);
+        return;
+    }
     if (l30_active() && !g_l30_logic_now && ctx->r[5] == 1 && ctx->r[6] == 1 && battle_scene_list(static_cast<uint32_t>(ctx->r[4]))) {
         ctx->r[5] = 4; ctx->r[6] = 4;   // a drawn-only frame: the battle runs as if paused
         static const bool none = std::getenv("PSPRECOMP_L30_NONE") != nullptr;   // experiment: no battle task at all on drawn-only frames
@@ -1889,6 +1905,7 @@ void actor_dt_hook(uint8_t* rdram, recomp_context* ctx) {
     const float before = ctx->f[0];
     struct NoteDt { recomp_context* c; ~NoteDt() { g_face_dt = c->f[0]; g_face_dt_set = true; } } note_dt{ctx};   // for face_step_hook
     if (match_paused_impl() && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != g_pause_keep) { ctx->f[0] = 0.f; return; }
+    if (g_hold_flow && actor == g_pause_keep && ctx->f[0] == 0.f && g_hold_dt > 0.f && match_paused_impl()) ctx->f[0] = g_hold_dt;   // the held intro: the banter's fighter plays at the step the task pass was given
     if (g_test_freeze_cpu && g_gt_started && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0 && actor != test_player()) { ctx->f[0] = 0.f; return; }
     if (g_ticks != 2.0f && ok(actor) && own) ctx->f[0] *= g_ticks * 0.5f;   // own clock: a fixed 2.0 per frame
     if (g_action_start_step && g_ticks < 2.0f && ok(actor) && g_ram[(actor + 0x542u) & 0x07FFFFFFu] == 0) {
@@ -2489,6 +2506,8 @@ int dissidia_ex_cores(float (*P)[3], int max) {
 // The position (actor+0x80, vec3) of the fighter nearest to `eye` among those that were updated in the last two
 // seconds, for camera.cpp: the game's own camera sits behind the fighter you control, so that is the one the free camera
 // pivots on. false when no fighter is known.
+static uint32_t g_nearest_actor = 0;
+uint32_t dissidia_nearest_actor() { return g_nearest_actor; }   // (camera.cpp, PSPRECOMP_INTROCAM_LOG=2) the actor of the last dissidia_nearest_fighter answer
 bool dissidia_nearest_fighter(const float eye[3], float pos[3]) {
     float best = 1e30f;
     bool found = false;
@@ -2497,7 +2516,7 @@ bool dissidia_nearest_fighter(const float eye[3], float pos[3]) {
         if (!a || !ok(a) || g_tick - g_fighter_seen[i] > 120) continue;
         float p[3] = {rdf(a + 0x80u), rdf(a + 0x84u), rdf(a + 0x88u)};
         const float d = (p[0] - eye[0]) * (p[0] - eye[0]) + (p[1] - eye[1]) * (p[1] - eye[1]) + (p[2] - eye[2]) * (p[2] - eye[2]);
-        if (d < best) { best = d; found = true; pos[0] = p[0]; pos[1] = p[1]; pos[2] = p[2]; }
+        if (d < best) { best = d; found = true; g_nearest_actor = a; pos[0] = p[0]; pos[1] = p[1]; pos[2] = p[2]; }
     }
     return found;
 }
@@ -2728,5 +2747,6 @@ void dissidia_framerate_install(uint8_t* rdram) {
     std::fprintf(stderr, "[FPS] frame rate %d (battle logic; scope %s)\n", g_target.load(), g_scope_all ? "all" : "battle");
 }
 
+void dissidia_hold_flow(bool on) { g_hold_flow = on; }   // tag team: hold the battle's update tasks (the retail intro) except the object manager and the camera
 void dissidia_pause_match(uint32_t keep, float seconds) { pause_match_impl(keep, seconds); }   // tag team call-in: the match stands still (see actor_dt_hook)
 bool dissidia_match_paused() { return match_paused_impl(); }
