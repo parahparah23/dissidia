@@ -4886,6 +4886,9 @@ void cam_restore(const char* why) {
     std::memcpy(g_ram + ((c + 0x40u) & 0x07FFFFFFu), g_camsnap.d + 0x40, sizeof g_camsnap.d - 0x40);
 }
 uint32_t g_midfin_gen = ~0u;   // battle generation whose retail finish phase (bs+72 == 4) was caused by a mid-battle KO: only its camera work and slow motion play (music / KO line / subtitle blocked)
+// Retail's finish machine (FUN_08B0618C, FUN_08B06370) clears the sound-request enable byte 0x089D6C98 (FUN_088A24D4 returns 0 without it: no sound effect or voice can start any more); nothing sets it again
+// until the next phase. A mid-battle KO saves it at the finish start and writes it back when the finish is over (user, RP6 25 Nov: the second KO, a slot fighter, silenced every effect; PSPRECOMP_TAGTEAM_NOSNDENABLE=1 = old).
+uint32_t g_sndenable_gen = ~0u; uint32_t g_sndenable_val = 0;
 void hpstep_hook(uint8_t* rdram, recomp_context* ctx) {
     g_ram = rdram; g_ctx = ctx;
     if (g_bs && std::getenv("PSPRECOMP_TAGTEAM_BS72WATCH")) { static uint32_t wg = 0xFFFFFFFFu; if (wg != g_battle_gen) { wg = g_battle_gen; psp_mem_watch_set(g_bs + 72u); std::fprintf(stderr, "[BS72] watching bs+72 at %08X\n", g_bs + 72u); } }   // debug: who writes the battle phase
@@ -6608,6 +6611,7 @@ void ko_oneround() {
         static uint32_t fin_gen = 0xFFFFFFFFu; static float fin_since = 0.f; if (fin_gen != g_battle_gen) { fin_gen = g_battle_gen; fin_since = 0.f; }
         if (!ko_any) { if (fin_since == 0.f) fin_since = age; if (age - fin_since >= 5.f) {
             { const uint32_t mg = rd(0x08A62280u); if (ok(mg, 0x40) && rdf(mg + 4u) < 1.99f) { const uint32_t sp1 = static_cast<uint32_t>(g_ctx->r[29]); g_ctx->r[29] = static_cast<int32_t>(sp1 - 0x40u); call(0x08A620B0u, mg, 0u); g_ctx->r[29] = static_cast<int32_t>(sp1); if (g_log) std::fprintf(stderr, "[TAGTEAM] t=%.2fs finish slow motion (channel 0) released by hand\n", age / 60.0f); } }
+            if (g_sndenable_gen == g_battle_gen && !std::getenv("PSPRECOMP_TAGTEAM_NOSNDENABLE")) { const uint32_t cur = rd(0x089D6C98u); if ((cur & 0xFFu) != g_sndenable_val) { wr(0x089D6C98u, (cur & ~0xFFu) | g_sndenable_val); if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs sound requests enabled again (byte 089D6C98 %02X -> %02X)\n", age / 60.0f, cur & 0xFFu, g_sndenable_val); } } g_sndenable_gen = ~0u;
             cam_restore("finish over"); g_midfin_gen = ~0u; wr(g_bs + 72u, 3u); for (uint32_t k = 0; k < 2; k++) { const uint32_t a2 = srd(g_bs + 56u + 4u * k); if (ok(a2, 0x12D0)) wr(a2 + 0x380u, rd(a2 + 0x380u) & ~0x20000000u); }
             // The finish also puts the WINNER's slot fighter into its victory state (+0x380 bit 2 and world flags +908 bit 2: win script, no pad, not moved by the world step): with the match going on that fighter stayed frozen for good
             // (kill camera "stuck forever", the extras / other players still moved). Back to normal for every slot fighter that is standing. PSPRECOMP_TAGTEAM_NOWINCLEAR=1 = old.
@@ -6850,6 +6854,7 @@ void finstart_hook(uint8_t* rdram, recomp_context* ctx) {
     g_midfin_gen = mid ? g_battle_gen : ~0u;
     if (g_log) std::fprintf(stderr, "[KOCAM] t=%.2fs retail finish start (bs+72 %u): %s%s\n", dissidia_battle_age() / 60.0f, g_bs ? rd(g_bs + 72u) : 99u, mid ? "mid-battle KO of " : "match-ending / forfeit: full retail finish", mid ? role_of(who) : "");
     if (mid) cam_snap("finish start"); else g_camsnap.have = false;
+    if (mid) { g_sndenable_gen = g_battle_gen; g_sndenable_val = rd(0x089D6C98u) & 0xFFu; } else g_sndenable_gen = ~0u;
     if (g_log && std::getenv("PSPRECOMP_TAGTEAM_KOSHOT")) { const float a = dissidia_battle_age() / 60.0f; tagteam_breakshot_event(a, g_battle_gen, "kofin", 0, "a", nullptr); tagteam_breakshot_event(a + 2.f, g_battle_gen, "kofin", 0, "b", nullptr); }   // debug: shots at the finish start +0 / 0.5 / 1.5 and +2 / 2.5 / 3.5 s
     g_orig_finstart(rdram, ctx);
 }
@@ -9864,6 +9869,7 @@ void xkocam_start(uint32_t victim) {
 float g_cam_post = -1.f;   // debug: log the camera director's words for 4 s after a kill camera
 void xkocam_step() {
     TtStep tt_step_("xkocam_step");
+    if (g_log && std::getenv("PSPRECOMP_TAGTEAM_SNDGATE")) { static float lg = -1e9f; const float a = dissidia_battle_age(); if (a - lg >= 60.f) { lg = a; const uint32_t pool = rd(0x09B50000u - 11616u); std::fprintf(stderr, "[SNDGATE] t=%.1fs enable byte %02X free pool count %d (pool %08X) bs72 %u\n", a / 60.0f, ok(0x089D6C98u, 4) ? (unsigned)(rd(0x089D6C98u) & 0xFFu) : 999u, ok(pool, 0x600) ? (int)rd(pool + 1536u) : -9, pool, g_bs ? rd(g_bs + 72u) : 99u); } }
     if (g_log && g_cam_post > 0.f && dissidia_battle_age() < g_cam_post) { static float last = -1e9f; const float a = dissidia_battle_age(); if (a - last >= 30.f) { last = a; const uint32_t c = cam_director(); if (c) std::fprintf(stderr, "[KOCAM] t=%.2fs camera director after: flags +188 %08X +176 %08X +180 %08X +184 %08X +64 %.1f %.1f %.1f\n", a / 60.f, rd(c + 188u), rd(c + 176u), rd(c + 180u), rd(c + 184u), rdf(c + 64u), rdf(c + 68u), rdf(c + 72u)); } }
     if (g_xko.t0 < 0.f) return;
     if (g_xko.gen != g_battle_gen) { g_xko = XKo(); return; }
