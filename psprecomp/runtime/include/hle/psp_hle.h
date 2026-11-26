@@ -245,3 +245,9 @@ void psp_hle_register_mpeg();
 /// Rate of the simulated vblank clock (default 60). A game that waits for one vblank per frame then runs at this
 /// rate. The vblank count carries on without a jump. 30..480.
 void psp_display_set_vblank_hz(int hz);
+
+/// Unlocked frame rate: while on, the vblank wait does not sleep to the next boundary (the game thread runs frames as fast as it
+/// can; the swap / vertical sync of the presenter is then the only pacing), but never faster than PSPRECOMP_UNLOCK_MAX fps
+/// (default 1000). The game module turns it on only where its own logic does not depend on the vblank clock.
+void psp_display_set_unlocked(bool on);
+bool psp_display_unlocked();

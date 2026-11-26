@@ -948,11 +948,12 @@ std::vector<psp_sddialog::MenuRow> make_rows() {
         case ROW_FPS: {
             const int i = fps_index();
             m.label = "Frame Rate";
-            std::snprintf(buf, sizeof buf, "%d fps", g_fps.rates[i]);
+            if (g_fps.rates[i] >= 1000) std::snprintf(buf, sizeof buf, "Unlocked");
+            else std::snprintf(buf, sizeof buf, "%d fps", g_fps.rates[i]);
             m.value = buf;
             m.can_dec = i > 0;
             m.can_inc = i + 1 < g_fps.count;
-            m.help = "Frame rate (multiples of 30)\nBattles run at this many frames a second; the PSP ran 30. Pick a rate your device can hold: if it cannot reach the target, the game will run slower than normal and stutter. Costs CPU and GPU time in proportion. Menus stay at 30. Saved.";
+            m.help = "Frame rate (multiples of 30)\nBattles run at this many frames a second; the PSP ran 30. Pick a rate your device can hold: if it cannot reach the target, the game will run slower than normal and stutter. Costs CPU and GPU time in proportion. Menus stay at 30. Unlocked: no limit, the battle is drawn as often as the device manages (the game itself still runs at its normal speed, and online it counts as 240 fps); turn Vertical Sync on to cap it at the screen's refresh rate and save power. Saved.";
             break;
         }
         case ROW_RENDERER: {
