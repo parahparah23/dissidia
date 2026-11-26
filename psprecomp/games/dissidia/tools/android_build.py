@@ -165,7 +165,7 @@ def pack_apk(adir, work, libmain, run, say, env):
 
 # --------------------------------------------------------------------------------------------------------------- on the phone
 
-def device_build(adir, work, jobs, say, tag, die):
+def device_build(adir, work, jobs, say, tag, die, jobs_fixed=False):
     """Compile + link the generated game ON the phone with the zig that ships in the setup app (zig is clang + lld in one static binary).
 
     The prebuilt core (adir/sdk) and libraries (adir/deps) come from the NDK, so the game is compiled against the NDK's headers and
@@ -192,6 +192,11 @@ def device_build(adir, work, jobs, say, tag, die):
     os.makedirs(objdir, exist_ok=True)
     env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=os.path.join(base, "zig-cache"), HOME=base,
                ZIG_LIB_DIR=os.path.join(adir, "zig-lib"))
+    # zig keeps a second copy of every object it compiles in its cache folder, and never removes one: it grew with every update
+    # (the Shield install failed with "CacheCheckFailed" on a full disk). The objects are kept in objdir by content (below), so
+    # zig's cache is only needed while a compile runs: emptied before the build (a stopped one leaves it) and after it.
+    if not os.environ.get("PSPRECOMP_KEEP_ZIG_CACHE"):
+        shutil.rmtree(env["ZIG_GLOBAL_CACHE_DIR"], ignore_errors=True)
     deps = os.path.join(adir, "deps", "deps")
     out = os.path.join(work, "output")
     ovl = os.path.join(work, "overlays")
@@ -218,33 +223,127 @@ def device_build(adir, work, jobs, say, tag, die):
              "-DANDROID", "-U__ANDROID_API__", "-D__ANDROID_API__=%d" % api, "-fdata-sections", "-ffunction-sections", "-funwind-tables",
              "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-std=gnu++17", "-fPIC", "-O2", "-fno-lto", "-fno-strict-aliasing", "-Wno-everything",
              "-ffp-contract=off"]   # lock-step online play: no fused multiply-add (clang for ARM fuses a * b + c by default), same rounding as the PC build
-    stamp = hashlib.sha256((" ".join(flags) + zig).encode()).hexdigest()[:12]
+    # Objects are kept by what they were compiled from (objcache.py: the source's bytes, the generated headers it includes, the compiler
+    # and the flags without folder paths), so an update compiles only the files whose code changed. Before, the object names carried a
+    # hash of the flags and of zig's path, which are inside the release folder: every update compiled all files again.
+    # What is not generated code (the runtime's main.cpp), and everything with PSPRECOMP_NO_OBJCACHE=1, keeps the old rule: an object
+    # named after the source's path and the flags, compiled again when the source is newer.
+    import objcache
+    import threading
+    import time as _time
+    try:
+        zig_ver = subprocess.run([zig, "version"], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        zig_ver = ""
+    cid = "zig %s size %d; ndk %s; api %s" % (zig_ver or "?", os.path.getsize(zig), v.get("ndk", {}).get("version", "?"), api)
+    use_cache = not os.environ.get("PSPRECOMP_NO_OBJCACHE")
+    old_stamp = hashlib.sha256((" ".join(flags) + zig).encode()).hexdigest()[:12]
+    info = {}   # source -> (object file, the parts of its key or None when it is not cached)
 
     def obj_of(src):
-        return os.path.join(objdir, hashlib.sha1(src.encode()).hexdigest()[:10] + "_" + os.path.basename(src) + "." + stamp + ".o")
+        if src not in info:
+            parts = objcache.key_parts(work, src, flags, cid) if use_cache else None
+            info[src] = (objcache.entry(objdir, objcache.key_of(parts)) if parts else
+                         os.path.join(objdir, hashlib.sha1(src.encode()).hexdigest()[:10] + "_" + os.path.basename(src) + "." + old_stamp + ".o"), parts)
+        return info[src][0]
 
-    todo = [(s, inc) for s, inc in srcs if not (os.path.isfile(obj_of(s)) and os.path.getmtime(obj_of(s)) >= os.path.getmtime(s))]
-    say("Compiling %d of %d files with zig (%d at a time)" % (len(todo), len(srcs), jobs))
+    def up_to_date(src):
+        o = obj_of(src)
+        return os.path.isfile(o) and (info[src][1] is not None or os.path.getmtime(o) >= os.path.getmtime(src))
+
+    todo = [(s, inc) for s, inc in srcs if not up_to_date(s)]
+    reasons = {}   # why the cached files of this build are compiled (the part of the key that changed)
+    for s, _ in todo:
+        if info[s][1]:
+            r = objcache.explain(objcache.recall(objdir, work, s), info[s][1])
+            reasons[r] = reasons.get(r, 0) + 1
+    say("Compiling %d of %d files with zig; %d are unchanged since the last build%s" % (
+        len(todo), len(srcs), len(srcs) - len(todo), " (why: %s)" % objcache.reasons_text(reasons) if reasons else ""))
     done = [0]
     errors = []
+    # How many files compile at once. Before: at most 3 (psp_build.py), whatever the phone. Now every core may be used, but a job is
+    # only started while the memory that is FREE right now covers it (objcache.may_start): a phone is killed, not slowed, when it
+    # runs out.
+    #  - the memory a job needs is measured (the peak of each finished compile, wait4); until the first one finishes it is taken as
+    #    1.5 GB (the old rule's figure). The largest files are compiled first, so the worst case is known early;
+    #  - a new job needs: free memory >= estimate x (1 + jobs started in the last 20 s, which have not grown yet) + 800 MB kept free;
+    #  - one job always runs. `--jobs N` (jobs_fixed) or PSPRECOMP_JOBS_FIXED=1 keeps a plain fixed count.
+    cpus = os.cpu_count() or 2
+    fixed = jobs_fixed or bool(os.environ.get("PSPRECOMP_JOBS_FIXED")) or objcache.mem_free_kb() is None
+    max_jobs = max(1, jobs if fixed else cpus)
+    cond = threading.Condition()
+    st = {"running": 0, "starts": [], "peak_kb": 0, "most": 0}
+
+    def may_start():
+        if st["running"] == 0:
+            return True
+        if st["running"] >= max_jobs:
+            return False
+        if fixed:
+            return True
+        now = _time.time()
+        return objcache.may_start(st["running"], sum(1 for t in st["starts"] if now - t < objcache.YOUNG_S),
+                                  objcache.estimate_kb(st["peak_kb"]), objcache.mem_free_kb())
 
     def compile_one(item):
         src, inc = item
+        if errors:   # one file failed: the rest is not started (a full disk fails every one of them)
+            return
         o = obj_of(src)
+        os.makedirs(os.path.dirname(o), exist_ok=True)
         part = o + ".part"
-        r = subprocess.run([zig, "c++"] + flags + inc + ["-c", src, "-o", part], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           text=True, errors="replace")
-        if r.returncode != 0:
-            errors.append("%s\n%s" % (src, r.stdout[-1500:]))
+        with cond:
+            while not may_start():
+                cond.wait(1.0)
+            st["running"] += 1
+            st["most"] = max(st["most"], st["running"])
+            at_once = st["running"]
+            t0 = _time.time()
+            st["starts"].append(t0)
+        out, rc, peak = "", 1, 0
+        try:
+            pr = subprocess.Popen([zig, "c++"] + flags + inc + ["-c", src, "-o", part], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out = pr.stdout.read().decode("utf-8", "replace")
+            try:
+                _, status, ru = os.wait4(pr.pid, 0)
+                rc = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else (status >> 8)
+                peak = int(ru.ru_maxrss)   # KB on Linux / Android: the largest of zig and the clang it runs
+                pr.returncode = rc
+            except (AttributeError, ChildProcessError, OSError):
+                rc = pr.wait()
+        except OSError as e:
+            out = str(e)
+        finally:
+            with cond:
+                st["running"] -= 1
+                st["starts"].remove(t0)
+                st["peak_kb"] = max(st["peak_kb"], peak)
+                cond.notify_all()
+        if rc != 0:
+            hint = ""
+            if "CacheCheckFailed" in out or "NoSpaceLeft" in out or "No space left" in out:
+                free = shutil.disk_usage(base).free // (1024 * 1024)
+                hint = ("The compiler could not write its files (%d MB free in %s). " % (free, base) +
+                        ("The storage is nearly full: free some space and run the install again. " if free < 1024 else
+                         "The storage is not full, so the compiler could not use its own cache folder (zig-cache) there. ") +
+                        "What is already compiled is kept.\n")
+            errors.append("%s%s\n%s" % (hint, src, out[-1500:]))
             return
         os.replace(part, o)
+        if info[src][1]:
+            objcache.remember(objdir, work, src, info[src][1])
         done[0] += 1
         tag("PROGRESS", str(100 * done[0] // max(1, len(todo))))
-        say("[%d/%d] %s" % (done[0], len(todo), os.path.basename(src)))
+        say("[%d/%d] %s (%.0f s%s, %d at once)" % (done[0], len(todo), os.path.basename(src), _time.time() - t0,
+                                                 ", %d MB" % (peak // 1024) if peak else "", at_once))
 
     if todo:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        todo.sort(key=lambda it: -os.path.getsize(it[0]))   # the largest first: the memory a job needs is learned from the worst case
+        t_all = _time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_jobs) as ex:
             list(ex.map(compile_one, todo))
+        say("Compiled %d files in %.0f s: up to %d at once (%d cores), largest job %d MB%s" % (
+            done[0], _time.time() - t_all, st["most"], cpus, st["peak_kb"] // 1024, " (fixed job count)" if fixed else ""))
     if errors:
         die("compiling failed:\n" + errors[0])
     say("Linking libmain.so")
@@ -268,4 +367,19 @@ def device_build(adir, work, jobs, say, tag, die):
     r = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     if r.returncode != 0:
         die("linking failed:\n" + "\n".join(l[:300] for l in r.stdout.splitlines()[:12]))
+    used = set(o for o, _ in info.values())   # the objects of this build stay; older ones (another version's code, the old naming) are removed
+    removed = 0
+    for dp, _, fns in os.walk(objdir):
+        for fn in fns:
+            fp = os.path.join(dp, fn)
+            if fp not in used and fn.endswith((".o", ".part", ".d")):
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except OSError:
+                    pass
+    if removed:
+        say("Removed %d object files of an older build" % removed)
+    if not os.environ.get("PSPRECOMP_KEEP_ZIG_CACHE"):
+        shutil.rmtree(env["ZIG_GLOBAL_CACHE_DIR"], ignore_errors=True)
     return libmain
